@@ -1,0 +1,19 @@
+# buf configuration for the birdman proto module.
+version: v2
+modules:
+  - path: .
+lint:
+  use:
+    - STANDARD
+  except:
+    # Service name "AgentLink" is fixed by docs/specs/protocol.md §1.
+    - SERVICE_SUFFIX
+    # AgentLink.Session is a long-lived bidi stream with hand-rolled
+    # envelope messages (AgentMsg/MasterMsg) shared conceptually with the
+    # UDS protocol; standard request/response naming does not apply.
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+    - RPC_REQUEST_RESPONSE_UNIQUE
+breaking:
+  use:
+    - FILE

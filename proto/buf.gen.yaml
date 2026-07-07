@@ -1,0 +1,12 @@
+# Code generation for the birdman proto module.
+# Plugins are pinned inside protogen.Dockerfile; see README.md:
+#   docker build -t birdman-protogen -f protogen.Dockerfile .
+#   docker run --rm -v "$PWD":/workspace birdman-protogen generate
+version: v2
+plugins:
+  - local: protoc-gen-go
+    out: .
+    opt: paths=source_relative
+  - local: protoc-gen-go-grpc
+    out: .
+    opt: paths=source_relative
