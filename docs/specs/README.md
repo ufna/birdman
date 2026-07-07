@@ -23,6 +23,8 @@ birdman/
   sdk/
     core/     # C++17 core-либа (без UE-зависимостей)
     unreal/   # UE-плагин (Birdman)
+  examples/
+    stub-server/  # референс-дедик: UDP-чат + серверная сторона liba-контракта (есть)
   panel/      # React + TS (SPA)
   proto/      # protobuf master↔agent + JSON-схемы liba↔agent
   infra/      # ansible: inventories, playbooks, roles

@@ -1,0 +1,52 @@
+name: stub-server
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'examples/stub-server/**'
+      - '.github/workflows/stub-server.yml'
+  pull_request:
+    paths:
+      - 'examples/stub-server/**'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  test-build-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: false
+
+      - name: Test
+        working-directory: examples/stub-server
+        run: |
+          go vet ./...
+          go test -race ./...
+
+      # Пуш в GHCR — встроенным GITHUB_TOKEN (packages: write).
+      # PAT в workflow не используется нигде.
+      - name: Login GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push
+        if: github.event_name == 'push'
+        uses: docker/build-push-action@v6
+        with:
+          context: examples/stub-server
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/birdman-stub-server:latest
+            ghcr.io/${{ github.repository_owner }}/birdman-stub-server:0.1.${{ github.run_number }}
