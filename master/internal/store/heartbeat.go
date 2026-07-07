@@ -30,6 +30,12 @@ func mapAgentState(agent string) string {
 	}
 }
 
+// liveState reports whether a master-side state means the server is alive
+// on its node (resurrection targets on Hello map reconciliation).
+func liveState(s string) bool {
+	return s == "ready" || s == "allocated" || s == "draining"
+}
+
 // transitionAllowed guards heartbeat-driven state changes: terminal states
 // stick, allocation is never downgraded by a stale agent report.
 func transitionAllowed(cur, next string) bool {
@@ -76,7 +82,14 @@ func touchNode(ctx context.Context, tx pgx.Tx, nodeID string) (recovered bool, e
 // applyReports upserts per-server state from an agent Hello/Heartbeat
 // (docs/specs/master.md: переход creating→ready делает только heartbeat).
 // Reports for servers that do not belong to this node are ignored.
-func applyReports(ctx context.Context, tx pgx.Tx, nodeID string, reports []ServerReport) error {
+//
+// resurrect is the Hello-only map reconciliation (protocol.md §1 Lease:
+// «возвращение heartbeat → сверка карты серверов»): a server the lease
+// checker failed while the node was silent, but which the returning agent
+// reports alive (containers survive agent/node-link outages), goes back to
+// its live state instead of being wastefully re-created. Regular heartbeats
+// keep the terminal guard: failed stays failed there.
+func applyReports(ctx context.Context, tx pgx.Tx, nodeID string, reports []ServerReport, resurrect bool) error {
 	reported := make([]string, 0, len(reports))
 	for _, r := range reports {
 		reported = append(reported, r.ServerID)
@@ -94,8 +107,19 @@ func applyReports(ctx context.Context, tx pgx.Tx, nodeID string, reports []Serve
 			return err
 		}
 		next := cur
-		if mapped := mapAgentState(r.State); mapped != "" && transitionAllowed(cur, mapped) {
-			next = mapped
+		if mapped := mapAgentState(r.State); mapped != "" {
+			switch {
+			case transitionAllowed(cur, mapped):
+				next = mapped
+			case resurrect && cur == "failed" && liveState(mapped):
+				next = mapped
+				id := r.ServerID
+				if err := insertEvent(ctx, tx, EventServerRecovered,
+					EventRef{ServerID: &id, NodeID: &nodeID},
+					map[string]any{"state": mapped}); err != nil {
+					return err
+				}
+			}
 		}
 		if _, err := tx.Exec(ctx, `
 			update servers set
@@ -143,7 +167,7 @@ func (s *Store) ApplyHeartbeat(ctx context.Context, nodeID string, reports []Ser
 			return err
 		}
 	}
-	if err := applyReports(ctx, tx, nodeID, reports); err != nil {
+	if err := applyReports(ctx, tx, nodeID, reports, false); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -173,7 +197,9 @@ func (s *Store) HelloSync(ctx context.Context, nodeID, hostname string, capacity
 			return err
 		}
 	}
-	if err := applyReports(ctx, tx, nodeID, reports); err != nil {
+	// Hello = map reconciliation: the agent's recovered map may resurrect
+	// servers the lease checker failed while the node was silent.
+	if err := applyReports(ctx, tx, nodeID, reports, true); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
