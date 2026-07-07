@@ -1,0 +1,20 @@
+---
+# Дефолты дев-роли birdman-agent (итерация 0). Значения конфига — по
+# docs/specs/agent.md §10, ужатые под общий дев-бокс (узкий порт-диапазон,
+# скромные лимиты).
+birdman_agent_binary: "{{ playbook_dir }}/../../agent/dist/birdman-agent"
+
+birdman_region: dev
+birdman_capacity_slots: 8
+birdman_port_range: [20000, 20050]
+birdman_limits_default:
+  cpu_millis: 2000
+  mem_mb: 1024
+birdman_log_dir: /var/log/birdman
+birdman_data_dir: /var/lib/birdman
+
+birdman_registry_username: ufna
+birdman_registry_token_file: /etc/birdman/ghcr.token
+
+# Комментарий UFW-правил — по нему находим/сверяем свои правила на общем боксе.
+birdman_ufw_comment: birdman-dev

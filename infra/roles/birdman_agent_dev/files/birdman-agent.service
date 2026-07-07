@@ -1,0 +1,23 @@
+# ЗАГОТОВКА (итерация 0): деплоится disabled/not started.
+# TODO(итерация 1): у агента v0 нет daemon-режима — только run-once.
+# Включать после появления master-линка: поправить ExecStart на реальную
+# команду демона и `systemctl enable --now birdman-agent`.
+[Unit]
+Description=birdman node agent
+Documentation=file:///etc/birdman/agent.yaml
+After=network-online.target containerd.service
+Wants=network-online.target
+Requires=containerd.service
+
+[Service]
+Type=simple
+# Плейсхолдер: команды `daemon` ещё нет, unit не включать (итерация 1).
+ExecStart=/usr/local/bin/birdman-agent daemon --config /etc/birdman/agent.yaml
+Restart=on-failure
+RestartSec=2
+# Агент — 0, дедикам агент выставляет oom_score_adj=500 (спека §3):
+# при memory pressure ядро убивает дедики раньше агента.
+OOMScoreAdjust=0
+
+[Install]
+WantedBy=multi-user.target
