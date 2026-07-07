@@ -66,6 +66,9 @@ port_range: [20000, 29999]
 limits_default: { cpu_millis: 3500, mem_mb: 4096 }
 log_dir: /var/log/birdman
 data_dir: /var/lib/birdman
+registry_auth:              # (уточнено в v0) pull приватного registry (GHCR)
+  username: "ufna"
+  token_file: /etc/birdman/ghcr.token   # токен только в файле — никогда в конфиге/коде
 ```
 
 TLS: при первом коннекте агент обменивает `node_token` на клиентский сертификат (mTLS дальше) — см. `protocol.md` §Auth.
