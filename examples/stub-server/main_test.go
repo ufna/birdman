@@ -95,6 +95,18 @@ func waitUDP(t *testing.T, g *game) *net.UDPAddr {
 	return nil
 }
 
+func waitState(t *testing.T, cl func(string) string, want string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(cl("PING"), "state="+want) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("state never became %q", want)
+}
+
 // udpClient шлёт команду и возвращает первый прямой ответ (broadcast-строки пропускает).
 func udpClient(t *testing.T, to *net.UDPAddr) func(string) string {
 	t.Helper()
@@ -144,6 +156,7 @@ func TestManagedLifecycle(t *testing.T) {
 	mock.send("allocated", map[string]any{"match_id": "m-42", "players_expected": 2})
 
 	cl := udpClient(t, laddr)
+	waitState(t, cl, "allocated") // allocated обрабатывается асинхронно
 	if got := cl("JOIN alice"); !strings.HasPrefix(got, "WELCOME alice") {
 		t.Fatalf("JOIN → %q", got)
 	}

@@ -286,6 +286,14 @@ func (g *game) onAllocated(matchID string, playersExpected int) {
 	g.allocated = true
 	g.matchID = matchID
 	log.Printf("[stub] allocated: match_id=%s players_expected=%d", matchID, playersExpected)
+	// Игроки могли зайти раньше, чем доехал allocated — матч стартует и в этом порядке.
+	if len(g.players) > 0 && !g.matchLive {
+		g.matchLive = true
+		log.Printf("[stub] match %s started", matchID)
+		if g.liba != nil {
+			g.liba.send("match_start", map[string]any{"match_id": matchID})
+		}
+	}
 }
 
 func (g *game) onDrain(deadlineS float64, reason string) {
