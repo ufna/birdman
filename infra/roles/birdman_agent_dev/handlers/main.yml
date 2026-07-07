@@ -1,0 +1,4 @@
+---
+- name: Apply birdman tmpfiles
+  ansible.builtin.command: systemd-tmpfiles --create /etc/tmpfiles.d/birdman.conf
+  changed_when: true

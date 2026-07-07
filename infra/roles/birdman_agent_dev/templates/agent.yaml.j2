@@ -1,0 +1,12 @@
+# {{ ansible_managed }}
+# Конфиг birdman-agent (docs/specs/agent.md §10, v0-подмножество).
+# master_addr/node_token появятся в итерации 1 — v0 незнакомые ключи игнорирует.
+region: "{{ birdman_region }}"
+capacity_slots: {{ birdman_capacity_slots }}
+port_range: [{{ birdman_port_range[0] }}, {{ birdman_port_range[1] }}]
+limits_default: { cpu_millis: {{ birdman_limits_default.cpu_millis }}, mem_mb: {{ birdman_limits_default.mem_mb }} }
+log_dir: {{ birdman_log_dir }}
+data_dir: {{ birdman_data_dir }}
+registry_auth:
+  username: "{{ birdman_registry_username }}"
+  token_file: {{ birdman_registry_token_file }}   # токен только в файле 0600, не в конфиге

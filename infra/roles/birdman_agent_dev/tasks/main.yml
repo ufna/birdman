@@ -1,0 +1,90 @@
+---
+# Всё в этой роли — аддитивно и только birdman-объекты: общий дев-бокс,
+# чужие контейнеры/nginx/UFW-правила не трогаем.
+
+- name: Read GHCR token from env BIRDMAN_GHCR_TOKEN
+  ansible.builtin.set_fact:
+    birdman_ghcr_token: "{{ lookup('env', 'BIRDMAN_GHCR_TOKEN') }}"
+  no_log: true
+
+- name: Fail if BIRDMAN_GHCR_TOKEN is not exported
+  ansible.builtin.fail:
+    msg: >-
+      env BIRDMAN_GHCR_TOKEN пуст. Экспортируй токен перед запуском
+      (см. infra/README.md). Токен никогда не хранится в репо.
+  when: birdman_ghcr_token | length == 0
+
+- name: Create birdman directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: /etc/birdman, mode: "0755" }
+    - { path: "{{ birdman_data_dir }}", mode: "0755" }
+    - { path: "{{ birdman_log_dir }}", mode: "0755" }
+    - { path: "{{ birdman_log_dir }}/servers", mode: "0755" }
+
+- name: Install tmpfiles.d config for /run/birdman (survives reboot)
+  ansible.builtin.copy:
+    src: tmpfiles-birdman.conf
+    dest: /etc/tmpfiles.d/birdman.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Apply birdman tmpfiles
+
+- name: Install birdman-agent binary
+  ansible.builtin.copy:
+    src: "{{ birdman_agent_binary }}"
+    dest: /usr/local/bin/birdman-agent
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install agent config /etc/birdman/agent.yaml
+  ansible.builtin.template:
+    src: agent.yaml.j2
+    dest: /etc/birdman/agent.yaml
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install GHCR pull token (root-only)
+  ansible.builtin.copy:
+    content: "{{ birdman_ghcr_token }}\n"
+    dest: "{{ birdman_registry_token_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Allow birdman dedicated-server port range in UFW (additive)
+  community.general.ufw:
+    rule: allow
+    port: "{{ birdman_port_range[0] }}:{{ birdman_port_range[1] }}"
+    proto: "{{ item }}"
+    comment: "{{ birdman_ufw_comment }}"
+  loop: [tcp, udp]
+
+- name: Install birdman-agent.service unit (placeholder for iteration 1)
+  ansible.builtin.copy:
+    src: birdman-agent.service
+    dest: /etc/systemd/system/birdman-agent.service
+    owner: root
+    group: root
+    mode: "0644"
+
+# Заготовка держится disabled/not started: у агента v0 нет daemon-режима
+# (master-линк — итерация 1), unit нужен лишь как каркас деплоя.
+- name: Ensure birdman-agent.service is disabled and stopped
+  ansible.builtin.systemd_service:
+    name: birdman-agent.service
+    enabled: false
+    state: stopped
+    daemon_reload: true
+
+- name: Apply tmpfiles now (idempotent)
+  ansible.builtin.meta: flush_handlers
