@@ -1,2 +1,6 @@
 certs/
 dist/
+# Панель, собранная panel/build.sh для go:embed — не коммитится,
+# кроме якоря .gitkeep (см. internal/panelui/panelui.go).
+internal/panelui/static/*
+!internal/panelui/static/.gitkeep
