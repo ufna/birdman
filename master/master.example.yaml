@@ -1,0 +1,15 @@
+# Конфиг birdman-master (см. docs/specs/master.md §7; дев-дефолты v0).
+# Любое поле можно переопределить env-переменными:
+#   BIRDMAN_DSN, BIRDMAN_LISTEN_API, BIRDMAN_LISTEN_GRPC.
+
+dsn: "postgres://postgres:birdman@localhost:5432/birdman?sslmode=disable"
+
+listen_api: ":8100"   # REST API (+ /metrics, /healthz)
+listen_grpc: ":8444"  # gRPC AgentLink (всегда TLS)
+
+tls:
+  # Продовые серты (если пусто — self-signed автогенерация в auto_cert_dir
+  # при первом старте; dev-режим).
+  cert_file: ""
+  key_file: ""
+  auto_cert_dir: "certs"

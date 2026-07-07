@@ -19,6 +19,7 @@ message AgentMsg {
     ServerEvent event = 3;
     LogChunk    log = 4;     // ответ на TailLogs
     PullReport  pull = 5;    // прогресс/результат PrePull
+    Ack         ack = 6;     // подтверждение команды master по cmd_id (уточнено в v0)
   }
 }
 message Hello      { string node_token=1; string hostname=2; string region=3;
@@ -43,16 +44,27 @@ message MasterMsg {
   }
 }
 message StartServer { string server_id=1; string image_ref=2; map<string,string> env=3;
-                      Limits limits=4; int32 port=5; }   // port=0 → агент выберет
+                      Limits limits=4; int32 port=5; string cmd_id=6; } // port=0 → агент выберет
 message Limits      { int32 cpu_millis=1; int32 mem_mb=2; }
-message StopServer  { string server_id=1; int32 grace_s=2; }
+message StopServer  { string server_id=1; int32 grace_s=2; string cmd_id=3; }
+
+// (уточнено в v0) поля остальных сообщений — канонический источник proto/agentlink/v1/agentlink.proto:
+message Ack         { string cmd_id=1; }
+message PrePull     { string cmd_id=1; string image_ref=2; }
+message Drain       { string cmd_id=1; string reason=2; }
+message UpgradeAgent{ string cmd_id=1; string url=2; string sha256=3; string version=4; }
+message TailLogs    { string cmd_id=1; string server_id=2; bool follow=3; }
+message LogChunk    { string cmd_id=1; string server_id=2; bytes data=3; bool eof=4; }
+message PullReport  { string cmd_id=1; string image_ref=2; string status=3; string detail=4; } // pulling|pulled|failed
 ```
 
-Правила: каждое команда-сообщение несёт `cmd_id`, агент подтверждает `Ack{cmd_id}` (или Event с ошибкой) — master ретраит неподтверждённые при реконнекте. Поля protobuf только добавляем, номера не переиспользуем (`reserved`).
+Правила: каждое команда-сообщение несёт `cmd_id`, агент подтверждает `Ack{cmd_id}` (или Event с ошибкой) — master ретраит неподтверждённые при реконнекте, поэтому обработка команд на агенте идемпотентна по `cmd_id` (at-least-once). Поля protobuf только добавляем, номера не переиспользуем (`reserved`). (Уточнено в v0: `Ack` добавлен в `AgentMsg` — именно агент подтверждает команды; `MasterMsg.Ack` зарезервирован под подтверждения master'ом агентских сообщений.)
 
 **Lease/карантин:** master считает тачку живой при heartbeat моложе **10с**; тишина → `quarantine` (аллокации исключены, сервера → failed после ещё 20с); возвращение heartbeat → сверка карты серверов и `active`.
 
 **Auth (bootstrap → mTLS):** ansible кладёт в конфиг одноразовый `node_token` (создан master'ом при `POST /v1/nodes`). Первый коннект — TLS (server-auth) + Hello с токеном → master выдаёт клиентский сертификат (внутренняя CA, TTL 90 дней, авто-ротация за 14 дней до истечения) → дальше строго mTLS. Токен гасится после обмена.
+
+> **(Уточнено в v0 — осознанное отступление, TODO итерации 2.)** master v0 не выдаёт клиентские сертификаты: агент аутентифицируется `node_token`'ом в Hello при **каждом** коннекте поверх TLS (server-auth; в dev — self-signed автогенерация при первом старте). Токен соответственно пока не одноразовый и не гасится; в БД хранится только его bcrypt-хэш (`nodes.token_hash`). Полный обмен «token → клиентский mTLS-серт» с внутренней CA — следующая итерация.
 
 ## 2. liba ↔ agent: NDJSON поверх unix socket
 

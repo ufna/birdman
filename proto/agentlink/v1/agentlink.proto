@@ -1,0 +1,141 @@
+syntax = "proto3";
+
+package agentlink.v1;
+
+option go_package = "github.com/ufna/birdman/proto/agentlink/v1;agentlinkv1";
+
+// AgentLink is the bidirectional control channel between birdman-master and
+// birdman-agent. The agent dials master (outbound only, TLS) and keeps a
+// single Session stream open. The first AgentMsg on the stream MUST be Hello.
+//
+// Delivery semantics: every command in MasterMsg carries a cmd_id; the agent
+// confirms execution with Ack{cmd_id} (or a ServerEvent describing the
+// failure). Master re-sends unacknowledged commands on reconnect, so command
+// handling on the agent must be idempotent by cmd_id (at-least-once).
+service AgentLink {
+  rpc Session(stream AgentMsg) returns (stream MasterMsg);
+}
+
+message AgentMsg {
+  oneof msg {
+    Hello hello = 1; // first message in the stream
+    Heartbeat heartbeat = 2;
+    ServerEvent event = 3;
+    LogChunk log = 4; // response to TailLogs
+    PullReport pull = 5; // progress/result of PrePull
+    Ack ack = 6; // confirms a master command by cmd_id
+  }
+}
+
+message Hello {
+  string node_token = 1;
+  string hostname = 2;
+  string region = 3;
+  int32 capacity_slots = 4;
+  string agent_version = 5;
+  repeated ServerState servers = 6; // recovered map after agent restart
+}
+
+message Heartbeat {
+  int64 ts_unix_ms = 1;
+  NodeStats node = 2;
+  repeated ServerState servers = 3;
+}
+
+message NodeStats {
+  float cpu = 1;
+  uint64 mem_used = 2;
+  uint64 mem_total = 3;
+  uint64 disk_used = 4;
+  uint64 disk_total = 5;
+  float load1 = 6;
+}
+
+message ServerState {
+  string server_id = 1;
+  string state = 2; // pulling|starting|ready|allocated|draining|stopped|failed
+  int32 players = 3;
+  float tick_ms = 4;
+  string match_id = 5;
+  int32 port = 6;
+  string version = 7;
+}
+
+message ServerEvent {
+  string server_id = 1;
+  string kind = 2; // failed|oom|ready|match_start|match_end
+  string detail = 3;
+}
+
+message LogChunk {
+  string cmd_id = 1; // TailLogs command this chunk answers
+  string server_id = 2;
+  bytes data = 3;
+  bool eof = 4; // no more chunks will follow
+}
+
+message PullReport {
+  string cmd_id = 1; // PrePull command this report answers
+  string image_ref = 2;
+  string status = 3; // pulling|pulled|failed
+  string detail = 4; // progress info or error text
+}
+
+message Ack {
+  string cmd_id = 1;
+}
+
+message MasterMsg {
+  oneof msg {
+    StartServer start = 1;
+    StopServer stop = 2;
+    PrePull prepull = 3;
+    Drain drain = 4; // node-level: stop creating, let matches finish
+    UpgradeAgent upgrade = 5;
+    TailLogs tail = 6;
+    Ack ack = 7; // reserved for master-side acknowledgements
+  }
+}
+
+message StartServer {
+  string server_id = 1;
+  string image_ref = 2;
+  map<string, string> env = 3;
+  Limits limits = 4;
+  int32 port = 5; // 0 → agent picks a port from its pool
+  string cmd_id = 6;
+}
+
+message Limits {
+  int32 cpu_millis = 1;
+  int32 mem_mb = 2;
+}
+
+message StopServer {
+  string server_id = 1;
+  int32 grace_s = 2;
+  string cmd_id = 3;
+}
+
+message PrePull {
+  string cmd_id = 1;
+  string image_ref = 2;
+}
+
+message Drain {
+  string cmd_id = 1;
+  string reason = 2;
+}
+
+message UpgradeAgent {
+  string cmd_id = 1;
+  string url = 2;
+  string sha256 = 3;
+  string version = 4;
+}
+
+message TailLogs {
+  string cmd_id = 1;
+  string server_id = 2;
+  bool follow = 3;
+}

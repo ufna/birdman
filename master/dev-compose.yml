@@ -1,0 +1,41 @@
+# Дев-стенд master: Postgres 16 + birdman-master (сборка из исходников).
+#   docker compose -f master/dev-compose.yml up --build -d
+#   docker compose -f master/dev-compose.yml logs master   # admin-ключ при первом старте
+# REST http://localhost:8100, gRPC AgentLink localhost:8444 (TLS self-signed).
+name: birdman-dev
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: birdman   # dev-only
+      POSTGRES_DB: birdman
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  master:
+    build:
+      context: ..
+      dockerfile: master/Dockerfile
+    environment:
+      BIRDMAN_DSN: postgres://postgres:birdman@postgres:5432/birdman?sslmode=disable
+      BIRDMAN_LISTEN_API: ":8100"
+      BIRDMAN_LISTEN_GRPC: ":8444"
+    ports:
+      - "8100:8100"   # REST API
+      - "8444:8444"   # gRPC AgentLink
+    volumes:
+      - certs:/certs  # self-signed dev TLS pair, генерируется при первом старте
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  certs:
