@@ -1,0 +1,42 @@
+name: panel
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'panel/**'
+      - '.github/workflows/panel.yml'
+  pull_request:
+    paths:
+      - 'panel/**'
+      - '.github/workflows/panel.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: panel
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: panel/package-lock.json
+
+      - name: Install
+        run: npm ci --no-fund --no-audit
+
+      - name: Typecheck (tsc --noEmit)
+        run: npm run check
+
+      - name: Test (vitest)
+        run: npm test
+
+      - name: Build (vite)
+        run: npm run build
