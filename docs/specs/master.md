@@ -23,6 +23,8 @@ create table nodes (
                     check (state in ('active','draining','quarantine','dead')),
   last_heartbeat_at timestamptz,
   labels            jsonb not null default '{}',
+  token_hash        text not null default '',  -- (уточнено в v0) bcrypt node_token,
+                                               -- пока не реализован обмен token→mTLS-серт
   created_at        timestamptz not null default now()
 );
 
@@ -53,6 +55,8 @@ create table servers (
   updated_at timestamptz not null default now()
 );
 create index servers_ready_idx on servers (project_id, version_id, state);
+-- (уточнено в v0) идемпотентность allocate по match_id при конкурентных запросах
+create unique index servers_match_id_uidx on servers (match_id) where match_id is not null;
 
 create table matches (
   id           uuid primary key default gen_random_uuid(),
@@ -117,7 +121,7 @@ crash-loop: ≥3 failed одной версии на одной тачке за 
             этой пары (version,node) на 15 мин + event crash_loop
 ```
 
-Создание сервера — это команда агенту; переход `creating → ready` делает только heartbeat от агента (после `ready` от liba).
+Создание сервера — это команда агенту; переход `creating → ready` делает только heartbeat от агента (после `ready` от liba). (Уточнено в v0: `creating` без прогресса от агента дольше 120с → `failed` + событие — самолечение после потери StartServer/рестарта master; репорт `pulling` от агента обновляет `updated_at` и таймер не срабатывает.)
 
 ## 3. Allocation API (граница матчмейкер ↔ флот)
 
@@ -188,9 +192,11 @@ POST /v1/rollback: шаг 3 в обратную сторону (образы у�
 
 Аутентификация: `Authorization: Bearer <api-key>`; скоупы из таблицы `api_keys`. Клиентский matchmaking-ключ — публичный по сути (зашит в клиент), поэтому его скоуп ограничен тикетами, rate-limit per IP/player_id.
 
+(Уточнено в v0.) Реализовано подмножество: nodes/servers/versions/fleets/events/allocate + `/healthz`, `/metrics`; скоуп `admin` включает остальные скоупы; при пустой `api_keys` master при старте генерирует admin-ключ и печатает его в лог один раз; `PUT /v1/fleets/{region}` дополнительно принимает `active_version` (deploy-менеджера ещё нет); проекты создаются неявно при первом упоминании slug в `POST /v1/nodes` / `POST /v1/versions`; SSE `/v1/events/stream` — TODO следующих итераций.
+
 ## 7. Операционное
 
-- Один бинарь `birdman-master`; конфиг `/etc/birdman/master.yaml` (dsn, listen :443 и :8443 gRPC, tls-серты, project defaults). systemd unit с `Restart=always`.
+- Один бинарь `birdman-master`; конфиг `/etc/birdman/master.yaml` (dsn, listen :443 и :8443 gRPC, tls-серты, project defaults). systemd unit с `Restart=always`. (Уточнено в v0: дев-дефолты `listen_api :8100`, `listen_grpc :8444`; env-переопределения `BIRDMAN_DSN`/`BIRDMAN_LISTEN_API`/`BIRDMAN_LISTEN_GRPC`; без сертов в конфиге — self-signed автогенерация при первом старте.)
 - Graceful shutdown: стоп приёма API → дожидание in-flight (≤5с) → exit. Агенты переподключаются сами.
 - QoS-эндпоинт: крошечный UDP-echo в составе агента на каждой тачке (порт 19999) — master отдаёт их список в `/v1/qos`.
 - Логи master: journald, JSON-формат.

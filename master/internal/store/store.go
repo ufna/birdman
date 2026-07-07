@@ -1,0 +1,78 @@
+// Package store is the Postgres persistence layer of birdman-master
+// (pgx/v5). All state lives in Postgres (ADR-3); this package owns every SQL
+// statement in the process.
+package store
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/golang-migrate/migrate/v4"
+	pgxmigrate "github.com/golang-migrate/migrate/v4/database/pgx/v5"
+	"github.com/golang-migrate/migrate/v4/source/iofs"
+	"github.com/jackc/pgx/v5/pgxpool"
+	_ "github.com/jackc/pgx/v5/stdlib" // database/sql driver for golang-migrate
+
+	"github.com/ufna/birdman/master/migrations"
+)
+
+type Store struct {
+	Pool *pgxpool.Pool
+}
+
+// Open connects a pgx pool and verifies connectivity.
+func Open(ctx context.Context, dsn string) (*Store, error) {
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("parse dsn: %w", err)
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := pool.Ping(pingCtx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("ping: %w", err)
+	}
+	return &Store{Pool: pool}, nil
+}
+
+func (s *Store) Close() { s.Pool.Close() }
+
+// MigrateUp applies embedded migrations (auto-upgrade on start).
+func MigrateUp(dsn string) error {
+	src, err := iofs.New(migrations.FS, ".")
+	if err != nil {
+		return fmt.Errorf("migrations fs: %w", err)
+	}
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return fmt.Errorf("open db: %w", err)
+	}
+	defer db.Close()
+	driver, err := pgxmigrate.WithInstance(db, &pgxmigrate.Config{})
+	if err != nil {
+		return fmt.Errorf("migrate driver: %w", err)
+	}
+	m, err := migrate.NewWithInstance("iofs", src, "pgx5", driver)
+	if err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		return fmt.Errorf("migrate up: %w", err)
+	}
+	return nil
+}
+
+// Ping verifies database connectivity (used by /healthz).
+func (s *Store) Ping(ctx context.Context) error {
+	return s.Pool.Ping(ctx)
+}
+
+// ErrNotFound is returned when a referenced entity does not exist.
+var ErrNotFound = errors.New("not_found")
