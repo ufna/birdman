@@ -1,0 +1,26 @@
+# {{ ansible_managed }}
+# Postgres для birdman-master (адаптация master/dev-compose.yml: master здесь
+# НЕ контейнер — статический бинарь под systemd, см. роль birdman_master_dev).
+# Порт только на 127.0.0.1: наружу ничего, 5432 занят чужим продом.
+name: birdman
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: birdman-postgres
+    environment:
+      POSTGRES_PASSWORD: "{{ birdman_pg_password }}"
+      POSTGRES_DB: birdman
+    ports:
+      - "127.0.0.1:{{ birdman_master_pg_port }}:5432"
+    volumes:
+      - birdman-pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+volumes:
+  birdman-pgdata:

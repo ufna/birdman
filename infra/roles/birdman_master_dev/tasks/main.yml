@@ -1,0 +1,139 @@
+---
+# Всё аддитивно и только birdman-объекты (общий дев-бокс): свой compose-проект
+# birdman (контейнер birdman-postgres), свой unit, свои файлы в /etc/birdman.
+
+- name: Create birdman master directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - /etc/birdman
+    - "{{ birdman_master_dir }}"
+    - "{{ birdman_master_data_dir }}"
+
+- name: Generate Postgres password once (kept only on the box)
+  ansible.builtin.copy:
+    content: "{{ lookup('password', '/dev/null length=32 chars=ascii_letters,digits') }}"
+    dest: "{{ birdman_master_pg_pass_file }}"
+    force: false          # только если файла ещё нет — идемпотентно
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Read Postgres password
+  ansible.builtin.slurp:
+    src: "{{ birdman_master_pg_pass_file }}"
+  register: birdman_pg_pass_raw
+  no_log: true
+
+- name: Set Postgres password fact
+  ansible.builtin.set_fact:
+    birdman_pg_password: "{{ birdman_pg_pass_raw.content | b64decode | trim }}"
+  no_log: true
+
+- name: Install docker compose file (postgres only, bound to 127.0.0.1)
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: "{{ birdman_master_dir }}/compose.yml"
+    owner: root
+    group: root
+    mode: "0600"          # содержит пароль postgres
+  no_log: true
+
+- name: Start birdman postgres (docker compose, idempotent)
+  ansible.builtin.command:
+    cmd: docker compose -f {{ birdman_master_dir }}/compose.yml up -d --wait
+  register: birdman_compose_up
+  changed_when: "'Started' in birdman_compose_up.stderr or 'Created' in birdman_compose_up.stderr"
+
+- name: Install birdman-master binary
+  ansible.builtin.copy:
+    src: "{{ birdman_master_binary }}"
+    dest: /usr/local/bin/birdman-master
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Restart birdman-master
+
+- name: Install master config /etc/birdman/master.yaml
+  ansible.builtin.template:
+    src: master.yaml.j2
+    dest: /etc/birdman/master.yaml
+    owner: root
+    group: root
+    mode: "0600"          # содержит DSN с паролем
+  no_log: true
+  notify: Restart birdman-master
+
+- name: Install birdman-master.service unit
+  ansible.builtin.copy:
+    src: birdman-master.service
+    dest: /etc/systemd/system/birdman-master.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart birdman-master
+
+- name: Enable and start birdman-master
+  ansible.builtin.systemd_service:
+    name: birdman-master.service
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Apply pending master restarts before health check
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for master REST API (healthz)
+  ansible.builtin.uri:
+    url: "http://{{ birdman_master_api_addr }}/healthz"
+    status_code: 200
+  register: birdman_master_health
+  retries: 30
+  delay: 2
+  until: birdman_master_health.status == 200
+
+# Bootstrap admin-ключ печатается master'ом ОДИН раз при первом старте с
+# пустой таблицей api_keys — выхватываем его из журнала и сохраняем 0600.
+- name: Check for stored admin API key
+  ansible.builtin.stat:
+    path: "{{ birdman_master_admin_key_file }}"
+  register: birdman_admin_key_stat
+
+- name: Harvest bootstrap admin key from master journal
+  ansible.builtin.shell: >
+    set -o pipefail;
+    journalctl -u birdman-master --no-pager -o cat
+    | grep -oE '"api_key":"bmk_[^"]+"' | head -1 | cut -d'"' -f4
+  args:
+    executable: /bin/bash
+  register: birdman_admin_key_raw
+  changed_when: false
+  no_log: true
+  when: not birdman_admin_key_stat.stat.exists
+
+- name: Fail if bootstrap admin key is not recoverable
+  ansible.builtin.fail:
+    msg: >-
+      Bootstrap admin-ключ не найден ни в {{ birdman_master_admin_key_file }},
+      ни в журнале birdman-master. Ключ печатается один раз при первом старте
+      с пустой api_keys; если журнал ротирован — сбросьте таблицу api_keys
+      (docker exec birdman-postgres psql -U postgres birdman -c "delete from api_keys")
+      и перезапустите master.
+  when:
+    - not birdman_admin_key_stat.stat.exists
+    - birdman_admin_key_raw.stdout | trim | length == 0
+
+- name: Store admin API key (0600, box only)
+  ansible.builtin.copy:
+    content: "{{ birdman_admin_key_raw.stdout | trim }}"
+    dest: "{{ birdman_master_admin_key_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  when: not birdman_admin_key_stat.stat.exists

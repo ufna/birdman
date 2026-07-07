@@ -1,6 +1,8 @@
 ---
 # Всё в этой роли — аддитивно и только birdman-объекты: общий дев-бокс,
 # чужие контейнеры/nginx/UFW-правила не трогаем.
+# Итерация 1: агент — демон под master'ом; роль регистрирует ноду в master
+# (одноразово, node_token остаётся только на тачке) и включает unit.
 
 - name: Read GHCR token from env BIRDMAN_GHCR_TOKEN
   ansible.builtin.set_fact:
@@ -43,6 +45,7 @@
     owner: root
     group: root
     mode: "0755"
+  notify: Restart birdman-agent
 
 - name: Install agent config /etc/birdman/agent.yaml
   ansible.builtin.template:
@@ -51,6 +54,7 @@
     owner: root
     group: root
     mode: "0644"
+  notify: Restart birdman-agent
 
 - name: Install GHCR pull token (root-only)
   ansible.builtin.copy:
@@ -69,22 +73,64 @@
     comment: "{{ birdman_ufw_comment }}"
   loop: [tcp, udp]
 
-- name: Install birdman-agent.service unit (placeholder for iteration 1)
+# --- регистрация ноды в master (одноразовая, идемпотентная) ---
+
+- name: Check for stored node token
+  ansible.builtin.stat:
+    path: "{{ birdman_node_token_file }}"
+  register: birdman_node_token_stat
+
+- name: Register node in master (POST /v1/nodes)
+  when: not birdman_node_token_stat.stat.exists
+  block:
+    - name: Read master admin key
+      ansible.builtin.slurp:
+        src: "{{ birdman_master_admin_key_file }}"
+      register: birdman_admin_key_slurp
+      no_log: true
+
+    - name: Create node (one-time node_token in response)
+      ansible.builtin.uri:
+        url: "{{ birdman_master_api }}/v1/nodes"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ birdman_admin_key_slurp.content | b64decode | trim }}"
+        body_format: json
+        body:
+          project: "{{ birdman_project }}"
+          region: "{{ birdman_region }}"
+          hostname: "{{ ansible_facts.hostname }}"
+          public_ip: "{{ birdman_public_ip }}"
+          capacity_slots: "{{ birdman_capacity_slots | int }}"
+        status_code: 201
+      register: birdman_node_reg
+      no_log: true
+
+    - name: Store node token (0600, box only)
+      ansible.builtin.copy:
+        content: "{{ birdman_node_reg.json.node_token }}"
+        dest: "{{ birdman_node_token_file }}"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+      notify: Restart birdman-agent
+
+- name: Install birdman-agent.service unit
   ansible.builtin.copy:
     src: birdman-agent.service
     dest: /etc/systemd/system/birdman-agent.service
     owner: root
     group: root
     mode: "0644"
+  notify: Restart birdman-agent
 
-# Заготовка держится disabled/not started: у агента v0 нет daemon-режима
-# (master-линк — итерация 1), unit нужен лишь как каркас деплоя.
-- name: Ensure birdman-agent.service is disabled and stopped
+- name: Enable and start birdman-agent
   ansible.builtin.systemd_service:
     name: birdman-agent.service
-    enabled: false
-    state: stopped
+    enabled: true
+    state: started
     daemon_reload: true
 
-- name: Apply tmpfiles now (idempotent)
+- name: Apply tmpfiles and pending restarts
   ansible.builtin.meta: flush_handlers

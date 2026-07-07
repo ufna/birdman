@@ -2,3 +2,9 @@
 - name: Apply birdman tmpfiles
   ansible.builtin.command: systemd-tmpfiles --create /etc/tmpfiles.d/birdman.conf
   changed_when: true
+
+- name: Restart birdman-agent
+  ansible.builtin.systemd_service:
+    name: birdman-agent.service
+    state: restarted
+    daemon_reload: true
