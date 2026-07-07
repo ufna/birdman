@@ -64,6 +64,8 @@ message PullReport  { string cmd_id=1; string image_ref=2; string status=3; stri
 
 **Auth (bootstrap → mTLS):** ansible кладёт в конфиг одноразовый `node_token` (создан master'ом при `POST /v1/nodes`). Первый коннект — TLS (server-auth) + Hello с токеном → master выдаёт клиентский сертификат (внутренняя CA, TTL 90 дней, авто-ротация за 14 дней до истечения) → дальше строго mTLS. Токен гасится после обмена.
 
+> **(Уточнено в v0 — осознанное отступление, TODO итерации 2.)** master v0 не выдаёт клиентские сертификаты: агент аутентифицируется `node_token`'ом в Hello при **каждом** коннекте поверх TLS (server-auth; в dev — self-signed автогенерация при первом старте). Токен соответственно пока не одноразовый и не гасится; в БД хранится только его bcrypt-хэш (`nodes.token_hash`). Полный обмен «token → клиентский mTLS-серт» с внутренней CA — следующая итерация.
+
 ## 2. liba ↔ agent: NDJSON поверх unix socket
 
 Per-server сокет: агент слушает `/run/birdman/servers/{id}.sock`, в контейнер он bind-mount'ится как `/birdman/agent.sock`. **Identity = сокет**: токены не нужны, чужой дедик физически не видит чужой сокет. Кодировка: одна JSON-строка на сообщение, `\n`-терминатор, envelope:
