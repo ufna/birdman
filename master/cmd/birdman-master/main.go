@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"errors"
 	"flag"
@@ -23,6 +24,7 @@ import (
 	"github.com/ufna/birdman/master/internal/agentlink"
 	"github.com/ufna/birdman/master/internal/config"
 	"github.com/ufna/birdman/master/internal/httpapi"
+	"github.com/ufna/birdman/master/internal/matchmaker"
 	"github.com/ufna/birdman/master/internal/metrics"
 	"github.com/ufna/birdman/master/internal/reconcile"
 	"github.com/ufna/birdman/master/internal/store"
@@ -103,17 +105,23 @@ func run() error {
 	}
 
 	m := metrics.New(st, log)
+	mmCfg, err := matchmakerConfig(cfg, log)
+	if err != nil {
+		return err
+	}
+	mm := matchmaker.New(st, m, mmCfg, log)
 	api := &http.Server{
 		Addr:              cfg.ListenAPI,
-		Handler:           httpapi.New(st, m, log),
+		Handler:           httpapi.New(st, m, mm, log),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	// Background loops: reconcile (1s), lease checker (1s).
+	// Background loops: reconcile (1s), lease checker (1s), matchmaker (500ms).
 	loopCtx, cancelLoops := context.WithCancel(context.Background())
 	defer cancelLoops()
 	go reconcile.New(st, hub, log).Run(loopCtx, time.Second)
 	go reconcile.NewLeaseChecker(st, log).Run(loopCtx, time.Second)
+	go mm.Run(loopCtx)
 
 	errCh := make(chan error, 2)
 	go func() {
@@ -155,6 +163,33 @@ func run() error {
 	}
 	cancelLoops()
 	return nil
+}
+
+// matchmakerConfig maps the yaml section to matchmaker.Config
+// (docs/specs/master.md §4).
+func matchmakerConfig(cfg config.Config, log *slog.Logger) (matchmaker.Config, error) {
+	mc := matchmaker.Config{
+		Tick:             time.Duration(cfg.Matchmaking.TickMS) * time.Millisecond,
+		WidenAfter:       time.Duration(cfg.Matchmaking.WidenAfterS) * time.Second,
+		TicketTTL:        time.Duration(cfg.Matchmaking.TicketTTLS) * time.Second,
+		DefaultProject:   cfg.Matchmaking.DefaultProject,
+		JoinTokenEnabled: cfg.Matchmaking.JoinToken.Enabled,
+	}
+	if !mc.JoinTokenEnabled {
+		return mc, nil
+	}
+	if s := cfg.Matchmaking.JoinToken.Secret; s != "" {
+		mc.JoinTokenSecret = []byte(s)
+		return mc, nil
+	}
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		return mc, fmt.Errorf("join token secret: %w", err)
+	}
+	mc.JoinTokenSecret = secret
+	log.Warn("join tokens enabled without a secret — generated an ephemeral one; " +
+		"tokens will not survive a master restart (set BIRDMAN_MM_JOIN_SECRET)")
+	return mc, nil
 }
 
 func serverCert(cfg config.Config, log *slog.Logger) (tls.Certificate, error) {
