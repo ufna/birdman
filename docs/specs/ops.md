@@ -1,0 +1,117 @@
+# Спека: ops — наблюдаемость, CI/CD, версии, ansible, runbooks
+
+> Итерации 3–5 из `../05-runtime-iterations.md`. Принцип: скучные проверенные инструменты, ноль самописного там, где это не наш продукт.
+
+## 1. Наблюдаемость
+
+Стек: **VictoriaMetrics** (single-node, на тачке master) + **vmagent** на каждой тачке (скрейпит localhost: agent :9101, node_exporter :9100, master :443/metrics) + **Grafana** (внутренний ops-инструмент; продуктовое лицо — панель) + **vmalert** → Discord webhook.
+
+### Канонические метрики
+
+| Метрика | Источник | Зачем |
+|---|---|---|
+| `birdman_node_heartbeat_age_seconds` | master | карантин/алерт NodeDown |
+| `birdman_servers{project,region,version,state}` | master | буферы, окно мультиверсий |
+| `birdman_allocation_duration_seconds` (hist) | master | SLO p95 <1с |
+| `birdman_allocation_failures_total{reason}` | master | no_capacity и пр. |
+| `birdman_mm_queue_depth{region}` / `birdman_mm_time_to_match_seconds` (hist) | master | здоровье матчмейкера |
+| `birdman_matches_running` / `birdman_players_online` | master | продуктовые |
+| `birdman_server_tick_ms{server_id}` / `birdman_server_players` | agent (из liba) | game-health |
+| cpu/mem/disk/net/load | node_exporter + agent (cgroups) | железо |
+
+### Алерты (vmalert → Discord)
+
+| Алерт | Условие | Severity |
+|---|---|---|
+| NodeDown | heartbeat_age > 30s | critical |
+| BufferEmpty | ready==0 в регионе > 3м ИЛИ allocation_failures{no_capacity} > 0 за 1м | critical |
+| CrashLoop | событие crash_loop (см. master §2) | critical |
+| DiskHigh | disk > 85% (critical: > 92%) | warning |
+| MasterDown | внешний probe (healthchecks.io/UptimeRobot на `GET /healthz`) | critical |
+| TickDegraded | p95 tick_ms > порога игры 5м | warning |
+| CertExpiry | mTLS/TLS серты < 14 дней | warning |
+| AgentUpgradeFailed | событие agent_upgrade_failed | critical |
+
+MasterDown обязан приходить **не** через master (внешний probe) — иначе немой отказ.
+
+### Логи
+
+Дедики — на тачках с tail/скачиванием через master (см. `agent.md` §5). master — journald (JSON). Централизованное хранилище логов (Loki/Victoria Logs) — только если руками станет тесно; не в v1.
+
+## 2. CI/CD (GitHub Actions)
+
+### Репозитории и артефакты
+
+- Monorepo `birdman`: master, agent, sdk, panel, proto, infra. Образы/бинари: `ghcr.io/<org>/birdman-master` (образ не обязателен — деплой бинарём через ansible), agent — бинарь в GH Releases (для self-upgrade), panel — статика внутри master.
+- Репо игры: workflow собирает **Linux Server** → Docker-образ `ghcr.io/<org>/<game>-server:<semver>`.
+
+### Пайплайн серверного билда игры
+
+```
+push в main:        build → push :X.Y.Z-dev.N → POST /v1/versions {channel: staging} → POST /v1/deploy (staging-флот)
+tag vX.Y.Z:         build → push :X.Y.Z → POST /v1/versions {channel: prod} → manual approval (environment) → POST /v1/deploy
+```
+
+Секреты: `BIRDMAN_DEPLOY_KEY` (API-ключ со скоупом deploy) в GH environment secrets. Rollback — кнопкой в панели или `POST /v1/rollback`, CI не нужен.
+
+### Пайплайн платформы
+
+lint (golangci-lint) + unit → integration (docker-compose: PG + master + agent + mockliba, сценарии: allocate, карантин, deploy) → build бинарей (linux/amd64) → GH Release. Агенты обновляет master командой UpgradeAgent (URL релиза + sha256), master — ansible-плейбуком.
+
+## 3. Версии и совместимость клиент↔сервер
+
+- Semver `MAJOR.MINOR.PATCH` для серверного билда; клиент шлёт свой `client_version` в тикете.
+- **Правило по умолчанию: совместимы при равных MAJOR.MINOR** (PATCH свободен). Переопределение — таблица в конфиге master:
+
+```yaml
+compat:
+  default: "major.minor"
+  overrides:
+    - client: "1.4.x"; servers: ["1.4.x", "1.5.x"]   # окно миграции
+```
+
+- Мягкий деплой (master §5): в окне мультиверсий старые клиенты матчатся на deprecated-версию, пока она в compat; вышла из compat → `update_required`.
+- Конвенцию утвердить с командой игры **до итерации 3** (чек-пункт).
+
+## 4. Ansible (`infra/`)
+
+```
+infra/
+  inventories/
+    production/hosts.yml      # группы: master, nodes_eu, nodes_us
+  playbooks/
+    site.yml                  # всё
+    add-node.yml              # «тачка одной командой»
+    master.yml  monitoring.yml
+  roles/
+    base        # юзеры, sshd hardening, nftables, sysctl, chrony, unattended-upgrades
+    containerd  # containerd + конфиг namespace birdman
+    node_exporter  vmagent
+    birdman_agent  # бинарь, конфиг из шаблона, systemd; node_token из vault
+    birdman_master # бинарь, конфиг, systemd, certbot(:443), внутренняя CA
+    postgres    # PG16 на тачке master, pg_dump-cron
+    victoria    # VM + vmalert + Grafana (тачка master)
+```
+
+**Добавить тачку** = 1 строка в `hosts.yml` + `ansible-playbook playbooks/add-node.yml -l node-eu-3` (создаёт node в master API, кладёт token, ставит всё, тачка сама выходит на связь). **Вывести** = `POST /nodes/{id}/drain` → дождаться пустоты → убрать из inventory.
+
+Ключевые параметры `base`: nftables — allow 22 (allowlist админ-IP), 443+8443 только на master, 19999/udp + 20000–29999 tcp/udp на нодах; sysctl: `net.core.rmem_max/wmem_max=8388608`, `net.netfilter.nf_conntrack_max` под UDP-нагрузку, `fs.nr_open`; секреты — ansible-vault.
+
+## 5. Бэкапы и восстановление
+
+- Postgres: `pg_dump` каждый час → S3-совместимое хранилище (Backblaze/Wasabi), retention 14 дней; еженедельный тест-restore в docker (CI-джоба).
+- Потеря master-тачки: новая тачка → `master.yml` плейбук → restore дампа → агенты переподключаются сами; матчи, шедшие во время отказа, доигрываются (сервера живы), их `match_end` попадёт в PG после восстановления. Целевой RTO ≤ 60 мин, RPO ≤ 1 ч.
+
+## 6. Runbooks (заготовки — довести в итерации 4–5)
+
+1. **Тачка умерла**: подтверждение (ssh/IPMI) → если труп: inventory-минус, capacity-проверка, заказ замены; карантин уже отработал сам.
+2. **DDoS**: прод-тачки только OVH game / Latitude (щит включён) → если региональная деградация: null-route у поставщика, `drain` тачки, буфер переезжает на соседние; клиентам матчмейкер выдаёт другой регион.
+3. **Плохой релиз**: CrashLoop-алерт → `POST /v1/rollback` (кнопка в панели) → расследование по логам умерших дедиков.
+4. **Диск полон**: image GC не справился → tail логов виновника, ручной прюнинг, поднять пороги/докупить диск.
+5. **Восстановление master** — см. §5.
+
+## 7. Acceptance
+
+- **Ит. 3**: пуш в main игры → staging-флот обновлён без рук; тег → прод после approve; 0 оборванных матчей (учение).
+- **Ит. 4**: все алерты таблицы стреляют на учениях в Discord ≤60с; логи любого умершего дедика достаются из панели/CLI; дашборд Grafana «одна тачка» и «регион» существуют.
+- **Ит. 5**: add-node.yml добавляет тачку за ≤15 мин от заказа до ready-буфера; тест-restore PG проходит в CI.
