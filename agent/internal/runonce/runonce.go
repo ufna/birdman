@@ -88,12 +88,16 @@ func Run(ctx context.Context, opts Options) int {
 		diag.Printf("log dir: %v", err)
 		return 1
 	}
-	if err := os.MkdirAll(opts.SocketDir, 0o755); err != nil {
+	// Per-server socket dir: its parent is bind-mounted (ro) into the
+	// container, so the socket path is {socket_dir}/{id}/agent.sock.
+	serverSockDir := filepath.Join(opts.SocketDir, serverID)
+	if err := os.MkdirAll(serverSockDir, 0o755); err != nil {
 		diag.Printf("socket dir: %v", err)
 		return 1
 	}
+	defer os.RemoveAll(serverSockDir)
 	logPath := filepath.Join(logDir, serverID+".log")
-	sockPath := filepath.Join(opts.SocketDir, serverID+".sock")
+	sockPath := filepath.Join(serverSockDir, runtime.SocketFileName)
 
 	slog, err := openServerLog(logPath)
 	if err != nil {

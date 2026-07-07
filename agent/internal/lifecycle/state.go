@@ -67,6 +67,13 @@ func NewMachine(serverID string, onChange func(Transition)) *Machine {
 	return &Machine{serverID: serverID, onChange: onChange, cur: StatePulling}
 }
 
+// NewMachineAt creates a machine at an arbitrary state — used when the agent
+// restores its server map from containerd labels after a restart (agent.md
+// §2): the restored server continues from its recorded state, not pulling.
+func NewMachineAt(serverID string, at State, onChange func(Transition)) *Machine {
+	return &Machine{serverID: serverID, onChange: onChange, cur: at}
+}
+
 // Current returns the current state.
 func (m *Machine) Current() State {
 	m.mu.Lock()

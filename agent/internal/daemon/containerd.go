@@ -1,0 +1,121 @@
+package daemon
+
+import (
+	"context"
+	"syscall"
+
+	"github.com/ufna/birdman/agent/internal/config"
+	"github.com/ufna/birdman/agent/internal/runtime"
+)
+
+// ContainerdRuntime adapts runtime.Client (containerd) to the Runtime
+// interface. Registry credentials are resolved lazily per pull so a rotated
+// token file is picked up without an agent restart.
+type ContainerdRuntime struct {
+	Client *runtime.Client
+	Auth   *config.RegistryAuth // nil for public images
+}
+
+func (r *ContainerdRuntime) creds() (*runtime.Credentials, error) {
+	if r.Auth == nil {
+		return nil, nil
+	}
+	token, err := r.Auth.Token()
+	if err != nil {
+		return nil, err
+	}
+	return &runtime.Credentials{Username: r.Auth.Username, Token: token}, nil
+}
+
+func (r *ContainerdRuntime) Pull(ctx context.Context, imageRef string) error {
+	creds, err := r.creds()
+	if err != nil {
+		return err
+	}
+	_, err = r.Client.EnsureImage(ctx, imageRef, creds)
+	return err
+}
+
+func (r *ContainerdRuntime) Start(ctx context.Context, spec StartSpec) (Handle, error) {
+	creds, err := r.creds()
+	if err != nil {
+		return nil, err
+	}
+	img, err := r.Client.EnsureImage(ctx, spec.ImageRef, creds)
+	if err != nil {
+		return nil, err
+	}
+	srv, err := r.Client.StartServer(ctx, runtime.ServerSpec{
+		ID:         spec.ID,
+		Image:      img,
+		ImageRef:   spec.ImageRef,
+		Port:       spec.Port,
+		Region:     spec.Region,
+		SocketPath: spec.SocketPath,
+		CPUMillis:  spec.CPUMillis,
+		MemMB:      spec.MemMB,
+		Env:        spec.Env,
+		LogPath:    spec.LogPath,
+	}, nil)
+	if err != nil {
+		return nil, err
+	}
+	return newHandle(srv), nil
+}
+
+func (r *ContainerdRuntime) Restore(ctx context.Context) ([]RestoredServer, error) {
+	restored, err := r.Client.Restore(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]RestoredServer, 0, len(restored))
+	for _, c := range restored {
+		out = append(out, RestoredServer{
+			Handle:   newHandle(c.Server),
+			ID:       c.ID,
+			Port:     c.Port,
+			ImageRef: c.ImageRef,
+			State:    c.State,
+			MatchID:  c.MatchID,
+			Running:  c.Running,
+			ExitCode: c.ExitCode,
+		})
+	}
+	return out, nil
+}
+
+// containerdHandle wraps runtime.Server, translating the containerd exit
+// channel into daemon.Exit.
+type containerdHandle struct {
+	srv  *runtime.Server
+	exit chan Exit
+}
+
+func newHandle(srv *runtime.Server) *containerdHandle {
+	h := &containerdHandle{srv: srv, exit: make(chan Exit, 1)}
+	if ch := srv.Wait(); ch != nil {
+		go func() {
+			st := <-ch
+			code, _, err := st.Result()
+			h.exit <- Exit{Code: code, Err: err}
+		}()
+	}
+	return h
+}
+
+func (h *containerdHandle) Wait() <-chan Exit { return h.exit }
+
+func (h *containerdHandle) Signal(ctx context.Context, sig syscall.Signal) error {
+	return h.srv.Signal(ctx, sig)
+}
+
+func (h *containerdHandle) Kill(ctx context.Context) error { return h.srv.ForceKill(ctx) }
+
+func (h *containerdHandle) Delete(ctx context.Context) error { return h.srv.Delete(ctx) }
+
+func (h *containerdHandle) SetState(ctx context.Context, state, matchID string) error {
+	return h.srv.SetLabels(ctx, map[string]string{
+		runtime.LabelState:   state,
+		runtime.LabelMatchID: matchID,
+	})
+}

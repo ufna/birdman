@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Сборка статического birdman-agent (linux/amd64) через docker —
 # Go на хосте не нужен. Результат: agent/dist/birdman-agent.
+# Монтируется корень репо: agent/go.mod содержит replace ../proto.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -8,9 +9,10 @@ VERSION="${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo d
 
 mkdir -p dist
 docker run --rm \
-  -v "$PWD":/src -w /src \
+  -v "$PWD/..":/src -w /src/agent \
   -v birdman-agent-gomod:/go/pkg/mod \
   -v birdman-agent-gocache:/root/.cache/go-build \
+  -e GOFLAGS=-buildvcs=false \
   -e GOOS=linux -e GOARCH=amd64 -e CGO_ENABLED=0 \
   golang:1.24 \
   go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \

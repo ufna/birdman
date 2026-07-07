@@ -177,3 +177,26 @@ func TestConcurrentTransitions(t *testing.T) {
 		t.Fatal(m.Current())
 	}
 }
+
+// NewMachineAt restores a machine mid-lifecycle (agent restart, map from
+// containerd labels): transitions continue from the restored state.
+func TestNewMachineAt(t *testing.T) {
+	m := NewMachineAt("srv-2", StateReady, nil)
+	if m.Current() != StateReady {
+		t.Fatalf("restored state = %s", m.Current())
+	}
+	if err := m.To(StateAllocated, "master allocated"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.To(StateStarting, "no way back"); err == nil {
+		t.Fatal("illegal transition from restored chain must fail")
+	}
+
+	d := NewMachineAt("srv-3", StateDraining, nil)
+	if err := d.To(StateStopped, "drained"); err != nil {
+		t.Fatal(err)
+	}
+	if !d.Current().Terminal() {
+		t.Fatal("stopped must be terminal")
+	}
+}

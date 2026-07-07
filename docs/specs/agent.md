@@ -10,7 +10,7 @@
 
 ## 2. Состояние и рестарт
 
-Агент — stateless поверх containerd. На старте: `containerd list` по namespace `birdman` → восстановить карту server_id→container (labels: `server_id`, `version`, `port`) → доложить master в Hello. Контейнеры agent-рестарт **переживают** (containerd их держит) — рестарт/апгрейд агента не трогает живые матчи.
+Агент — stateless поверх containerd. На старте: `containerd list` по namespace `birdman` → восстановить карту server_id→container (labels: `server_id`, `version`, `port`; уточнено в v0: плюс `state` и `match-id` — агент пишет их при переходах, чтобы после рестарта продолжить с ready/allocated, а не гонять readiness-grace заново) → доложить master в Hello. Мёртвые контейнеры (умерли, пока агент не смотрел) — Event `failed` + cleanup. Контейнеры agent-рестарт **переживают** (containerd их держит) — рестарт/апгрейд агента не трогает живые матчи.
 
 ## 3. Запуск дедика
 
@@ -18,8 +18,8 @@
 
 1. Ensure image (обычно уже прогрет PrePull'ом; иначе pull с прогрессом в Event).
 2. Выделить порт из пула (конфиг, деф. `20000–29999`); один порт TCP+UDP на дедик (v1).
-3. Создать per-server unix socket `/run/birdman/servers/{server_id}.sock` (слушает агент).
-4. `containerd create+start`: host network; bind mounts: сокет → `/birdman/agent.sock` (ro-каталог, rw-сокет); env: `BIRDMAN_SOCKET=/birdman/agent.sock`, `BIRDMAN_PORT`, `BIRDMAN_SERVER_ID`, `BIRDMAN_REGION` + env из команды; cgroups-лимиты из `limits`; `oom_score_adj` дедикам > агенту.
+3. Создать per-server unix socket `/run/birdman/servers/{server_id}/agent.sock` (слушает агент). (Уточнено в v0: сокет живёт в per-server каталоге, потому что монтируется каталог, а не файл — см. п. 4.)
+4. `containerd create+start`: host network; bind mount: каталог `/run/birdman/servers/{server_id}` → `/birdman` (ro-каталог, rw-сокет 0666 — connect(2) к сокету работает и на ro-mount); env: `BIRDMAN_SOCKET=/birdman/agent.sock`, `BIRDMAN_PORT`, `BIRDMAN_SERVER_ID`, `BIRDMAN_REGION` + env из команды; cgroups-лимиты из `limits`; `oom_score_adj` дедикам > агенту. (Уточнено в v0: монтируется именно каталог — рестартовавший агент пересоздаёт сокет-файл, и liba реконнектится к новому inode; file-mount замораживал бы старый.)
 5. Grace-период readiness: **30с** на `ready` от liba, иначе `failed` + stop.
 
 Стейт-машина на агенте: `pulling → starting → ready → allocated → draining → stopped|failed`. Переходы `ready/allocated/draining` диктует master (allocated) и liba (ready, match_end); `failed` — exit-код ≠0, отсутствие `ready`, OOM.
@@ -60,6 +60,9 @@ UDP-echo на порту **19999**: отвечает исходным пакет
 ```yaml
 master_addr: "master.birdman.internal:8443"
 node_token: "…"            # bootstrap-токен, выдаётся при добавлении тачки (ansible)
+node_token_file: /etc/birdman/node.token  # (уточнено в v0) альтернатива node_token:
+                            # секрет в отдельном файле 0600 (как registry token),
+                            # конфиг остаётся без секретов; inline-значение приоритетнее
 region: "eu"
 capacity_slots: 24          # обычно = физические ядра - резерв
 port_range: [20000, 29999]
@@ -69,9 +72,12 @@ data_dir: /var/lib/birdman
 registry_auth:              # (уточнено в v0) pull приватного registry (GHCR)
   username: "ufna"
   token_file: /etc/birdman/ghcr.token   # токен только в файле — никогда в конфиге/коде
+tls_insecure: false         # (уточнено в v0) true — не проверять серт master
+                            # (ТОЛЬКО dev: self-signed автогенерация master v0)
+tls_ca_file: ""             # (уточнено в v0) прод-путь: пин CA-серта master
 ```
 
-TLS: при первом коннекте агент обменивает `node_token` на клиентский сертификат (mTLS дальше) — см. `protocol.md` §Auth.
+TLS: при первом коннекте агент обменивает `node_token` на клиентский сертификат (mTLS дальше) — см. `protocol.md` §Auth. (Уточнено в v0: обмена пока нет — агент шлёт `node_token` в Hello при каждом коннекте поверх TLS server-auth; проверка серта master — `tls_ca_file`, в dev допустим `tls_insecure: true`.)
 
 ## 11. Acceptance
 
