@@ -1,0 +1,69 @@
+name: master
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'master/**'
+      - 'proto/**'
+      - '.github/workflows/master.yml'
+  pull_request:
+    paths:
+      - 'master/**'
+      - 'proto/**'
+      - '.github/workflows/master.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: birdman
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    env:
+      # Тесты берут DSN из env вместо самоподнятого docker-постгреса.
+      BIRDMAN_TEST_DSN: postgres://postgres:birdman@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: |
+            master/go.sum
+            proto/go.sum
+
+      - name: Vet & build proto
+        working-directory: proto
+        run: |
+          go vet ./...
+          go build ./...
+
+      - name: Vet master
+        working-directory: master
+        run: go vet ./...
+
+      - name: Test master (integration, Postgres 16)
+        working-directory: master
+        run: go test -race ./...
+
+      - name: Build static linux/amd64 binary
+        working-directory: master
+        env:
+          GOOS: linux
+          GOARCH: amd64
+          CGO_ENABLED: '0'
+        run: |
+          go build -trimpath -ldflags '-s -w' -o dist/birdman-master ./cmd/birdman-master
+          file dist/birdman-master
