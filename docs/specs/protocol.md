@@ -60,7 +60,7 @@ message PullReport  { string cmd_id=1; string image_ref=2; string status=3; stri
 
 Правила: каждое команда-сообщение несёт `cmd_id`, агент подтверждает `Ack{cmd_id}` (или Event с ошибкой) — master ретраит неподтверждённые при реконнекте, поэтому обработка команд на агенте идемпотентна по `cmd_id` (at-least-once). Поля protobuf только добавляем, номера не переиспользуем (`reserved`). (Уточнено в v0: `Ack` добавлен в `AgentMsg` — именно агент подтверждает команды; `MasterMsg.Ack` зарезервирован под подтверждения master'ом агентских сообщений.)
 
-**Lease/карантин:** master считает тачку живой при heartbeat моложе **10с**; тишина → `quarantine` (аллокации исключены, сервера → failed после ещё 20с); возвращение heartbeat → сверка карты серверов и `active`.
+**Lease/карантин:** master считает тачку живой при heartbeat моложе **10с**; тишина → `quarantine` (аллокации исключены, сервера → failed после ещё 20с); возвращение heartbeat → сверка карты серверов и `active`. (Уточнено в v0: «сверка карты» = только Hello-репорты могут воскресить `failed`-сервер обратно в `ready/allocated/draining` — дедики переживают тишину линка, master был пессимистичен; событие `server_recovered`. Обычные heartbeat'ы терминальные состояния не трогают; `reaped` не воскресает никогда.)
 
 **Auth (bootstrap → mTLS):** ansible кладёт в конфиг одноразовый `node_token` (создан master'ом при `POST /v1/nodes`). Первый коннект — TLS (server-auth) + Hello с токеном → master выдаёт клиентский сертификат (внутренняя CA, TTL 90 дней, авто-ротация за 14 дней до истечения) → дальше строго mTLS. Токен гасится после обмена.
 
@@ -68,7 +68,7 @@ message PullReport  { string cmd_id=1; string image_ref=2; string status=3; stri
 
 ## 2. liba ↔ agent: NDJSON поверх unix socket
 
-Per-server сокет: агент слушает `/run/birdman/servers/{id}.sock`, в контейнер он bind-mount'ится как `/birdman/agent.sock`. **Identity = сокет**: токены не нужны, чужой дедик физически не видит чужой сокет. Кодировка: одна JSON-строка на сообщение, `\n`-терминатор, envelope:
+Per-server сокет: агент слушает `/run/birdman/servers/{id}/agent.sock`; в контейнер bind-mount'ится per-server **каталог** (ro) как `/birdman`, сокет виден как `/birdman/agent.sock`. (Уточнено в v0: каталог вместо файла — рестартовавший агент пересоздаёт сокет, и liba реконнектится к новому inode; connect(2) к 0666-сокету работает и на ro-mount.) **Identity = сокет**: токены не нужны, чужой дедик физически не видит чужой сокет. Кодировка: одна JSON-строка на сообщение, `\n`-терминатор, envelope:
 
 ```json
 {"v":1,"type":"...","data":{...}}

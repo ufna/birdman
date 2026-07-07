@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"syscall"
@@ -30,15 +31,28 @@ const (
 	DefaultAddress = "/run/containerd/containerd.sock"
 	// Namespace is the containerd namespace owned by birdman.
 	Namespace = "birdman"
+	// ContainerSocketDir is the in-container directory that receives the
+	// per-server socket directory bind mount (ro dir, rw socket — agent.md
+	// §3; the directory, not the socket file, is mounted so that an agent
+	// restart can recreate the socket and liba still reaches the new inode).
+	ContainerSocketDir = "/birdman"
 	// ContainerSocketPath is where the per-server agent socket appears
 	// inside the container (protocol.md §2).
 	ContainerSocketPath = "/birdman/agent.sock"
+	// SocketFileName is the socket file name inside the per-server dir.
+	SocketFileName = "agent.sock"
 
 	// Container labels — the agent restores its server map from these after
-	// a restart (agent.md §2; the restore itself lands in iteration 1).
+	// a restart (agent.md §2).
 	LabelServerID = "birdman/server-id"
 	LabelPort     = "birdman/port"
 	LabelImage    = "birdman/image"
+	// LabelState tracks the agent-side lifecycle state (starting/ready/
+	// allocated/draining) so a restarted agent resumes supervision from the
+	// recorded state instead of re-running the readiness grace.
+	LabelState = "birdman/state"
+	// LabelMatchID is set when the server is allocated to a match.
+	LabelMatchID = "birdman/match-id"
 
 	// serverOOMScoreAdj > agent's 0: under memory pressure the kernel kills
 	// dediks before the agent (agent.md §3).
@@ -110,13 +124,19 @@ type ServerSpec struct {
 	ImageRef string
 	Port     int
 	Region   string
-	// SocketPath is the host path of the per-server agent socket; it is
-	// bind-mounted to ContainerSocketPath inside the container.
+	// SocketPath is the host path of the per-server agent socket. It must
+	// end with SocketFileName; its parent directory is bind-mounted (ro) to
+	// ContainerSocketDir so the socket shows up as ContainerSocketPath.
 	SocketPath string
 	CPUMillis  int
 	MemMB      int
 	Env        map[string]string // extra env on top of the BIRDMAN_* contract
 	Args       []string          // override image entrypoint (integration tests); nil = image default
+	// LogPath, when set, makes the containerd shim write stdout/stderr to
+	// this file directly (cio.LogFile) — the log stream survives agent
+	// restarts (agent.md §5, daemon mode). Otherwise the caller-provided
+	// writer receives the streams via this process (run-once).
+	LogPath string
 }
 
 // Server is a created (and running until proven otherwise) dedik container.
@@ -128,11 +148,11 @@ type Server struct {
 }
 
 // StartServer creates and starts a dedicated server container: host network,
-// BIRDMAN_* env, agent socket bind mount, cgroup cpu/mem limits.
+// BIRDMAN_* env, agent socket-dir bind mount, cgroup cpu/mem limits.
 //
-// Container stdout/stderr are streamed into logW by this process (v0).
-// TODO(итерация 1): shim-side лог (cio.LogFile/LogURI), чтобы рестарт агента
-// не прерывал поток логов живого дедика.
+// With sp.LogPath set the shim writes container stdout/stderr straight to
+// the file (survives agent restarts); otherwise the streams are copied into
+// logW by this process (run-once).
 func (c *Client) StartServer(ctx context.Context, sp ServerSpec, logW io.Writer) (*Server, error) {
 	env := []string{
 		"BIRDMAN_PORT=" + strconv.Itoa(sp.Port),
@@ -150,11 +170,13 @@ func (c *Client) StartServer(ctx context.Context, sp ServerSpec, logW io.Writer)
 		oci.WithHostHostsFile,
 		oci.WithHostResolvconf,
 		oci.WithEnv(env),
+		// The per-server dir is mounted ro; connect(2) to the 0666 socket
+		// inside still works (write to S_ISSOCK bypasses the ro check).
 		oci.WithMounts([]specs.Mount{{
-			Destination: ContainerSocketPath,
+			Destination: ContainerSocketDir,
 			Type:        "bind",
-			Source:      sp.SocketPath,
-			Options:     []string{"bind", "rw"},
+			Source:      filepath.Dir(sp.SocketPath),
+			Options:     []string{"bind", "ro"},
 		}}),
 		oci.WithMemoryLimit(uint64(sp.MemMB) << 20),
 		// cpu_millis → CFS: 1000 millis = 1 ядро = квота 100000мкс на период 100000мкс
@@ -169,6 +191,7 @@ func (c *Client) StartServer(ctx context.Context, sp ServerSpec, logW io.Writer)
 		LabelServerID: sp.ID,
 		LabelPort:     strconv.Itoa(sp.Port),
 		LabelImage:    sp.ImageRef,
+		LabelState:    "starting",
 	}
 
 	cont, err := c.c.NewContainer(ctx, sp.ID,
@@ -180,8 +203,12 @@ func (c *Client) StartServer(ctx context.Context, sp ServerSpec, logW io.Writer)
 		return nil, fmt.Errorf("create container %s: %w", sp.ID, err)
 	}
 
+	creator := cio.NewCreator(cio.WithStreams(nil, logW, logW))
+	if sp.LogPath != "" {
+		creator = cio.LogFile(sp.LogPath)
+	}
 	cleanupCtx := context.WithoutCancel(ctx)
-	task, err := cont.NewTask(ctx, cio.NewCreator(cio.WithStreams(nil, logW, logW)))
+	task, err := cont.NewTask(ctx, creator)
 	if err != nil {
 		_ = cont.Delete(cleanupCtx, containerd.WithSnapshotCleanup)
 		return nil, fmt.Errorf("create task %s: %w", sp.ID, err)
@@ -224,16 +251,92 @@ func (s *Server) ForceKill(ctx context.Context) error {
 	return err
 }
 
-// Delete removes the task and the container with its snapshot.
+// Delete removes the task (if any) and the container with its snapshot.
 func (s *Server) Delete(ctx context.Context) error {
 	var firstErr error
-	if _, err := s.task.Delete(ctx, containerd.WithProcessKill); err != nil && !errdefs.IsNotFound(err) {
-		firstErr = fmt.Errorf("delete task %s: %w", s.ID, err)
+	if s.task != nil {
+		if _, err := s.task.Delete(ctx, containerd.WithProcessKill); err != nil && !errdefs.IsNotFound(err) {
+			firstErr = fmt.Errorf("delete task %s: %w", s.ID, err)
+		}
 	}
 	if err := s.container.Delete(ctx, containerd.WithSnapshotCleanup); err != nil && !errdefs.IsNotFound(err) && firstErr == nil {
 		firstErr = fmt.Errorf("delete container %s: %w", s.ID, err)
 	}
 	return firstErr
+}
+
+// SetLabels updates container labels (merge semantics). The daemon records
+// lifecycle state transitions here so a restarted agent can restore the map
+// (agent.md §2).
+func (s *Server) SetLabels(ctx context.Context, labels map[string]string) error {
+	_, err := s.container.SetLabels(ctx, labels)
+	return err
+}
+
+// Restored is one container recovered from the birdman namespace after an
+// agent restart (agent.md §2): identity and state come from labels.
+type Restored struct {
+	Server   *Server
+	ID       string
+	Port     int
+	ImageRef string
+	State    string // LabelState value ("" for legacy containers)
+	MatchID  string
+	Running  bool
+	ExitCode uint32 // meaningful only when !Running and the task existed
+}
+
+// Restore lists containers labeled with a birdman server id and re-attaches
+// to their tasks. Running tasks get a fresh exit watch; dead ones are
+// returned with Running=false for the caller to report and clean up.
+func (c *Client) Restore(ctx context.Context) ([]Restored, error) {
+	conts, err := c.c.Containers(ctx, `labels."`+LabelServerID+`"`)
+	if err != nil {
+		return nil, fmt.Errorf("list containers: %w", err)
+	}
+	out := make([]Restored, 0, len(conts))
+	for _, cont := range conts {
+		labels, err := cont.Labels(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("labels %s: %w", cont.ID(), err)
+		}
+		r := Restored{
+			ID:       labels[LabelServerID],
+			ImageRef: labels[LabelImage],
+			State:    labels[LabelState],
+			MatchID:  labels[LabelMatchID],
+		}
+		r.Port, _ = strconv.Atoi(labels[LabelPort])
+		srv := &Server{ID: r.ID, container: cont}
+
+		task, err := cont.Task(ctx, nil) // no IO re-attach: shim logs to file
+		switch {
+		case errdefs.IsNotFound(err):
+			// Container without a task (crashed between create and start,
+			// or task already deleted) — dead.
+		case err != nil:
+			return nil, fmt.Errorf("task %s: %w", cont.ID(), err)
+		default:
+			srv.task = task
+			st, err := task.Status(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("task status %s: %w", cont.ID(), err)
+			}
+			if st.Status == containerd.Running {
+				exitCh, err := task.Wait(context.WithoutCancel(ctx))
+				if err != nil {
+					return nil, fmt.Errorf("wait task %s: %w", cont.ID(), err)
+				}
+				srv.exitCh = exitCh
+				r.Running = true
+			} else {
+				r.ExitCode = st.ExitStatus
+			}
+		}
+		r.Server = srv
+		out = append(out, r)
+	}
+	return out, nil
 }
 
 func sortedKeys(m map[string]string) []string {

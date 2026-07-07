@@ -1,9 +1,13 @@
 ---
-# Дев-нода birdman (итерация 0): каталоги, бинарь агента, конфиг, GHCR-токен,
-# UFW-порты дедиков, unit-заготовка. Требует env BIRDMAN_GHCR_TOKEN (см. infra/README.md).
+# Дев-нода birdman (итерации 0–1): master (postgres в compose + статический
+# бинарь под systemd, только localhost) + агент (демон под master'ом,
+# регистрация ноды, UFW-порты дедиков). Требует env BIRDMAN_GHCR_TOKEN и
+# собранные бинари agent/dist + master/dist (см. infra/README.md).
 # containerd НЕ ставим: на дев-боксе он уже есть (docker); прод-роль — specs/ops.md §4.
-- name: birdman dev node — agent v0
+# Порядок ролей важен: агент регистрируется в живом master.
+- name: birdman dev node — master + agent (iteration 1)
   hosts: birdman_dev
   become: true
   roles:
+    - birdman_master_dev
     - birdman_agent_dev

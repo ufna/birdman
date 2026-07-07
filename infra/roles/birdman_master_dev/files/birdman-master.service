@@ -1,0 +1,16 @@
+[Unit]
+Description=birdman master (fleet controller + allocation API + AgentLink gRPC)
+Documentation=file:///etc/birdman/master.yaml
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/birdman-master -config /etc/birdman/master.yaml
+Restart=always
+RestartSec=2
+# Миграции применяются самим master'ом при старте (retry, пока postgres
+# поднимается) — отдельного шага не нужно.
+
+[Install]
+WantedBy=multi-user.target

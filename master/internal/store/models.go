@@ -83,6 +83,7 @@ const (
 	EventNodeQuarantine    = "node_quarantine"
 	EventNodeRecovered     = "node_recovered"
 	EventServerFailed      = "server_failed"
+	EventServerRecovered   = "server_recovered"
 	EventCrashLoop         = "crash_loop"
 	EventAllocationFailed  = "allocation_failed"
 	EventVersionRegistered = "version_registered"

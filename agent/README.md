@@ -1,12 +1,12 @@
 # birdman-agent
 
-Нода-агент birdman, **v0 = итерация 0** (`docs/05-runtime-iterations.md`): супервизия одного игрового дедика через containerd в режиме `run-once`. Master'а ещё нет — gRPC-линк, heartbeat и восстановление карты серверов приходят в итерации 1. Спеки: `docs/specs/agent.md`, `docs/specs/protocol.md` §2.
+Нода-агент birdman, **итерация 1** (`docs/05-runtime-iterations.md`): демон `run` под управлением master (gRPC AgentLink) + локальный `run-once` из итерации 0. Спеки: `docs/specs/agent.md`, `docs/specs/protocol.md` §1–2.
 
-Что внутри v0: ensure/pull образа (включая приватный GHCR), пул host-портов, запуск контейнера (host network, cgroup-лимиты, env-контракт `BIRDMAN_*`, bind-mount per-server сокета), UDS-сервер liba-протокола (NDJSON), стейт-машина `pulling → starting → ready → allocated → draining → stopped|failed`, grace 30с до `ready`, логи дедика, graceful stop по SIGTERM.
+Что внутри: gRPC bidi-линк с master (Hello с восстановленной картой, heartbeat 2с c NodeStats, команды Start/Stop/PrePull c `Ack{cmd_id}` и идемпотентностью, реконнект с бэкоффом 1с→30с), восстановление карты серверов из containerd-labels после рестарта (живые дедики агент-рестарт переживают), ensure/pull образа (включая приватный GHCR), пул host-портов, запуск контейнера (host network, cgroup-лимиты, env-контракт `BIRDMAN_*`, ro bind-mount per-server каталога с сокетом), UDS-сервер liba-протокола (NDJSON), стейт-машина `pulling → starting → ready → allocated → draining → stopped|failed`, grace 30с до `ready`, shim-side логи дедика (`cio.LogFile` — переживают рестарт агента), graceful stop по SIGTERM (дедиков не трогает).
 
 ## Сборка
 
-Go на хосте не нужен — только docker:
+Go на хосте не нужен — только docker (монтируется корень репо: `replace ../proto`):
 
 ```bash
 ./build.sh          # → dist/birdman-agent (static ELF linux/amd64, stripped)
@@ -18,11 +18,11 @@ file dist/birdman-agent
 
 ## Конфиг
 
-`/etc/birdman/agent.yaml` — v0 читает подмножество спеки §10 (неизвестные ключи, например `master_addr`/`node_token` из полного конфига, игнорируются — форвард-совместимость):
+`/etc/birdman/agent.yaml` (спека §10; неизвестные ключи игнорируются — форвард-совместимость):
 
 ```yaml
-region: "eu"
-capacity_slots: 24                    # v0 не использует
+region: "dev"
+capacity_slots: 8
 port_range: [20000, 29999]            # дефолт, если не задан
 limits_default: { cpu_millis: 3500, mem_mb: 4096 }
 log_dir: /var/log/birdman
@@ -30,9 +30,27 @@ data_dir: /var/lib/birdman
 registry_auth:                        # для pull приватного GHCR
   username: "ufna"
   token_file: /etc/birdman/ghcr.token # токен ТОЛЬКО в файле, не в конфиге/коде
+# --- master-линк (режим run) ---
+master_addr: "127.0.0.1:8444"
+node_token_file: /etc/birdman/node.token  # из POST /v1/nodes; файл 0600
+tls_insecure: true                    # ТОЛЬКО dev: self-signed master;
+                                      # прод — tls_ca_file: /path/ca.pem
 ```
 
-## Запуск
+## Запуск (демон, итерация 1)
+
+```bash
+birdman-agent run --config /etc/birdman/agent.yaml
+```
+
+- коннект к `master_addr` (TLS), Hello{node_token + карта серверов} — при каждом (ре)коннекте;
+- heartbeat каждые 2с: NodeStats (cpu/mem/disk/load из /proc+statfs) + все живые дедики;
+- команды master: StartServer (порт из пула или заданный), StopServer{grace}, PrePull (+PullReport), Drain/UpgradeAgent/TailLogs — Ack + TODO;
+- каждая команда подтверждается `Ack{cmd_id}`; повторный `cmd_id` (ре-доставка) не исполняется повторно; повторный StartServer знакомого server_id — no-op;
+- события ready/failed/match_start/match_end — ServerEvent'ами (переживают реконнект в outbox-очереди);
+- SIGTERM → закрыть стрим и выйти; дедики продолжают жить, следующий старт агента восстанавливает карту по labels (`birdman/state`, `birdman/match-id`).
+
+## Запуск (run-once, итерация 0)
 
 ```bash
 birdman-agent run-once \
@@ -51,8 +69,10 @@ birdman-agent run-once \
 ## Тесты
 
 ```bash
-# unit (пул портов, конфиг, UDS против фейкового liba-клиента, стейт-машина/grace)
-docker run --rm -v "$PWD":/src -w /src golang:1.24 sh -c "go vet ./... && go test -race ./..."
+# unit (линк bufconn против фейкового master-стрима, менеджер с фейковым
+# рантаймом, пул портов, конфиг, UDS против фейкового liba, стейт-машина)
+docker run --rm -v "$PWD/..":/src -w /src/agent -e GOFLAGS=-buildvcs=false \
+  golang:1.24 sh -c "go vet ./... && go test -race ./..."
 
 # интеграция с containerd — на Linux-тачке с демоном (скипается в обычном прогоне):
 go test -race -tags integration ./internal/runtime/
@@ -64,12 +84,14 @@ go test -race -tags integration ./internal/runtime/
 
 1. **Клиентская библиотека — `github.com/containerd/containerd` v1.7.x, не `/v2`.** Целевые тачки — Ubuntu 24.04 с docker 28.x, т.е. демон containerd **1.7.x**; клиент той же линии исключает сюрпризы совместимости (v2-клиент рассчитан на демоны 2.x: transfer-service pull, sandbox API). Переход на `/v2` — осознанно, вместе с апгрейдом демона на тачках. Примечание: `runtime-spec` запинен на v1.1.0 (v1.3 ломает компиляцию containerd 1.7).
 2. **EnsureImage вместо голого pull**: сначала локальный образ (спека §3 «ensure image» — PrePull-семантика итерации 3), иначе pull; авторизация GHCR через resolver с creds из `token_file`.
-3. **Логи дедика** пишет агент (cio-стримы → файл). TODO итерация 1: shim-side лог (`cio.LogFile`/LogURI), чтобы рестарт агента не рвал поток; ротация 100MB×2 + gzip (спека §5) — тоже TODO, в v0 нет.
-4. **Сокет 0666**: identity дедика = его сокет (protocol.md §2), других процессов на тачке нет доверенных/недоверенных градаций в v0; образы игр бывают non-root (наш stub — distroless **nonroot**), им нужен connect.
-5. **exit-watch через `task.Wait`**, заармленный `context.WithoutCancel`: канал выхода обязан пережить отмену сигнального контекста, иначе при SIGTERM агент получает фиктивный `context canceled` вместо реального кода (поймано E2E-тестом). OOM-детект через events — итерация 1 (там он нужен для Event master'у).
+3. **Логи дедика**: демон — shim-side (`cio.LogFile`, переживают рестарт агента); run-once — cio-стримы через процесс агента. Ротация 100MB×2 + gzip (спека §5) — TODO.
+4. **Сокет 0666 в per-server каталоге, каталог монтируется ro** (итерация 1): бинд каталога вместо файла — иначе после рестарта агента контейнер видел бы замороженный старый inode и liba не могла бы реконнектиться; connect(2) к сокету работает и на ro-mount (S_ISSOCK не подпадает под запрет записи). Identity дедика = его сокет (protocol.md §2); образы игр бывают non-root (наш stub — distroless **nonroot**), им нужен connect.
+5. **exit-watch через `task.Wait`**, заармленный `context.WithoutCancel`: канал выхода обязан пережить отмену сигнального контекста, иначе при SIGTERM агент получает фиктивный `context canceled` вместо реального кода (поймано E2E-тестом). OOM-детект через containerd events — TODO (сейчас OOM виден как failed c кодом 137).
 6. **Пул портов in-memory** (спека §2: durable-состояния на агенте нет). Чужой процесс на порту из пула проявится как «игра не забиндилась» → нет `ready` → failed по grace.
 7. **`oom_score_adj=500`** дедикам (агент 0) — при memory pressure ядро убивает дедики раньше агента (спека §3).
-8. **env-контракт**: `BIRDMAN_PORT`, `BIRDMAN_SERVER_ID`, `BIRDMAN_SOCKET=/birdman/agent.sock`, `BIRDMAN_REGION` (спека §3). Labels контейнера `birdman/server-id|port|image` — под восстановление карты в итерации 1.
-9. **Реконнект liba**: агент реплеит последние `allocated`/`drain` (protocol.md §2); ping каждые 10с; тишина >15с при `allocated` — warning в stderr (heartbeat-эскалация — итерация 1).
+8. **env-контракт**: `BIRDMAN_PORT`, `BIRDMAN_SERVER_ID`, `BIRDMAN_SOCKET=/birdman/agent.sock`, `BIRDMAN_REGION` (спека §3). Labels контейнера `birdman/server-id|port|image|state|match-id` — источник восстановления карты (`state`/`match-id` агент обновляет при переходах).
+9. **Реконнект liba**: агент реплеит последние `allocated`/`drain` (protocol.md §2); ping каждые 10с; тишина >15с при `allocated` — warning в лог (эскалация в heartbeat-стейт — итерация 2).
+10. **Ack = «команда принята»** (итерация 1): агент подтверждает cmd_id сразу после регистрации команды, исход доносят ServerEvent'ы и heartbeat (при ре-доставке cmd_id из кэша последних 1024 — только повторный Ack). Событ/PullReport-очередь (outbox) переживает реконнекты; перед отправкой событий уходит свежий heartbeat — master видит консистентный стейт (порт до ready).
+11. **`allocated` дедику не доставляется** (итерация 1): master v0 аллоцирует только в БД; команды Allocate в протоколе v1 нет — доставка матча в liba приходит с матчмейкером (итерация 2). Дедик остаётся `ready` со своей точки зрения, master-стейт `allocated` — не перетирается (heartbeat-репорт `ready` для `allocated`-строки игнорируется master'ом).
 
-Отложено (по плану, не долг): gRPC-линк с master, восстановление карты по labels, heartbeat 2с, OOM-события, image GC, self-upgrade, UDP-echo, метрики 9101, ротация логов; ansible-плейбук тачки — отдельная задача итерации 0.
+Отложено (по плану, не долг): доставка `allocated` в liba (итерация 2), полный drain-цикл и self-upgrade (итерация 4), OOM-события, image GC, UDP-echo 19999, метрики 9101, ротация логов.

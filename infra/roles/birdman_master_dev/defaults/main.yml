@@ -1,0 +1,19 @@
+---
+# Дев-роль birdman-master на общем боксе (итерация 1).
+# Путь деплоя: СТАТИЧЕСКИЙ БИНАРЬ + systemd (проще, чем собирать образ на
+# тачке: не нужен исходник репо на боксе, рестарт/логи — штатный systemd);
+# Postgres 16 — docker compose (адаптация master/dev-compose.yml),
+# порт ТОЛЬКО 127.0.0.1:5433 (5432 может быть занят чужим продом).
+# Master слушает только localhost: 8100 (REST) и 8444 (gRPC) — наружу ничего.
+birdman_master_binary: "{{ playbook_dir }}/../../master/dist/birdman-master"
+
+birdman_master_dir: /opt/birdman
+birdman_master_data_dir: /var/lib/birdman-master   # self-signed TLS-пара master
+birdman_master_api_addr: "127.0.0.1:8100"
+birdman_master_grpc_addr: "127.0.0.1:8444"
+birdman_master_pg_port: 5433
+
+# Секреты живут ТОЛЬКО на тачке (0600): пароль Postgres генерируется при
+# первом прогоне, admin-ключ выхватывается из журнала первого старта master.
+birdman_master_pg_pass_file: /etc/birdman/pg.pass
+birdman_master_admin_key_file: /etc/birdman/master-admin.key

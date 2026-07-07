@@ -1,0 +1,6 @@
+---
+- name: Restart birdman-master
+  ansible.builtin.systemd_service:
+    name: birdman-master.service
+    state: restarted
+    daemon_reload: true

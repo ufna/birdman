@@ -80,16 +80,78 @@ limits_default: { cpu_millis: 1000, mem_mb: 512 }
 	}
 }
 
-// Полный спек-конфиг (agent.md §10) содержит master_addr/node_token —
-// v0 их не использует, но обязан парсить без ошибок.
+// Незнакомые ключи (конфиги будущих агентов) парсятся без ошибок.
 func TestUnknownKeysIgnored(t *testing.T) {
 	if _, err := Load(write(t, `
-master_addr: "master.birdman.internal:8443"
-node_token: "bootstrap-token"
 region: eu
 limits_default: { cpu_millis: 1000, mem_mb: 512 }
+some_future_key: true
 `)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestMasterLinkConfig(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "node.token")
+	if err := os.WriteFile(tokenFile, []byte("bnt_id.secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(write(t, `
+region: dev
+limits_default: { cpu_millis: 1000, mem_mb: 512 }
+master_addr: "127.0.0.1:8444"
+node_token_file: `+tokenFile+`
+tls_insecure: true
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MasterAddr != "127.0.0.1:8444" || !cfg.TLSInsecure || cfg.TLSCAFile != "" {
+		t.Fatalf("%+v", cfg)
+	}
+	if err := cfg.ValidateRun(); err != nil {
+		t.Fatal(err)
+	}
+	tok, err := cfg.MasterToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok != "bnt_id.secret" {
+		t.Fatalf("token = %q", tok)
+	}
+
+	// Inline token wins over the file.
+	cfg.NodeToken = "bnt_inline.secret"
+	if tok, _ := cfg.MasterToken(); tok != "bnt_inline.secret" {
+		t.Fatalf("inline token must win, got %q", tok)
+	}
+}
+
+func TestValidateRunErrors(t *testing.T) {
+	base := `
+region: dev
+limits_default: { cpu_millis: 1000, mem_mb: 512 }
+`
+	cfg, err := Load(write(t, base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.ValidateRun(); err == nil {
+		t.Fatal("run mode without master_addr must fail validation")
+	}
+	cfg, err = Load(write(t, base+`master_addr: "127.0.0.1:8444"`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.ValidateRun(); err == nil {
+		t.Fatal("run mode without node_token must fail validation")
+	}
+	cfg.NodeTokenFile = filepath.Join(t.TempDir(), "missing")
+	if err := cfg.ValidateRun(); err != nil {
+		t.Fatalf("token file existence is not validated at load: %v", err)
+	}
+	if _, err := cfg.MasterToken(); err == nil {
+		t.Fatal("missing node token file must fail")
 	}
 }
 

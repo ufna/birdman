@@ -1,0 +1,16 @@
+# {{ ansible_managed }}
+# Конфиг birdman-master (docs/specs/master.md §7, дев-дефолты v0).
+# Файл 0600: DSN содержит пароль Postgres.
+
+dsn: "postgres://postgres:{{ birdman_pg_password }}@127.0.0.1:{{ birdman_master_pg_port }}/birdman?sslmode=disable"
+
+# Только localhost: наружу master на дев-боксе не выставляется.
+listen_api: "{{ birdman_master_api_addr }}"
+listen_grpc: "{{ birdman_master_grpc_addr }}"
+
+tls:
+  # Пусто → self-signed автогенерация при первом старте (dev-режим);
+  # агент ходит с tls_insecure: true.
+  cert_file: ""
+  key_file: ""
+  auto_cert_dir: "{{ birdman_master_data_dir }}/certs"

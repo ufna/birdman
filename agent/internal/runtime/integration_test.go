@@ -55,8 +55,15 @@ func TestServerRoundtrip(t *testing.T) {
 	if sockDir == "" {
 		sockDir = dir
 	}
-	sockPath := filepath.Join(sockDir, fmt.Sprintf("itest-%d.sock", time.Now().UnixNano()))
-	defer os.Remove(sockPath)
+	// Per-server dir layout: {sockDir}/{id}/agent.sock — the dir is what
+	// gets bind-mounted (ro) into the container.
+	id := fmt.Sprintf("itest-%d", time.Now().UnixNano())
+	serverSockDir := filepath.Join(sockDir, id)
+	if err := os.MkdirAll(serverSockDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(serverSockDir)
+	sockPath := filepath.Join(serverSockDir, SocketFileName)
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatal(err)
@@ -70,7 +77,6 @@ func TestServerRoundtrip(t *testing.T) {
 	}
 	defer logF.Close()
 
-	id := fmt.Sprintf("itest-%d", time.Now().UnixNano())
 	srv, err := client.StartServer(ctx, ServerSpec{
 		ID:         id,
 		Image:      img,

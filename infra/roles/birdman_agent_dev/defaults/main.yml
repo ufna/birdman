@@ -1,5 +1,5 @@
 ---
-# Дефолты дев-роли birdman-agent (итерация 0). Значения конфига — по
+# Дефолты дев-роли birdman-agent (итерации 0–1). Значения конфига — по
 # docs/specs/agent.md §10, ужатые под общий дев-бокс (узкий порт-диапазон,
 # скромные лимиты).
 birdman_agent_binary: "{{ playbook_dir }}/../../agent/dist/birdman-agent"
@@ -18,3 +18,14 @@ birdman_registry_token_file: /etc/birdman/ghcr.token
 
 # Комментарий UFW-правил — по нему находим/сверяем свои правила на общем боксе.
 birdman_ufw_comment: birdman-dev
+
+# --- master-линк (итерация 1) ---
+# Master на той же тачке, только localhost (роль birdman_master_dev).
+birdman_master_addr: "127.0.0.1:8444"
+birdman_master_api: "http://127.0.0.1:8100"
+birdman_master_admin_key_file: /etc/birdman/master-admin.key
+# node_token выдаётся POST /v1/nodes при первом прогоне и живёт ТОЛЬКО на
+# тачке (0600); агент читает его из файла (node_token_file в agent.yaml).
+birdman_node_token_file: /etc/birdman/node.token
+birdman_project: game
+birdman_public_ip: "{{ ansible_host }}"
