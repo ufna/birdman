@@ -3,8 +3,7 @@
 // of this API — no private side doors (ADR-9).
 //
 // TODO(v0): SSE live feed (GET /v1/events/stream) — later iteration.
-// TODO(v0): matchmaking endpoints, deploy/rollback, node drain — later
-// iterations (2, 3).
+// TODO(v0): deploy/rollback, node drain, logs proxy — later iterations (3+).
 package httpapi
 
 import (
@@ -17,20 +16,31 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/ufna/birdman/master/internal/matchmaker"
 	"github.com/ufna/birdman/master/internal/metrics"
 	"github.com/ufna/birdman/master/internal/store"
 )
 
+// mmRateLimit: 5 rps per player_id on matchmaking endpoints
+// (docs/specs/protocol.md §3).
+const mmRateLimit = 5
+
 type Server struct {
-	st   *store.Store
-	m    *metrics.Metrics
-	auth *authenticator
-	log  *slog.Logger
-	mux  *http.ServeMux
+	st      *store.Store
+	m       *metrics.Metrics
+	mm      *matchmaker.Matchmaker
+	mmLimit *rateLimiter
+	auth    *authenticator
+	log     *slog.Logger
+	mux     *http.ServeMux
 }
 
-func New(st *store.Store, m *metrics.Metrics, log *slog.Logger) *Server {
-	s := &Server{st: st, m: m, auth: newAuthenticator(st), log: log, mux: http.NewServeMux()}
+func New(st *store.Store, m *metrics.Metrics, mm *matchmaker.Matchmaker, log *slog.Logger) *Server {
+	s := &Server{
+		st: st, m: m, mm: mm,
+		mmLimit: newRateLimiter(mmRateLimit, mmRateLimit),
+		auth:    newAuthenticator(st), log: log, mux: http.NewServeMux(),
+	}
 
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz) // no auth by design
 	s.mux.Handle("GET /metrics", promhttp.HandlerFor(m.Registry, promhttp.HandlerOpts{}))
@@ -41,8 +51,14 @@ func New(st *store.Store, m *metrics.Metrics, log *slog.Logger) *Server {
 	s.mux.HandleFunc("POST /v1/versions", s.requireScope(ScopeDeploy, s.handleCreateVersion))
 	s.mux.HandleFunc("GET /v1/versions", s.requireScope(ScopeReadonly, s.handleListVersions))
 	s.mux.HandleFunc("PUT /v1/fleets/{region}", s.requireScope(ScopeAdmin, s.handleUpsertFleet))
+	s.mux.HandleFunc("PUT /v1/projects/{slug}", s.requireScope(ScopeAdmin, s.handleUpsertProject))
 	s.mux.HandleFunc("GET /v1/events", s.requireScope(ScopeReadonly, s.handleListEvents))
 	s.mux.HandleFunc("POST /v1/allocate", s.requireScope(ScopeAllocate, s.handleAllocate))
+
+	s.mux.HandleFunc("POST /v1/matchmaking/tickets", s.requireScope(ScopeMatchmaking, s.handleCreateTicket))
+	s.mux.HandleFunc("GET /v1/matchmaking/tickets/{id}", s.requireScope(ScopeMatchmaking, s.handleGetTicket))
+	s.mux.HandleFunc("DELETE /v1/matchmaking/tickets/{id}", s.requireScope(ScopeMatchmaking, s.handleCancelTicket))
+	s.mux.HandleFunc("GET /v1/qos", s.handleQoS) // public by design (master.md §6)
 
 	return s
 }

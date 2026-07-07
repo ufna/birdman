@@ -18,6 +18,11 @@ type Metrics struct {
 
 	AllocDuration prometheus.Histogram
 	AllocFailures *prometheus.CounterVec
+
+	// Matchmaker (docs/specs/ops.md §1).
+	MMQueueDepth  *prometheus.GaugeVec   // {region} queued tickets by best region
+	MMTimeToMatch prometheus.Histogram   // seconds from ticket submit to matched
+	MMTickets     *prometheus.CounterVec // {result} matched|cancelled|update_required|expired
 }
 
 func New(st *store.Store, log *slog.Logger) *Metrics {
@@ -33,8 +38,21 @@ func New(st *store.Store, log *slog.Logger) *Metrics {
 			Name: "birdman_allocation_failures_total",
 			Help: "Failed allocations by reason (no_capacity, bad_request, internal).",
 		}, []string{"reason"}),
+		MMQueueDepth: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "birdman_mm_queue_depth",
+			Help: "Queued matchmaking tickets per best (lowest-rtt) region.",
+		}, []string{"region"}),
+		MMTimeToMatch: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "birdman_mm_time_to_match_seconds",
+			Help:    "Time from ticket submit to matched.",
+			Buckets: []float64{0.5, 1, 2, 5, 10, 30, 60, 120},
+		}),
+		MMTickets: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "birdman_mm_tickets_total",
+			Help: "Finished matchmaking tickets by result (matched, cancelled, update_required, expired).",
+		}, []string{"result"}),
 	}
-	reg.MustRegister(m.AllocDuration, m.AllocFailures)
+	reg.MustRegister(m.AllocDuration, m.AllocFailures, m.MMQueueDepth, m.MMTimeToMatch, m.MMTickets)
 	reg.MustRegister(&dbCollector{st: st, log: log})
 	reg.MustRegister(collectors.NewGoCollector())
 	reg.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))

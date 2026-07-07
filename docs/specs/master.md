@@ -8,6 +8,9 @@
 create table projects (
   id         uuid primary key default gen_random_uuid(),
   slug       text unique not null,          -- 'ourgame'
+  match_size int  not null default 2        -- (уточнено в v0) размер матча —
+             check (match_size >= 1),       -- конфиг per project (§4), правится
+                                            -- через PUT /v1/projects/{slug}
   created_at timestamptz not null default now()
 );
 
@@ -148,12 +151,14 @@ returning id, node_id, port;
 
 ## 4. Матчмейкер v0
 
-- Тикет: `{ticket_id, player_id, client_version, regions: [{region, rtt_ms}]}`. Очереди **in-memory** per (region, compat-bucket). Потеря при рестарте — ок: клиент ре-квьюится (см. `sdk.md`).
-- Тик каждые **500мс**: в каждой очереди собрать группы по `match_size` (конфиг per project, v0 — константа) → `allocate` → всем участникам `matched {host, port, match_id, join_token}`.
-- Выбор региона: минимальный медианный rtt по группе; если очередь региона < match_size дольше `widen_after_s` (деф. 30с) — расширяем на следующий по rtt регион.
-- `client_version` не входит ни в один compat-bucket активных версий → ответ `update_required`.
-- `join_token` = HMAC(match_id, player_id, exp 60с) — дедик проверяет через liba (анти-«зашёл мимо матчмейкера»); v0 — опционально, включается флагом.
-- Анти-дубль: один активный тикет на player_id (новый вытесняет старый).
+- Тикет: `{ticket_id, player_id, client_version, regions: [{region, rtt_ms}]}`. Очереди **in-memory** per (region, compat-bucket). Потеря при рестарте — ок: клиент ре-квьюится (см. `sdk.md`). (Уточнено в v0: статусы тикета `queued | matched | update_required | cancelled | expired`; TTL тикета в очереди — конфиг `ticket_ttl_s`, деф. 120с → `expired`; терминальные тикеты живут в памяти ещё ~2×TTL для поздних GET.)
+- Тик каждые **500мс**: в каждой очереди собрать группы по `match_size` (конфиг per project — колонка `projects.match_size`, деф. 2, правится `PUT /v1/projects/{slug}`; уточнено в v0) → `allocate` (внутренний вызов store с новым `match_id` uuid, регионом и пиненой версией) → всем участникам `matched {host, port, match_id, join_token?}`. `no_capacity` → тикеты остаются в очереди, ретрай следующим тиком (буфер тем временем поднимает reconcile); заодно инкрементится `birdman_allocation_failures_total{no_capacity}` — алерт BufferEmpty видит и внутренние отказы.
+- Выбор региона: минимальный медианный rtt по группе (группа — старейшие `match_size` тикетов, FIFO; тай-брейк — имя региона); если очередь региона < match_size дольше `widen_after_s` (деф. 30с) — расширяем на следующий по rtt регион игрока (ещё один регион за каждый следующий интервал).
+- `client_version` не входит ни в один compat-bucket активных версий → ответ `update_required` (проверка на submit и на каждом тике — смена активной версии не оставляет несовместимые тикеты висеть). (Уточнено в v0: правило по умолчанию major.minor из `ops.md` §3, overrides-таблица — позже; «активные версии» региона = `fleet_configs.active_version` + versions(state=active, channel=prod), пока deploy-менеджер не переводит state — см. §5; при полном отсутствии активных версий тикеты ждут в очереди до TTL, а не получают `update_required`.)
+- `join_token` = HMAC(match_id, player_id, exp 60с) — дедик проверяет через liba (анти-«зашёл мимо матчмейкера»); v0 — опционально, включается флагом (`matchmaking.join_token.enabled`, секрет — env `BIRDMAN_MM_JOIN_SECRET`; выдача реализована, проверка на дедике — TODO liba).
+- Анти-дубль: один активный тикет на player_id (новый вытесняет старый → `cancelled`).
+- (Уточнено в v0.) Проект тикета: поле `project` опционально — по умолчанию `matchmaking.default_project` из конфига либо единственный проект в БД; успешная аллокация пишет строку в `matches` (state `pending`).
+- Метрики: `birdman_mm_queue_depth{region}` (по лучшему региону тикета), `birdman_mm_time_to_match_seconds` (histogram), `birdman_mm_tickets_total{result}`.
 - Явно вне v0: скиллы, пати, бэкфилл, реконнект в матч.
 
 ## 5. Deploy-менеджер (мягкий деплой)
@@ -184,6 +189,7 @@ POST /v1/rollback: шаг 3 в обратную сторону (образы у�
 | `GET /v1/nodes` · `/v1/servers` · `/v1/matches` · `/v1/versions` | readonly | списки с фильтрами |
 | `GET /v1/events/stream` (SSE) | readonly | live-лента для панели |
 | `PUT /v1/fleets/{region}` | admin | buffer, max_servers, reap_ttl |
+| `PUT /v1/projects/{slug}` | admin | match_size проекта (уточнено в v0) |
 | `POST /v1/versions` | deploy | регистрация билда из CI |
 | `POST /v1/deploy` · `/v1/rollback` | deploy | см. §5 |
 | `POST /v1/nodes/{id}/drain` · `/undrain` | admin | вывод тачки |
@@ -192,7 +198,7 @@ POST /v1/rollback: шаг 3 в обратную сторону (образы у�
 
 Аутентификация: `Authorization: Bearer <api-key>`; скоупы из таблицы `api_keys`. Клиентский matchmaking-ключ — публичный по сути (зашит в клиент), поэтому его скоуп ограничен тикетами, rate-limit per IP/player_id.
 
-(Уточнено в v0.) Реализовано подмножество: nodes/servers/versions/fleets/events/allocate + `/healthz`, `/metrics`; скоуп `admin` включает остальные скоупы; при пустой `api_keys` master при старте генерирует admin-ключ и печатает его в лог один раз; `PUT /v1/fleets/{region}` дополнительно принимает `active_version` (deploy-менеджера ещё нет); проекты создаются неявно при первом упоминании slug в `POST /v1/nodes` / `POST /v1/versions`; SSE `/v1/events/stream` — TODO следующих итераций.
+(Уточнено в v0.) Реализовано подмножество: nodes/servers/versions/fleets/projects/events/allocate + matchmaking-тикеты (long-poll `?wait=`, кап 30с), `/v1/qos`, `/healthz`, `/metrics`; скоуп `admin` включает остальные скоупы; при пустой `api_keys` master при старте генерирует admin-ключ и печатает его в лог один раз; `PUT /v1/fleets/{region}` дополнительно принимает `active_version` (deploy-менеджера ещё нет); проекты создаются неявно при первом упоминании slug в `POST /v1/nodes` / `POST /v1/versions` / `PUT /v1/projects/{slug}`; rate-limit матчмейкинга — 5 rps per player_id, in-memory token bucket → `429 rate_limited` (`protocol.md` §3); `GET /v1/qos` отдаёт живые ноды (active, heartbeat <30с) с `udp_port:19999` — сам UDP-echo приезжает в агенте в итерации 4; ошибки — плоский JSON `{"error","detail"}`, не RFC 7807; SSE `/v1/events/stream` — TODO следующих итераций.
 
 ## 7. Операционное
 

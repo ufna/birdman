@@ -58,7 +58,7 @@ jobs:
         working-directory: master
         run: go test -race ./...
 
-      - name: Build static linux/amd64 binary
+      - name: Build static linux/amd64 binaries
         working-directory: master
         env:
           GOOS: linux
@@ -66,4 +66,5 @@ jobs:
           CGO_ENABLED: '0'
         run: |
           go build -trimpath -ldflags '-s -w' -o dist/birdman-master ./cmd/birdman-master
-          file dist/birdman-master
+          go build -trimpath -ldflags '-s -w' -o dist/mmcli ./cmd/mmcli
+          file dist/birdman-master dist/mmcli

@@ -18,11 +18,31 @@ type TLS struct {
 	AutoCertDir string `yaml:"auto_cert_dir"`
 }
 
+// JoinToken configures the optional HMAC join token
+// (docs/specs/master.md §4; off by default in v0).
+type JoinToken struct {
+	Enabled bool `yaml:"enabled"`
+	// Secret should come from the environment (BIRDMAN_MM_JOIN_SECRET), not
+	// from the config file. Empty with Enabled → an ephemeral secret is
+	// generated at start (tokens do not survive a master restart).
+	Secret string `yaml:"secret"`
+}
+
+// Matchmaking configures the v0 matchmaker (docs/specs/master.md §4).
+type Matchmaking struct {
+	TickMS         int       `yaml:"tick_ms"`         // queue scan period, default 500
+	WidenAfterS    int       `yaml:"widen_after_s"`   // widen to next region, default 30
+	TicketTTLS     int       `yaml:"ticket_ttl_s"`    // queued → expired, default 120
+	DefaultProject string    `yaml:"default_project"` // empty → sole project in DB
+	JoinToken      JoinToken `yaml:"join_token"`
+}
+
 type Config struct {
-	DSN        string `yaml:"dsn"`
-	ListenAPI  string `yaml:"listen_api"`
-	ListenGRPC string `yaml:"listen_grpc"`
-	TLS        TLS    `yaml:"tls"`
+	DSN         string      `yaml:"dsn"`
+	ListenAPI   string      `yaml:"listen_api"`
+	ListenGRPC  string      `yaml:"listen_grpc"`
+	TLS         TLS         `yaml:"tls"`
+	Matchmaking Matchmaking `yaml:"matchmaking"`
 }
 
 func defaults() Config {
@@ -30,12 +50,17 @@ func defaults() Config {
 		ListenAPI:  ":8100",
 		ListenGRPC: ":8444",
 		TLS:        TLS{AutoCertDir: "certs"},
+		Matchmaking: Matchmaking{
+			TickMS:      500,
+			WidenAfterS: 30,
+			TicketTTLS:  120,
+		},
 	}
 }
 
 // Load reads the YAML config at path (optional — pass "" to use defaults)
 // and applies environment overrides: BIRDMAN_DSN, BIRDMAN_LISTEN_API,
-// BIRDMAN_LISTEN_GRPC.
+// BIRDMAN_LISTEN_GRPC, BIRDMAN_MM_JOIN_SECRET.
 func Load(path string) (Config, error) {
 	cfg := defaults()
 	if path != "" {
@@ -55,6 +80,9 @@ func Load(path string) (Config, error) {
 	}
 	if v := os.Getenv("BIRDMAN_LISTEN_GRPC"); v != "" {
 		cfg.ListenGRPC = v
+	}
+	if v := os.Getenv("BIRDMAN_MM_JOIN_SECRET"); v != "" {
+		cfg.Matchmaking.JoinToken.Secret = v
 	}
 	if cfg.ListenAPI == "" {
 		cfg.ListenAPI = ":8100"

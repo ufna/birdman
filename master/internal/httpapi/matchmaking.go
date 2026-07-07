@@ -1,0 +1,142 @@
+package httpapi
+
+import (
+	"errors"
+	"net/http"
+	"time"
+
+	"github.com/ufna/birdman/master/internal/matchmaker"
+	"github.com/ufna/birdman/master/internal/store"
+)
+
+// Matchmaking endpoints (docs/specs/master.md §4/§6, protocol.md §3).
+// Transport: long-poll `?wait=25s`; SSE stays panel-only (later iteration).
+
+// maxWait caps GET ?wait= (spec suggests 25s; anything longer risks
+// intermediary timeouts).
+const maxWait = 30 * time.Second
+
+type submitTicketRequest struct {
+	Project       string                  `json:"project,omitempty"`
+	PlayerID      string                  `json:"player_id"`
+	ClientVersion string                  `json:"client_version"`
+	Regions       []matchmaker.RegionPing `json:"regions"`
+}
+
+func (s *Server) handleCreateTicket(w http.ResponseWriter, r *http.Request) {
+	var req submitTicketRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.PlayerID == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "player_id is required")
+		return
+	}
+	if !s.mmLimit.allow(req.PlayerID) {
+		writeError(w, http.StatusTooManyRequests, "rate_limited",
+			"matchmaking rate limit: 5 rps per player_id")
+		return
+	}
+	t, err := s.mm.Submit(r.Context(), matchmaker.SubmitParams{
+		Project:       req.Project,
+		PlayerID:      req.PlayerID,
+		ClientVersion: req.ClientVersion,
+		Regions:       req.Regions,
+	})
+	switch {
+	case errors.Is(err, matchmaker.ErrInvalid):
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrConflict):
+		// Unknown project / ambiguous default project.
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, t)
+}
+
+func (s *Server) handleGetTicket(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	t, ok := s.mm.Get(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "ticket "+id+" not found")
+		return
+	}
+	if !s.mmLimit.allow(t.PlayerID) {
+		writeError(w, http.StatusTooManyRequests, "rate_limited",
+			"matchmaking rate limit: 5 rps per player_id")
+		return
+	}
+
+	wait := time.Duration(0)
+	if raw := r.URL.Query().Get("wait"); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil || d < 0 {
+			writeError(w, http.StatusBadRequest, "bad_request",
+				"wait must be a duration like 25s")
+			return
+		}
+		wait = min(d, maxWait)
+	}
+
+	t, ok = s.mm.Wait(r.Context(), id, wait)
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "ticket "+id+" not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, t)
+}
+
+func (s *Server) handleCancelTicket(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	t, ok := s.mm.Get(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "ticket "+id+" not found")
+		return
+	}
+	if !s.mmLimit.allow(t.PlayerID) {
+		writeError(w, http.StatusTooManyRequests, "rate_limited",
+			"matchmaking rate limit: 5 rps per player_id")
+		return
+	}
+	t, ok = s.mm.Cancel(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "ticket "+id+" not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, t)
+}
+
+// handleQoS lists per-region ping targets (public by design, master.md §6).
+// The UDP echo responder on nodes ships with the agent in iteration 4; the
+// endpoint already returns the correct host list of live nodes.
+func (s *Server) handleQoS(w http.ResponseWriter, r *http.Request) {
+	eps, err := s.st.ListQoSEndpoints(r.Context())
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"qos": emptyNotNull(eps)})
+}
+
+// --- projects (match_size, docs/specs/master.md §4) ---
+
+type upsertProjectRequest struct {
+	MatchSize int32 `json:"match_size"`
+}
+
+func (s *Server) handleUpsertProject(w http.ResponseWriter, r *http.Request) {
+	var req upsertProjectRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	p, err := s.st.SetProjectMatchSize(r.Context(), r.PathValue("slug"), req.MatchSize)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"project": p})
+}

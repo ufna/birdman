@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ufna/birdman/master/internal/httpapi"
+	"github.com/ufna/birdman/master/internal/matchmaker"
 	"github.com/ufna/birdman/master/internal/metrics"
 	"github.com/ufna/birdman/master/internal/store"
 	"github.com/ufna/birdman/master/internal/testdb"
@@ -63,7 +64,9 @@ func (c *client) do(method, path string, body any) (int, map[string]any) {
 func TestRESTFlow(t *testing.T) {
 	st := testdb.New(t)
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	ts := httptest.NewServer(httpapi.New(st, metrics.New(st, log), log))
+	m := metrics.New(st, log)
+	mm := matchmaker.New(st, m, matchmaker.Config{}, log)
+	ts := httptest.NewServer(httpapi.New(st, m, mm, log))
 	t.Cleanup(ts.Close)
 	ctx := t.Context()
 
