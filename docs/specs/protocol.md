@@ -103,7 +103,9 @@ Per-server сокет: агент слушает `/run/birdman/servers/{id}/agen
 | `verify_token` | `{player_id, token} → ответ liba {ok}` | v0 опционально (join_token) |
 | `ping` | `{}` | keepalive; liba отвечает `pong` |
 
-Правила: неизвестный `type` игнорируется (forward-compat); реконнект liba допустим (агент реплеит последний `allocated`/`drain`); тишина liba >15с при allocated — `unhealthy`.
+(Уточнено в v0: агент поле `allocated.metadata` пока не шлёт (`agent/internal/uds`) — liba обязана трактовать отсутствие как пустой словарь; поле займёт своё место аддитивно.)
+
+Правила: неизвестный `type` игнорируется (forward-compat); реконнект liba допустим (агент реплеит последний `allocated`/`drain`, liba дедуплицирует реплеи — `allocated` по `match_id`, `drain` по значению); тишина liba >15с при allocated — `unhealthy`.
 
 ## 3. Клиент игры ↔ master: REST + long-poll/SSE
 
