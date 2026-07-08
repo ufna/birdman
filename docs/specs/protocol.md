@@ -41,6 +41,7 @@ message MasterMsg {
     UpgradeAgent upgrade = 5;   // url, sha256, version
     TailLogs     tail = 6;      // server_id, follow
     Ack          ack = 7;
+    AllocateServer allocate = 8; // (добавлено в итерации 2, аддитивно)
   }
 }
 message StartServer { string server_id=1; string image_ref=2; map<string,string> env=3;
@@ -56,6 +57,13 @@ message UpgradeAgent{ string cmd_id=1; string url=2; string sha256=3; string ver
 message TailLogs    { string cmd_id=1; string server_id=2; bool follow=3; }
 message LogChunk    { string cmd_id=1; string server_id=2; bytes data=3; bool eof=4; }
 message PullReport  { string cmd_id=1; string image_ref=2; string status=3; string detail=4; } // pulling|pulled|failed
+
+// (добавлено в итерации 2) доставка матча до дедика: master шлёт после КАЖДОЙ
+// успешной аллокации (и REST /v1/allocate, и встроенный матчмейкер); агент
+// пересылает в liba UDS-фреймом `allocated{match_id, players_expected}` (§2)
+// и кэширует его для реплея при реконнекте liba. players_expected=0 = «не знаю»
+// (внешний матчмейкер через REST его не сообщает).
+message AllocateServer { string cmd_id=1; string server_id=2; string match_id=3; int32 players_expected=4; }
 ```
 
 Правила: каждое команда-сообщение несёт `cmd_id`, агент подтверждает `Ack{cmd_id}` (или Event с ошибкой) — master ретраит неподтверждённые при реконнекте, поэтому обработка команд на агенте идемпотентна по `cmd_id` (at-least-once). Поля protobuf только добавляем, номера не переиспользуем (`reserved`). (Уточнено в v0: `Ack` добавлен в `AgentMsg` — именно агент подтверждает команды; `MasterMsg.Ack` зарезервирован под подтверждения master'ом агентских сообщений.)
