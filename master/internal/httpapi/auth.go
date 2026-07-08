@@ -53,6 +53,7 @@ func newAuthenticator(st *store.Store) *authenticator {
 func (a *authenticator) authenticate(r *http.Request) (key store.APIKey, viaCookie, ok bool) {
 	h := r.Header.Get("Authorization")
 	token, ok := strings.CutPrefix(h, "Bearer ")
+	token = strings.TrimSpace(token) // tolerate paste/whitespace artifacts
 	if !ok || token == "" {
 		if c, err := r.Cookie(sessionCookie); err == nil && c.Value != "" {
 			key, ok := a.sessions.get(c.Value)

@@ -84,6 +84,12 @@ func TestSessionAuth(t *testing.T) {
 		t.Fatalf("anon session probe: want 401, got %d", code)
 	}
 
+	// A key with paste whitespace (trailing newline/spaces) still logs in —
+	// server trims it, so a copied key isn't a spurious 401.
+	if code, _, _ := b.do("POST", "/v1/session", map[string]any{"api_key": "  " + roKey + "\n"}); code != 200 {
+		t.Fatalf("whitespace-wrapped key login: want 200, got %d", code)
+	}
+
 	// Login sets a hardened HttpOnly cookie and returns the scopes.
 	code, body, resp := b.do("POST", "/v1/session", map[string]any{"api_key": roKey})
 	if code != 200 {

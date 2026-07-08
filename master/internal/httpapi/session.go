@@ -98,6 +98,9 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	// Keys never contain surrounding whitespace; trim paste artifacts
+	// (trailing newline/space) so a copied key isn't a spurious 401.
+	req.APIKey = strings.TrimSpace(req.APIKey)
 	key, err := s.st.AuthAPIKey(r.Context(), req.APIKey)
 	if errors.Is(err, store.ErrBadAPIKey) {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "invalid API key")
