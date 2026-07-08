@@ -1,0 +1,75 @@
+@import 'tailwindcss';
+@import './tokens.css';
+
+/* Токены → утилиты tailwind: bg-paper, text-ink, border-line, bg-good-bg…
+ * `inline` — утилиты ссылаются на var() и переключаются вместе с темой. */
+@theme inline {
+  --color-paper: var(--paper);
+  --color-card: var(--card);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-accent: var(--accent);
+  --color-accent-ink: var(--accent-ink);
+  --color-good: var(--good);
+  --color-good-bg: var(--good-bg);
+  --color-warn: var(--warn);
+  --color-warn-bg: var(--warn-bg);
+  --color-dead: var(--dead);
+  --color-dead-bg: var(--dead-bg);
+  --color-mark: var(--mark);
+
+  --font-sans: 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', monospace;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Числа в таблицах и тикающие значения не «прыгают» по ширине. */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Живой индикатор: точка «дышит», пока стрим подключён. */
+@keyframes live-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--good) 45%, transparent);
+  }
+  60% {
+    box-shadow: 0 0 0 5px transparent;
+  }
+}
+
+.live-dot-on {
+  animation: live-pulse 2.4s ease-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-dot-on {
+    animation: none;
+  }
+}
+
+/* uPlot под токены: сетка и курсор не спорят с темой. */
+.uplot,
+.uplot * {
+  box-sizing: border-box;
+}

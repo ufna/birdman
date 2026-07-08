@@ -1,0 +1,74 @@
+// Лента последних событий: стартовый снимок из GET /v1/events, дальше —
+// живое дополнение из SSE-стрима (дедупликация по id).
+
+import { useEffect, useState } from 'react';
+import { api } from '../lib/api';
+import type { ApiEvent } from '../lib/api';
+import { useLive } from '../lib/live';
+import { formatClock, shortId, summarizePayload } from '../lib/format';
+import { StateBadge, toneOfEventKind } from './Badge';
+import { EmptyState, LoadingRow } from './ui';
+
+const FEED_CAP = 60;
+
+export function EventsFeed() {
+  const { subscribe } = useLive();
+  const [events, setEvents] = useState<ApiEvent[] | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .listEvents(40)
+      .then((list) => {
+        if (!cancelled) setEvents(list);
+      })
+      .catch(() => {
+        if (!cancelled) setFailed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(
+    () =>
+      subscribe((e) => {
+        setEvents((prev) => {
+          const base = prev ?? [];
+          if (base.some((x) => x.id === e.id)) return base;
+          return [e.event, ...base].slice(0, FEED_CAP);
+        });
+      }),
+    [subscribe],
+  );
+
+  if (failed) return <EmptyState>Лента событий недоступна.</EmptyState>;
+  if (events === null) return <LoadingRow />;
+  if (events.length === 0) return <EmptyState>Событий ещё не было.</EmptyState>;
+
+  return (
+    <ul className="max-h-[420px] divide-y divide-line overflow-y-auto">
+      {events.map((e) => (
+        <li key={e.id} className="flex items-start gap-3 px-4 py-2">
+          <span className="tabular shrink-0 pt-0.5 font-mono text-xs text-muted">{formatClock(e.ts)}</span>
+          <StateBadge state={e.kind} tone={toneOfEventKind(e.kind)} />
+          <span className="min-w-0 flex-1 truncate pt-0.5 text-xs text-muted">
+            {refsOf(e)}
+            {Object.keys(e.payload).length > 0 && (
+              <span className="text-ink/80"> {summarizePayload(e.payload)}</span>
+            )}
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function refsOf(e: ApiEvent): string {
+  const refs: string[] = [];
+  if (e.node_id !== undefined) refs.push(`node ${shortId(e.node_id)}`);
+  if (e.server_id !== undefined) refs.push(`srv ${shortId(e.server_id)}`);
+  if (e.match_id !== undefined) refs.push(`match ${shortId(e.match_id)}`);
+  return refs.length > 0 ? `${refs.join(' · ')} · ` : '';
+}

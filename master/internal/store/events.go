@@ -69,6 +69,42 @@ func (s *Store) ListEvents(ctx context.Context, limit int) ([]Event, error) {
 	return out, rows.Err()
 }
 
+// ListEventsAfter returns events with id > afterID, oldest first, up to
+// limit — the SSE stream cursor read (docs/specs/master.md §6).
+func (s *Store) ListEventsAfter(ctx context.Context, afterID int64, limit int) ([]Event, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 1000
+	}
+	rows, err := s.Pool.Query(ctx, `
+		select id, ts, kind, node_id::text, server_id::text, match_id::text, version_id::text, payload
+		from events where id > $1 order by id limit $2`, afterID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Event
+	for rows.Next() {
+		var e Event
+		var payload []byte
+		if err := rows.Scan(&e.ID, &e.TS, &e.Kind, &e.NodeID, &e.ServerID, &e.MatchID, &e.VersionID, &payload); err != nil {
+			return nil, err
+		}
+		if len(payload) > 0 {
+			_ = json.Unmarshal(payload, &e.Payload)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// MaxEventID returns the current top of the events feed (0 when empty) —
+// the default SSE cursor: stream only what happens after connect.
+func (s *Store) MaxEventID(ctx context.Context) (int64, error) {
+	var id int64
+	err := s.Pool.QueryRow(ctx, `select coalesce(max(id), 0) from events`).Scan(&id)
+	return id, err
+}
+
 // CountEvents is a small helper for tests and sanity checks.
 func (s *Store) CountEvents(ctx context.Context, kind string) (int, error) {
 	var n int

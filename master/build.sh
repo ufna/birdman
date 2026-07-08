@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 # Сборка статических linux/amd64 бинарей master/dist/{birdman-master,mmcli}
-# через docker (Go на хосте не нужен).
+# через docker (Go на хосте не нужен). Панель собирается и встраивается
+# автоматически (panel/build.sh, node не обязателен — есть docker-фолбэк);
+# SKIP_PANEL=1 пропускает её — бинарь тогда отдаёт placeholder вместо панели.
 set -euo pipefail
 cd "$(dirname "$0")/.."   # корень репо: нужен ../proto для replace-директивы
+
+if [ "${SKIP_PANEL:-}" != "1" ]; then
+  ./panel/build.sh
+fi
 
 docker run --rm \
   -v "$PWD":/src -w /src/master \
