@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# {{ ansible_managed }}
+# birdman Postgres backup (ops.md §5): pg_dump (custom-format, сжатый) базы
+# birdman из контейнера {{ birdman_postgres_container }} → {{ birdman_backups_dir }},
+# ротация: держим {{ birdman_backups_retention }} свежих дампов.
+#
+# TODO(offsite): S3-совместимый оффсайт (Backblaze/Wasabi) пока НЕ настроен —
+#   bucket'а нет (ops.md §5). Когда появится: добавить сюда `rclone copy`/
+#   `aws s3 cp "$out" s3://.../` после успешного mv. См. ops.md §5 TODO.
+set -euo pipefail
+
+BACKUP_DIR="{{ birdman_backups_dir }}"
+RETENTION={{ birdman_backups_retention }}
+CONTAINER="{{ birdman_postgres_container }}"
+DB="{{ birdman_pg_db }}"
+PGUSER="{{ birdman_pg_user }}"
+
+mkdir -p "$BACKUP_DIR"
+ts="$(date -u +%Y%m%dT%H%M%SZ)"
+out="$BACKUP_DIR/birdman-${ts}.dump"
+tmp="${out}.partial"
+
+# -Fc = custom format (сжатие + pg_restore-совместимость). Внутри контейнера
+# локальный сокет postgres = trust → пароль не нужен; версия pg_dump совпадает
+# с сервером (дампим из того же контейнера).
+docker exec "$CONTAINER" pg_dump -U "$PGUSER" -d "$DB" -Fc > "$tmp"
+mv "$tmp" "$out"
+
+# Ротация: удаляем всё, что старше RETENTION свежих дампов.
+ls -1t "$BACKUP_DIR"/birdman-*.dump 2>/dev/null | tail -n +$((RETENTION + 1)) | xargs -r rm -f
+
+echo "backup ok: $out ($(du -h "$out" | cut -f1))"

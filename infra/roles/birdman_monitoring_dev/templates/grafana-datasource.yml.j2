@@ -1,0 +1,15 @@
+# {{ ansible_managed }}
+# Grafana datasource provisioning: VictoriaMetrics как Prometheus-совместимый.
+# URL — bridge-DNS внутри compose-проекта birdman-monitoring.
+apiVersion: 1
+datasources:
+  - name: VictoriaMetrics
+    uid: birdman-vm
+    type: prometheus
+    access: proxy
+    url: {{ birdman_grafana_datasource_url }}
+    isDefault: true
+    jsonData:
+      httpMethod: POST
+      timeInterval: {{ birdman_scrape_interval }}
+    editable: false

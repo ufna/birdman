@@ -1,0 +1,78 @@
+---
+# Дев-роль наблюдаемости birdman (итерация 4, docs/specs/ops.md §1, §5).
+# Весь стек — docker compose, проект birdman-monitoring, ВСЁ строго на
+# 127.0.0.1 (наружу — только SSH-туннель). Чужой prod-node_exporter на
+# 127.0.0.1:4027 скрейпим read-only и НЕ управляем им.
+
+# --- образы (пинуем версии) ---
+birdman_vm_image: victoriametrics/victoria-metrics:v1.102.1
+birdman_vmagent_image: victoriametrics/vmagent:v1.102.1
+birdman_vmalert_image: victoriametrics/vmalert:v1.102.1
+birdman_grafana_image: grafana/grafana:11.2.0
+birdman_alertmanager_image: prom/alertmanager:v0.27.0
+birdman_alert_sink_image: python:3.12-alpine
+birdman_pg_image: postgres:16          # throwaway для restore-drill (совпадает с сервером)
+
+# --- каталоги ---
+birdman_monitoring_dir: /opt/birdman/monitoring        # compose.yml
+birdman_monitoring_conf_dir: /etc/birdman/monitoring   # шаблонные конфиги (ro-маунты)
+birdman_log_dir: /var/log/birdman
+birdman_alerts_log: /var/log/birdman/alerts.log        # сюда logger-sink пишет алерты
+
+# --- bind (ТОЛЬКО localhost) ---
+birdman_bind_addr: "127.0.0.1"
+birdman_vm_port: 8428
+birdman_vmagent_port: 8429
+birdman_vmalert_port: 8880
+birdman_grafana_port: 3000
+birdman_alert_sink_port: 9094
+birdman_alertmanager_port: 9093
+
+# --- VictoriaMetrics / скрейп ---
+birdman_vm_retention: 30d
+birdman_scrape_interval: 15s
+birdman_eval_interval: 15s
+
+# Цели скрейпа — список job'ов (расширяемо: добавить ноду = добавить target).
+# vmagent идёт в host-network, поэтому это 127.0.0.1 самого бокса.
+birdman_scrape_jobs:
+  - job_name: birdman-agent
+    metrics_path: /metrics
+    targets: ["127.0.0.1:9101"]
+  - job_name: birdman-master
+    metrics_path: /metrics
+    targets: ["127.0.0.1:8100"]
+  - job_name: node
+    metrics_path: /metrics
+    targets: ["127.0.0.1:4027"]        # ЧУЖОЙ prod node_exporter — read-only
+
+# vmagent host-network → пишет в опубликованный на хосте порт VM.
+birdman_vm_remote_write_url: "http://127.0.0.1:8428/api/v1/write"
+
+# --- Grafana ---
+# Пароль admin ГЕНЕРИТСЯ ansible'ом в 0600-файл на тачке (не хардкодим, не
+# коммитим). Отсюда же он попадает в 0600 grafana.env (env_file для контейнера).
+birdman_grafana_admin_password_file: /etc/birdman/grafana_admin_password
+birdman_grafana_datasource_url: "http://victoriametrics:8428"   # bridge-DNS внутри compose
+
+# --- маршрутизация алертов ---
+# Пусто → локальный logger-sink (пишет /var/log/birdman/alerts.log).
+# Задан → реальный prom/alertmanager с discord_configs на этот webhook.
+# Discord-webhook'а пока НЕТ (см. docs/05 «Нужно») → работает logger-путь.
+birdman_alert_discord_webhook: ""
+
+# --- пороги алертов (vmalert, ops.md §1) ---
+birdman_heartbeat_max_age_seconds: 30
+birdman_tick_degraded_ms: 50           # порог игры для TickDegraded
+birdman_disk_warn_pct: 85
+birdman_disk_crit_pct: 92
+birdman_ready_empty_for: "3m"          # BufferEmpty: ready==0 держится столько
+birdman_tick_degraded_for: "5m"
+
+# --- бэкапы Postgres (ops.md §5) ---
+birdman_postgres_container: birdman-postgres   # контейнер из роли birdman_master_dev
+birdman_pg_db: birdman
+birdman_pg_user: postgres
+birdman_backups_dir: /var/lib/birdman/backups
+birdman_backups_retention: 14          # держим N свежих дампов
+birdman_backup_oncalendar: "*-*-* 00/6:00:00"  # каждые 6ч (00,06,12,18 UTC)

@@ -1,0 +1,126 @@
+# {{ ansible_managed }}
+# vmalert-правила birdman (docs/specs/ops.md §1). Пороги — ansible-переменные
+# (подставляются в expr). Go-шаблоны vmalert в annotations ({{ '{{' }} $labels ... }})
+# обёрнуты в {% raw %}...{% endraw %}, чтобы Jinja их НЕ трогала.
+# Дисциплина файла: expr — только Jinja-переменные (без $); annotations.summary —
+# только {% raw %}{{ $... }}{% endraw %} (без Jinja-переменных).
+groups:
+  - name: birdman-availability
+    rules:
+      # NodeDown: heartbeat_age растёт, пока агент молчит. for:0s + scrape/eval
+      # по 15s → алерт ≤60s после остановки агента (ops.md §7, ит.4 acceptance).
+      - alert: NodeDown
+        expr: birdman_node_heartbeat_age_seconds > {{ birdman_heartbeat_max_age_seconds }}
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: {% raw %}'NodeDown {{ $labels.node }} ({{ $labels.region }}): heartbeat_age={{ $value }}s'{% endraw %}
+
+          description: 'Нода молчит > порога; сработал карантин (ops.md §1 NodeDown).'
+
+      # BufferEmpty (1/2): ready-буфер региона опустел и держится.
+      # ВНИМАНИЕ: если master перестаёт экспортировать ready-серию региона
+      # (0 серий вместо явного 0), sum by(region) не вернёт 0 — на этот случай
+      # есть парный BufferEmptyAllocFail ниже.
+      - alert: BufferEmptyReady
+        expr: sum by (region) (birdman_servers{state="ready"}) == 0
+        for: {{ birdman_ready_empty_for }}
+        labels:
+          severity: critical
+        annotations:
+          summary: {% raw %}'BufferEmpty: регион {{ $labels.region }} без ready-серверов'{% endraw %}
+
+          description: 'sum(birdman_servers{state="ready"}) == 0 дольше порога (ops.md §1 BufferEmpty).'
+
+      # BufferEmpty (2/2): аллокации падают из-за отсутствия ёмкости.
+      - alert: BufferEmptyAllocFail
+        expr: increase(birdman_allocation_failures_total{reason="no_capacity"}[1m]) > 0
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: {% raw %}'BufferEmpty: no_capacity аллокаций за 1м: {{ $value }}'{% endraw %}
+
+          description: 'Нет свободных слотов под аллокацию (ops.md §1 BufferEmpty).'
+
+  - name: birdman-health
+    rules:
+      # CrashLoop: событие crash_loop от master (плохой релиз).
+      - alert: CrashLoop
+        expr: increase(birdman_events_total{kind="crash_loop"}[5m]) > 0
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: {% raw %}'CrashLoop: событий crash_loop за 5м: {{ $value }}'{% endraw %}
+
+          description: 'Вероятен плохой релиз — rollback (ops.md §6 runbook 3).'
+
+      # DiskHigh: диск агента. warning > {{ birdman_disk_warn_pct }}%, critical > {{ birdman_disk_crit_pct }}%
+      # (две severities; при > crit сработают обе — это ок, alertmanager дедупит).
+      - alert: DiskHighWarning
+        expr: 100 * birdman_agent_disk_used_bytes / birdman_agent_disk_total_bytes > {{ birdman_disk_warn_pct }}
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: {% raw %}'DiskHigh(warn): диск агента {{ $value }}%'{% endraw %}
+
+          description: 'Диск ноды выше warning-порога (ops.md §1 DiskHigh).'
+
+      - alert: DiskHighCritical
+        expr: 100 * birdman_agent_disk_used_bytes / birdman_agent_disk_total_bytes > {{ birdman_disk_crit_pct }}
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: {% raw %}'DiskHigh(crit): диск агента {{ $value }}%'{% endraw %}
+
+          description: 'Диск ноды выше critical-порога — GC/прюнинг/докупить диск (ops.md §6 runbook 4).'
+
+      # AllocationFailures: любые провалы аллокации (по reason).
+      - alert: AllocationFailures
+        expr: increase(birdman_allocation_failures_total[5m]) > 0
+        for: 0s
+        labels:
+          severity: warning
+        annotations:
+          summary: {% raw %}'AllocationFailures: reason={{ $labels.reason }} за 5м: {{ $value }}'{% endraw %}
+
+          description: 'Растут ошибки аллокации (ops.md §1 AllocationFailures).'
+
+      # TickDegraded: тик игрового сервера выше порога игры дольше 5м.
+      # (ops.md §1 говорит про p95 tick_ms; в v0 agent отдаёт gauge
+      #  birdman_server_tick_ms{server_id} — правило на него, порог — var.)
+      - alert: TickDegraded
+        expr: birdman_server_tick_ms > {{ birdman_tick_degraded_ms }}
+        for: {{ birdman_tick_degraded_for }}
+        labels:
+          severity: warning
+        annotations:
+          summary: {% raw %}'TickDegraded: server {{ $labels.server_id }} tick={{ $value }}ms'{% endraw %}
+
+          description: 'game-health: тик деградировал дольше порога (ops.md §1 TickDegraded).'
+
+      # AgentUpgradeFailed: self-upgrade агента не завершился Hello с новой
+      # версией в окне (master пишет событие agent_upgrade_failed, итерация 4).
+      - alert: AgentUpgradeFailed
+        expr: increase(birdman_events_total{kind="agent_upgrade_failed"}[10m]) > 0
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: {% raw %}'AgentUpgradeFailed: неудачных апгрейдов агента за 10м: {{ $value }}'{% endraw %}
+
+          description: 'Агент не вышел на связь с новой версией (agent.md §7; откат — ansible).'
+
+# ---------------------------------------------------------------------------
+# MasterDown — НАМЕРЕННО не реализовано здесь. Его НЕЛЬЗЯ определить с самого
+# master/этого стека (стек живёт на той же тачке — при падении master'а/бокса
+# получим немой отказ). Нужен ВНЕШНИЙ probe (healthchecks.io / UptimeRobot /
+# blackbox_exporter ВНЕ бокса) на GET /healthz. См. TODO в ops.md §1.
+# ---------------------------------------------------------------------------
+# CertExpiry (таблица ops.md §1) — вне scope итерации 4: в v0 нет метрики
+# истечения серта (self-signed автоген master'а). AgentUpgradeFailed — выше
+# (событие agent_upgrade_failed теперь пишет master, итерация 4).

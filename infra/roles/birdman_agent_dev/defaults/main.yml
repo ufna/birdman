@@ -7,6 +7,8 @@ birdman_agent_binary: "{{ playbook_dir }}/../../agent/dist/birdman-agent"
 birdman_region: dev
 birdman_capacity_slots: 8
 birdman_port_range: [20000, 20050]
+# QoS echo (ops.md §4 / docs: единственный внешне-открытый порт на ноде).
+birdman_qos_echo_port: 19999
 birdman_limits_default:
   cpu_millis: 2000
   mem_mb: 1024

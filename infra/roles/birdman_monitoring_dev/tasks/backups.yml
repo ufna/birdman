@@ -1,0 +1,55 @@
+---
+# Бэкапы Postgres (ops.md §5): pg_dump каждые 6ч через systemd-timer, ротация
+# {{ birdman_backups_retention }} свежих дампов + скрипт restore-drill.
+
+- name: Create backups directory
+  ansible.builtin.file:
+    path: "{{ birdman_backups_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Install pg backup script
+  ansible.builtin.template:
+    src: birdman-pg-backup.sh.j2
+    dest: /usr/local/bin/birdman-pg-backup
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install pg restore-drill script
+  ansible.builtin.template:
+    src: birdman-pg-restore-test.sh.j2
+    dest: /usr/local/bin/birdman-pg-restore-test
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install pg backup systemd service
+  ansible.builtin.template:
+    src: birdman-pg-backup.service.j2
+    dest: /etc/systemd/system/birdman-pg-backup.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd daemon
+
+- name: Install pg backup systemd timer
+  ansible.builtin.template:
+    src: birdman-pg-backup.timer.j2
+    dest: /etc/systemd/system/birdman-pg-backup.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd daemon
+
+- name: Apply pending systemd reload before enabling timer
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start pg backup timer
+  ansible.builtin.systemd_service:
+    name: birdman-pg-backup.timer
+    enabled: true
+    state: started
+    daemon_reload: true

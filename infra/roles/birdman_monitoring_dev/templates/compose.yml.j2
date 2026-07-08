@@ -1,0 +1,126 @@
+# {{ ansible_managed }}
+# Стек наблюдаемости birdman (docs/specs/ops.md §1). Отдельный compose-проект
+# birdman-monitoring (postgres живёт в проекте birdman у роли master).
+# ВСЁ слушает только 127.0.0.1: bridge-сервисы публикуются как 127.0.0.1:port,
+# vmagent (host-network) вешает свой листенер на 127.0.0.1 явным флагом.
+name: birdman-monitoring
+
+services:
+  # --- TSDB: VictoriaMetrics single-node, retention {{ birdman_vm_retention }} ---
+  victoriametrics:
+    image: {{ birdman_vm_image }}
+    container_name: birdman-victoriametrics
+    command:
+      - "-storageDataPath=/victoria-metrics-data"
+      - "-retentionPeriod={{ birdman_vm_retention }}"
+      - "-httpListenAddr=:{{ birdman_vm_port }}"
+    volumes:
+      - vmdata:/victoria-metrics-data
+    ports:
+      # host-порт нужен и для vmagent (host-net), и для SSH-туннеля оператора
+      - "{{ birdman_bind_addr }}:{{ birdman_vm_port }}:{{ birdman_vm_port }}"
+    restart: unless-stopped
+
+  # --- скрейпер: vmagent, host-network (единственный надёжный способ достать
+  #     сервисы на 127.0.0.1 самого бокса: agent :9101, master :8100, чужой
+  #     node_exporter :4027). Свой HTTP-листенер — строго на 127.0.0.1. ---
+  vmagent:
+    image: {{ birdman_vmagent_image }}
+    container_name: birdman-vmagent
+    network_mode: host
+    command:
+      - "-promscrape.config=/etc/vmagent/scrape.yml"
+      - "-remoteWrite.url={{ birdman_vm_remote_write_url }}"
+      - "-httpListenAddr={{ birdman_bind_addr }}:{{ birdman_vmagent_port }}"
+    volumes:
+      - "{{ birdman_monitoring_conf_dir }}/vmagent/scrape.yml:/etc/vmagent/scrape.yml:ro"
+    depends_on:
+      - victoriametrics
+    restart: unless-stopped
+
+  # --- алерты: vmalert (query → VM, notify → sink/alertmanager) ---
+  vmalert:
+    image: {{ birdman_vmalert_image }}
+    container_name: birdman-vmalert
+    command:
+      - "-rule=/etc/vmalert/rules.yml"
+      - "-datasource.url=http://victoriametrics:{{ birdman_vm_port }}"
+      - "-remoteWrite.url=http://victoriametrics:{{ birdman_vm_port }}"
+{% if birdman_alert_discord_webhook | length > 0 %}
+      - "-notifier.url=http://alertmanager:{{ birdman_alertmanager_port }}"
+{% else %}
+      - "-notifier.url=http://alert-sink:{{ birdman_alert_sink_port }}"
+{% endif %}
+      - "-evaluationInterval={{ birdman_eval_interval }}"
+      - "-httpListenAddr=:{{ birdman_vmalert_port }}"
+    volumes:
+      - "{{ birdman_monitoring_conf_dir }}/vmalert/rules.yml:/etc/vmalert/rules.yml:ro"
+    ports:
+      - "{{ birdman_bind_addr }}:{{ birdman_vmalert_port }}:{{ birdman_vmalert_port }}"
+    depends_on:
+      - victoriametrics
+{% if birdman_alert_discord_webhook | length > 0 %}
+      - alertmanager
+{% else %}
+      - alert-sink
+{% endif %}
+    restart: unless-stopped
+
+{% if birdman_alert_discord_webhook | length > 0 %}
+  # --- alertmanager-путь (webhook задан): реальный Discord-приёмник ---
+  alertmanager:
+    image: {{ birdman_alertmanager_image }}
+    container_name: birdman-alertmanager
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--web.listen-address=:{{ birdman_alertmanager_port }}"
+      - "--cluster.listen-address="
+    volumes:
+      - "{{ birdman_monitoring_conf_dir }}/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro"
+    ports:
+      - "{{ birdman_bind_addr }}:{{ birdman_alertmanager_port }}:{{ birdman_alertmanager_port }}"
+    restart: unless-stopped
+{% else %}
+  # --- logger-путь (webhook пуст): крошечный stdlib-приёмник, дописывает
+  #     каждый POST от vmalert в {{ birdman_alerts_log }} (одна JSON-строка) ---
+  alert-sink:
+    image: {{ birdman_alert_sink_image }}
+    container_name: birdman-alert-sink
+    command: ["python3", "/app/alert-logger.py"]
+    environment:
+      BIRDMAN_ALERTS_LOG: "{{ birdman_alerts_log }}"
+      BIRDMAN_SINK_PORT: "{{ birdman_alert_sink_port }}"
+    volumes:
+      - "{{ birdman_monitoring_conf_dir }}/alert-logger.py:/app/alert-logger.py:ro"
+      - "{{ birdman_log_dir }}:{{ birdman_log_dir }}"
+    ports:
+      - "{{ birdman_bind_addr }}:{{ birdman_alert_sink_port }}:{{ birdman_alert_sink_port }}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:{{ birdman_alert_sink_port }}/ >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+{% endif %}
+
+  # --- Grafana: datasource + 2 дашборда provisioning'ом, пароль из env_file ---
+  grafana:
+    image: {{ birdman_grafana_image }}
+    container_name: birdman-grafana
+    env_file:
+      - "{{ birdman_monitoring_conf_dir }}/grafana.env"
+    volumes:
+      - grafana:/var/lib/grafana
+      - "{{ birdman_monitoring_conf_dir }}/grafana/provisioning:/etc/grafana/provisioning:ro"
+      - "{{ birdman_monitoring_conf_dir }}/grafana/dashboards:/etc/grafana/dashboards:ro"
+    ports:
+      - "{{ birdman_bind_addr }}:{{ birdman_grafana_port }}:{{ birdman_grafana_port }}"
+    depends_on:
+      - victoriametrics
+    restart: unless-stopped
+
+volumes:
+  vmdata:
+    name: birdman-vmdata
+  grafana:
+    name: birdman-grafana

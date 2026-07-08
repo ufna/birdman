@@ -1,0 +1,15 @@
+# {{ ansible_managed }}
+# Alertmanager-конфиг (используется ТОЛЬКО когда задан birdman_alert_discord_webhook).
+# Discord-приёмник (alertmanager >= 0.25 умеет discord_configs нативно).
+# Webhook секретный — файл кладётся 0600, в репо его нет.
+route:
+  receiver: discord
+  group_by: ['alertname', 'severity', 'region']
+  group_wait: 10s
+  group_interval: 1m
+  repeat_interval: 1h
+receivers:
+  - name: discord
+    discord_configs:
+      - webhook_url: {{ birdman_alert_discord_webhook | to_json }}
+        send_resolved: true

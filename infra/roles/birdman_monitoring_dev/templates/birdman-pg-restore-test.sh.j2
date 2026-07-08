@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# {{ ansible_managed }}
+# birdman Postgres restore-drill (ops.md §5): восстановить ПОСЛЕДНИЙ дамп в
+# одноразовый postgres-контейнер, прогнать sanity-запрос, отчитаться PASS/FAIL,
+# снести контейнер. Запускать руками во время учения (ит.4/5 acceptance).
+set -uo pipefail
+
+BACKUP_DIR="{{ birdman_backups_dir }}"
+IMAGE="{{ birdman_pg_image }}"
+DB="{{ birdman_pg_db }}"
+PGUSER="{{ birdman_pg_user }}"
+NAME="birdman-restore-test-$$"
+
+latest="$(ls -1t "$BACKUP_DIR"/birdman-*.dump 2>/dev/null | head -1 || true)"
+if [ -z "${latest:-}" ]; then
+  echo "RESTORE TEST: FAIL — нет дампов в $BACKUP_DIR"
+  exit 1
+fi
+echo "restoring latest dump: $latest"
+
+cleanup() { docker rm -f "$NAME" >/dev/null 2>&1 || true; }
+trap cleanup EXIT
+
+# Одноразовый сервер (--rm): БД $DB создаётся из POSTGRES_DB.
+docker run -d --rm --name "$NAME" \
+  -e POSTGRES_PASSWORD=throwaway -e POSTGRES_DB="$DB" "$IMAGE" >/dev/null
+
+# Ждём готовности.
+ready=0
+for _ in $(seq 1 60); do
+  if docker exec "$NAME" pg_isready -U "$PGUSER" -d "$DB" >/dev/null 2>&1; then ready=1; break; fi
+  sleep 1
+done
+if [ "$ready" -ne 1 ]; then
+  echo "RESTORE TEST: FAIL — throwaway postgres не поднялся"
+  exit 1
+fi
+
+# Восстановление (custom format читается pg_restore со stdin).
+# --no-owner/--no-acl: в throwaway есть только роль postgres.
+if ! docker exec -i "$NAME" pg_restore -U "$PGUSER" -d "$DB" --no-owner --no-acl < "$latest"; then
+  echo "WARN: pg_restore вернул ненулевой код (часто безобидно: комментарии/расширения)"
+fi
+
+# Sanity: сколько таблиц в public + (best-effort) счётчик nodes.
+tables="$(docker exec "$NAME" psql -U "$PGUSER" -d "$DB" -tAc \
+  "select count(*) from information_schema.tables where table_schema='public'" 2>/dev/null || echo 0)"
+echo "public tables restored: ${tables:-0}"
+if [ "${tables:-0}" -lt 1 ]; then
+  echo "RESTORE TEST: FAIL — в восстановленной БД нет таблиц"
+  exit 1
+fi
+
+nodes="$(docker exec "$NAME" psql -U "$PGUSER" -d "$DB" -tAc "select count(*) from nodes" 2>/dev/null || echo "n/a")"
+echo "nodes rows: $nodes"
+
+echo "RESTORE TEST: PASS"

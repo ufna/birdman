@@ -73,6 +73,13 @@
     comment: "{{ birdman_ufw_comment }}"
   loop: [tcp, udp]
 
+- name: Allow QoS echo port in UFW (additive, единственный внешне-открытый порт)
+  community.general.ufw:
+    rule: allow
+    port: "{{ birdman_qos_echo_port }}"
+    proto: udp
+    comment: "{{ birdman_ufw_comment }}"
+
 # --- регистрация ноды в master (одноразовая, идемпотентная) ---
 
 - name: Check for stored node token
