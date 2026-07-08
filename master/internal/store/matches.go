@@ -12,8 +12,12 @@ import (
 
 // Match is one matches row joined with its version, server and node — the
 // read model of GET /v1/matches (docs/specs/master.md §6). ServerPlayers is
-// the live players count from the backing server (matches.players_peak is
-// written by liba, later iteration).
+// the live players count from the backing server.
+//
+// Lifecycle (итерация 2): pending (RecordMatch on allocation) → running
+// (agent ServerEvent match_start, started_at) → finished|aborted (match_end,
+// ended_at; a failing server aborts its match). players_peak is the maximum
+// heartbeat players count observed while the match was open.
 type Match struct {
 	ID            string     `json:"id"`
 	Project       string     `json:"project"`

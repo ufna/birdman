@@ -1,8 +1,8 @@
 # birdman-agent
 
-Нода-агент birdman, **итерация 1** (`docs/05-runtime-iterations.md`): демон `run` под управлением master (gRPC AgentLink) + локальный `run-once` из итерации 0. Спеки: `docs/specs/agent.md`, `docs/specs/protocol.md` §1–2.
+Нода-агент birdman, **итерации 1–2** (`docs/05-runtime-iterations.md`): демон `run` под управлением master (gRPC AgentLink) + локальный `run-once` из итерации 0. Спеки: `docs/specs/agent.md`, `docs/specs/protocol.md` §1–2.
 
-Что внутри: gRPC bidi-линк с master (Hello с восстановленной картой, heartbeat 2с c NodeStats, команды Start/Stop/PrePull c `Ack{cmd_id}` и идемпотентностью, реконнект с бэкоффом 1с→30с), восстановление карты серверов из containerd-labels после рестарта (живые дедики агент-рестарт переживают), ensure/pull образа (включая приватный GHCR), пул host-портов, запуск контейнера (host network, cgroup-лимиты, env-контракт `BIRDMAN_*`, ro bind-mount per-server каталога с сокетом), UDS-сервер liba-протокола (NDJSON), стейт-машина `pulling → starting → ready → allocated → draining → stopped|failed`, grace 30с до `ready`, shim-side логи дедика (`cio.LogFile` — переживают рестарт агента), graceful stop по SIGTERM (дедиков не трогает).
+Что внутри: gRPC bidi-линк с master (Hello с восстановленной картой, heartbeat 2с c NodeStats, команды Start/Stop/Allocate/PrePull c `Ack{cmd_id}` и идемпотентностью, реконнект с бэкоффом 1с→30с), восстановление карты серверов из containerd-labels после рестарта (живые дедики агент-рестарт переживают), ensure/pull образа (включая приватный GHCR), пул host-портов, запуск контейнера (host network, cgroup-лимиты, env-контракт `BIRDMAN_*`, ro bind-mount per-server каталога с сокетом), UDS-сервер liba-протокола (NDJSON), стейт-машина `pulling → starting → ready → allocated → draining → stopped|failed`, grace 30с до `ready`, shim-side логи дедика (`cio.LogFile` — переживают рестарт агента), graceful stop по SIGTERM (дедиков не трогает).
 
 ## Сборка
 
@@ -37,7 +37,7 @@ tls_insecure: true                    # ТОЛЬКО dev: self-signed master;
                                       # прод — tls_ca_file: /path/ca.pem
 ```
 
-## Запуск (демон, итерация 1)
+## Запуск (демон, итерации 1–2)
 
 ```bash
 birdman-agent run --config /etc/birdman/agent.yaml
@@ -45,7 +45,7 @@ birdman-agent run --config /etc/birdman/agent.yaml
 
 - коннект к `master_addr` (TLS), Hello{node_token + карта серверов} — при каждом (ре)коннекте;
 - heartbeat каждые 2с: NodeStats (cpu/mem/disk/load из /proc+statfs) + все живые дедики;
-- команды master: StartServer (порт из пула или заданный), StopServer{grace}, PrePull (+PullReport), Drain/UpgradeAgent/TailLogs — Ack + TODO;
+- команды master: StartServer (порт из пула или заданный), StopServer{grace}, AllocateServer (итерация 2: `allocated{match_id, players_expected}` → liba, `ready → allocated`), PrePull (+PullReport), Drain/UpgradeAgent/TailLogs — Ack + TODO;
 - каждая команда подтверждается `Ack{cmd_id}`; повторный `cmd_id` (ре-доставка) не исполняется повторно; повторный StartServer знакомого server_id — no-op;
 - события ready/failed/match_start/match_end — ServerEvent'ами (переживают реконнект в outbox-очереди);
 - SIGTERM → закрыть стрим и выйти; дедики продолжают жить, следующий старт агента восстанавливает карту по labels (`birdman/state`, `birdman/match-id`).
@@ -92,6 +92,6 @@ go test -race -tags integration ./internal/runtime/
 8. **env-контракт**: `BIRDMAN_PORT`, `BIRDMAN_SERVER_ID`, `BIRDMAN_SOCKET=/birdman/agent.sock`, `BIRDMAN_REGION` (спека §3). Labels контейнера `birdman/server-id|port|image|state|match-id` — источник восстановления карты (`state`/`match-id` агент обновляет при переходах).
 9. **Реконнект liba**: агент реплеит последние `allocated`/`drain` (protocol.md §2); ping каждые 10с; тишина >15с при `allocated` — warning в лог (эскалация в heartbeat-стейт — итерация 2).
 10. **Ack = «команда принята»** (итерация 1): агент подтверждает cmd_id сразу после регистрации команды, исход доносят ServerEvent'ы и heartbeat (при ре-доставке cmd_id из кэша последних 1024 — только повторный Ack). Событ/PullReport-очередь (outbox) переживает реконнекты; перед отправкой событий уходит свежий heartbeat — master видит консистентный стейт (порт до ready).
-11. **`allocated` дедику не доставляется** (итерация 1): master v0 аллоцирует только в БД; команды Allocate в протоколе v1 нет — доставка матча в liba приходит с матчмейкером (итерация 2). Дедик остаётся `ready` со своей точки зрения, master-стейт `allocated` — не перетирается (heartbeat-репорт `ready` для `allocated`-строки игнорируется master'ом).
+11. **Доставка `allocated` дедику** (итерация 2): команда `AllocateServer{server_id, match_id, players_expected}` (protocol.md §1, аддитивно) → агент шлёт liba UDS-фрейм `allocated{match_id, players_expected}`, переводит `ready → allocated` и пишет match-id в labels (переживает рестарт агента). Фрейм кэшируется UDS-сервером и реплеится реконнектящейся liba; повторная команда (реплей master'а после рестарта агента) идемпотентна — только пере-доставка фрейма и labels. Штатный конец одноразового дедика: `match_end` → exit 0 → `stopped` (master делает `reaped`, никакого crash-loop).
 
-Отложено (по плану, не долг): доставка `allocated` в liba (итерация 2), полный drain-цикл и self-upgrade (итерация 4), OOM-события, image GC, UDP-echo 19999, метрики 9101, ротация логов.
+Отложено (по плану, не долг): полный drain-цикл и self-upgrade (итерация 4), OOM-события, image GC, UDP-echo 19999, метрики 9101, ротация логов.

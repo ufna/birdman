@@ -17,11 +17,30 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib" // database/sql driver for golang-migrate
 
 	"github.com/ufna/birdman/master/migrations"
+	agentlinkv1 "github.com/ufna/birdman/proto/agentlink/v1"
 )
+
+// CommandSender dispatches a command to a node's agent. Implemented by
+// agentlink.Hub (cmd_id/Ack tracking, replay on reconnect); fakes in tests.
+// Send must not block: commands to offline nodes stay queued in the hub.
+//
+// The store owns the AllocateServer dispatch (итерация 2): a successful
+// allocation must reach the dedik's liba whichever door it came through —
+// REST POST /v1/allocate or the built-in matchmaker — and store.Allocate is
+// the single shared point of both paths.
+type CommandSender interface {
+	Send(nodeID string, msg *agentlinkv1.MasterMsg) (cmdID string)
+}
 
 type Store struct {
 	Pool *pgxpool.Pool
+
+	sender CommandSender // nil until SetCommandSender (some tests)
 }
+
+// SetCommandSender wires the agent command dispatcher. Call once at startup,
+// before the API/matchmaker start allocating.
+func (s *Store) SetCommandSender(sender CommandSender) { s.sender = sender }
 
 // Open connects a pgx pool and verifies connectivity.
 func Open(ctx context.Context, dsn string) (*Store, error) {

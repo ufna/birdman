@@ -17,11 +17,21 @@
 - **reconcile** (тик 1с): дефицит buffer_ready → `INSERT servers(creating)` +
   `StartServer` (first-fit: самая занятая живая нода региона); излишек ready →
   `StopServer` старейших; crash-loop ≥3 failed (version,node) за 10 мин →
-  пауза пары на 15 мин + событие `crash_loop`; зависшие `creating` >120с →
-  `failed`;
+  пауза пары на 15 мин + событие `crash_loop` (вход — события `server_failed`
+  с reason≠`node_lost`: массовые фейлы карантина ноды ложный pause не дают);
+  зависшие `creating` >120с → `failed`;
 - **Allocation API** `POST /v1/allocate` — атомарный claim через
   `FOR UPDATE SKIP LOCKED`, идемпотентность по `match_id`,
-  `409 {"error":"no_capacity"}`;
+  `409 {"error":"no_capacity"}`; после успешной аллокации (оба пути — REST и
+  матчмейкер) агенту ноды уходит `AllocateServer{match_id, players_expected}`
+  → liba получает UDS-фрейм `allocated` (итерация 2, protocol.md §1);
+- **жизненный цикл matches** (итерация 2): аллокация → `pending`
+  (матчмейкер) либо строка создаётся при `match_start` (REST-путь);
+  `match_start` → `running` (started_at), `match_end` → `finished|aborted`
+  (ended_at); `players_peak` — максимум players из heartbeat за матч; падение
+  дедика/потеря ноды закрывает матч `aborted` (Hello-воскрешение сервера
+  возвращает и матч); штатный конец одноразового дедика (match_end → exit 0)
+  → сервер `reaped`, слот пересоздаёт reconcile;
 - **матчмейкер v0** (`docs/specs/master.md` §4): in-memory очереди per
   (region, compat-bucket), тик 500мс, группы по `projects.match_size`
   (деф. 2, правится `PUT /v1/projects/{slug}`), регион по минимальному

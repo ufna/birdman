@@ -204,7 +204,9 @@ func (s *Server) handleAllocate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	alloc, err := s.st.Allocate(r.Context(), req.Project, req.Region, req.VersionID, req.MatchID)
+	// players_expected 0 = unknown: the external matchmaker behind this API
+	// does not report the match size (spec'd request shape, master.md §3).
+	alloc, err := s.st.Allocate(r.Context(), req.Project, req.Region, req.VersionID, req.MatchID, 0)
 	switch {
 	case errors.Is(err, store.ErrNoCapacity):
 		s.m.AllocFailures.WithLabelValues("no_capacity").Inc()

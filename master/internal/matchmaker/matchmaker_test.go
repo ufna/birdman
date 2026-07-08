@@ -112,6 +112,47 @@ func TestTwoTicketsOneMatch(t *testing.T) {
 	}
 }
 
+// A formed match reaches the dedik: the matchmaker's allocation dispatches
+// AllocateServer to the server's node with players_expected = group size
+// (итерация 2 — liba gets `allocated{match_id, players_expected}`).
+func TestMatchNotifiesAgentWithPlayersExpected(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10)
+	f.UpsertFleet(t, 2, 50)
+	f.InsertServer(t, f.NodeID, f.VersionID, "ready", 20001, 0)
+	rec := &testdb.CommandRecorder{}
+	st.SetCommandSender(rec)
+	mm := newMM(t, st, matchmaker.Config{})
+
+	t1 := submit(t, mm, "p1", "1.0.0", regions("eu", 10))
+	submit(t, mm, "p2", "1.0.0", regions("eu", 20))
+	runOnce(t, mm)
+
+	g1 := get(t, mm, t1.ID)
+	if g1.Status != matchmaker.StatusMatched {
+		t.Fatalf("want matched, got %s", g1.Status)
+	}
+	allocs := rec.Allocates()
+	if len(allocs) != 1 {
+		t.Fatalf("want exactly 1 AllocateServer, got %d", len(allocs))
+	}
+	if allocs[0].NodeID != f.NodeID {
+		t.Fatalf("command node: %s, want %s", allocs[0].NodeID, f.NodeID)
+	}
+	a := allocs[0].Msg.GetAllocate()
+	if a.GetMatchId() != g1.Match.MatchID || a.GetPlayersExpected() != 2 {
+		t.Fatalf("AllocateServer: %+v (match %s)", a, g1.Match.MatchID)
+	}
+	var serverID string
+	if err := st.Pool.QueryRow(context.Background(),
+		`select id::text from servers where match_id = $1::uuid`, g1.Match.MatchID).Scan(&serverID); err != nil {
+		t.Fatal(err)
+	}
+	if a.GetServerId() != serverID {
+		t.Fatalf("AllocateServer server_id %s, want %s", a.GetServerId(), serverID)
+	}
+}
+
 // A new ticket for the same player cancels the previous queued one.
 func TestAntiDupPlayer(t *testing.T) {
 	st := testdb.New(t)

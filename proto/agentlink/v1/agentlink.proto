@@ -94,7 +94,21 @@ message MasterMsg {
     UpgradeAgent upgrade = 5;
     TailLogs tail = 6;
     Ack ack = 7; // reserved for master-side acknowledgements
+    AllocateServer allocate = 8; // iteration 2: deliver a match to the dedik
   }
+}
+
+// AllocateServer tells the node's agent that master allocated a match to
+// server_id: the agent forwards the `allocated{match_id, players_expected}`
+// frame to liba over the per-server socket (docs/specs/protocol.md §2) and
+// remembers it for liba reconnect replay. Sent after every successful
+// allocation — both REST POST /v1/allocate and the built-in matchmaker.
+// players_expected = 0 means "unknown" (external matchmaker did not say).
+message AllocateServer {
+  string cmd_id = 1;
+  string server_id = 2;
+  string match_id = 3;
+  int32 players_expected = 4;
 }
 
 message StartServer {

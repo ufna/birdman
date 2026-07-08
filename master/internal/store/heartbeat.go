@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -119,6 +120,18 @@ func applyReports(ctx context.Context, tx pgx.Tx, nodeID string, reports []Serve
 					map[string]any{"state": mapped}); err != nil {
 					return err
 				}
+				// The lease checker aborted the match together with failing
+				// the server (node_lost); the dedik survived the outage and
+				// still plays it — symmetric resurrection for the match.
+				if mapped == "allocated" {
+					if _, err := tx.Exec(ctx, `
+						update matches m set state = 'running', ended_at = null
+						from servers s
+						where s.id = $1::uuid and m.id = s.match_id
+						  and m.state = 'aborted'`, r.ServerID); err != nil {
+						return err
+					}
+				}
 			}
 		}
 		if _, err := tx.Exec(ctx, `
@@ -132,11 +145,25 @@ func applyReports(ctx context.Context, tx pgx.Tx, nodeID string, reports []Serve
 			r.ServerID, next, r.Players, r.TickMS, r.Port); err != nil {
 			return err
 		}
+		// players_peak = максимум players из heartbeat за матч (master.md §1).
+		if r.Players > 0 {
+			if _, err := tx.Exec(ctx, `
+				update matches m set players_peak = greatest(m.players_peak, $2)
+				from servers s
+				where s.id = $1::uuid and m.id = s.match_id
+				  and m.state in ('pending','running')`,
+				r.ServerID, r.Players); err != nil {
+				return err
+			}
+		}
 		if next == "failed" && cur != "failed" {
 			id := r.ServerID
 			if err := insertEvent(ctx, tx, EventServerFailed,
 				EventRef{ServerID: &id, NodeID: &nodeID},
 				map[string]any{"reason": "agent_report", "agent_state": r.State}); err != nil {
+				return err
+			}
+			if err := abortServerMatch(ctx, tx, r.ServerID); err != nil {
 				return err
 			}
 		}
@@ -206,6 +233,12 @@ func (s *Store) HelloSync(ctx context.Context, nodeID, hostname string, capacity
 }
 
 // ApplyServerEvent handles an agent ServerEvent (failed|oom|ready|match_*).
+//
+// Match lifecycle (итерация 2, master.md §1): match_start moves the server's
+// match to running (started_at), match_end finishes it (finished|aborted,
+// ended_at). The match row is identified via servers.match_id — the
+// allocation source of truth; a row missing at match_start (external
+// matchmaker allocated via REST and never wrote one) is created on the fly.
 func (s *Store) ApplyServerEvent(ctx context.Context, nodeID, serverID, kind, detail string) error {
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
@@ -214,10 +247,11 @@ func (s *Store) ApplyServerEvent(ctx context.Context, nodeID, serverID, kind, de
 	defer tx.Rollback(ctx)
 
 	var cur string
+	var matchID *string
 	err = tx.QueryRow(ctx, `
-		select state from servers
+		select state, match_id::text from servers
 		where id = $1::uuid and node_id = $2::uuid
-		for update`, serverID, nodeID).Scan(&cur)
+		for update`, serverID, nodeID).Scan(&cur, &matchID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil // unknown/foreign server — ignore
 	}
@@ -234,8 +268,12 @@ func (s *Store) ApplyServerEvent(ctx context.Context, nodeID, serverID, kind, de
 				return err
 			}
 			if err := insertEvent(ctx, tx, EventServerFailed,
-				EventRef{ServerID: &serverID, NodeID: &nodeID},
+				EventRef{ServerID: &serverID, NodeID: &nodeID, MatchID: matchID},
 				map[string]any{"reason": kind, "detail": detail}); err != nil {
+				return err
+			}
+			// A dedik dying mid-match never sends match_end — close the match.
+			if err := abortServerMatch(ctx, tx, serverID); err != nil {
 				return err
 			}
 		}
@@ -247,13 +285,71 @@ func (s *Store) ApplyServerEvent(ctx context.Context, nodeID, serverID, kind, de
 				return err
 			}
 		}
-	default:
-		// match_start / match_end / custom — audit trail only in v0.
+	case "match_start":
+		// Upsert keeps whoever came first consistent: the matchmaker's
+		// RecordMatch (pending) or this event (REST-allocate path has no row).
+		if _, err := tx.Exec(ctx, `
+			insert into matches (id, project_id, server_id, version_id, region, state, started_at)
+			select s.match_id, s.project_id, s.id, s.version_id, n.region, 'running', now()
+			from servers s join nodes n on n.id = s.node_id
+			where s.id = $1::uuid and s.match_id is not null
+			on conflict (id) do update
+				set state = 'running', started_at = coalesce(matches.started_at, now())
+				where matches.state = 'pending'`, serverID); err != nil {
+			return err
+		}
 		if err := insertEvent(ctx, tx, kind,
-			EventRef{ServerID: &serverID, NodeID: &nodeID},
+			EventRef{ServerID: &serverID, NodeID: &nodeID, MatchID: matchID},
+			map[string]any{"detail": detail}); err != nil {
+			return err
+		}
+	case "match_end":
+		target := "finished"
+		if matchResult(detail) == "aborted" {
+			target = "aborted"
+		}
+		if _, err := tx.Exec(ctx, `
+			update matches m set state = $2, ended_at = coalesce(m.ended_at, now())
+			from servers s
+			where s.id = $1::uuid and m.id = s.match_id
+			  and m.state in ('pending','running')`, serverID, target); err != nil {
+			return err
+		}
+		if err := insertEvent(ctx, tx, kind,
+			EventRef{ServerID: &serverID, NodeID: &nodeID, MatchID: matchID},
+			map[string]any{"detail": detail, "result": matchResult(detail)}); err != nil {
+			return err
+		}
+	default:
+		// Custom kinds — audit trail only in v0.
+		if err := insertEvent(ctx, tx, kind,
+			EventRef{ServerID: &serverID, NodeID: &nodeID, MatchID: matchID},
 			map[string]any{"detail": detail}); err != nil {
 			return err
 		}
 	}
 	return tx.Commit(ctx)
+}
+
+// matchResult extracts the liba result out of a match_end event detail
+// ("<match_id> completed|aborted", protocol.md §2 via agent). Anything not
+// explicitly aborted counts as completed — a one-shot dedik that exited
+// cleanly played its match out.
+func matchResult(detail string) string {
+	fields := strings.Fields(detail)
+	if len(fields) > 0 && fields[len(fields)-1] == "aborted" {
+		return "aborted"
+	}
+	return "completed"
+}
+
+// abortServerMatch closes the still-open match of a failed server: without a
+// live dedik no match_end will ever arrive.
+func abortServerMatch(ctx context.Context, db execer, serverID string) error {
+	_, err := db.Exec(ctx, `
+		update matches m set state = 'aborted', ended_at = coalesce(m.ended_at, now())
+		from servers s
+		where s.id = $1::uuid and m.id = s.match_id
+		  and m.state in ('pending','running')`, serverID)
+	return err
 }
