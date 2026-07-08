@@ -71,6 +71,19 @@ export function canRead(s: SessionInfo): boolean {
   return s.scopes.includes('readonly') || s.scopes.includes('admin');
 }
 
+/**
+ * true, если сессия может деплоить/откатывать (скоуп deploy или admin —
+ * admin включает остальные скоупы, master §6). Гейтит кнопки Deploy/Rollback.
+ */
+export function canDeploy(s: SessionInfo): boolean {
+  return s.scopes.includes('deploy') || s.scopes.includes('admin');
+}
+
+/** true, если сессия admin — гейтит операции с тачкой (Drain/Undrain). */
+export function canAdmin(s: SessionInfo): boolean {
+  return s.scopes.includes('admin');
+}
+
 /** Человеческое сообщение об ошибке логина. */
 export function loginErrorMessage(e: unknown): string {
   if (e instanceof ApiError) {
