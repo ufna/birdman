@@ -26,7 +26,9 @@ import { UtilizationChart } from '../components/UtilizationChart';
 /** Окно графика утилизации во времени, часов (совпадает с UtilizationChart). */
 const UTIL_WINDOW_HOURS = 6;
 
-const PERIODS = [7, 30, 90];
+// Потолок — 30 дней (Task 6, "Статистика v1"): 90д снят, on-the-fly-скан
+// сырых matches ограничен; роллапы (Фаза 2) — отдельная работа под флот большего масштаба.
+const PERIODS = [7, 30];
 
 /** Слото-часы: 2 знака для мелких, 1 для десятков, целое для сотен+. */
 function fmtHours(v: number): string {

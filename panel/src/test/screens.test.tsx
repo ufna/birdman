@@ -167,4 +167,13 @@ describe('Cost — полная композиция', () => {
     expect(screen.getByText('2/8 slots')).toBeTruthy(); // утилизация региона dev
     expect(screen.getByText('Utilization over time')).toBeTruthy(); // новый график
   });
+
+  it('длинный селектор — только 7д и 30д, потолок 30д (Task 6, "Статистика v1")', async () => {
+    stubJSON(cost);
+    renderEn(<Cost />);
+    await screen.findByText('Total slot-hours');
+    expect(screen.getByRole('button', { name: '7' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '30' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '90' })).toBeNull();
+  });
 });
