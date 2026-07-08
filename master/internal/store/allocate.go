@@ -8,6 +8,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	agentlinkv1 "github.com/ufna/birdman/proto/agentlink/v1"
 )
 
 // ErrNoCapacity — no ready server matched the allocation request
@@ -41,7 +43,14 @@ returning id, node_id, port`
 // Allocate atomically claims one ready server (FOR UPDATE SKIP LOCKED).
 // Idempotent by match_id: a repeated request returns the same server, backed
 // by the partial unique index on servers(match_id).
-func (s *Store) Allocate(ctx context.Context, project, region string, versionID *string, matchID string) (Allocation, error) {
+//
+// After a fresh claim the node's agent receives AllocateServer (итерация 2,
+// protocol.md §1): the agent forwards `allocated{match_id, players_expected}`
+// to liba. Delivery guarantees match the other commands (cmd_id/Ack, replay
+// on reconnect); the idempotent repeat does not re-send — the pending command
+// is already tracked by the hub. playersExpected 0 = unknown (external
+// matchmaker via REST does not report it).
+func (s *Store) Allocate(ctx context.Context, project, region string, versionID *string, matchID string, playersExpected int32) (Allocation, error) {
 	var projectID string
 	err := s.Pool.QueryRow(ctx, `select id::text from projects where slug = $1`, project).Scan(&projectID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -80,12 +89,32 @@ func (s *Store) Allocate(ctx context.Context, project, region string, versionID 
 		return Allocation{}, err
 	}
 
+	// The claim is committed — the dedik must learn about its match now,
+	// even if the host lookup below fails.
+	s.notifyAllocated(nodeID.String(), serverID.String(), matchID, playersExpected)
+
 	var host string
 	if err := s.Pool.QueryRow(ctx,
 		`select host(public_ip) from nodes where id = $1::uuid`, nodeID.String()).Scan(&host); err != nil {
 		return Allocation{}, err
 	}
 	return Allocation{ServerID: serverID.String(), Host: host, Port: port}, nil
+}
+
+// notifyAllocated sends AllocateServer to the node's agent via the hub. A nil
+// sender (not wired in some tests) is a no-op — production wiring installs it
+// at startup (SetCommandSender in cmd/birdman-master).
+func (s *Store) notifyAllocated(nodeID, serverID, matchID string, playersExpected int32) {
+	if s.sender == nil {
+		return
+	}
+	s.sender.Send(nodeID, &agentlinkv1.MasterMsg{Msg: &agentlinkv1.MasterMsg_Allocate{
+		Allocate: &agentlinkv1.AllocateServer{
+			ServerId:        serverID,
+			MatchId:         matchID,
+			PlayersExpected: playersExpected,
+		},
+	}})
 }
 
 func (s *Store) findByMatch(ctx context.Context, projectID, matchID string) (Allocation, bool, error) {

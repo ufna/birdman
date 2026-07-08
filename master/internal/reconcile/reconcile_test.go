@@ -397,6 +397,125 @@ func TestStaleVersionReaped(t *testing.T) {
 	}
 }
 
+// Node loss fails ≥3 servers at once (reason node_lost) — that says nothing
+// about the (version, node) pair: when the node returns, the buffer must be
+// re-created immediately, with no crash_loop event (ложнопозитив acceptance
+// итерации 1).
+func TestNodeLostDoesNotPauseCreations(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10)
+	f.UpsertFleet(t, 3, 50)
+	r, sender := newReconciler(st)
+	lease := reconcile.NewLeaseChecker(st, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})))
+	ctx := context.Background()
+
+	// Build the warm pool and make it ready.
+	if err := r.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if cmds := sender.take(); len(cmds) != 3 {
+		t.Fatalf("want 3 starts, got %d", len(cmds))
+	}
+	if err := st.ApplyHeartbeat(ctx, f.NodeID, readyReports(t, f)); err != nil {
+		t.Fatal(err)
+	}
+
+	// The node goes dark: quarantine + its servers failed (node_lost).
+	f.SetHeartbeatAge(t, f.NodeID, 31*time.Second)
+	if err := lease.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if states := f.ServerStates(t); states["failed"] != 3 {
+		t.Fatalf("want 3 node_lost failures, got %+v", states)
+	}
+
+	// The node returns (fresh heartbeat, servers gone for real — say the box
+	// rebooted): reconcile must rebuild the buffer at once.
+	if err := st.ApplyHeartbeat(ctx, f.NodeID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	starts, _ := sender.countStarts()
+	if starts != 3 {
+		t.Fatalf("node_lost must not pause creations: want 3 starts, got %d", starts)
+	}
+	if n, _ := st.CountEvents(ctx, store.EventCrashLoop); n != 0 {
+		t.Fatalf("node_lost produced a false crash_loop event (%d)", n)
+	}
+}
+
+// A one-shot dedik finishing its match (match_end → clean exit 0 → agent
+// reports stopped) is a NORMAL end: the server is reaped, the slot re-created
+// by reconcile — and repeated healthy cycles never look like a crash loop.
+func TestCleanMatchCycleDoesNotFeedCrashLoop(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10)
+	f.UpsertFleet(t, 1, 50)
+	r, sender := newReconciler(st)
+	ctx := context.Background()
+
+	for cycle := 0; cycle < 3; cycle++ {
+		// Reconcile creates the buffer server; agent brings it ready.
+		if err := r.RunOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+		cmds := sender.take()
+		if len(cmds) != 1 || cmds[0].Msg.GetStart() == nil {
+			t.Fatalf("cycle %d: want 1 StartServer, got %+v", cycle, cmds)
+		}
+		serverID := cmds[0].Msg.GetStart().GetServerId()
+		if err := st.ApplyHeartbeat(ctx, f.NodeID, []store.ServerReport{
+			{ServerID: serverID, State: "ready", Port: int32(21000 + cycle)},
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		// Match: allocate → start → end → clean exit (stopped report).
+		matchID := uuid.NewString()
+		if _, err := st.Allocate(ctx, "game", "eu", nil, matchID, 2); err != nil {
+			t.Fatalf("cycle %d: allocate: %v", cycle, err)
+		}
+		if err := st.ApplyServerEvent(ctx, f.NodeID, serverID, "match_start", matchID); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.ApplyServerEvent(ctx, f.NodeID, serverID, "match_end", matchID+" completed"); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.ApplyHeartbeat(ctx, f.NodeID, []store.ServerReport{
+			{ServerID: serverID, State: "stopped", MatchID: matchID},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		sv, err := st.GetServer(ctx, serverID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sv.State != "reaped" {
+			t.Fatalf("cycle %d: clean exit must reap, got %s", cycle, sv.State)
+		}
+	}
+
+	// Replacement for the last cycle still comes; zero crash-loop signals.
+	if err := r.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if starts, _ := sender.countStarts(); starts != 1 {
+		t.Fatalf("replacement after clean cycle: want 1 start, got %d", starts)
+	}
+	if n, _ := st.CountEvents(ctx, store.EventCrashLoop); n != 0 {
+		t.Fatalf("clean cycles fed crash-loop: %d events", n)
+	}
+	if n, _ := st.CountEvents(ctx, store.EventServerFailed); n != 0 {
+		t.Fatalf("clean cycles produced %d server_failed events", n)
+	}
+	states := f.ServerStates(t)
+	if states["reaped"] != 3 || states["failed"] != 0 {
+		t.Fatalf("unexpected states after 3 cycles: %+v", states)
+	}
+}
+
 // --- helpers ---
 
 func readyReports(t *testing.T, f *testdb.Fixture) []store.ServerReport {

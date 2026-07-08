@@ -107,14 +107,27 @@ func (f *Fixture) InsertServer(t *testing.T, nodeID, versionID, state string, po
 	return id
 }
 
-// MarkFailed flips a server to failed with updated_at = now()-age.
+// MarkFailed flips a server to failed with updated_at = now()-age, writing
+// the server_failed event the way the real failure paths do (reason
+// agent_report) — crash-loop detection feeds on these events.
 func (f *Fixture) MarkFailed(t *testing.T, serverID string, age time.Duration) {
 	t.Helper()
-	_, err := f.St.Pool.Exec(context.Background(),
+	ctx := context.Background()
+	age_ := fmt.Sprintf("%d milliseconds", age.Milliseconds())
+	_, err := f.St.Pool.Exec(ctx,
 		`update servers set state = 'failed', updated_at = now() - $2::interval where id = $1::uuid`,
-		serverID, fmt.Sprintf("%d milliseconds", age.Milliseconds()))
+		serverID, age_)
 	if err != nil {
 		t.Fatalf("mark failed: %v", err)
+	}
+	_, err = f.St.Pool.Exec(ctx, `
+		insert into events (ts, kind, server_id, node_id, version_id, payload)
+		select now() - $2::interval, 'server_failed', s.id, s.node_id, s.version_id,
+		       '{"reason": "agent_report"}'::jsonb
+		from servers s where s.id = $1::uuid`,
+		serverID, age_)
+	if err != nil {
+		t.Fatalf("mark failed event: %v", err)
 	}
 }
 

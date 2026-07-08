@@ -183,6 +183,11 @@ func (s *Store) FailQuarantinedServers(ctx context.Context) (int, error) {
 			map[string]any{"reason": "node_lost"}); err != nil {
 			return 0, err
 		}
+		// The dedik may still be playing behind the dead link, but from the
+		// master's view the match is unobservable — close it.
+		if err := abortServerMatch(ctx, s.Pool, r.id); err != nil {
+			return 0, err
+		}
 	}
 	return len(failed), nil
 }

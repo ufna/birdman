@@ -98,6 +98,9 @@ func run() error {
 		}),
 	)
 	hub := agentlink.NewHub(log)
+	// Allocations notify the dedik's agent (AllocateServer → liba `allocated`,
+	// итерация 2) — wire the dispatcher before anything can allocate.
+	st.SetCommandSender(hub)
 	agentlinkv1.RegisterAgentLinkServer(grpcServer, agentlink.NewService(st, hub, log))
 	grpcLis, err := net.Listen("tcp", cfg.ListenGRPC)
 	if err != nil {

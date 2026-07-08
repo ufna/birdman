@@ -165,14 +165,21 @@ func drainServers(ctx context.Context, tx pgx.Tx, sql string, args ...any) ([]Pl
 
 // RecentFailedTimes returns failure timestamps per node for (version, region)
 // within the lookback window — crash-loop detection input (§2). Derived from
-// the servers table, so it survives master restarts.
+// server_failed events (they survive master restarts and carry the reason),
+// NOT the servers table: failures with reason node_lost — mass-fails of a
+// quarantined node's servers — say nothing about the (version, node) pair and
+// must not trip the crash-loop pause (ложнопозитив acceptance ит. 1).
 func (s *Store) RecentFailedTimes(ctx context.Context, versionID, region string, lookback time.Duration) (map[string][]time.Time, error) {
 	rows, err := s.Pool.Query(ctx, `
-		select s.node_id::text, s.updated_at
-		from servers s join nodes n on n.id = s.node_id
-		where s.version_id = $1::uuid and n.region = $2 and s.state = 'failed'
-		  and s.updated_at > now() - $3::interval
-		order by s.node_id, s.updated_at`,
+		select e.node_id::text, e.ts
+		from events e
+		join servers s on s.id = e.server_id
+		join nodes n on n.id = e.node_id
+		where e.kind = 'server_failed'
+		  and s.version_id = $1::uuid and n.region = $2
+		  and coalesce(e.payload->>'reason', '') <> 'node_lost'
+		  and e.ts > now() - $3::interval
+		order by e.node_id, e.ts`,
 		versionID, region, fmt.Sprintf("%d milliseconds", lookback.Milliseconds()))
 	if err != nil {
 		return nil, err

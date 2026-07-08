@@ -94,8 +94,10 @@ func (s *Store) ListQoSEndpoints(ctx context.Context) ([]QoSEndpoint, error) {
 }
 
 // RecordMatch writes the matches row for a successful internal allocation
-// (docs/specs/master.md §1). Idempotent by match id; state stays 'pending'
-// until liba reports match_start (later iteration).
+// (docs/specs/master.md §1). Idempotent by match id — and it never clobbers a
+// row the agent's match_start already upserted to 'running' (the dedik can be
+// faster than this insert); state starts 'pending' otherwise, the lifecycle
+// is driven by ApplyServerEvent (итерация 2).
 func (s *Store) RecordMatch(ctx context.Context, matchID, project, region, serverID, versionID string) error {
 	_, err := s.Pool.Exec(ctx, `
 		insert into matches (id, project_id, server_id, version_id, region)

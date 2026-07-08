@@ -80,7 +80,7 @@ func TestAllocateConcurrentSingleServer(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := st.Allocate(context.Background(), "game", "eu", nil, uuid.NewString())
+			_, err := st.Allocate(context.Background(), "game", "eu", nil, uuid.NewString(), 0)
 			mu.Lock()
 			defer mu.Unlock()
 			switch {
@@ -116,7 +116,7 @@ func TestAllocateConcurrentHundredServers(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			a, err := st.Allocate(context.Background(), "game", "eu", nil, uuid.NewString())
+			a, err := st.Allocate(context.Background(), "game", "eu", nil, uuid.NewString(), 0)
 			if err != nil {
 				t.Errorf("allocate: %v", err)
 				return
@@ -146,11 +146,11 @@ func TestAllocateIdempotentByMatchID(t *testing.T) {
 	ctx := context.Background()
 
 	matchID := uuid.NewString()
-	first, err := st.Allocate(ctx, "game", "eu", nil, matchID)
+	first, err := st.Allocate(ctx, "game", "eu", nil, matchID, 0)
 	if err != nil {
 		t.Fatalf("allocate: %v", err)
 	}
-	again, err := st.Allocate(ctx, "game", "eu", nil, matchID)
+	again, err := st.Allocate(ctx, "game", "eu", nil, matchID, 0)
 	if err != nil || again.ServerID != first.ServerID {
 		t.Fatalf("sequential repeat: want %s, got %+v (%v)", first.ServerID, again, err)
 	}
@@ -165,7 +165,7 @@ func TestAllocateIdempotentByMatchID(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			a, err := st.Allocate(context.Background(), "game", "eu", nil, matchID2)
+			a, err := st.Allocate(context.Background(), "game", "eu", nil, matchID2, 0)
 			if err != nil {
 				t.Errorf("concurrent idempotent allocate: %v", err)
 				return
@@ -196,33 +196,33 @@ func TestAllocateFilters(t *testing.T) {
 	ctx := context.Background()
 
 	// No ready servers at all.
-	if _, err := st.Allocate(ctx, "game", "eu", nil, uuid.NewString()); !errors.Is(err, store.ErrNoCapacity) {
+	if _, err := st.Allocate(ctx, "game", "eu", nil, uuid.NewString(), 0); !errors.Is(err, store.ErrNoCapacity) {
 		t.Fatalf("empty pool: want no_capacity, got %v", err)
 	}
 	// Unknown project.
-	if _, err := st.Allocate(ctx, "nope", "eu", nil, uuid.NewString()); !errors.Is(err, store.ErrNotFound) {
+	if _, err := st.Allocate(ctx, "nope", "eu", nil, uuid.NewString(), 0); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("unknown project: want not_found, got %v", err)
 	}
 
 	f.InsertServer(t, f.NodeID, f.VersionID, "ready", 20001, 0)
 
 	// Wrong region.
-	if _, err := st.Allocate(ctx, "game", "us", nil, uuid.NewString()); !errors.Is(err, store.ErrNoCapacity) {
+	if _, err := st.Allocate(ctx, "game", "us", nil, uuid.NewString(), 0); !errors.Is(err, store.ErrNoCapacity) {
 		t.Fatalf("wrong region: want no_capacity, got %v", err)
 	}
 	// Version filter mismatch.
 	v2 := f.AddVersion(t, "2.0.0")
-	if _, err := st.Allocate(ctx, "game", "eu", &v2, uuid.NewString()); !errors.Is(err, store.ErrNoCapacity) {
+	if _, err := st.Allocate(ctx, "game", "eu", &v2, uuid.NewString(), 0); !errors.Is(err, store.ErrNoCapacity) {
 		t.Fatalf("version mismatch: want no_capacity, got %v", err)
 	}
 	// Stale heartbeat excludes the node.
 	f.SetHeartbeatAge(t, f.NodeID, 11*time.Second)
-	if _, err := st.Allocate(ctx, "game", "eu", nil, uuid.NewString()); !errors.Is(err, store.ErrNoCapacity) {
+	if _, err := st.Allocate(ctx, "game", "eu", nil, uuid.NewString(), 0); !errors.Is(err, store.ErrNoCapacity) {
 		t.Fatalf("stale heartbeat: want no_capacity, got %v", err)
 	}
 	// Fresh again → allocable, and version filter matches.
 	f.SetHeartbeatAge(t, f.NodeID, 0)
-	a, err := st.Allocate(ctx, "game", "eu", &f.VersionID, uuid.NewString())
+	a, err := st.Allocate(ctx, "game", "eu", &f.VersionID, uuid.NewString(), 0)
 	if err != nil {
 		t.Fatalf("allocate: %v", err)
 	}
@@ -260,7 +260,7 @@ func TestHeartbeatTransitions(t *testing.T) {
 	}
 
 	// Allocation wins over a stale 'ready' report (no downgrade).
-	if _, err := st.Allocate(ctx, "game", "eu", nil, uuid.NewString()); err != nil {
+	if _, err := st.Allocate(ctx, "game", "eu", nil, uuid.NewString(), 0); err != nil {
 		t.Fatalf("allocate: %v", err)
 	}
 	if err := st.ApplyHeartbeat(ctx, f.NodeID, []store.ServerReport{
