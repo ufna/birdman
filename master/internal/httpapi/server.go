@@ -2,7 +2,8 @@
 // (docs/specs/master.md §6, v0 subset). The panel and CLI are plain clients
 // of this API — no private side doors (ADR-9).
 //
-// TODO(v0): node drain, logs proxy — later iterations (4+).
+// Node drain/undrain, the server logs proxy, agent self-upgrade and the
+// read-only metrics proxy (итерация 4) live in ops.go.
 package httpapi
 
 import (
@@ -15,6 +16,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/ufna/birdman/master/internal/agentlink"
 	"github.com/ufna/birdman/master/internal/deploy"
 	"github.com/ufna/birdman/master/internal/matchmaker"
 	"github.com/ufna/birdman/master/internal/metrics"
@@ -31,15 +33,18 @@ type Server struct {
 	m       *metrics.Metrics
 	mm      *matchmaker.Matchmaker
 	dep     *deploy.Manager
+	sender  CommandSender      // agent command dispatch (agentlink.Hub)
+	logs    *agentlink.LogRouter // TailLogs chunk router
+	vmURL   string             // VictoriaMetrics base URL for the metrics proxy
 	mmLimit *rateLimiter
 	auth    *authenticator
 	log     *slog.Logger
 	mux     *http.ServeMux
 }
 
-func New(st *store.Store, m *metrics.Metrics, mm *matchmaker.Matchmaker, dep *deploy.Manager, log *slog.Logger) *Server {
+func New(st *store.Store, m *metrics.Metrics, mm *matchmaker.Matchmaker, dep *deploy.Manager, sender CommandSender, logs *agentlink.LogRouter, vmURL string, log *slog.Logger) *Server {
 	s := &Server{
-		st: st, m: m, mm: mm, dep: dep,
+		st: st, m: m, mm: mm, dep: dep, sender: sender, logs: logs, vmURL: vmURL,
 		mmLimit: newRateLimiter(mmRateLimit, mmRateLimit),
 		auth:    newAuthenticator(st), log: log, mux: http.NewServeMux(),
 	}
@@ -49,7 +54,13 @@ func New(st *store.Store, m *metrics.Metrics, mm *matchmaker.Matchmaker, dep *de
 
 	s.mux.HandleFunc("POST /v1/nodes", s.requireScope(ScopeAdmin, s.handleCreateNode))
 	s.mux.HandleFunc("GET /v1/nodes", s.requireScope(ScopeReadonly, s.handleListNodes))
+	s.mux.HandleFunc("POST /v1/nodes/{id}/drain", s.requireScope(ScopeAdmin, s.handleDrainNode))
+	s.mux.HandleFunc("POST /v1/nodes/{id}/undrain", s.requireScope(ScopeAdmin, s.handleUndrainNode))
 	s.mux.HandleFunc("GET /v1/servers", s.requireScope(ScopeReadonly, s.handleListServers))
+	s.mux.HandleFunc("GET /v1/servers/{id}/logs", s.requireScope(ScopeReadonly, s.handleServerLogs))
+	s.mux.HandleFunc("POST /v1/agent-upgrade", s.requireScope(ScopeAdmin, s.handleAgentUpgrade))
+	s.mux.HandleFunc("GET /v1/metrics/query", s.requireScope(ScopeReadonly, s.handleMetricsQuery))
+	s.mux.HandleFunc("GET /v1/metrics/query_range", s.requireScope(ScopeReadonly, s.handleMetricsQueryRange))
 	s.mux.HandleFunc("POST /v1/versions", s.requireScope(ScopeDeploy, s.handleCreateVersion))
 	s.mux.HandleFunc("GET /v1/versions", s.requireScope(ScopeReadonly, s.handleListVersions))
 	s.mux.HandleFunc("POST /v1/deploy", s.requireScope(ScopeDeploy, s.handleDeploy))

@@ -118,14 +118,16 @@ func (f *fakeMaster) counts() (sessions, heartbeats, events, acks int) {
 
 // fakeHandler records dispatched commands.
 type fakeHandler struct {
-	mu          sync.Mutex
-	starts      []*agentlinkv1.StartServer
-	stops       []*agentlinkv1.StopServer
-	allocates   []*agentlinkv1.AllocateServer
-	prepulls    []*agentlinkv1.PrePull
-	drains      []*agentlinkv1.Drain
-	srvDrains   []*agentlinkv1.DrainServer
-	unsupported []string
+	mu        sync.Mutex
+	starts    []*agentlinkv1.StartServer
+	stops     []*agentlinkv1.StopServer
+	allocates []*agentlinkv1.AllocateServer
+	prepulls  []*agentlinkv1.PrePull
+	drains    []*agentlinkv1.Drain
+	undrains  []*agentlinkv1.Undrain
+	srvDrains []*agentlinkv1.DrainServer
+	upgrades  []*agentlinkv1.UpgradeAgent
+	tails     []*agentlinkv1.TailLogs
 }
 
 func (h *fakeHandler) Start(_ context.Context, c *agentlinkv1.StartServer) {
@@ -158,10 +160,20 @@ func (h *fakeHandler) DrainServer(_ context.Context, c *agentlinkv1.DrainServer)
 	defer h.mu.Unlock()
 	h.srvDrains = append(h.srvDrains, c)
 }
-func (h *fakeHandler) Unsupported(_ context.Context, kind, cmdID, serverID string) {
+func (h *fakeHandler) Undrain(_ context.Context, c *agentlinkv1.Undrain) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.unsupported = append(h.unsupported, kind)
+	h.undrains = append(h.undrains, c)
+}
+func (h *fakeHandler) Upgrade(_ context.Context, c *agentlinkv1.UpgradeAgent) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.upgrades = append(h.upgrades, c)
+}
+func (h *fakeHandler) TailLogs(_ context.Context, c *agentlinkv1.TailLogs) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.tails = append(h.tails, c)
 }
 func (h *fakeHandler) startCount() int {
 	h.mu.Lock()
@@ -337,12 +349,12 @@ func TestCommandDispatchAckAndIdempotency(t *testing.T) {
 		t.Fatalf("acks: %v", acks)
 	}
 
-	// Other command kinds reach their handlers (unsupported ones included).
+	// Other command kinds reach their handlers.
 	h.fake.push(t, &agentlinkv1.MasterMsg{Msg: &agentlinkv1.MasterMsg_Stop{Stop: &agentlinkv1.StopServer{
 		ServerId: "s1", GraceS: 5, CmdId: "cmd-2",
 	}}})
 	h.fake.push(t, &agentlinkv1.MasterMsg{Msg: &agentlinkv1.MasterMsg_Tail{Tail: &agentlinkv1.TailLogs{
-		ServerId: "s1", CmdId: "cmd-3",
+		ServerId: "s1", CmdId: "cmd-3", Follow: true, TailLines: 50,
 	}}})
 	h.fake.push(t, &agentlinkv1.MasterMsg{Msg: &agentlinkv1.MasterMsg_Allocate{Allocate: &agentlinkv1.AllocateServer{
 		ServerId: "s1", MatchId: "m-1", PlayersExpected: 2, CmdId: "cmd-4",
@@ -350,21 +362,31 @@ func TestCommandDispatchAckAndIdempotency(t *testing.T) {
 	h.fake.push(t, &agentlinkv1.MasterMsg{Msg: &agentlinkv1.MasterMsg_DrainServer{DrainServer: &agentlinkv1.DrainServer{
 		ServerId: "s1", DeadlineS: 300, Reason: "deploy", CmdId: "cmd-5",
 	}}})
-	eventually(t, "stop, tail, allocate and drain_server handled", func() bool {
+	h.fake.push(t, &agentlinkv1.MasterMsg{Msg: &agentlinkv1.MasterMsg_Upgrade{Upgrade: &agentlinkv1.UpgradeAgent{
+		Url: "https://example.com/agent", Sha256: "aa", Version: "v2", CmdId: "cmd-6",
+	}}})
+	h.fake.push(t, &agentlinkv1.MasterMsg{Msg: &agentlinkv1.MasterMsg_Undrain{Undrain: &agentlinkv1.Undrain{
+		CmdId: "cmd-7",
+	}}})
+	eventually(t, "stop, tail, allocate, drain_server, upgrade and undrain handled", func() bool {
 		handler.mu.Lock()
 		defer handler.mu.Unlock()
-		return len(handler.stops) == 1 && len(handler.unsupported) == 1 &&
-			len(handler.allocates) == 1 && len(handler.srvDrains) == 1
+		return len(handler.stops) == 1 && len(handler.tails) == 1 &&
+			len(handler.allocates) == 1 && len(handler.srvDrains) == 1 &&
+			len(handler.upgrades) == 1 && len(handler.undrains) == 1
 	})
 	handler.mu.Lock()
-	if handler.unsupported[0] != "tail_logs" {
-		t.Fatalf("unsupported: %v", handler.unsupported)
+	if tl := handler.tails[0]; tl.GetServerId() != "s1" || !tl.GetFollow() || tl.GetTailLines() != 50 {
+		t.Fatalf("tail command: %+v", tl)
 	}
 	if a := handler.allocates[0]; a.GetMatchId() != "m-1" || a.GetPlayersExpected() != 2 {
 		t.Fatalf("allocate command: %+v", a)
 	}
 	if d := handler.srvDrains[0]; d.GetServerId() != "s1" || d.GetDeadlineS() != 300 || d.GetReason() != "deploy" {
 		t.Fatalf("drain_server command: %+v", d)
+	}
+	if u := handler.upgrades[0]; u.GetVersion() != "v2" || u.GetUrl() != "https://example.com/agent" {
+		t.Fatalf("upgrade command: %+v", u)
 	}
 	handler.mu.Unlock()
 	eventually(t, "allocate and drain_server acked", func() bool {

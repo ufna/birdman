@@ -49,6 +49,10 @@ message NodeStats {
   uint64 disk_used = 4;
   uint64 disk_total = 5;
   float load1 = 6;
+  // draining (iteration 4, additive): the agent acknowledged a node-level
+  // Drain and rejects new StartServer commands. Informational — node state
+  // in the master's DB stays authoritative.
+  bool draining = 7;
 }
 
 message ServerState {
@@ -96,7 +100,14 @@ message MasterMsg {
     Ack ack = 7; // reserved for master-side acknowledgements
     AllocateServer allocate = 8; // iteration 2: deliver a match to the dedik
     DrainServer drain_server = 9; // iteration 3: per-server drain (deploy reap)
+    Undrain undrain = 10; // iteration 4: lift the node-level drain
   }
+}
+
+// Undrain lifts a node-level Drain (iteration 4, POST /v1/nodes/{id}/undrain):
+// the agent clears its draining flag and accepts StartServer again.
+message Undrain {
+  string cmd_id = 1;
 }
 
 // DrainServer asks ONE dedicated server to finish its current match and exit
@@ -167,4 +178,11 @@ message TailLogs {
   string cmd_id = 1;
   string server_id = 2;
   bool follow = 3;
+  // cancel_cmd_id (iteration 4, additive): when set, this message carries no
+  // new tail request — it cancels the running tail started by that cmd_id
+  // (the REST client of the master's logs proxy disconnected).
+  string cancel_cmd_id = 4;
+  // tail_lines (iteration 4, additive): > 0 → start from the last N lines of
+  // the log instead of the beginning.
+  int32 tail_lines = 5;
 }

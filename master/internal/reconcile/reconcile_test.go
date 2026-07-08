@@ -115,6 +115,79 @@ func TestReconcileCreatesBuffer(t *testing.T) {
 	}
 }
 
+// TestReconcileNodeDrain covers node drain (итерация 4, master.md §6): ready
+// servers on a drained node are reaped (draining + Stop) and the warm pool is
+// rebuilt on an active node, while an allocated server plays its match out.
+func TestReconcileNodeDrain(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10) // node A
+	nodeB := f.AddNode(t, "node-2", "203.0.113.20", 10)
+	f.UpsertFleet(t, 2, 50) // buffer 2
+	r, sender := newReconciler(st)
+	ctx := context.Background()
+
+	// Warm pool of 2 ready + one allocated (live match), all on node A.
+	f.InsertServer(t, f.NodeID, f.VersionID, "ready", 26001, 0)
+	f.InsertServer(t, f.NodeID, f.VersionID, "ready", 26002, 0)
+	allocA := f.InsertServer(t, f.NodeID, f.VersionID, "allocated", 26003, 0)
+
+	// Buffer already satisfied → steady state is quiet.
+	if err := r.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if cmds := sender.take(); len(cmds) != 0 {
+		t.Fatalf("buffer full — want quiet, got %d commands", len(cmds))
+	}
+
+	// Drain node A.
+	node, err := st.DrainNode(ctx, f.NodeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if node.State != "draining" {
+		t.Fatalf("DrainNode: want state draining, got %s", node.State)
+	}
+
+	if err := r.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	starts, stops := map[string]int{}, map[string]int{}
+	for _, c := range sender.take() {
+		if c.Msg.GetStart() != nil {
+			starts[c.NodeID]++
+		}
+		if c.Msg.GetStop() != nil {
+			stops[c.NodeID]++
+		}
+	}
+	if stops[f.NodeID] != 2 || len(stops) != 1 {
+		t.Fatalf("want 2 Stop on the drained node, got %v", stops)
+	}
+	if starts[nodeB] != 2 || len(starts) != 1 {
+		t.Fatalf("want 2 Start on the active node B, got %v", starts)
+	}
+	// The allocated server keeps playing — never touched by drain.
+	if sv, err := st.GetServer(ctx, allocA); err != nil || sv.State != "allocated" {
+		t.Fatalf("allocated server must keep playing, got state=%s err=%v", sv.State, err)
+	}
+	if states := f.ServerStates(t); states["draining"] != 2 || states["creating"] != 2 || states["allocated"] != 1 {
+		t.Fatalf("unexpected states after drain: %+v", states)
+	}
+
+	// node_drain event recorded.
+	if n, err := st.CountEvents(ctx, store.EventNodeDrain); err != nil || n != 1 {
+		t.Fatalf("want 1 node_drain event, got %d err=%v", n, err)
+	}
+
+	// Undrain: node active again, idempotent.
+	if node, err := st.UndrainNode(ctx, f.NodeID); err != nil || node.State != "active" {
+		t.Fatalf("UndrainNode: want active, got state=%s err=%v", node.State, err)
+	}
+	if n, err := st.CountEvents(ctx, store.EventNodeUndrain); err != nil || n != 1 {
+		t.Fatalf("want 1 node_undrain event, got %d err=%v", n, err)
+	}
+}
+
 // Killing a server restores the buffer on the next pass (acceptance ит. 1).
 func TestReconcileRestoresAfterFailure(t *testing.T) {
 	st := testdb.New(t)

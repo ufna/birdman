@@ -1,8 +1,8 @@
 # birdman-master v0
 
-Флот-контроллер + Allocation API + матчмейкер v0 + deploy-менеджер + gRPC
-AgentLink — итерации 1–3 из `docs/05-runtime-iterations.md`. Спека:
-`docs/specs/master.md` (источник истины).
+Флот-контроллер + Allocation API + матчмейкер v0 + deploy-менеджер +
+наблюдаемость/операционка + gRPC AgentLink — итерации 1–4 из
+`docs/05-runtime-iterations.md`. Спека: `docs/specs/master.md` (источник истины).
 
 Что внутри v0:
 
@@ -85,11 +85,20 @@ AgentLink — итерации 1–3 из `docs/05-runtime-iterations.md`. Сп�
   SameSite=Lax cookie (in-memory, TTL 24ч, скоупы ключа), `GET /v1/session`,
   `DELETE /v1/session`; Bearer работает как раньше; для не-GET по cookie
   обязателен заголовок `X-Birdman-Csrf: 1`;
-- **встроенная админ-панель** (`/`, П0 read-only) — см. раздел «Панель».
+- **встроенная админ-панель** (`/`, П0 read-only) — см. раздел «Панель»;
+- **наблюдаемость + операционка** (итерация 4, `master.md` §6, тело в
+  `internal/httpapi/ops.go`): drain/undrain ноды (`POST /v1/nodes/{id}/drain`·
+  `/undrain` — reconcile реапит ready на draining-ноде, allocated доигрывают),
+  logs-proxy (`GET /v1/servers/{id}/logs?follow=&tail=` — стрим `LogChunk`
+  через `agentlink.LogRouter`, в т.ч. для умерших), self-upgrade агента
+  (`POST /v1/agent-upgrade`, watchdog → `agent_upgrade_succeeded/failed`),
+  read-only прокси метрик к VictoriaMetrics (`GET /v1/metrics/query`·
+  `/query_range`); метрики `birdman_events_total{kind}` (вход CrashLoop-алерта),
+  `birdman_matches_running`, `birdman_players_online`.
 
 Отложено (TODO, спеки помечены): обмен node_token → клиентский mTLS-серт,
-проверка join_token на дедике (liba), drain ноды, logs-proxy, деплой-хук
-из CI в master (master не публичен — `ops.md` §2).
+проверка join_token на дедике (liba), деплой-хук из CI в master (master не
+публичен — `ops.md` §2); MasterDown — внешний probe (`ops.md` §1).
 
 ## Конфиг
 

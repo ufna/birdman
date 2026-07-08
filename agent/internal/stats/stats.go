@@ -37,6 +37,11 @@ func New(diskPath string) *Collector {
 	return &Collector{diskPath: diskPath}
 }
 
+// DiskUsage reports used/total bytes of the filesystem containing path
+// (zeroes on non-Linux dev hosts) — image GC watermarks and the metrics
+// endpoint sample it directly.
+func DiskUsage(path string) (used, total uint64) { return diskUsage(path) }
+
 // Sample reads the current node stats.
 func (c *Collector) Sample() Stats {
 	var s Stats

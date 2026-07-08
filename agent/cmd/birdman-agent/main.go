@@ -10,14 +10,21 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/ufna/birdman/agent/internal/config"
 	"github.com/ufna/birdman/agent/internal/daemon"
+	"github.com/ufna/birdman/agent/internal/imagegc"
 	"github.com/ufna/birdman/agent/internal/link"
+	"github.com/ufna/birdman/agent/internal/logrot"
+	"github.com/ufna/birdman/agent/internal/metrics"
+	"github.com/ufna/birdman/agent/internal/qosecho"
 	"github.com/ufna/birdman/agent/internal/runonce"
 	"github.com/ufna/birdman/agent/internal/runtime"
+	"github.com/ufna/birdman/agent/internal/stats"
 )
 
 // version is injected by build.sh via -ldflags "-X main.version=…".
@@ -80,8 +87,12 @@ func runDaemon(args []string) int {
 		hostname = ""
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	// A successful self-upgrade also ends this context: the agent exits
+	// cleanly and systemd restarts the new binary (agent.md §7).
+	ctx, cancel := context.WithCancel(sigCtx)
+	defer cancel()
 
 	client, err := runtime.Connect(*containerdAddr)
 	if err != nil {
@@ -90,22 +101,64 @@ func runDaemon(args []string) int {
 	}
 	defer client.Close()
 
+	rt := &daemon.ContainerdRuntime{Client: client, Auth: cfg.RegistryAuth}
+	gc := imagegc.New(imagegc.Options{
+		Runtime:   rt,
+		DiskUsage: func() (uint64, uint64) { return stats.DiskUsage(cfg.DataDir) },
+		Watermark: float64(cfg.DiskGCWatermarkPct) / 100,
+		Logf:      logf,
+	})
+
+	var upgraded atomic.Bool
 	outbox := link.NewOutbox(logf)
 	mgr, err := daemon.NewManager(ctx, daemon.Options{
-		Config:    cfg,
-		Runtime:   &daemon.ContainerdRuntime{Client: client, Auth: cfg.RegistryAuth},
-		Sink:      outbox,
-		SocketDir: *socketDir,
-		Logf:      logf,
+		Config:       cfg,
+		Runtime:      rt,
+		Sink:         outbox,
+		SocketDir:    *socketDir,
+		Logf:         logf,
+		AgentVersion: version,
+		TouchImage:   gc.Touch,
+		OnUpgraded: func(v string) {
+			logf("self-upgrade to %s complete — exiting for systemd restart", v)
+			upgraded.Store(true)
+			cancel()
+		},
 	})
 	if err != nil {
 		logf("%v", err)
 		return 1
 	}
+
+	// Log rotation + retention (agent.md §5): 100MB×2 per dedik, gzip after
+	// stop, N-day retention for archives.
+	rot := logrot.New(logrot.Config{
+		Dir:       filepath.Join(cfg.LogDir, "servers"),
+		MaxSize:   int64(cfg.LogMaxSizeMB) << 20,
+		Retention: time.Duration(cfg.LogRetentionDays) * 24 * time.Hour,
+		Logf:      logf,
+	}, mgr.LiveServerIDs)
+	mgr.SetLogFinalizer(rot.Finalize)
+
 	if err := mgr.Restore(ctx); err != nil {
 		logf("restore server map: %v", err)
 		return 1
 	}
+
+	go rot.Run(ctx.Done())
+	go gc.Run(ctx, time.Minute)
+	go func() {
+		// Metrics endpoint (agent.md §9) — localhost only, scraped by vmagent.
+		if err := metrics.Serve(ctx, cfg.MetricsAddr, version, mgr.MetricsSample, logf); err != nil {
+			logf("metrics: %v", err)
+		}
+	}()
+	go func() {
+		// QoS UDP echo (agent.md §8) — the public ping target of the node.
+		if err := qosecho.Serve(ctx, cfg.QoSEchoAddr, logf); err != nil {
+			logf("qos echo: %v", err)
+		}
+	}()
 
 	lc := link.New(link.Config{
 		MasterAddr:    cfg.MasterAddr,
@@ -126,7 +179,11 @@ func runDaemon(args []string) int {
 	}
 	// Graceful shutdown: close liba sockets, leave containers running.
 	mgr.Shutdown()
-	logf("agent stopped; dedicated servers keep running (restart restores the map)")
+	if upgraded.Load() {
+		logf("agent exiting for self-upgrade restart; dedicated servers keep running")
+	} else {
+		logf("agent stopped; dedicated servers keep running (restart restores the map)")
+	}
 	return 0
 }
 

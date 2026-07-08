@@ -32,13 +32,17 @@ type Handler interface {
 	// (итерация 2: `allocated{match_id, players_expected}` over UDS).
 	Allocate(ctx context.Context, cmd *agentlinkv1.AllocateServer)
 	PrePull(ctx context.Context, cmd *agentlinkv1.PrePull)
+	// Drain / Undrain flip the node-level drain flag (итерация 4): while
+	// draining the agent rejects new StartServer commands.
 	Drain(ctx context.Context, cmd *agentlinkv1.Drain)
+	Undrain(ctx context.Context, cmd *agentlinkv1.Undrain)
 	// DrainServer drains ONE dedik (итерация 3, deploy reap): liba gets the
 	// `drain{deadline_s, reason}` frame and exits after the match on its own.
 	DrainServer(ctx context.Context, cmd *agentlinkv1.DrainServer)
-	// Unsupported handles commands the agent does not implement yet
-	// (UpgradeAgent, TailLogs — v0 TODO).
-	Unsupported(ctx context.Context, kind, cmdID, serverID string)
+	// Upgrade self-upgrades the agent binary (итерация 4, agent.md §7).
+	Upgrade(ctx context.Context, cmd *agentlinkv1.UpgradeAgent)
+	// TailLogs streams a server log back as LogChunk frames (итерация 4).
+	TailLogs(ctx context.Context, cmd *agentlinkv1.TailLogs)
 }
 
 // Source supplies the current node/server state for Hello and heartbeats.
@@ -210,6 +214,12 @@ func (c *Client) session(ctx context.Context, client agentlinkv1.AgentLinkClient
 			if err := stream.Send(c.heartbeat()); err != nil {
 				return err
 			}
+		case m := <-c.outbox.logChunks():
+			// Log chunks are session-scoped: an undelivered chunk dies with
+			// the stream (the master closes its side of the tail anyway).
+			if err := stream.Send(m); err != nil {
+				return err
+			}
 		case <-c.outbox.wait():
 			// A heartbeat goes out before queued events so the master sees
 			// consistent server state (port, state) before reacting to the
@@ -277,12 +287,14 @@ func (c *Client) dispatch(ctx context.Context, in *agentlinkv1.MasterMsg) {
 		c.h.PrePull(ctx, m.Prepull)
 	case *agentlinkv1.MasterMsg_Drain:
 		c.h.Drain(ctx, m.Drain)
+	case *agentlinkv1.MasterMsg_Undrain:
+		c.h.Undrain(ctx, m.Undrain)
 	case *agentlinkv1.MasterMsg_DrainServer:
 		c.h.DrainServer(ctx, m.DrainServer)
 	case *agentlinkv1.MasterMsg_Upgrade:
-		c.h.Unsupported(ctx, "upgrade_agent", m.Upgrade.GetCmdId(), "")
+		c.h.Upgrade(ctx, m.Upgrade)
 	case *agentlinkv1.MasterMsg_Tail:
-		c.h.Unsupported(ctx, "tail_logs", m.Tail.GetCmdId(), m.Tail.GetServerId())
+		c.h.TailLogs(ctx, m.Tail)
 	}
 }
 
@@ -299,6 +311,8 @@ func commandID(m *agentlinkv1.MasterMsg) string {
 		return c.Prepull.GetCmdId()
 	case *agentlinkv1.MasterMsg_Drain:
 		return c.Drain.GetCmdId()
+	case *agentlinkv1.MasterMsg_Undrain:
+		return c.Undrain.GetCmdId()
 	case *agentlinkv1.MasterMsg_DrainServer:
 		return c.DrainServer.GetCmdId()
 	case *agentlinkv1.MasterMsg_Upgrade:

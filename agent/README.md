@@ -1,8 +1,10 @@
 # birdman-agent
 
-Нода-агент birdman, **итерации 1–3** (`docs/05-runtime-iterations.md`): демон `run` под управлением master (gRPC AgentLink) + локальный `run-once` из итерации 0. Спеки: `docs/specs/agent.md`, `docs/specs/protocol.md` §1–2.
+Нода-агент birdman, **итерации 1–4** (`docs/05-runtime-iterations.md`): демон `run` под управлением master (gRPC AgentLink) + локальный `run-once` из итерации 0. Спеки: `docs/specs/agent.md`, `docs/specs/protocol.md` §1–2.
 
 Что внутри: gRPC bidi-линк с master (Hello с восстановленной картой, heartbeat 2с c NodeStats, команды Start/Stop/Allocate/PrePull/DrainServer c `Ack{cmd_id}` и идемпотентностью, реконнект с бэкоффом 1с→30с), восстановление карты серверов из containerd-labels после рестарта (живые дедики агент-рестарт переживают), ensure/pull образа (включая приватный GHCR), пул host-портов, запуск контейнера (host network, cgroup-лимиты, env-контракт `BIRDMAN_*`, ro bind-mount per-server каталога с сокетом), UDS-сервер liba-протокола (NDJSON), стейт-машина `pulling → starting → ready → allocated → draining → stopped|failed`, grace 30с до `ready`, shim-side логи дедика (`cio.LogFile` — переживают рестарт агента), graceful stop по SIGTERM (дедиков не трогает).
+
+Итерация 4 (наблюдаемость + операционка): **`/metrics` на `127.0.0.1:9101`** (Prometheus text: `birdman_agent_up`, `birdman_agent_servers{state}`, `birdman_server_players/tick_ms{server_id}`, per-container cpu/mem из cgroups v2, диск `data_dir`, занятость пула портов); **UDP QoS-echo на `:19999`** (≤64б, публичный — клиенты меряют rtt); **ротация логов дедиков** (100MB×2, gzip после stop, ретенция 7 дней, фоновая уборка); **image GC** (диск >80% → LRU неиспользуемых образов кроме active/prepulling/deprecated; >90% → отказ StartServer + событие `disk_full`); **TailLogs** (стрим `LogChunk` master'у, в т.ч. из `.gz` для умерших дедиков); **node Drain/Undrain** (draining в heartbeat, новые StartServer отклоняет); **self-upgrade** (`UpgradeAgent{url,sha256,version}` → скачать → sha256 → atomic rename → чистый выход, systemd поднимает новый бинарь; живые дедики переживают — нужен `Restart=always` в unit).
 
 ## Сборка
 

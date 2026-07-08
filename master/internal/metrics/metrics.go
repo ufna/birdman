@@ -80,6 +80,21 @@ var (
 		"birdman_versions",
 		"Registered version counts by project and state (registered, prepulling, active, deprecated, disabled).",
 		[]string{"project", "state"}, nil)
+	// birdman_events_total feeds the CrashLoop alert (increase of
+	// {kind="crash_loop"}); the events table is append-only, so a DB-derived
+	// count is monotonic and survives a master restart — a real counter.
+	eventsTotalDesc = prometheus.NewDesc(
+		"birdman_events_total",
+		"Total events by kind (append-only feed; crash_loop feeds the CrashLoop alert).",
+		[]string{"kind"}, nil)
+	matchesRunningDesc = prometheus.NewDesc(
+		"birdman_matches_running",
+		"Matches currently in the running state (product metric).",
+		nil, nil)
+	playersOnlineDesc = prometheus.NewDesc(
+		"birdman_players_online",
+		"Live players across allocated servers, last heartbeat (product metric).",
+		nil, nil)
 )
 
 // dbCollector derives gauge metrics from Postgres on scrape.
@@ -92,11 +107,43 @@ func (c *dbCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- serversDesc
 	ch <- heartbeatAgeDesc
 	ch <- versionsDesc
+	ch <- eventsTotalDesc
+	ch <- matchesRunningDesc
+	ch <- playersOnlineDesc
 }
 
 func (c *dbCollector) Collect(ch chan<- prometheus.Metric) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+
+	// Product + alert-feed metrics (ops.md §1). Each logs-and-continues so one
+	// failed query does not blank the rest.
+	if erows, err := c.st.Pool.Query(ctx, `select kind, count(*) from events group by kind`); err != nil {
+		c.log.Error("metrics: events query failed", "err", err)
+	} else {
+		for erows.Next() {
+			var kind string
+			var n float64
+			if err := erows.Scan(&kind, &n); err != nil {
+				c.log.Error("metrics: events scan failed", "err", err)
+				break
+			}
+			ch <- prometheus.MustNewConstMetric(eventsTotalDesc, prometheus.CounterValue, n, kind)
+		}
+		erows.Close()
+	}
+	var running float64
+	if err := c.st.Pool.QueryRow(ctx, `select count(*) from matches where state = 'running'`).Scan(&running); err != nil {
+		c.log.Error("metrics: matches_running query failed", "err", err)
+	} else {
+		ch <- prometheus.MustNewConstMetric(matchesRunningDesc, prometheus.GaugeValue, running)
+	}
+	var players float64
+	if err := c.st.Pool.QueryRow(ctx, `select coalesce(sum(players), 0) from servers where state = 'allocated'`).Scan(&players); err != nil {
+		c.log.Error("metrics: players_online query failed", "err", err)
+	} else {
+		ch <- prometheus.MustNewConstMetric(playersOnlineDesc, prometheus.GaugeValue, players)
+	}
 
 	rows, err := c.st.Pool.Query(ctx, `
 		select s.state, n.region, v.semver, count(*)

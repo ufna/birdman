@@ -27,11 +27,12 @@ type Service struct {
 	st   *store.Store
 	hub  *Hub
 	pull PullSink
+	logs *LogRouter
 	log  *slog.Logger
 }
 
-func NewService(st *store.Store, hub *Hub, pull PullSink, log *slog.Logger) *Service {
-	return &Service{st: st, hub: hub, pull: pull, log: log}
+func NewService(st *store.Store, hub *Hub, pull PullSink, logs *LogRouter, log *slog.Logger) *Service {
+	return &Service{st: st, hub: hub, pull: pull, logs: logs, log: log}
 }
 
 func (s *Service) Session(stream agentlinkv1.AgentLink_SessionServer) error {
@@ -128,7 +129,11 @@ func (s *Service) readLoop(ctx context.Context, stream agentlinkv1.AgentLink_Ses
 				s.pull.HandlePullReport(nodeID, m.Pull)
 			}
 		case *agentlinkv1.AgentMsg_Log:
-			// TailLogs streaming to REST is a later iteration.
+			// Route TailLogs answer chunks to the REST logs proxy
+			// (итерация 4, GET /v1/servers/{id}/logs).
+			if s.logs != nil {
+				s.logs.Dispatch(m.Log.GetCmdId(), m.Log)
+			}
 		case *agentlinkv1.AgentMsg_Hello:
 			s.log.Warn("agentlink: duplicate Hello ignored", "node_id", nodeID)
 		}

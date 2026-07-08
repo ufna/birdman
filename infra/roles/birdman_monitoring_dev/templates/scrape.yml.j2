@@ -1,0 +1,14 @@
+# {{ ansible_managed }}
+# vmagent promscrape-конфиг (Prometheus-формат). Цели — из role-var
+# birdman_scrape_jobs (расширяемо: добавить ноду = добавить target).
+global:
+  scrape_interval: {{ birdman_scrape_interval }}
+  external_labels:
+    box: birdman-dev
+scrape_configs:
+{% for job in birdman_scrape_jobs %}
+  - job_name: {{ job.job_name }}
+    metrics_path: {{ job.metrics_path | default('/metrics') }}
+    static_configs:
+      - targets: {{ job.targets | to_json }}
+{% endfor %}

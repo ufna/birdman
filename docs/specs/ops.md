@@ -34,6 +34,8 @@
 
 MasterDown обязан приходить **не** через master (внешний probe) — иначе немой отказ.
 
+> **(Уточнено в v0, итерация 4 — реализовано.)** vmalert-стек поднят ansible'ом (`infra/roles/birdman_monitoring_dev`, playbook `monitoring.yml`): VictoriaMetrics + vmagent + vmalert + Grafana, всё на 127.0.0.1 дев-бокса. Правила: NodeDown, BufferEmpty (ready==0 3м **и** `no_capacity` 1м — две записи), CrashLoop (`increase(birdman_events_total{kind="crash_loop"}[5m])`), DiskHigh (warn/crit по `birdman_agent_disk_*`), AllocationFailures, TickDegraded (порог `birdman_tick_degraded_ms`), AgentUpgradeFailed (`birdman_events_total{kind="agent_upgrade_failed"}`). **MasterDown — НЕ реализован** (намеренно): правило на самом боксе = немой отказ при падении master'а/тачки. Нужен **внешний** probe (healthchecks.io / UptimeRobot / blackbox_exporter вне бокса) на `GET /healthz`; пока master слушает только localhost — probe через туннель/бастион либо после публичного HTTPS-ингресса master'а (прод-фаза). **CertExpiry** — тоже TODO (в v0 self-signed автоген master'а, метрики истечения нет). Канал алертов: Discord-webhook'а пока нет → работает logger-sink (`/var/log/birdman/alerts.log`); переключение на `prom/alertmanager` с `discord_configs` — ansible-переменной `birdman_alert_discord_webhook`.
+
 ### Логи
 
 Дедики — на тачках с tail/скачиванием через master (см. `agent.md` §5). master — journald (JSON). Централизованное хранилище логов (Loki/Victoria Logs) — только если руками станет тесно; не в v1.
@@ -104,6 +106,8 @@ infra/
 ## 5. Бэкапы и восстановление
 
 - Postgres: `pg_dump` каждый час → S3-совместимое хранилище (Backblaze/Wasabi), retention 14 дней; еженедельный тест-restore в docker (CI-джоба).
+
+> **(Уточнено в v0, итерация 4.)** Реализованы **локальные** дампы (роль `birdman_monitoring_dev`): `birdman-pg-backup.timer` каждые 6ч → `docker exec birdman-postgres pg_dump -Fc` в `/var/lib/birdman/backups`, ротация 14 свежих; тест-restore — `/usr/local/bin/birdman-pg-restore-test` (одноразовый `postgres:16`, `pg_restore` + sanity-запрос). **Оффсайт в S3 — TODO** (бакета нет): когда появится — `rclone copy`/`aws s3 cp` в `/usr/local/bin/birdman-pg-backup` (место помечено `TODO(offsite)`), креды в vault. Еженедельный тест-restore как CI-джоба — тоже прод-фаза (сейчас скрипт запускается вручную/по расписанию на боксе).
 - Потеря master-тачки: новая тачка → `master.yml` плейбук → restore дампа → агенты переподключаются сами; матчи, шедшие во время отказа, доигрываются (сервера живы), их `match_end` попадёт в PG после восстановления. Целевой RTO ≤ 60 мин, RPO ≤ 1 ч.
 
 ## 6. Runbooks (заготовки — довести в итерации 4–5)

@@ -1,0 +1,16 @@
+---
+# Стек наблюдаемости + ops birdman (итерация 4, docs/specs/ops.md §1, §5):
+# VictoriaMetrics + vmagent + vmalert + Grafana + alert-sink (docker compose,
+# всё на 127.0.0.1) и systemd-бэкапы Postgres. Запускать ПОСЛЕ dev-node.yml
+# (нужны живой birdman-postgres для бэкапов и цели скрейпа agent/master).
+# Всё аддитивно; на общий дев-бокс кладёт только birdman-объекты.
+#
+#   ansible-playbook playbooks/monitoring.yml
+#
+# Discord-webhook'а пока нет → работает logger-sink (пишет
+# /var/log/birdman/alerts.log). Задать webhook: -e birdman_alert_discord_webhook=...
+- name: birdman dev node — monitoring + ops (iteration 4)
+  hosts: birdman_dev
+  become: true
+  roles:
+    - birdman_monitoring_dev

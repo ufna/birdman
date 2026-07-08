@@ -5,6 +5,7 @@ import (
 	"syscall"
 
 	"github.com/ufna/birdman/agent/internal/config"
+	"github.com/ufna/birdman/agent/internal/imagegc"
 	"github.com/ufna/birdman/agent/internal/runtime"
 )
 
@@ -63,6 +64,28 @@ func (r *ContainerdRuntime) Start(ctx context.Context, spec StartSpec) (Handle, 
 	return newHandle(srv), nil
 }
 
+// Images / DeleteImage / UsedImageRefs make ContainerdRuntime satisfy
+// imagegc.Runtime (agent.md §6).
+func (r *ContainerdRuntime) Images(ctx context.Context) ([]imagegc.Image, error) {
+	infos, err := r.Client.Images(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]imagegc.Image, 0, len(infos))
+	for _, i := range infos {
+		out = append(out, imagegc.Image{Name: i.Name, UpdatedAt: i.UpdatedAt})
+	}
+	return out, nil
+}
+
+func (r *ContainerdRuntime) DeleteImage(ctx context.Context, name string) error {
+	return r.Client.DeleteImage(ctx, name)
+}
+
+func (r *ContainerdRuntime) UsedImageRefs(ctx context.Context) (map[string]bool, error) {
+	return r.Client.UsedImageRefs(ctx)
+}
+
 func (r *ContainerdRuntime) Restore(ctx context.Context) ([]RestoredServer, error) {
 	restored, err := r.Client.Restore(ctx)
 	if err != nil {
@@ -104,6 +127,8 @@ func newHandle(srv *runtime.Server) *containerdHandle {
 }
 
 func (h *containerdHandle) Wait() <-chan Exit { return h.exit }
+
+func (h *containerdHandle) Pid() uint32 { return h.srv.Pid() }
 
 func (h *containerdHandle) Signal(ctx context.Context, sig syscall.Signal) error {
 	return h.srv.Signal(ctx, sig)

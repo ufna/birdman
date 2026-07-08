@@ -7,8 +7,10 @@ infra/
   ansible.cfg                 # inventory/roles_path — запускать из infra/
   inventories/dev/hosts.yml   # birdman-dev (HOSTER_A, ОБЩИЙ бокс с чужим продом)
   playbooks/dev-node.yml      # дев-нода: master (pg+бинарь+unit) → агент (демон)
+  playbooks/monitoring.yml    # наблюдаемость + ops-бэкапы (итерация 4)
   roles/birdman_master_dev/   # postgres в compose + master-бинарь под systemd
   roles/birdman_agent_dev/    # агент-демон + регистрация ноды (см. «Дев vs прод»)
+  roles/birdman_monitoring_dev/  # VM+vmagent+vmalert+Grafana+alert-sink (compose) + pg-бэкапы
 ```
 
 ## Запуск
@@ -58,6 +60,36 @@ ansible-playbook playbooks/dev-node.yml
 Проверка после прогона: `systemctl is-active birdman-master birdman-agent`, `curl -s localhost:8100/healthz` (на тачке), нода в `GET /v1/nodes` — `active` со свежим heartbeat.
 
 Дальше жизнью дедиков управляет только master/agent-цикл (версии/флоты — через REST API master, см. `master/README.md`): ansible дедики не деплоит.
+
+## Наблюдаемость + ops (`monitoring.yml`)
+
+Итерация 4 (`docs/specs/ops.md` §1, §5). Запускать **после** `dev-node.yml`
+(нужны живой `birdman-postgres` для бэкапов и цели скрейпа agent/master):
+
+```bash
+ansible-playbook playbooks/monitoring.yml
+```
+
+Роль `birdman_monitoring_dev` — отдельный compose-проект `birdman-monitoring`,
+всё строго на `127.0.0.1` (наружу — только SSH-туннель):
+
+| Сервис | Порт (127.0.0.1) | Что |
+|---|---|---|
+| VictoriaMetrics | 8428 | TSDB single-node, retention 30d, volume `birdman-vmdata` |
+| vmagent | 8429 | скрейп 15s (host-network): agent :9101, master :8100, чужой node_exporter :4027 (read-only) → remote-write в VM |
+| vmalert | 8880 | правила `ops.md §1`; query→VM, notify→sink/alertmanager |
+| Grafana | 3000 | datasource VM + 2 дашборда provisioning'ом («Тачка», «birdman»); admin-пароль в `/etc/birdman/grafana_admin_password` (0600), volume `birdman-grafana` |
+| alert-sink **или** alertmanager | 9094 / 9093 | по умолчанию logger-sink пишет `/var/log/birdman/alerts.log`; при `-e birdman_alert_discord_webhook=…` — реальный alertmanager с Discord |
+
+Конфиги шаблонятся в `/etc/birdman/monitoring/…` и монтируются ro в контейнеры.
+
+Бэкапы Postgres: `birdman-pg-backup.timer` (каждые 6ч) → `pg_dump -Fc` в
+`/var/lib/birdman/backups` (держим 14 свежих). Учебный restore:
+`/usr/local/bin/birdman-pg-restore-test` (поднимает throwaway postgres:16,
+восстанавливает последний дамп, гоняет sanity-запрос, PASS/FAIL, сносит).
+
+UFW `19999/udp` (QoS echo) открывает роль `birdman_agent_dev` (единственный
+внешне-открытый порт ноды), при прогоне `dev-node.yml`.
 
 ## Дев vs прод
 

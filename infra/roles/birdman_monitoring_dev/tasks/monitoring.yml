@@ -1,0 +1,177 @@
+---
+# Стек наблюдаемости birdman: docker compose (проект birdman-monitoring).
+# Конфиги шаблонятся в /etc/birdman/monitoring и монтируются ro в контейнеры.
+
+- name: Create monitoring directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - /etc/birdman
+    - /opt/birdman
+    - "{{ birdman_monitoring_dir }}"
+    - "{{ birdman_monitoring_conf_dir }}"
+    - "{{ birdman_monitoring_conf_dir }}/vmagent"
+    - "{{ birdman_monitoring_conf_dir }}/vmalert"
+    - "{{ birdman_monitoring_conf_dir }}/grafana"
+    - "{{ birdman_monitoring_conf_dir }}/grafana/provisioning"
+    - "{{ birdman_monitoring_conf_dir }}/grafana/provisioning/datasources"
+    - "{{ birdman_monitoring_conf_dir }}/grafana/provisioning/dashboards"
+    - "{{ birdman_monitoring_conf_dir }}/grafana/dashboards"
+    - "{{ birdman_log_dir }}"
+
+# --- Grafana admin password: генерится один раз, живёт 0600 на тачке ---
+- name: Generate Grafana admin password once (kept only on the box)
+  ansible.builtin.copy:
+    content: "{{ lookup('password', '/dev/null length=32 chars=ascii_letters,digits') }}"
+    dest: "{{ birdman_grafana_admin_password_file }}"
+    force: false          # только если файла ещё нет — идемпотентно
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Read Grafana admin password
+  ansible.builtin.slurp:
+    src: "{{ birdman_grafana_admin_password_file }}"
+  register: birdman_grafana_pass_raw
+  no_log: true
+
+- name: Set Grafana admin password fact
+  ansible.builtin.set_fact:
+    birdman_grafana_admin_password: "{{ birdman_grafana_pass_raw.content | b64decode | trim }}"
+  no_log: true
+
+- name: Render Grafana env_file (0600, contains admin password)
+  ansible.builtin.template:
+    src: grafana.env.j2
+    dest: "{{ birdman_monitoring_conf_dir }}/grafana.env"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  notify: Restart birdman-grafana
+
+# --- Grafana provisioning: datasource + dashboards ---
+- name: Render Grafana datasource provisioning (VictoriaMetrics)
+  ansible.builtin.template:
+    src: grafana-datasource.yml.j2
+    dest: "{{ birdman_monitoring_conf_dir }}/grafana/provisioning/datasources/victoriametrics.yml"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart birdman-grafana
+
+- name: Install Grafana dashboards provider
+  ansible.builtin.copy:
+    src: grafana-dashboard-provider.yml
+    dest: "{{ birdman_monitoring_conf_dir }}/grafana/provisioning/dashboards/provider.yml"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart birdman-grafana
+
+- name: Install Grafana dashboards (Тачка + birdman)
+  ansible.builtin.copy:
+    src: "dashboards/{{ item }}"
+    dest: "{{ birdman_monitoring_conf_dir }}/grafana/dashboards/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - tachka.json
+    - birdman.json
+  # дашборды grafana подхватывает сама (updateIntervalSeconds) — рестарт не нужен
+
+# --- vmagent scrape config ---
+- name: Render vmagent scrape config
+  ansible.builtin.template:
+    src: scrape.yml.j2
+    dest: "{{ birdman_monitoring_conf_dir }}/vmagent/scrape.yml"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart birdman-vmagent
+
+# --- vmalert rules ---
+- name: Render vmalert rules
+  ansible.builtin.template:
+    src: rules.yml.j2
+    dest: "{{ birdman_monitoring_conf_dir }}/vmalert/rules.yml"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart birdman-vmalert
+
+# --- alert sink (logger-путь) ---
+- name: Install alert logger sink script
+  ansible.builtin.copy:
+    src: alert-logger.py
+    dest: "{{ birdman_monitoring_conf_dir }}/alert-logger.py"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart birdman-alert-sink
+
+# --- alertmanager (Discord-путь: только когда задан webhook) ---
+- name: Ensure alertmanager config dir (discord path)
+  ansible.builtin.file:
+    path: "{{ birdman_monitoring_conf_dir }}/alertmanager"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: birdman_alert_discord_webhook | length > 0
+
+- name: Render alertmanager config (discord path, 0600 — contains webhook)
+  ansible.builtin.template:
+    src: alertmanager.yml.j2
+    dest: "{{ birdman_monitoring_conf_dir }}/alertmanager/alertmanager.yml"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  when: birdman_alert_discord_webhook | length > 0
+  notify: Restart birdman-alertmanager
+
+# --- compose file + up ---
+- name: Install monitoring compose file
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: "{{ birdman_monitoring_dir }}/compose.yml"
+    owner: root
+    group: root
+    mode: "0644"          # без секретов: пароль Grafana — в env_file 0600
+
+- name: Start monitoring stack (docker compose, idempotent)
+  ansible.builtin.command:
+    cmd: docker compose -f {{ birdman_monitoring_dir }}/compose.yml up -d --remove-orphans
+  register: birdman_mon_compose_up
+  changed_when: >-
+    'Started' in birdman_mon_compose_up.stderr or
+    'Created' in birdman_mon_compose_up.stderr or
+    'Recreated' in birdman_mon_compose_up.stderr
+
+- name: Apply pending monitoring restarts before health checks
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for VictoriaMetrics
+  ansible.builtin.uri:
+    url: "http://{{ birdman_bind_addr }}:{{ birdman_vm_port }}/health"
+    status_code: 200
+  register: birdman_vm_health
+  retries: 30
+  delay: 2
+  until: birdman_vm_health.status == 200
+
+- name: Wait for Grafana
+  ansible.builtin.uri:
+    url: "http://{{ birdman_bind_addr }}:{{ birdman_grafana_port }}/api/health"
+    status_code: 200
+  register: birdman_grafana_health
+  retries: 30
+  delay: 2
+  until: birdman_grafana_health.status == 200

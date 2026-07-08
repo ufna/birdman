@@ -1,0 +1,14 @@
+# Grafana dashboards provisioning provider (статичный). Читает JSON-дашборды
+# из /etc/grafana/dashboards (ro-маунт), кладёт их в папку "birdman".
+apiVersion: 1
+providers:
+  - name: birdman
+    orgId: 1
+    folder: birdman
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/dashboards
+      foldersFromFilesStructure: false

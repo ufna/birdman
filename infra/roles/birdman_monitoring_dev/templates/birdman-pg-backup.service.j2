@@ -1,0 +1,10 @@
+# {{ ansible_managed }}
+[Unit]
+Description=birdman Postgres backup (pg_dump -> {{ birdman_backups_dir }})
+Documentation=file:///usr/local/bin/birdman-pg-backup
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/birdman-pg-backup

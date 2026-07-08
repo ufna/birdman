@@ -16,11 +16,13 @@ import (
 	"sort"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/cio"
 	"github.com/containerd/containerd/containers"
 	"github.com/containerd/containerd/errdefs"
+	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/oci"
 	"github.com/containerd/containerd/remotes/docker"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -233,6 +235,15 @@ func (c *Client) StartServer(ctx context.Context, sp ServerSpec, logW io.Writer)
 // Wait returns the exit channel armed before task start.
 func (s *Server) Wait() <-chan containerd.ExitStatus { return s.exitCh }
 
+// Pid returns the container init pid (0 when there is no live task) — the
+// cgroup resolution entry point for per-container metrics (agent.md §9).
+func (s *Server) Pid() uint32 {
+	if s.task == nil {
+		return 0
+	}
+	return s.task.Pid()
+}
+
 // Signal sends sig to the container init process (graceful stop = SIGTERM).
 func (s *Server) Signal(ctx context.Context, sig syscall.Signal) error {
 	err := s.task.Kill(ctx, sig)
@@ -337,6 +348,51 @@ func (c *Client) Restore(ctx context.Context) ([]Restored, error) {
 		out = append(out, r)
 	}
 	return out, nil
+}
+
+// ImageInfo is one image of the birdman namespace (image GC input).
+type ImageInfo struct {
+	Name      string
+	UpdatedAt time.Time
+}
+
+// Images lists images in the birdman namespace.
+func (c *Client) Images(ctx context.Context) ([]ImageInfo, error) {
+	imgs, err := c.c.ImageService().List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list images: %w", err)
+	}
+	out := make([]ImageInfo, 0, len(imgs))
+	for _, img := range imgs {
+		out = append(out, ImageInfo{Name: img.Name, UpdatedAt: img.UpdatedAt})
+	}
+	return out, nil
+}
+
+// DeleteImage removes an image, synchronously collecting its content
+// (docs/specs/agent.md §6 image GC).
+func (c *Client) DeleteImage(ctx context.Context, name string) error {
+	return c.c.ImageService().Delete(ctx, name, images.SynchronousDelete())
+}
+
+// UsedImageRefs returns the image refs referenced by existing containers of
+// the namespace — never GC candidates.
+func (c *Client) UsedImageRefs(ctx context.Context) (map[string]bool, error) {
+	conts, err := c.c.Containers(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list containers: %w", err)
+	}
+	used := make(map[string]bool, len(conts))
+	for _, cont := range conts {
+		info, err := cont.Info(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("container info %s: %w", cont.ID(), err)
+		}
+		if info.Image != "" {
+			used[info.Image] = true
+		}
+	}
+	return used, nil
 }
 
 func sortedKeys(m map[string]string) []string {

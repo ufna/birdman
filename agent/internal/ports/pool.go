@@ -80,3 +80,6 @@ func (p *Pool) InUse() int {
 	defer p.mu.Unlock()
 	return len(p.inUse)
 }
+
+// Capacity reports the total size of the pool range (metrics).
+func (p *Pool) Capacity() int { return p.to - p.from + 1 }

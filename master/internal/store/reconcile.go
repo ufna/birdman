@@ -104,6 +104,25 @@ func (s *Store) PlanFleet(ctx context.Context, f FleetConfig, dep *Version, paus
 		return nil, nil, nil, false, nil
 	}
 
+	// Node drain (итерация 4, docs/specs/master.md §6): ready servers on nodes
+	// leaving the fleet (draining/quarantine/dead) are reaped so the warm pool
+	// moves to active nodes; allocated servers are left to play their match
+	// out. Marked draining first so they drop out of the per-version buffer
+	// counts below and the deficit is placed on active nodes.
+	drainedReady, err := drainServers(ctx, tx, `
+		update servers set state = 'draining', updated_at = now()
+		where id in (
+			select s.id from servers s join nodes n on n.id = s.node_id
+			where s.project_id = $1::uuid and n.region = $2
+			  and n.state <> 'active' and s.state = 'ready'
+		)
+		returning id::text, node_id::text`,
+		f.ProjectID, f.Region)
+	if err != nil {
+		return nil, nil, nil, true, err
+	}
+	stops = append(stops, drainedReady...)
+
 	type target struct {
 		versionID string
 		imageRef  string
