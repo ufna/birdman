@@ -95,6 +95,10 @@ var (
 		"birdman_players_online",
 		"Live players across allocated servers, last heartbeat (product metric).",
 		nil, nil)
+	capacitySlotsDesc = prometheus.NewDesc(
+		"birdman_node_capacity_slots",
+		"Capacity slots of active nodes, per region.",
+		[]string{"region"}, nil)
 )
 
 // dbCollector derives gauge metrics from Postgres on scrape.
@@ -110,6 +114,7 @@ func (c *dbCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- eventsTotalDesc
 	ch <- matchesRunningDesc
 	ch <- playersOnlineDesc
+	ch <- capacitySlotsDesc
 }
 
 func (c *dbCollector) Collect(ch chan<- prometheus.Metric) {
@@ -143,6 +148,20 @@ func (c *dbCollector) Collect(ch chan<- prometheus.Metric) {
 		c.log.Error("metrics: players_online query failed", "err", err)
 	} else {
 		ch <- prometheus.MustNewConstMetric(playersOnlineDesc, prometheus.GaugeValue, players)
+	}
+	if crows, err := c.st.Pool.Query(ctx, `select region, sum(capacity_slots)::int from nodes where state='active' group by region`); err != nil {
+		c.log.Error("metrics: capacity query failed", "err", err)
+	} else {
+		for crows.Next() {
+			var region string
+			var n float64
+			if err := crows.Scan(&region, &n); err != nil {
+				c.log.Error("metrics: capacity scan failed", "err", err)
+				break
+			}
+			ch <- prometheus.MustNewConstMetric(capacitySlotsDesc, prometheus.GaugeValue, n, region)
+		}
+		crows.Close()
 	}
 
 	rows, err := c.st.Pool.Query(ctx, `
