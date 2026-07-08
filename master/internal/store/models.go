@@ -112,4 +112,10 @@ const (
 	// audit payload carries key_id/name/scopes — never the secret.
 	EventAPIKeyCreated = "apikey_created" // POST /v1/apikeys
 	EventAPIKeyRevoked = "apikey_revoked" // DELETE /v1/apikeys/{id}
+
+	// Alert mute/suppression annotations (П2 Alerts screen, master.md §6). v0:
+	// a mute is a master-level annotation, not a real vmalert/Discord silence
+	// (ops.md §1 TODO). Payload carries mute_id/alertname/region — no secrets.
+	EventAlertMuted   = "alert_muted"   // POST /v1/alerts/mutes
+	EventAlertUnmuted = "alert_unmuted" // DELETE /v1/alerts/mutes/{id}
 )

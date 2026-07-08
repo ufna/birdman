@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/sha256"
 	"net/http"
 	"slices"
@@ -95,9 +96,24 @@ func (a *authenticator) invalidateKey(keyID string) {
 	a.sessions.deleteByKey(keyID)
 }
 
+// ctxKey is the private type for request-context keys set by this package.
+type ctxKey int
+
+const apiKeyCtxKey ctxKey = iota
+
+// keyFromContext returns the authenticated API key that requireScope resolved
+// for this request. Handlers that need the caller's identity (e.g. audit
+// created_by) read it from here instead of re-authenticating.
+func keyFromContext(ctx context.Context) (store.APIKey, bool) {
+	k, ok := ctx.Value(apiKeyCtxKey).(store.APIKey)
+	return k, ok
+}
+
 // requireScope wraps h: the request must carry a key with the scope (or
 // admin, which implies everything). Cookie-authenticated non-GET requests
-// must also carry the CSRF header (session.go).
+// must also carry the CSRF header (session.go). On success the resolved key is
+// stashed in the request context (keyFromContext) for handlers that audit who
+// acted.
 func (s *Server) requireScope(scope string, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key, viaCookie, ok := s.auth.authenticate(r)
@@ -114,6 +130,6 @@ func (s *Server) requireScope(scope string, h http.HandlerFunc) http.HandlerFunc
 			writeError(w, http.StatusForbidden, "forbidden", "scope "+scope+" required")
 			return
 		}
-		h(w, r)
+		h(w, r.WithContext(context.WithValue(r.Context(), apiKeyCtxKey, key)))
 	}
 }
