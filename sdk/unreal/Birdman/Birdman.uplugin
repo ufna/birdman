@@ -1,0 +1,18 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1.0",
+	"FriendlyName": "Birdman",
+	"Description": "birdman game-server platform SDK: managed dedicated server lifecycle (ready/allocated/match/drain) + matchmaking client stub. Wraps the C++ core from sdk/core.",
+	"Category": "Networking",
+	"CreatedBy": "birdman",
+	"CanContainContent": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "Birdman",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	]
+}
