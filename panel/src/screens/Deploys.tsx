@@ -11,7 +11,8 @@ import { api } from '../lib/api';
 import type { ApiEvent, GameServer, NodeInfo, VersionInfo } from '../lib/api';
 import { useData, useLive } from '../lib/live';
 import { canDeploy, useSession } from '../lib/session';
-import { formatStamp, shortId } from '../lib/format';
+import { shortId } from '../lib/format';
+import { useT, useFormat } from '../lib/i18n';
 import { DataTable } from '../components/DataTable';
 import { StateBadge, toneOfVersionState } from '../components/Badge';
 import { ConfirmButton } from '../components/ConfirmDialog';
@@ -21,6 +22,7 @@ const LIVE_SERVER_STATES = new Set(['creating', 'ready', 'allocated', 'draining'
 const HEARTBEAT_FRESH_MS = 30_000;
 
 export function Deploys() {
+  const { t } = useT();
   const versions = useData(() => api.listVersions(), []);
   const servers = useData(() => api.listServers(), []);
   const nodes = useData(() => api.listNodes(), []);
@@ -58,9 +60,9 @@ export function Deploys() {
       ))}
       {projects.length === 0 && (
         <Card>
-          <CardHeader title="Деплои" />
+          <CardHeader title={t('nav.deploys')} />
           <div className="px-4 py-10 text-center text-sm text-muted">
-            Версий пока нет. Зарегистрируйте билд: <span className="font-mono">POST /v1/versions</span>.
+            {t('deploys.emptyPre')} <span className="font-mono">POST /v1/versions</span>
           </div>
         </Card>
       )}
@@ -87,6 +89,8 @@ function ProjectDeploys({
   mayDeploy: boolean;
   reload: () => void;
 }) {
+  const { t, tp } = useT();
+  const fmt = useFormat();
   const active = versions.find((v) => v.state === 'active');
   const deprecated = versions.filter((v) => v.state === 'deprecated');
   const prepulling = versions.filter((v) => v.state === 'prepulling');
@@ -96,7 +100,7 @@ function ProjectDeploys({
     () => [
       {
         id: 'semver',
-        header: 'Версия',
+        header: t('col.version'),
         cell: ({ row }) => (
           <div>
             <div className="font-mono font-medium">{row.original.semver}</div>
@@ -106,12 +110,12 @@ function ProjectDeploys({
       },
       {
         id: 'state',
-        header: 'Состояние',
-        cell: ({ row }) => <StateBadge state={row.original.state} tone={toneOfVersionState(row.original.state)} />,
+        header: t('col.state'),
+        cell: ({ row }) => <StateBadge state={row.original.state} tone={toneOfVersionState(row.original.state)} domain="version" />,
       },
       {
         id: 'live',
-        header: 'Дедиков живо',
+        header: t('deploys.col.liveDedics'),
         cell: ({ row }) => {
           const n = liveByVersion.get(row.original.id) ?? 0;
           return <span className="tabular font-mono text-xs">{n > 0 ? n : '—'}</span>;
@@ -119,15 +123,15 @@ function ProjectDeploys({
       },
       {
         id: 'created',
-        header: 'Создана',
-        cell: ({ row }) => <span className="tabular font-mono text-xs text-muted">{formatStamp(row.original.created_at)}</span>,
+        header: t('deploys.col.created'),
+        cell: ({ row }) => <span className="tabular font-mono text-xs text-muted">{fmt.stamp(row.original.created_at)}</span>,
       },
       {
         id: 'deprecated',
-        header: 'Депрекейт',
+        header: t('deploys.col.deprecated'),
         cell: ({ row }) => (
           <span className="tabular font-mono text-xs text-muted">
-            {row.original.deprecated_at !== undefined ? formatStamp(row.original.deprecated_at) : '—'}
+            {row.original.deprecated_at !== undefined ? fmt.stamp(row.original.deprecated_at) : '—'}
           </span>
         ),
       },
@@ -138,34 +142,28 @@ function ProjectDeploys({
           mayDeploy ? <DeployAction version={row.original} onDone={reload} /> : null,
       },
     ],
-    [liveByVersion, mayDeploy, reload],
+    [t, fmt, liveByVersion, mayDeploy, reload],
   );
 
   return (
     <Card>
       <CardHeader
-        title={`Проект ${project}`}
+        title={t('deploys.project', { project })}
         aside={
           mayDeploy && deprecated.length > 0 ? (
             <ConfirmButton
-              label="Откатить"
+              label={t('deploys.rollback')}
               tone="dead"
-              title={`Откат проекта ${project}`}
-              description={
-                <>
-                  Активную версию заменит последняя deprecated (
-                  <span className="font-mono">{deprecated[0].semver}</span>). Образы уже на тачках — откат за секунды,
-                  живые матчи не рвутся.
-                </>
-              }
-              confirmLabel="Откатить"
+              title={t('deploys.rollback.title', { project })}
+              description={t('deploys.rollback.desc', { semver: deprecated[0].semver })}
+              confirmLabel={t('deploys.rollback')}
               onConfirm={async () => {
                 await api.rollback({ project });
                 reload();
               }}
             />
           ) : (
-            <span className="font-mono text-xs text-muted">{versions.length} версий</span>
+            <span className="font-mono text-xs text-muted">{tp('deploys.versionsCount', versions.length)}</span>
           )
         }
       />
@@ -183,7 +181,7 @@ function ProjectDeploys({
         columns={columns}
         data={versions}
         rowId={(v) => v.id}
-        empty="Версий проекта нет."
+        empty={t('deploys.emptyProject')}
       />
     </Card>
   );
@@ -191,21 +189,17 @@ function ProjectDeploys({
 
 /** Deploy-кнопка для строки версии: доступна для registered/deprecated. */
 function DeployAction({ version, onDone }: { version: VersionInfo; onDone: () => void }) {
+  const { t } = useT();
   if (version.state === 'prepulling') {
-    return <span className="font-mono text-xs text-warn">идёт прогрев…</span>;
+    return <span className="font-mono text-xs text-warn">{t('deploys.warming')}</span>;
   }
   if (version.state !== 'registered' && version.state !== 'deprecated') return null;
   return (
     <ConfirmButton
-      label="Развернуть"
-      title={`Развернуть ${version.semver}?`}
-      description={
-        <>
-          Master спрогреет образ на всех живых тачках (pre-pull), затем атомарно переключит активную версию. Живые матчи
-          старой версии доигрывают в окне мультиверсий.
-        </>
-      }
-      confirmLabel="Развернуть"
+      label={t('deploys.deploy')}
+      title={t('deploys.deploy.title', { semver: version.semver })}
+      description={t('deploys.deploy.desc')}
+      confirmLabel={t('deploys.deploy')}
       onConfirm={async () => {
         await api.deploy(version.id);
         onDone();
@@ -224,23 +218,24 @@ function WindowCard({
   deprecated: VersionInfo[];
   liveByVersion: Map<string, number>;
 }) {
+  const { t, tp } = useT();
   const rows: { v: VersionInfo; role: string }[] = [];
   if (active !== undefined) rows.push({ v: active, role: 'active' });
   for (const d of deprecated) rows.push({ v: d, role: 'deprecated' });
   return (
     <div className="rounded-lg border border-line bg-paper p-3">
-      <div className="mb-2 text-xs font-medium tracking-wide text-muted uppercase">Окно мультиверсий</div>
+      <div className="mb-2 text-xs font-medium tracking-wide text-muted uppercase">{t('deploys.window')}</div>
       {rows.length === 0 ? (
-        <p className="text-sm text-muted">Нет активной версии.</p>
+        <p className="text-sm text-muted">{t('deploys.noActive')}</p>
       ) : (
         <ul className="flex flex-col gap-2">
           {rows.map(({ v, role }) => (
             <li key={v.id} className="flex items-center justify-between gap-3">
               <span className="flex items-center gap-2">
-                <StateBadge state={role} tone={toneOfVersionState(role)} />
+                <StateBadge state={role} tone={toneOfVersionState(role)} domain="version" />
                 <span className="font-mono text-sm">{v.semver}</span>
               </span>
-              <span className="tabular font-mono text-xs text-muted">{liveByVersion.get(v.id) ?? 0} дедиков</span>
+              <span className="tabular font-mono text-xs text-muted">{tp('deploys.dedicsCount', liveByVersion.get(v.id) ?? 0)}</span>
             </li>
           ))}
         </ul>
@@ -258,11 +253,12 @@ function RegionActiveCard({
   regionActive: { region: string; semver: string; count: number; extra: number }[];
   activeSemver?: string;
 }) {
+  const { t, tp } = useT();
   return (
     <div className="rounded-lg border border-line bg-paper p-3">
-      <div className="mb-2 text-xs font-medium tracking-wide text-muted uppercase">Активно по регионам</div>
+      <div className="mb-2 text-xs font-medium tracking-wide text-muted uppercase">{t('deploys.regionActive')}</div>
       {regionActive.length === 0 ? (
-        <p className="text-sm text-muted">Живых дедиков нет.</p>
+        <p className="text-sm text-muted">{t('deploys.noLiveDedics')}</p>
       ) : (
         <ul className="flex flex-col gap-2">
           {regionActive.map((r) => (
@@ -273,7 +269,7 @@ function RegionActiveCard({
                   {r.semver}
                 </span>
                 {r.extra > 0 && <span className="font-mono text-xs text-muted">+{r.extra}</span>}
-                <span className="tabular font-mono text-xs text-muted">{r.count} дедиков</span>
+                <span className="tabular font-mono text-xs text-muted">{tp('deploys.dedicsCount', r.count)}</span>
               </span>
             </li>
           ))}
@@ -287,6 +283,7 @@ function RegionActiveCard({
  *  + remaining из последнего события; total = sprogreto + remaining, либо
  *  оценка по живым нодам, пока событий нет. */
 function PrepullBar({ version, progress, nodes }: { version: VersionInfo; progress?: DeployProgress; nodes: NodeInfo[] }) {
+  const { t } = useT();
   const pulled = progress?.pulled.size ?? 0;
   const estimate = nodes.filter(
     (n) => n.state === 'active' && n.last_heartbeat_at !== undefined && Date.now() - new Date(n.last_heartbeat_at).getTime() < HEARTBEAT_FRESH_MS,
@@ -298,10 +295,10 @@ function PrepullBar({ version, progress, nodes }: { version: VersionInfo; progre
     <div className="border-b border-line bg-warn-bg/40 px-4 py-3">
       <div className="mb-2 flex items-center justify-between gap-3">
         <span className="text-sm">
-          Прогрев <span className="font-mono font-medium">{version.semver}</span> (pre-pull)
+          {t('deploys.prepullPre')} <span className="font-mono font-medium">{version.semver}</span> {t('deploys.prepullSuffix')}
         </span>
         <span className="tabular font-mono text-xs text-muted">
-          {pulled} / {total > 0 ? total : '?'} тачек
+          {t('deploys.prepull.nodes', { pulled, total: total > 0 ? total : '?' })}
         </span>
       </div>
       <span className="block h-1.5 w-full overflow-hidden rounded-full bg-line" aria-hidden>
@@ -317,9 +314,7 @@ function PrepullBar({ version, progress, nodes }: { version: VersionInfo; progre
         </div>
       )}
       {progress === undefined && (
-        <p className="mt-2 text-xs text-muted">
-          Ждём отчёты о прогреве по тачкам (события deploy_node_pulled)…
-        </p>
+        <p className="mt-2 text-xs text-muted">{t('deploys.prepull.waiting')}</p>
       )}
     </div>
   );

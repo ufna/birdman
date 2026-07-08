@@ -1,6 +1,6 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-// Только нужные подмножества: UI русский + латиница данных (id, semver).
+// Подмножества под двуязычный UI (EN/RU): латиница + кириллица, sans + mono.
 import '@fontsource/ibm-plex-sans/cyrillic-400.css';
 import '@fontsource/ibm-plex-sans/cyrillic-500.css';
 import '@fontsource/ibm-plex-sans/cyrillic-600.css';
@@ -14,7 +14,7 @@ import './styles/app.css';
 import App from './App';
 
 const container = document.getElementById('root');
-if (container === null) throw new Error('нет #root');
+if (container === null) throw new Error('missing #root element');
 createRoot(container).render(
   <StrictMode>
     <App />

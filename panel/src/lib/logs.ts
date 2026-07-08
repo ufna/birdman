@@ -34,7 +34,9 @@ export async function pumpTextStream(
   }
 }
 
-export type LogStreamStatus = 'connecting' | 'streaming' | 'ended' | 'error' | 'unauthorized';
+// 'gone' — сервер вычищен (404): логи истекли/дедик реапнут; UI показывает
+// аккуратное пустое состояние, а не ошибку.
+export type LogStreamStatus = 'connecting' | 'streaming' | 'ended' | 'error' | 'unauthorized' | 'gone';
 
 export interface StreamLogsOptions {
   tail?: number;
@@ -69,6 +71,12 @@ export async function streamServerLogs(id: string, opts: StreamLogsOptions): Pro
   }
   if (res.status === 401) {
     status('unauthorized');
+    return;
+  }
+  // 404 — дедик/логи вычищены (ретенция, reaped server_id): не ошибка стрима,
+  // а «больше недоступно». Тело не читаем, наверх не бросаем.
+  if (res.status === 404) {
+    status('gone');
     return;
   }
   if (!res.ok || res.body === null) {

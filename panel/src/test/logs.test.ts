@@ -77,6 +77,23 @@ describe('streamServerLogs', () => {
     expect(text).toBe('');
   });
 
+  it('404 → статус gone (логи вычищены/reaped), не бросает', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: 'not_found' }), { status: 404 })),
+    );
+    const statuses: LogStreamStatus[] = [];
+    let text = '';
+    await streamServerLogs('gone-srv', {
+      onText: (c) => {
+        text += c;
+      },
+      onStatus: (s) => statuses.push(s),
+    });
+    expect(statuses.at(-1)).toBe('gone');
+    expect(text).toBe('');
+  });
+
   it('follow=1 добавляется в URL', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response('', { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);

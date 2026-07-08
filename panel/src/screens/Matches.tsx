@@ -1,6 +1,7 @@
 // Матчи: Live (running + pending — pending уже держит дедик, running
 // появится с liba) и История с фильтрами state/region и пагинацией
-// limit/offset.
+// limit/offset. Клик по строке (в обеих вкладках) открывает дровер деталей
+// матча (статы + логи).
 
 import { useMemo, useState } from 'react';
 import * as Tabs from '@radix-ui/react-tabs';
@@ -8,26 +9,31 @@ import type { ColumnDef } from '@tanstack/react-table';
 import { api } from '../lib/api';
 import type { Match, MatchState } from '../lib/api';
 import { useData } from '../lib/live';
-import { useServerDrawer } from '../lib/drawer';
+import { useMatchDrawer, useServerDrawer } from '../lib/drawer';
 import { useNow } from '../lib/useNow';
-import { ageOf, formatAge, formatStamp, shortId } from '../lib/format';
+import { ageOf, shortId } from '../lib/format';
+import { useT, useFormat } from '../lib/i18n';
+import type { I18nContextValue, MessageKey } from '../lib/i18n';
 import { DataTable } from '../components/DataTable';
 import { StateBadge, toneOfMatchState } from '../components/Badge';
 import { Card, CardHeader, ErrorNote, LoadingRow } from '../components/ui';
 
 const PAGE_SIZE = 50;
 
+type T = I18nContextValue['t'];
+
 export function Matches() {
+  const { t } = useT();
   return (
     <Tabs.Root defaultValue="live" className="flex flex-col gap-4">
-      <Tabs.List className="flex w-fit gap-1 rounded-lg border border-line bg-card p-1" aria-label="Матчи">
+      <Tabs.List className="flex w-fit gap-1 rounded-lg border border-line bg-card p-1" aria-label={t('matches.tabs')}>
         {(['live', 'history'] as const).map((tab) => (
           <Tabs.Trigger
             key={tab}
             value={tab}
             className="rounded-md px-3 py-1 text-sm text-muted transition-colors data-[state=active]:bg-mark data-[state=active]:font-medium data-[state=active]:text-accent-ink"
           >
-            {tab === 'live' ? 'Live' : 'История'}
+            {tab === 'live' ? t('matches.tab.live') : t('matches.tab.history')}
           </Tabs.Trigger>
         ))}
       </Tabs.List>
@@ -42,6 +48,8 @@ export function Matches() {
 }
 
 function LiveMatches() {
+  const { t } = useT();
+  const { open: openMatch } = useMatchDrawer();
   const live = useData(
     () =>
       Promise.all([
@@ -62,7 +70,7 @@ function LiveMatches() {
   return (
     <Card>
       <CardHeader
-        title="Идут сейчас"
+        title={t('matches.live.title')}
         aside={<span className="tabular font-mono text-xs text-muted">{live.data?.length ?? 0}</span>}
       />
       {live.data === undefined ? (
@@ -72,7 +80,10 @@ function LiveMatches() {
           columns={columns}
           data={live.data}
           rowId={(m) => m.id}
-          empty="Живых матчей нет. Как только матчмейкер соберёт группу — матч появится здесь без перезагрузки."
+          onRowClick={(m) => {
+            openMatch(m.id);
+          }}
+          empty={t('matches.live.empty')}
         />
       )}
     </Card>
@@ -80,25 +91,26 @@ function LiveMatches() {
 }
 
 function useLiveColumns(): ColumnDef<Match, unknown>[] {
-  const { open } = useServerDrawer();
+  const { t } = useT();
+  const { open: openServer } = useServerDrawer();
   return useMemo(
     () => [
-      idColumn(),
-      regionColumn(),
-      versionColumn(),
+      idColumn(t),
+      regionColumn(t),
+      versionColumn(t),
       {
         id: 'players',
-        header: 'Игроки',
+        header: t('col.players'),
         cell: ({ row }) => <span className="tabular font-mono text-xs">{row.original.server_players}</span>,
       },
       {
         id: 'duration',
-        header: 'Длительность',
+        header: t('col.duration'),
         cell: ({ row }) => <DurationCell m={row.original} />,
       },
       {
         id: 'server',
-        header: 'Сервер',
+        header: t('col.server'),
         cell: ({ row }) => (
           <div className="font-mono text-xs">
             {row.original.host}:{row.original.port}
@@ -107,11 +119,12 @@ function useLiveColumns(): ColumnDef<Match, unknown>[] {
                 {' · '}
                 <button
                   type="button"
-                  onClick={() => {
-                    open(row.original.server_id);
+                  onClick={(e) => {
+                    e.stopPropagation(); // не открывать дровер матча
+                    openServer(row.original.server_id);
                   }}
                   className="text-accent-ink underline-offset-2 hover:underline"
-                  title="Открыть детали дедика"
+                  title={t('server.openDetails')}
                 >
                   {shortId(row.original.server_id)}
                 </button>
@@ -120,28 +133,25 @@ function useLiveColumns(): ColumnDef<Match, unknown>[] {
           </div>
         ),
       },
-      stateColumn(),
+      stateColumn(t),
     ],
-    [open],
+    [t, openServer],
   );
 }
 
 /** Тикающая длительность живого матча (от started_at, иначе от created_at). */
 function DurationCell({ m }: { m: Match }) {
   const now = useNow();
+  const fmt = useFormat();
   const age = ageOf(m.started_at ?? m.created_at, now);
-  return <span className="tabular font-mono text-xs">{age === null ? '—' : formatAge(age)}</span>;
+  return <span className="tabular font-mono text-xs">{age === null ? '—' : fmt.age(age)}</span>;
 }
 
-const HISTORY_STATES: { value: MatchState | ''; label: string }[] = [
-  { value: '', label: 'все состояния' },
-  { value: 'pending', label: 'pending' },
-  { value: 'running', label: 'running' },
-  { value: 'finished', label: 'finished' },
-  { value: 'aborted', label: 'aborted' },
-];
+const HISTORY_STATE_VALUES: (MatchState | '')[] = ['', 'pending', 'running', 'finished', 'aborted'];
 
 function MatchHistory() {
+  const { t } = useT();
+  const { open: openMatch } = useMatchDrawer();
   const [state, setState] = useState<MatchState | ''>('');
   const [region, setRegion] = useState('');
   const [page, setPage] = useState(0);
@@ -172,11 +182,11 @@ function MatchHistory() {
   return (
     <Card>
       <CardHeader
-        title="История"
+        title={t('matches.history.title')}
         aside={
           <div className="flex items-center gap-2">
             <select
-              aria-label="Фильтр по состоянию"
+              aria-label={t('matches.filter.stateAria')}
               className={select}
               value={state}
               onChange={(e) => {
@@ -184,14 +194,14 @@ function MatchHistory() {
                 setPage(0);
               }}
             >
-              {HISTORY_STATES.map((s) => (
-                <option key={s.value} value={s.value}>
-                  {s.label}
+              {HISTORY_STATE_VALUES.map((s) => (
+                <option key={s} value={s}>
+                  {s === '' ? t('matches.filter.allStates') : t(`state.match.${s}` as MessageKey)}
                 </option>
               ))}
             </select>
             <select
-              aria-label="Фильтр по региону"
+              aria-label={t('matches.filter.regionAria')}
               className={select}
               value={region}
               onChange={(e) => {
@@ -199,7 +209,7 @@ function MatchHistory() {
                 setPage(0);
               }}
             >
-              <option value="">все регионы</option>
+              <option value="">{t('matches.filter.allRegions')}</option>
               {regions.map((r) => (
                 <option key={r} value={r}>
                   {r}
@@ -221,7 +231,10 @@ function MatchHistory() {
             columns={columns}
             data={visible}
             rowId={(m) => m.id}
-            empty={page > 0 ? 'Дальше пусто — вернитесь назад.' : 'Под эти фильтры матчей нет.'}
+            onRowClick={(m) => {
+              openMatch(m.id);
+            }}
+            empty={page > 0 ? t('matches.history.emptyNext') : t('matches.history.emptyFilter')}
           />
           <footer className="flex items-center justify-between border-t border-line px-4 py-2.5">
             <span className="tabular font-mono text-xs text-muted">
@@ -234,7 +247,7 @@ function MatchHistory() {
                   setPage((p) => Math.max(0, p - 1));
                 }}
               >
-                ← Новее
+                {t('pager.newer')}
               </PagerButton>
               <PagerButton
                 disabled={!hasNext}
@@ -242,7 +255,7 @@ function MatchHistory() {
                   setPage((p) => p + 1);
                 }}
               >
-                Старше →
+                {t('pager.older')}
               </PagerButton>
             </div>
           </footer>
@@ -274,71 +287,71 @@ function PagerButton({
 }
 
 function useHistoryColumns(): ColumnDef<Match, unknown>[] {
+  const { t } = useT();
+  const fmt = useFormat();
   return useMemo(
     () => [
-      idColumn(),
-      regionColumn(),
-      versionColumn(),
-      stateColumn(),
+      idColumn(t),
+      regionColumn(t),
+      versionColumn(t),
+      stateColumn(t),
       {
         id: 'peak',
-        header: 'Пик игроков',
+        header: t('col.playersPeak'),
         cell: ({ row }) => <span className="tabular font-mono text-xs">{row.original.players_peak}</span>,
       },
       {
         id: 'created',
-        header: 'Создан',
+        header: t('col.created'),
         cell: ({ row }) => (
-          <span className="tabular font-mono text-xs text-muted">{formatStamp(row.original.created_at)}</span>
+          <span className="tabular font-mono text-xs text-muted">{fmt.stamp(row.original.created_at)}</span>
         ),
       },
       {
         id: 'took',
-        header: 'Длительность',
+        header: t('col.duration'),
         cell: ({ row }) => {
           const { started_at: s, ended_at: e } = row.original;
           if (s === undefined || e === undefined) return <span className="text-xs text-muted">—</span>;
           return (
-            <span className="tabular font-mono text-xs">
-              {formatAge(new Date(e).getTime() - new Date(s).getTime())}
-            </span>
+            <span className="tabular font-mono text-xs">{fmt.age(new Date(e).getTime() - new Date(s).getTime())}</span>
           );
         },
       },
     ],
-    [],
+    [t, fmt],
   );
 }
 
 // Общие колонки Live/История.
-function idColumn(): ColumnDef<Match, unknown> {
+function idColumn(t: T): ColumnDef<Match, unknown> {
   return {
     id: 'id',
-    header: 'Матч',
+    header: t('col.match'),
     cell: ({ row }) => <span className="font-mono text-xs">{shortId(row.original.id)}</span>,
   };
 }
 
-function regionColumn(): ColumnDef<Match, unknown> {
+function regionColumn(t: T): ColumnDef<Match, unknown> {
   return {
     id: 'region',
-    header: 'Регион',
+    header: t('col.region'),
     cell: ({ row }) => <span className="font-mono text-xs">{row.original.region}</span>,
   };
 }
 
-function versionColumn(): ColumnDef<Match, unknown> {
+function versionColumn(t: T): ColumnDef<Match, unknown> {
   return {
     id: 'version',
-    header: 'Версия',
+    header: t('col.version'),
     cell: ({ row }) => <span className="font-mono text-xs">{row.original.semver}</span>,
   };
 }
 
-function stateColumn(): ColumnDef<Match, unknown> {
+function stateColumn(t: T): ColumnDef<Match, unknown> {
   return {
     id: 'state',
-    header: 'Состояние',
-    cell: ({ row }) => <StateBadge state={row.original.state} tone={toneOfMatchState(row.original.state)} />,
+    header: t('col.state'),
+    cell: ({ row }) => <StateBadge state={row.original.state} tone={toneOfMatchState(row.original.state)} domain="match" />,
   };
 }

@@ -3,7 +3,14 @@
 // неизвестное. Цвет никогда не единственный носитель смысла: всегда есть
 // точка-маркер и текстовая метка состояния.
 
+import { useT } from '../lib/i18n';
+import type { MessageKey } from '../lib/i18n';
+
 export type Tone = 'good' | 'warn' | 'dead' | 'accent' | 'neutral';
+
+/** Домены человекочитаемых подписей состояний (коды остаются в API). Событийные
+ *  kind'ы — технические токены, их не переводим (badge без domain = сырой код). */
+export type StateDomain = 'node' | 'server' | 'match' | 'version';
 
 export function toneOfNodeState(state: string): Tone {
   switch (state) {
@@ -116,14 +123,23 @@ const toneClasses: Record<Tone, string> = {
   neutral: 'border border-line text-muted',
 };
 
-export function StateBadge({ state, tone }: { state: string; tone: Tone }) {
+/**
+ * Бейдж состояния. С `domain` показывает переведённую подпись
+ * (`state.<domain>.<code>`, фолбэк — сырой код для незнакомых значений); без
+ * `domain` — сырой код (событийные kind'ы).
+ */
+export function StateBadge({ state, tone, domain }: { state: string; tone: Tone; domain?: StateDomain }) {
+  const { t, has } = useT();
+  const key = domain !== undefined ? `state.${domain}.${state}` : undefined;
+  const label = key !== undefined && has(key) ? t(key as MessageKey) : state;
   return (
     <span
       data-tone={tone}
+      title={domain !== undefined ? state : undefined}
       className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium whitespace-nowrap ${toneClasses[tone]}`}
     >
       <span aria-hidden className="size-1.5 rounded-full bg-current" />
-      {state}
+      {label}
     </span>
   );
 }

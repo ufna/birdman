@@ -5,6 +5,7 @@
 // metrics_unconfigured) и «нет данных».
 
 import { ApiError, qs } from './api';
+import type { MessageKey } from './i18n';
 
 /** Одна серия matrix: подписи + точки [unix-сек, значение|null (разрыв)]. */
 export interface MetricSeries {
@@ -136,14 +137,40 @@ export async function queryRange(args: QueryRangeArgs): Promise<MetricsResult> {
   return { kind: 'ok', series: parseMatrix(body) };
 }
 
+/**
+ * Окно графика в unix-секундах. end задан — статичная история (не поллим);
+ * end опущен — живое окно [start, now], график дозапрашивается.
+ */
+export interface MetricRange {
+  start: number;
+  end?: number;
+}
+
+/** Дескриптор графика метрики: titleKey переводится в компоненте. */
+export interface MetricQuery {
+  key: string;
+  titleKey: MessageKey;
+  expr: string;
+  unit: Unit;
+}
+
 /** PromQL для метрик одного дедика (agent metrics.go: label server_id). */
-export function serverMetricQueries(serverID: string): { key: string; title: string; expr: string; unit: Unit }[] {
+export function serverMetricQueries(serverID: string): MetricQuery[] {
   const sel = `{server_id="${serverID}"}`;
   return [
-    { key: 'players', title: 'Игроки', expr: `birdman_server_players${sel}`, unit: 'int' },
-    { key: 'tick', title: 'Tick, мс', expr: `birdman_server_tick_ms${sel}`, unit: 'ms' },
-    { key: 'cpu', title: 'CPU, ядра', expr: `rate(birdman_container_cpu_seconds_total${sel}[1m])`, unit: 'cores' },
-    { key: 'mem', title: 'Память', expr: `birdman_container_memory_bytes${sel}`, unit: 'bytes' },
+    { key: 'players', titleKey: 'metric.players', expr: `birdman_server_players${sel}`, unit: 'int' },
+    { key: 'tick', titleKey: 'metric.tick', expr: `birdman_server_tick_ms${sel}`, unit: 'ms' },
+    { key: 'cpu', titleKey: 'metric.cpu', expr: `rate(birdman_container_cpu_seconds_total${sel}[1m])`, unit: 'cores' },
+    { key: 'mem', titleKey: 'metric.mem', expr: `birdman_container_memory_bytes${sel}`, unit: 'bytes' },
+  ];
+}
+
+/** Метрики матча: только tick_ms и игроки (panel.md, фича 2). */
+export function matchMetricQueries(serverID: string): MetricQuery[] {
+  const sel = `{server_id="${serverID}"}`;
+  return [
+    { key: 'players', titleKey: 'metric.players', expr: `birdman_server_players${sel}`, unit: 'int' },
+    { key: 'tick', titleKey: 'metric.tick', expr: `birdman_server_tick_ms${sel}`, unit: 'ms' },
   ];
 }
 

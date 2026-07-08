@@ -1,20 +1,22 @@
-// Каркас после логина: навигация, live-индикатор стрима, переключатель
-// темы, выход. До 1280px страница не скроллится по горизонтали — таблицы
-// скроллятся внутри карточек.
+// Каркас после логина: навигация, live-индикатор стрима, переключатели
+// языка и темы, выход. До 1280px страница не скроллится по горизонтали —
+// таблицы скроллятся внутри карточек.
 
 import type { ReactNode } from 'react';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import { useLive } from '../lib/live';
 import { useSession } from '../lib/session';
 import { useTheme } from '../lib/theme';
+import { useT } from '../lib/i18n';
+import type { Lang, MessageKey } from '../lib/i18n';
 import { Brand } from './ui';
 
-const navItems = [
-  { path: '/', label: 'Overview' },
-  { path: '/fleet', label: 'Флот' },
-  { path: '/matches', label: 'Матчи' },
-  { path: '/deploys', label: 'Деплои' },
-  { path: '/events', label: 'События' },
+const navItems: { path: string; key: MessageKey }[] = [
+  { path: '/', key: 'nav.overview' },
+  { path: '/fleet', key: 'nav.fleet' },
+  { path: '/matches', key: 'nav.matches' },
+  { path: '/deploys', key: 'nav.deploys' },
+  { path: '/events', key: 'nav.events' },
 ];
 
 function isActive(item: string, path: string): boolean {
@@ -22,8 +24,9 @@ function isActive(item: string, path: string): boolean {
 }
 
 function NavLinks({ path, navigate, row = false }: { path: string; navigate: (p: string) => void; row?: boolean }) {
+  const { t } = useT();
   return (
-    <nav className={row ? 'flex items-center gap-1' : 'flex flex-col gap-1'} aria-label="Разделы">
+    <nav className={row ? 'flex items-center gap-1' : 'flex flex-col gap-1'} aria-label={t('nav.sections')}>
       {navItems.map((item) => {
         const active = isActive(item.path, path);
         return (
@@ -41,7 +44,7 @@ function NavLinks({ path, navigate, row = false }: { path: string; navigate: (p:
                 : 'text-muted hover:bg-paper hover:text-ink'
             }`}
           >
-            {item.label}
+            {t(item.key)}
           </a>
         );
       })}
@@ -51,23 +54,57 @@ function NavLinks({ path, navigate, row = false }: { path: string; navigate: (p:
 
 function LiveIndicator() {
   const { status } = useLive();
+  const { t } = useT();
   const view = {
-    live: { cls: 'bg-good', dotAnim: true, label: 'live' },
-    connecting: { cls: 'bg-warn', dotAnim: false, label: 'подключение…' },
-    down: { cls: 'bg-dead', dotAnim: false, label: 'переподключение…' },
-    unauthorized: { cls: 'bg-dead', dotAnim: false, label: 'нет доступа' },
+    live: { cls: 'bg-good', dotAnim: true, key: 'live.live' as MessageKey },
+    connecting: { cls: 'bg-warn', dotAnim: false, key: 'live.connecting' as MessageKey },
+    down: { cls: 'bg-dead', dotAnim: false, key: 'live.reconnecting' as MessageKey },
+    unauthorized: { cls: 'bg-dead', dotAnim: false, key: 'live.noAccess' as MessageKey },
   }[status];
   return (
-    <span className="inline-flex items-center gap-2 font-mono text-xs text-muted" title="Состояние стрима событий">
+    <span className="inline-flex items-center gap-2 font-mono text-xs text-muted" title={t('live.title')}>
       <span aria-hidden className={`size-2 rounded-full ${view.cls} ${view.dotAnim ? 'live-dot-on' : ''}`} />
-      {view.label}
+      {t(view.key)}
     </span>
+  );
+}
+
+/** Компактный переключатель EN/RU — в тон обводке темы, доступный (role=group
+ *  + aria-pressed на активном языке). */
+function LangToggle() {
+  const { lang, setLang, t } = useT();
+  return (
+    <div
+      role="group"
+      aria-label={t('lang.switch')}
+      className="inline-flex overflow-hidden rounded-lg border border-line text-xs"
+    >
+      {(['en', 'ru'] as Lang[]).map((l) => {
+        const active = lang === l;
+        return (
+          <button
+            key={l}
+            type="button"
+            onClick={() => {
+              setLang(l);
+            }}
+            aria-pressed={active}
+            className={`px-1.5 py-1 font-medium uppercase transition-colors ${
+              active ? 'bg-mark text-accent-ink' : 'text-muted hover:text-ink'
+            }`}
+          >
+            {l}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
 function ThemeToggle() {
   const { theme, toggle } = useTheme();
-  const label = theme === 'dark' ? 'Светлая тема' : 'Тёмная тема';
+  const { t } = useT();
+  const label = theme === 'dark' ? t('theme.toLight') : t('theme.toDark');
   return (
     <Tooltip.Root>
       <Tooltip.Trigger asChild>
@@ -113,9 +150,10 @@ function ThemeToggle() {
 
 function SessionBox() {
   const { session, logout } = useSession();
+  const { t } = useT();
   return (
     <div className="flex items-center justify-between gap-2">
-      <span className="truncate font-mono text-xs text-muted" title="Имя API-ключа сессии">
+      <span className="truncate font-mono text-xs text-muted" title={t('shell.keyName')}>
         {session?.name ?? ''}
       </span>
       <button
@@ -125,7 +163,7 @@ function SessionBox() {
         }}
         className="rounded-lg border border-line px-2.5 py-1 text-xs text-muted hover:text-ink"
       >
-        Выйти
+        {t('shell.logout')}
       </button>
     </div>
   );
@@ -142,7 +180,10 @@ export function Shell({ path, navigate, children }: { path: string; navigate: (p
           <div className="mt-auto flex flex-col gap-3 border-t border-line pt-4">
             <div className="flex items-center justify-between">
               <LiveIndicator />
-              <ThemeToggle />
+              <div className="flex items-center gap-2">
+                <LangToggle />
+                <ThemeToggle />
+              </div>
             </div>
             <SessionBox />
           </div>
@@ -155,6 +196,7 @@ export function Shell({ path, navigate, children }: { path: string; navigate: (p
             <NavLinks path={path} navigate={navigate} row />
             <div className="flex items-center gap-2">
               <LiveIndicator />
+              <LangToggle />
               <ThemeToggle />
             </div>
           </header>

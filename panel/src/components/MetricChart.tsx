@@ -7,15 +7,18 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import uPlot from 'uplot';
 import 'uplot/dist/uPlot.min.css';
 import { cssVar, useTheme } from '../lib/theme';
+import { useT } from '../lib/i18n';
 import { queryRange, toAlignedData, formatMetric } from '../lib/metrics';
-import type { MetricSeries, Unit } from '../lib/metrics';
+import type { MetricRange, MetricSeries, Unit } from '../lib/metrics';
 
 interface MetricChartProps {
   query: string;
   title: string;
   unit?: Unit;
-  /** Окно, мс (по умолчанию 30 минут). */
+  /** Скользящее окно, мс (по умолчанию 30 минут). Игнорируется, если задан range. */
   windowMs?: number;
+  /** Явное окно [start, end?]. Если end задан — график статичен (история). */
+  range?: MetricRange;
   height?: number;
   /** Период дозапроса, мс (по умолчанию 15с). */
   refreshMs?: number;
@@ -28,6 +31,7 @@ export function MetricChart({
   title,
   unit = 'int',
   windowMs = 30 * 60_000,
+  range,
   height = 150,
   refreshMs = 15_000,
 }: MetricChartProps) {
@@ -35,14 +39,19 @@ export function MetricChart({
   const [series, setSeries] = useState<MetricSeries[] | null>(null);
   const [errorMsg, setErrorMsg] = useState('');
 
+  // Статичное окно (история матча) — только один запрос, без поллинга.
+  const rangeStart = range?.start;
+  const rangeEnd = range?.end;
+  const isStatic = rangeStart !== undefined && rangeEnd !== undefined;
+
   useEffect(() => {
     let active = true;
     let ctrl: AbortController | null = null;
     const load = () => {
       ctrl?.abort();
       ctrl = new AbortController();
-      const end = Math.floor(Date.now() / 1000);
-      const start = end - Math.floor(windowMs / 1000);
+      const end = rangeEnd ?? Math.floor(Date.now() / 1000);
+      const start = rangeStart ?? end - Math.floor(windowMs / 1000);
       const step = Math.max(15, Math.round((end - start) / 150));
       queryRange({ query, start, end, step, signal: ctrl.signal })
         .then((res) => {
@@ -68,13 +77,14 @@ export function MetricChart({
         });
     };
     load();
-    const t = setInterval(load, refreshMs);
+    // История матча не тикает — не поллим; живое/скользящее окно дозапрашиваем.
+    const timer = isStatic ? null : setInterval(load, refreshMs);
     return () => {
       active = false;
       ctrl?.abort();
-      clearInterval(t);
+      if (timer !== null) clearInterval(timer);
     };
-  }, [query, windowMs, refreshMs]);
+  }, [query, windowMs, refreshMs, rangeStart, rangeEnd, isStatic]);
 
   const aligned = useMemo(() => toAlignedData(series ?? []), [series]);
   const hasData = aligned.x.length > 0;
@@ -110,17 +120,18 @@ function ChartMessage({
   error: string;
   height: number;
 }) {
+  const { t } = useT();
   const text =
     status === 'loading'
-      ? 'Загрузка метрик…'
+      ? t('metric.loading')
       : status === 'unconfigured'
-        ? 'Метрики не настроены на этом master (victoriametrics_url пуст).'
+        ? t('metric.unconfigured')
         : status === 'unreachable'
-          ? 'VictoriaMetrics недоступна — данных сейчас нет.'
+          ? t('metric.unreachable')
           : status === 'error'
-            ? `Метрики недоступны: ${error}`
+            ? t('metric.error', { error })
             : !hasData
-              ? 'Нет данных за выбранный период.'
+              ? t('metric.noData')
               : '';
   return (
     <div
@@ -137,6 +148,7 @@ function Plot({ aligned, unit, height }: { aligned: { x: number[]; ys: (number |
   const holder = useRef<HTMLDivElement>(null);
   const plot = useRef<uPlot | null>(null);
   const { theme } = useTheme();
+  const { t } = useT();
 
   useEffect(() => {
     const el = holder.current;
@@ -190,7 +202,7 @@ function Plot({ aligned, unit, height }: { aligned: { x: number[]; ys: (number |
     plot.current?.setData([aligned.x, ...aligned.ys] as uPlot.AlignedData);
   }, [aligned]);
 
-  return <div ref={holder} role="img" aria-label="График метрики" />;
+  return <div ref={holder} role="img" aria-label={t('metric.aria')} />;
 }
 
 function lastValue(series: MetricSeries[]): number | null {

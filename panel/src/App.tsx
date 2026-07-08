@@ -1,4 +1,5 @@
 import { ThemeProvider } from './lib/theme';
+import { I18nProvider, useT } from './lib/i18n';
 import { SessionProvider, canRead, useSession } from './lib/session';
 import { LiveProvider } from './lib/live';
 import { DrawerProvider } from './lib/drawer';
@@ -15,15 +16,18 @@ import { Events } from './screens/Events';
 export default function App() {
   return (
     <ThemeProvider>
-      <SessionProvider>
-        <Root />
-      </SessionProvider>
+      <I18nProvider>
+        <SessionProvider>
+          <Root />
+        </SessionProvider>
+      </I18nProvider>
     </ThemeProvider>
   );
 }
 
 function Root() {
   const { session, logout } = useSession();
+  const { t } = useT();
 
   // Пробуем существующую cookie — без мигания формой логина.
   if (session === undefined) {
@@ -38,10 +42,7 @@ function Root() {
     return (
       <div className="flex min-h-screen items-center justify-center px-4">
         <Card className="max-w-sm p-5 text-sm">
-          <p>
-            У ключа <span className="font-mono">{session.name}</span> нет скоупа{' '}
-            <span className="font-mono">readonly</span> — панели нечего показать.
-          </p>
+          <p>{t('app.noScope', { name: session.name })}</p>
           <button
             type="button"
             onClick={() => {
@@ -49,7 +50,7 @@ function Root() {
             }}
             className="mt-4 rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-white hover:opacity-90"
           >
-            Войти другим ключом
+            {t('app.switchKey')}
           </button>
         </Card>
       </div>

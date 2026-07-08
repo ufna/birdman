@@ -9,7 +9,8 @@ import { useData } from '../lib/live';
 import { canAdmin, useSession } from '../lib/session';
 import { useServerDrawer } from '../lib/drawer';
 import { useNow } from '../lib/useNow';
-import { ageOf, formatAge, heartbeatTone, shortId } from '../lib/format';
+import { ageOf, heartbeatTone, shortId } from '../lib/format';
+import { useT, useFormat } from '../lib/i18n';
 import { DataTable } from '../components/DataTable';
 import { StateBadge, toneOfNodeState, toneOfServerState } from '../components/Badge';
 import { ConfirmButton } from '../components/ConfirmDialog';
@@ -18,6 +19,7 @@ import { Card, CardHeader, ErrorNote, LoadingRow } from '../components/ui';
 const LIVE_SERVER_STATES = new Set(['creating', 'ready', 'allocated', 'draining']);
 
 export function Fleet() {
+  const { t, tp } = useT();
   const nodes = useData(() => api.listNodes(), []);
   const servers = useData(() => api.listServers(), []);
   const versions = useData(() => api.listVersions(), []);
@@ -56,7 +58,7 @@ export function Fleet() {
     () => [
       {
         id: 'host',
-        header: 'Тачка',
+        header: t('col.node'),
         cell: ({ row }) => (
           <div className="min-w-36">
             <div className="font-medium">{row.original.hostname}</div>
@@ -66,13 +68,13 @@ export function Fleet() {
           </div>
         ),
       },
-      { id: 'region', header: 'Регион', cell: ({ row }) => <span className="font-mono text-xs">{row.original.region}</span> },
+      { id: 'region', header: t('col.region'), cell: ({ row }) => <span className="font-mono text-xs">{row.original.region}</span> },
       {
         id: 'state',
-        header: 'Состояние',
+        header: t('col.state'),
         cell: ({ row }) => (
           <div className="flex flex-col gap-1">
-            <StateBadge state={row.original.state} tone={toneOfNodeState(row.original.state)} />
+            <StateBadge state={row.original.state} tone={toneOfNodeState(row.original.state)} domain="node" />
             {row.original.state === 'quarantine' && quarantineReason.get(row.original.id) !== undefined && (
               <span className="max-w-40 truncate text-[11px] text-dead" title={quarantineReason.get(row.original.id)}>
                 {quarantineReason.get(row.original.id)}
@@ -88,7 +90,7 @@ export function Fleet() {
       },
       {
         id: 'slots',
-        header: 'Слоты',
+        header: t('col.slots'),
         cell: ({ row }) => (
           <SlotsCell
             busy={(serversByNode.get(row.original.id) ?? []).filter((s) => LIVE_SERVER_STATES.has(s.state)).length}
@@ -98,12 +100,12 @@ export function Fleet() {
       },
       {
         id: 'heartbeat',
-        header: 'Heartbeat',
+        header: t('col.heartbeat'),
         cell: ({ row }) => <HeartbeatCell iso={row.original.last_heartbeat_at} />,
       },
       {
         id: 'agent',
-        header: 'Агент',
+        header: t('col.agent'),
         cell: ({ row }) => (
           <span className="font-mono text-xs text-muted">
             {row.original.agent_version !== '' ? row.original.agent_version : '—'}
@@ -130,7 +132,7 @@ export function Fleet() {
         ),
       },
     ],
-    [serversByNode, expandedId, quarantineReason, mayAdmin, nodes.reload],
+    [t, serversByNode, expandedId, quarantineReason, mayAdmin, nodes.reload],
   );
 
   const error = nodes.error ?? servers.error ?? versions.error;
@@ -141,8 +143,8 @@ export function Fleet() {
   return (
     <Card>
       <CardHeader
-        title="Флот"
-        aside={<span className="font-mono text-xs text-muted">{sortedNodes.length} тачек</span>}
+        title={t('nav.fleet')}
+        aside={<span className="font-mono text-xs text-muted">{tp('fleet.nodesCount', sortedNodes.length)}</span>}
       />
       {nodes.data === undefined ? (
         <LoadingRow />
@@ -153,7 +155,7 @@ export function Fleet() {
           rowId={(n) => n.id}
           empty={
             <>
-              Тачек пока нет. Зарегистрируйте первую: <span className="font-mono">POST /v1/nodes</span>.
+              {t('fleet.emptyPre')} <span className="font-mono">POST /v1/nodes</span>
             </>
           }
           expandedId={expandedId}
@@ -189,6 +191,7 @@ function SlotsCell({ busy, total }: { busy: number; total: number }) {
 /** Drain/Undrain тачки (admin, confirm). stopPropagation — чтобы клик по
  *  кнопке не разворачивал строку. */
 function NodeActions({ node, onDone }: { node: NodeInfo; onDone: () => void }) {
+  const { t } = useT();
   if (node.state === 'dead') return null;
   const draining = node.state === 'draining';
   return (
@@ -200,10 +203,10 @@ function NodeActions({ node, onDone }: { node: NodeInfo; onDone: () => void }) {
     >
       {draining ? (
         <ConfirmButton
-          label="Undrain"
-          title={`Вернуть ${node.hostname} в ротацию?`}
-          description="Reconcile снова начнёт размещать дедики на этой тачке, агенту уйдёт Undrain."
-          confirmLabel="Undrain"
+          label={t('fleet.undrain')}
+          title={t('fleet.undrain.title', { host: node.hostname })}
+          description={t('fleet.undrain.desc')}
+          confirmLabel={t('fleet.undrain')}
           onConfirm={async () => {
             await api.undrainNode(node.id);
             onDone();
@@ -211,11 +214,11 @@ function NodeActions({ node, onDone }: { node: NodeInfo; onDone: () => void }) {
         />
       ) : (
         <ConfirmButton
-          label="Drain"
+          label={t('fleet.drain')}
           tone="dead"
-          title={`Вывести ${node.hostname} из ротации?`}
-          description="Новые дедики размещаться не будут, ready-буфер реапится, а allocated доигрывают свои матчи. Тачку можно вернуть кнопкой Undrain."
-          confirmLabel="Drain"
+          title={t('fleet.drain.title', { host: node.hostname })}
+          description={t('fleet.drain.desc')}
+          confirmLabel={t('fleet.drain')}
           onConfirm={async () => {
             await api.drainNode(node.id);
             onDone();
@@ -228,9 +231,10 @@ function NodeActions({ node, onDone }: { node: NodeInfo; onDone: () => void }) {
 
 /** Индикация опустошения draining-ноды: сколько allocated ещё доигрывает. */
 function DrainProgress({ playing }: { playing: number }) {
+  const { t, tp } = useT();
   return (
     <span className="font-mono text-[11px] text-warn">
-      {playing > 0 ? `${playing} доигрывает` : 'опустошена'}
+      {playing > 0 ? tp('fleet.drain.playing', playing) : t('fleet.drain.empty')}
     </span>
   );
 }
@@ -250,13 +254,15 @@ function latestQuarantineReasons(events: ApiEvent[]): Map<string, string> {
 /** Живой возраст heartbeat: тикает каждую секунду, тон — по свежести. */
 export function HeartbeatCell({ iso }: { iso?: string }) {
   const now = useNow();
+  const { t } = useT();
+  const fmt = useFormat();
   const age = ageOf(iso, now);
   const tone = heartbeatTone(age);
   const toneText = { good: 'text-good', warn: 'text-warn', dead: 'text-dead' }[tone];
   return (
     <span className={`inline-flex items-center gap-1.5 font-mono text-xs ${toneText}`}>
       <span aria-hidden className="size-1.5 rounded-full bg-current" />
-      <span className="tabular">{age === null ? 'не был' : `${formatAge(age)} назад`}</span>
+      <span className="tabular">{age === null ? t('fleet.hb.never') : fmt.ago(age)}</span>
     </span>
   );
 }
@@ -264,21 +270,23 @@ export function HeartbeatCell({ iso }: { iso?: string }) {
 function NodeServers({ servers, semverOf }: { servers: GameServer[]; semverOf: Map<string, string> }) {
   const now = useNow();
   const { open } = useServerDrawer();
+  const { t } = useT();
+  const fmt = useFormat();
   if (servers.length === 0) {
-    return <p className="py-2 text-xs text-muted">На тачке нет дедиков.</p>;
+    return <p className="py-2 text-xs text-muted">{t('fleet.node.noServers')}</p>;
   }
   return (
     <div className="overflow-x-auto rounded-lg border border-line bg-card">
       <table className="w-full min-w-[560px] text-xs">
         <thead>
           <tr className="border-b border-line text-muted">
-            <th className="px-3 py-2 text-left font-medium">Дедик</th>
-            <th className="px-3 py-2 text-left font-medium">Состояние</th>
-            <th className="px-3 py-2 text-left font-medium">Версия</th>
-            <th className="px-3 py-2 text-left font-medium">Игроки</th>
-            <th className="px-3 py-2 text-left font-medium">Порт</th>
-            <th className="px-3 py-2 text-left font-medium">Аптайм</th>
-            <th className="px-3 py-2 text-left font-medium">Матч</th>
+            <th className="px-3 py-2 text-left font-medium">{t('col.dedic')}</th>
+            <th className="px-3 py-2 text-left font-medium">{t('col.state')}</th>
+            <th className="px-3 py-2 text-left font-medium">{t('col.version')}</th>
+            <th className="px-3 py-2 text-left font-medium">{t('col.players')}</th>
+            <th className="px-3 py-2 text-left font-medium">{t('col.port')}</th>
+            <th className="px-3 py-2 text-left font-medium">{t('col.uptime')}</th>
+            <th className="px-3 py-2 text-left font-medium">{t('col.match')}</th>
           </tr>
         </thead>
         <tbody>
@@ -289,16 +297,16 @@ function NodeServers({ servers, semverOf }: { servers: GameServer[]; semverOf: M
                 open(s.id);
               }}
               className="cursor-pointer border-b border-line transition-colors last:border-0 hover:bg-paper"
-              title="Открыть детали дедика: таймлайн, логи, метрики"
+              title={t('server.openDetailsFull')}
             >
               <td className="px-3 py-2 font-mono text-accent-ink underline-offset-2 hover:underline">{shortId(s.id)}</td>
               <td className="px-3 py-2">
-                <StateBadge state={s.state} tone={toneOfServerState(s.state)} />
+                <StateBadge state={s.state} tone={toneOfServerState(s.state)} domain="server" />
               </td>
               <td className="px-3 py-2 font-mono">{semverOf.get(s.version_id) ?? shortId(s.version_id)}</td>
               <td className="tabular px-3 py-2 font-mono">{s.players}</td>
               <td className="tabular px-3 py-2 font-mono">{s.port}</td>
-              <td className="tabular px-3 py-2 font-mono">{formatAge(Math.max(0, now - new Date(s.created_at).getTime()))}</td>
+              <td className="tabular px-3 py-2 font-mono">{fmt.age(Math.max(0, now - new Date(s.created_at).getTime()))}</td>
               <td className="px-3 py-2 font-mono text-muted">
                 {s.match_id !== undefined ? shortId(s.match_id) : '—'}
               </td>
