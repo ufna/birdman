@@ -12,6 +12,8 @@
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.2.5",
     "@fontsource/ibm-plex-sans": "^5.2.5",
+    "@radix-ui/react-alert-dialog": "^1.1.19",
+    "@radix-ui/react-dialog": "^1.1.19",
     "@radix-ui/react-tabs": "^1.1.12",
     "@radix-ui/react-tooltip": "^1.2.7",
     "@tanstack/react-table": "^8.21.3",

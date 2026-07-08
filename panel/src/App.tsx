@@ -1,6 +1,7 @@
 import { ThemeProvider } from './lib/theme';
 import { SessionProvider, canRead, useSession } from './lib/session';
 import { LiveProvider } from './lib/live';
+import { DrawerProvider } from './lib/drawer';
 import { usePath } from './lib/usePath';
 import { Shell } from './components/Shell';
 import { Brand, Card } from './components/ui';
@@ -8,6 +9,8 @@ import { Login } from './screens/Login';
 import { Overview } from './screens/Overview';
 import { Fleet } from './screens/Fleet';
 import { Matches } from './screens/Matches';
+import { Deploys } from './screens/Deploys';
+import { Events } from './screens/Events';
 
 export default function App() {
   return (
@@ -54,7 +57,9 @@ function Root() {
   }
   return (
     <LiveProvider>
-      <Routed />
+      <DrawerProvider>
+        <Routed />
+      </DrawerProvider>
     </LiveProvider>
   );
 }
@@ -65,6 +70,10 @@ function Routed() {
     <Fleet />
   ) : path.startsWith('/matches') ? (
     <Matches />
+  ) : path.startsWith('/deploys') ? (
+    <Deploys />
+  ) : path.startsWith('/events') ? (
+    <Events />
   ) : (
     <Overview />
   );

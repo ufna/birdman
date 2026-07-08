@@ -28,7 +28,7 @@ React 18 + TypeScript + Vite; клиент API генерируется из `op
 
 (Уточнено в v0.) Login по API-ключу → cookie-сессия (`master.md` §6); «живой» матч v0 = `running`+`pending` (liba, переводящая матчи в `running`, приезжает позже — pending уже держит дедик); «активная версия» показывается per регион по фактическим live-дедикам (deploy-менеджера ещё нет); cpu/mem бары тачек — П1 (агент их пока не репортит), вместо них — заполненность слотов; фильтры истории — state/region, пагинация limit/offset; live-обновление — SSE `/v1/events/stream` + refetch-фолбэк, реконнект переживают и таблицы, и лента.
 
-### П1 — операции (параллельно итерациям 4–5, ~2–3 недели)
+### П1 — операции (параллельно итерациям 4–5, ~2–3 недели) — ✅ реализовано (v0)
 
 | Экран | Содержимое | Данные |
 |---|---|---|
@@ -36,6 +36,18 @@ React 18 + TypeScript + Vite; клиент API генерируется из `op
 | **Деплои** | Таблица версий (semver, канал, состояние, дата), активная версия per регион, **прогресс pre-pull по тачкам**, кнопки Deploy / Rollback (с confirm), окно мультиверсий: сколько deprecated-дедиков ещё доигрывает | `/v1/versions`, `/v1/deploy`, `/v1/rollback`, SSE |
 | **Действия с тачкой** | Drain / Undrain с прогрессом опустошения; причина карантина | `/v1/nodes/{id}/drain` |
 | **События** | Полная лента events с фильтрами (kind, node, период) | `/v1/events` |
+
+(Уточнено в v0.) Экраны **Деплои** (`/deploys`) и **События** (`/events`) добавлены в навигацию; детали дедика — дровер (Radix Dialog), открывается кликом на дедик во Флоте/Матчах и по ссылкам `srv …` в ленте. Всё — на существующем master API, новых эндпоинтов не добавляли.
+
+- **Деплои**: таблица версий с цветными бейджами состояния (`toneOfVersionState`: registered/prepulling/active/deprecated/disabled); окно мультиверсий = active + deprecated и сколько дедиков каждой ещё живо (группировка `/v1/servers` по `version_id`, live-состояния); «активно по регионам» **выведено из живых дедиков** (`GET /v1/fleets` наружу не отдаётся — TODO в panel, per-region active_version недоступен точно); **прогресс pre-pull по тачкам** собран из событий `deploy_node_pulled` (множество спрогретых `node_id` + `remaining` из последнего события; total = спрогрето + remaining, либо оценка по живым нодам, пока событий нет), сидируется из `/v1/events` и обновляется по SSE (`deploy_started/node_pulled/activated/failed/rolled_back`); **Deploy/Rollback** — за confirm-диалогом Radix, `POST /v1/deploy` / `/v1/rollback`, кнопки скрыты у readonly-сессии (гейт `canDeploy` = скоуп deploy/admin из `GET /v1/session`).
+- **Дедик-дровер**: отдельного `GET /v1/servers/{id}` в master нет → карточка ищет дедик в `/v1/servers` клиентом (логи/метрики работают и без строки, для reaped/failed); **таймлайн** — клиентский фильтр `/v1/events` по `server_id` (server-side фильтра нет — TODO) + live-дополнение из SSE; **логи** — live tail + скачивание файлом (`GET /v1/servers/{id}/logs?follow=&tail=`, chunked-стрим; download = тот же эндпоинт без follow → Blob); **метрики** — 4 графика uPlot через metrics-proxy (`birdman_server_players|tick_ms`, `rate(birdman_container_cpu_seconds_total)`, `birdman_container_memory_bytes` по `server_id`), при ненастроенной (503) или недоступной (502) VM показывают «нет данных», а не падают.
+- **Действия с тачкой** (Флот): **Drain/Undrain** (`POST /v1/nodes/{id}/drain·/undrain`, confirm, admin-only) с индикацией опустошения (сколько allocated ещё доигрывает — из `/v1/servers`); причина карантина — из последнего события `node_quarantine` (client-фильтр ленты, т.к. фильтра по `node_id` у `/v1/events` нет).
+- **События**: полная лента `/v1/events` с фильтрами kind/node/период и пагинацией — **клиентскими** поверх окна (у `/v1/events` только `limit`, нет `offset`/фильтров → TODO: серверные фильтры + keyset-пагинация), размер окна регулируется селектором; live-prepend через SSE (dedup по id).
+- **Метрики-обёртка**: `lib/metrics.ts` (`parseMatrix` VM-matrix → серии для uPlot, `toAlignedData`, `queryRange` с мягкой деградацией) + переиспользуемый `<MetricChart query= title= unit= />`.
+- Скоуп-гейт/CSRF/темы: деструктивные кнопки скрыты у readonly, показаны у deploy/admin; каждый не-GET несёт `X-Birdman-Csrf: 1`; обе темы; страница не скроллится по горизонтали до 1280px (таблицы/графики/логи скроллятся внутри контейнеров).
+- Тесты (vitest): парсер `parseMatrix`/`toAlignedData`/`formatMetric` + `queryRange` (503/502/ok), скоуп-гейт кнопок и `ConfirmButton`, reader лог-стрима (`pumpTextStream` с разрывом многобайтового символа + `streamServerLogs`).
+
+TODO (в master, не трогали — помечено здесь): `GET /v1/servers/{id}` (single), серверные фильтры/`offset` у `/v1/events` (по `kind`/`node_id`/`server_id`), отдача per-region `active_version` (например `GET /v1/fleets`).
 
 ### П2 — статистика и админка (после прода, ~2–3 недели)
 

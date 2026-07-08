@@ -36,14 +36,35 @@ export interface GameServer {
   updated_at: string;
 }
 
+export type VersionState = 'registered' | 'prepulling' | 'active' | 'deprecated' | 'disabled';
+
 export interface VersionInfo {
   id: string;
   project: string;
   semver: string;
   image_ref: string;
-  channel: 'staging' | 'prod';
-  state: string;
+  channel: string;
+  /** registered | prepulling | active | deprecated | disabled (master store/deploy.go). */
+  state: VersionState | string;
   created_at: string;
+  /** Проставляется при демоте active → deprecated; отсчёт reap_ttl_min от неё. */
+  deprecated_at?: string;
+}
+
+/** Ответ POST /v1/deploy: {deploy: Status} (deploy.Status в master). */
+export interface DeployStatus {
+  version: VersionInfo;
+  /** Состояние после вызова: prepulling | active. */
+  state: string;
+  /** Сколько тачек ещё греется (0, когда флип уже произошёл). */
+  pending_nodes: number;
+}
+
+/** Ответ POST /v1/rollback: {rollback: {...}}. */
+export interface RollbackResult {
+  version: VersionInfo;
+  regions: string[];
+  old_semver: string;
 }
 
 export type MatchState = 'pending' | 'running' | 'finished' | 'aborted';
@@ -152,4 +173,29 @@ export const api = {
     request<{ match: Match }>('GET', `/v1/matches/${encodeURIComponent(id)}`).then((r) => r.match),
   listEvents: (limit = 50) =>
     request<{ events: ApiEvent[] }>('GET', `/v1/events${qs({ limit })}`).then((r) => r.events),
+
+  // --- П1: операции (скоуп deploy/admin; кнопки скрыты у readonly) ---
+
+  /** Мягкий деплой версии: 202 prepulling / 200 active (master §5). */
+  deploy: (versionId: string) =>
+    request<{ deploy: DeployStatus }>('POST', '/v1/deploy', { version_id: versionId }).then((r) => r.deploy),
+  /** Откат: deprecated ↔ active за секунды. project опускаем при единственном. */
+  rollback: (body: { project?: string; region?: string } = {}) =>
+    request<{ rollback: RollbackResult }>('POST', '/v1/rollback', body).then((r) => r.rollback),
+  /** Вывод тачки из ротации (admin). */
+  drainNode: (id: string) =>
+    request<{ node: NodeInfo }>('POST', `/v1/nodes/${encodeURIComponent(id)}/drain`).then((r) => r.node),
+  undrainNode: (id: string) =>
+    request<{ node: NodeInfo }>('POST', `/v1/nodes/${encodeURIComponent(id)}/undrain`).then((r) => r.node),
 };
+
+/**
+ * URL стрима логов дедика (chunked text/plain). follow=1 — live tail; без
+ * follow — конечный ответ для скачивания. Работает и для reaped/failed.
+ */
+export function serverLogsPath(id: string, opts: { follow?: boolean; tail?: number } = {}): string {
+  return `/v1/servers/${encodeURIComponent(id)}/logs${qs({
+    follow: opts.follow ? 1 : undefined,
+    tail: opts.tail,
+  })}`;
+}
