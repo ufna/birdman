@@ -6,6 +6,10 @@
 #
 # Options:
 #   -DBIRDMAN_SANITIZE=thread|address   sanitized test build (ctest under TSAN/ASAN)
+#
+# The smoke test (example game <-> mockagent) needs a Go toolchain; it is
+# skipped automatically when `go` is not on PATH (see sdk/README.md for the
+# docker path on machines without Go).
 cmake_minimum_required(VERSION 3.16)
 project(birdman_sdk CXX)
 
@@ -28,3 +32,16 @@ endif()
 enable_testing()
 
 add_subdirectory(core)
+add_subdirectory(example)
+
+# Smoke: example game driven end-to-end against sdk/mockagent (Go).
+find_program(BIRDMAN_GO go)
+if(BIRDMAN_GO)
+  add_test(NAME sdk.smoke
+           COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/smoke.sh
+                   $<TARGET_FILE:birdman_example>
+                   ${CMAKE_CURRENT_SOURCE_DIR}/mockagent)
+  set_tests_properties(sdk.smoke PROPERTIES TIMEOUT 180)
+else()
+  message(STATUS "birdman: `go` not found — sdk.smoke test disabled (mockagent is Go)")
+endif()
