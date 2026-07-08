@@ -80,6 +80,21 @@ func (a *authenticator) authenticate(r *http.Request) (key store.APIKey, viaCook
 	return key, false, true
 }
 
+// invalidateKey drops every cached bcrypt verification and every panel session
+// for the given key id — called on revoke so a revoked key stops
+// authenticating at once instead of after authCacheTTL. The cache is keyed by
+// sha256(token), so we scan by the stored key.ID (revokes are rare).
+func (a *authenticator) invalidateKey(keyID string) {
+	a.mu.Lock()
+	for sum, c := range a.cache {
+		if c.key.ID == keyID {
+			delete(a.cache, sum)
+		}
+	}
+	a.mu.Unlock()
+	a.sessions.deleteByKey(keyID)
+}
+
 // requireScope wraps h: the request must carry a key with the scope (or
 // admin, which implies everything). Cookie-authenticated non-GET requests
 // must also carry the CSRF header (session.go).

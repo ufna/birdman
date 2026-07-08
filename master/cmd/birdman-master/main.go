@@ -127,9 +127,11 @@ func run() error {
 		return err
 	}
 	mm := matchmaker.New(st, m, mmCfg, log)
+	apiHandler := httpapi.New(st, m, mm, dep, hub, logRouter, cfg.Metrics.VictoriaMetricsURL, log).
+		WithAlertsSources(cfg.Alerts.VmalertURL, cfg.Alerts.LogPath)
 	api := &http.Server{
 		Addr:              cfg.ListenAPI,
-		Handler:           httpapi.New(st, m, mm, dep, hub, logRouter, cfg.Metrics.VictoriaMetricsURL, log),
+		Handler:           apiHandler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

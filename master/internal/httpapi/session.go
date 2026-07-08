@@ -85,6 +85,18 @@ func (ss *sessionStore) delete(id string) {
 	delete(ss.m, id)
 }
 
+// deleteByKey drops every session backed by the given API key id — a revoked
+// key must not keep a live browser session (auth.invalidateKey).
+func (ss *sessionStore) deleteByKey(keyID string) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	for sid, s := range ss.m {
+		if s.key.ID == keyID {
+			delete(ss.m, sid)
+		}
+	}
+}
+
 // --- handlers ---
 
 type createSessionRequest struct {

@@ -107,4 +107,9 @@ const (
 	EventAgentUpgrade          = "agent_upgrade"           // UpgradeAgent command sent
 	EventAgentUpgradeSucceeded = "agent_upgrade_succeeded" // node re-Hello'd with target version
 	EventAgentUpgradeFailed    = "agent_upgrade_failed"    // no re-Hello with target version in time
+
+	// API-key admin actions (П2 Access screen, docs/specs/master.md §6). The
+	// audit payload carries key_id/name/scopes — never the secret.
+	EventAPIKeyCreated = "apikey_created" // POST /v1/apikeys
+	EventAPIKeyRevoked = "apikey_revoked" // DELETE /v1/apikeys/{id}
 )
