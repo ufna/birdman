@@ -93,3 +93,16 @@ BIRDMAN_SOCKET=/tmp/agent.sock BIRDMAN_SERVER_ID=dev-1 BIRDMAN_PORT=7777 ./your-
 mockagent повторяет поведение настоящего агента: печатает все фреймы liba,
 реплеит последний `allocated`/`drain` при реконнекте, пингует раз в 10с.
 `BIRDMAN_SDK_DEBUG=1` включает диагностику SDK в stderr игры.
+
+## Проверено против реального агента (08.07.2026)
+
+Контракт `sdk/core` валидирован не только против mockagent, но и против
+НАСТОЯЩЕГО `birdman-agent` на дев-тачке. `sdk/example` собран в Docker-образ
+(`sdk/example/Dockerfile`, CI-выпуск `.github/workflows/sdk.yml` →
+`ghcr.io/ufna/birdman-sdk-example:<tag>` по `gh workflow run sdk -f tag=…`),
+задеплоен как обычная версия через флот и провёл реальный матч 2 игроков
+end-to-end (`ready → allocated → match_start → players → match_end → reaped`),
+0 потерянных датаграмм. Это ровно тот путь, которым поедет UE-игра — см.
+`docs/05-runtime-iterations.md`, «Итерация 2 · SDK-валидация». Значит: чтобы
+поставить игру на платформу, достаточно собрать её сервер с этим SDK в
+Docker-образ и зарегистрировать версию — платформенная сторона доказана.
