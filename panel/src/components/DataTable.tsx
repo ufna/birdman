@@ -18,6 +18,8 @@ interface DataTableProps<T> {
   empty: ReactNode;
   expandedId?: string | null;
   onRowClick?: (row: T) => void;
+  /** Доступная подпись кликабельной строки (aria-label для клавиатуры/SR). */
+  rowLabel?: (row: T) => string;
   renderExpanded?: (row: T) => ReactNode;
 }
 
@@ -28,6 +30,7 @@ export function DataTable<T>({
   empty,
   expandedId,
   onRowClick,
+  rowLabel,
   renderExpanded,
 }: DataTableProps<T>) {
   const table = useReactTable({
@@ -66,9 +69,23 @@ export function DataTable<T>({
               <RowGroup key={id}>
                 <tr
                   className={`border-b border-line transition-colors last:border-0 ${
-                    onRowClick !== undefined ? 'cursor-pointer hover:bg-paper' : ''
+                    onRowClick !== undefined ? 'cursor-pointer hover:bg-paper focus-visible:bg-paper' : ''
                   } ${expanded ? 'bg-paper' : ''}`}
                   onClick={onRowClick !== undefined ? () => onRowClick(row.original) : undefined}
+                  role={onRowClick !== undefined ? 'button' : undefined}
+                  tabIndex={onRowClick !== undefined ? 0 : undefined}
+                  aria-expanded={renderExpanded !== undefined && onRowClick !== undefined ? expanded : undefined}
+                  aria-label={onRowClick !== undefined && rowLabel !== undefined ? rowLabel(row.original) : undefined}
+                  onKeyDown={
+                    onRowClick !== undefined
+                      ? (e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            onRowClick(row.original);
+                          }
+                        }
+                      : undefined
+                  }
                 >
                   {row.getVisibleCells().map((cell) => (
                     <td key={cell.id} className="px-4 py-2.5 align-middle">

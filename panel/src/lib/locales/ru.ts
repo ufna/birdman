@@ -26,6 +26,10 @@ export const ru: Record<MessageKey, string> = {
   'nav.deploys': 'Деплои',
   'nav.events': 'События',
   'nav.sections': 'Разделы',
+  'nav.menu': 'Меню',
+
+  // — доступность —
+  'a11y.skipToContent': 'К содержимому',
 
   // — индикатор стрима событий —
   'live.live': 'live',
@@ -220,6 +224,7 @@ export const ru: Record<MessageKey, string> = {
   'fleet.nodesCount.other': '{count} тачки',
   'fleet.emptyPre': 'Тачек пока нет. Зарегистрируйте первую:',
   'fleet.node.noServers': 'На тачке нет дедиков.',
+  'fleet.toggleNode': 'Показать или скрыть дедики тачки {host}',
   'fleet.drain.playing.one': '{count} доигрывает',
   'fleet.drain.playing.few': '{count} доигрывают',
   'fleet.drain.playing.many': '{count} доигрывают',
@@ -308,6 +313,8 @@ export const ru: Record<MessageKey, string> = {
   'deploys.prepullSuffix': '(pre-pull)',
   'deploys.prepull.nodes': '{pulled} / {total} тачек',
   'deploys.prepull.waiting': 'Ждём отчёты о прогреве по тачкам (события deploy_node_pulled)…',
+  'deploys.toast.deployed': 'Деплой {semver} запущен',
+  'deploys.toast.rolledBack': 'Откат до {semver} выполнен',
 
   // — навигация (П2) —
   'nav.stats': 'Статистика',
@@ -385,7 +392,9 @@ export const ru: Record<MessageKey, string> = {
   'cost.utilOverTimeNote': 'живые дедики по состоянию · окно {hours}ч',
 
   // — экран «Алерты» (описания приходят из vmalert как есть; переводим только обвязку) —
-  'alerts.readonly': 'только чтение · mute/edit — конфиг vmalert (TODO)',
+  'alerts.readonly': 'правила и активные из vmalert (только чтение)',
+  'alerts.sound': 'Звук при новом critical',
+  'alerts.critical.badge': '{count} активных critical-алертов',
   'alerts.active': 'Активные',
   'alerts.noActive': 'Активных алертов нет — всё чисто.',
   'alerts.unconfigured': 'Алерты не настроены на этом master (vmalert_url пуст).',
@@ -405,6 +414,34 @@ export const ru: Record<MessageKey, string> = {
   'alerts.noHistory': 'Срабатываний ещё не было.',
   'alerts.limitAria': 'Сколько записей тянуть',
   'alerts.lastN': 'последние {count}',
+
+  // — заглушки алертов (admin ставит/снимает; подавление в панели + аудит) —
+  'alerts.mute.section': 'Заглушённые',
+  'alerts.mute.semantics': 'Mute скрывает алерт в панели и пишет запись в аудит — vmalert и Discord продолжают слать.',
+  'alerts.mute.allRegions': 'все регионы',
+  'alerts.mute.badge': 'заглушён',
+  'alerts.mute.action': 'Заглушить',
+  'alerts.mute.unmute': 'Снять',
+  'alerts.mute.byWhen': '{who} · {when}',
+  'alerts.mute.expires': 'истекает {when}',
+  'alerts.mute.noExpiry': 'без срока (бессрочно)',
+  'alerts.mute.dialog.title': 'Заглушить {name}',
+  'alerts.mute.note': 'Заметка (необязательно)',
+  'alerts.mute.notePlaceholder': 'напр. известный флап тачки, тикет #123',
+  'alerts.mute.expiresLabel': 'Истекает',
+  'alerts.mute.preset.1h': '1ч',
+  'alerts.mute.preset.8h': '8ч',
+  'alerts.mute.preset.24h': '24ч',
+  'alerts.mute.preset.forever': 'Бессрочно',
+  'alerts.mute.preset.custom': 'Своё',
+  'alerts.mute.expiresPreview': 'До {when}',
+  'alerts.mute.unmute.title': 'Снять заглушку {name}?',
+  'alerts.mute.unmute.desc': 'Алерт снова будет виден в панели. На vmalert и Discord это не влияло.',
+  'alerts.mute.toast.created': 'Алерт {name} заглушён',
+  'alerts.mute.toast.removed': 'Заглушка {name} снята',
+  'alerts.mute.err.bad': 'Запрос на mute отклонён (проверьте имя алерта).',
+  'alerts.mute.err.gone': 'Этой заглушки уже нет — возможно, её уже сняли.',
+  'alerts.mute.err.conflict': 'Конфликт заглушки — обновите и попробуйте снова.',
 
   // — экран «Доступ» (admin) —
   'access.keys': 'API-ключи',
@@ -430,4 +467,6 @@ export const ru: Record<MessageKey, string> = {
   'access.secret.copy': 'Копировать',
   'access.secret.copied': 'Скопировано',
   'access.secret.done': 'Готово',
+  'access.toast.created': 'Ключ {name} создан',
+  'access.toast.revoked': 'Ключ {name} отозван',
 };

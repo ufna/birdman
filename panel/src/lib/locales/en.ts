@@ -42,6 +42,10 @@ export const en = {
   'nav.deploys': 'Deploys',
   'nav.events': 'Events',
   'nav.sections': 'Sections',
+  'nav.menu': 'Menu',
+
+  // — accessibility —
+  'a11y.skipToContent': 'Skip to content',
 
   // — event-stream indicator —
   'live.live': 'live',
@@ -236,6 +240,7 @@ export const en = {
   'fleet.nodesCount.other': '{count} nodes',
   'fleet.emptyPre': 'No nodes yet. Register the first:',
   'fleet.node.noServers': 'No dedics on this node.',
+  'fleet.toggleNode': 'Show or hide dedics on {host}',
   'fleet.drain.playing.one': '{count} still playing',
   'fleet.drain.playing.few': '{count} still playing',
   'fleet.drain.playing.many': '{count} still playing',
@@ -324,6 +329,8 @@ export const en = {
   'deploys.prepullSuffix': '(pre-pull)',
   'deploys.prepull.nodes': '{pulled} / {total} nodes',
   'deploys.prepull.waiting': 'Waiting for per-node pull reports (deploy_node_pulled events)…',
+  'deploys.toast.deployed': 'Deploy of {semver} started',
+  'deploys.toast.rolledBack': 'Rolled back to {semver}',
 
   // — navigation (П2) —
   'nav.stats': 'Statistics',
@@ -401,7 +408,9 @@ export const en = {
   'cost.utilOverTimeNote': 'live dedics by state · {hours}h window',
 
   // — Alerts screen (descriptions come from vmalert as-is; UI chrome only) —
-  'alerts.readonly': 'read-only · mute/edit is vmalert config (TODO)',
+  'alerts.readonly': 'rules & firing state from vmalert (read-only)',
+  'alerts.sound': 'Sound on new critical',
+  'alerts.critical.badge': '{count} active critical alerts',
   'alerts.active': 'Active',
   'alerts.noActive': 'No active alerts — all clear.',
   'alerts.unconfigured': 'Alerts are not configured on this master (vmalert_url is empty).',
@@ -421,6 +430,34 @@ export const en = {
   'alerts.noHistory': 'No alerts have fired yet.',
   'alerts.limitAria': 'How many entries to fetch',
   'alerts.lastN': 'last {count}',
+
+  // — Alerts mute (admin sets/removes; panel suppression + audit) —
+  'alerts.mute.section': 'Muted',
+  'alerts.mute.semantics': 'A mute hides the alert in this panel and records an audit entry — vmalert and Discord keep firing.',
+  'alerts.mute.allRegions': 'all regions',
+  'alerts.mute.badge': 'muted',
+  'alerts.mute.action': 'Mute',
+  'alerts.mute.unmute': 'Unmute',
+  'alerts.mute.byWhen': 'by {who} · {when}',
+  'alerts.mute.expires': 'expires {when}',
+  'alerts.mute.noExpiry': 'no expiry (indefinite)',
+  'alerts.mute.dialog.title': 'Mute {name}',
+  'alerts.mute.note': 'Note (optional)',
+  'alerts.mute.notePlaceholder': 'e.g. known flapping node, ticket #123',
+  'alerts.mute.expiresLabel': 'Expires',
+  'alerts.mute.preset.1h': '1h',
+  'alerts.mute.preset.8h': '8h',
+  'alerts.mute.preset.24h': '24h',
+  'alerts.mute.preset.forever': 'Indefinite',
+  'alerts.mute.preset.custom': 'Custom',
+  'alerts.mute.expiresPreview': 'Until {when}',
+  'alerts.mute.unmute.title': 'Remove mute for {name}?',
+  'alerts.mute.unmute.desc': 'The alert will show in the panel again. vmalert and Discord were never affected.',
+  'alerts.mute.toast.created': 'Alert {name} muted',
+  'alerts.mute.toast.removed': 'Mute removed for {name}',
+  'alerts.mute.err.bad': 'The mute request was rejected (check the alert name).',
+  'alerts.mute.err.gone': 'This mute no longer exists — it may have already been removed.',
+  'alerts.mute.err.conflict': 'Mute conflict — reload and try again.',
 
   // — Access screen (admin-only) —
   'access.keys': 'API keys',
@@ -446,6 +483,8 @@ export const en = {
   'access.secret.copy': 'Copy',
   'access.secret.copied': 'Copied',
   'access.secret.done': 'Done',
+  'access.toast.created': 'Key {name} created',
+  'access.toast.revoked': 'Key {name} revoked',
 } as const;
 
 export type MessageKey = keyof typeof en;

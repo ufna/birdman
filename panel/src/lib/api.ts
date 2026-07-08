@@ -187,7 +187,7 @@ export interface AlertRule {
   description: string;
 }
 
-/** Активный (firing) алерт из vmalert. */
+/** Активный (firing) алерт из vmalert. `muted` — подавлен ли mute'ом (панель). */
 export interface ActiveAlert {
   name: string;
   severity: string;
@@ -197,6 +197,7 @@ export interface ActiveAlert {
   active_at: string;
   value: string;
   description: string;
+  muted?: boolean;
 }
 
 /** Срабатывание из истории (alerts.log). active — ещё ли горит (по endsAt). */
@@ -210,6 +211,30 @@ export interface AlertEvent {
   description: string;
   active: boolean;
   received_at?: string;
+  muted?: boolean;
+}
+
+/**
+ * Заглушка алерта (mute): подавляет показ в панели и ведёт аудит. region=null —
+ * все регионы; expires_at=null — бессрочно. Апсертится по (alertname, region).
+ * Семантика v0: mute — панельное подавление; vmalert/Discord продолжают слать.
+ */
+export interface AlertMute {
+  id: string;
+  alertname: string;
+  region: string | null;
+  note: string;
+  created_at: string;
+  expires_at: string | null;
+  created_by: string;
+}
+
+/** Тело создания mute: region/note/expires_at опциональны (пустое = все/бессрочно). */
+export interface AlertMuteInput {
+  alertname: string;
+  region?: string;
+  note?: string;
+  expires_at?: string;
 }
 
 // --- П2: API-ключи (GET/POST/DELETE /v1/apikeys, admin-only) ---
@@ -334,6 +359,16 @@ export const api = {
     request<{ alerts: ActiveAlert[] }>('GET', '/v1/alerts/active').then((r) => r.alerts),
   alertHistory: (limit: number) =>
     request<{ alerts: AlertEvent[] }>('GET', `/v1/alerts/history${qs({ limit })}`).then((r) => r.alerts),
+
+  // Заглушки алертов (readonly читает; создание/снятие — admin). all=1 включает истёкшие.
+  alertMutes: (all = false) =>
+    request<{ mutes: AlertMute[] }>('GET', `/v1/alerts/mutes${qs({ all: all ? 1 : undefined })}`).then(
+      (r) => r.mutes ?? [],
+    ),
+  createAlertMute: (body: AlertMuteInput) =>
+    request<{ mute: AlertMute }>('POST', '/v1/alerts/mutes', body).then((r) => r.mute),
+  deleteAlertMute: (id: string) =>
+    request<void>('DELETE', `/v1/alerts/mutes/${encodeURIComponent(id)}`),
 
   // --- П2: API-ключи (admin-only) ---
 

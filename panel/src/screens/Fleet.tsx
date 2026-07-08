@@ -162,6 +162,7 @@ export function Fleet() {
           onRowClick={(n) => {
             setExpandedId((cur) => (cur === n.id ? null : n.id));
           }}
+          rowLabel={(n) => t('fleet.toggleNode', { host: n.hostname })}
           renderExpanded={(n) => (
             <NodeServers servers={serversByNode.get(n.id) ?? []} semverOf={semverOf} />
           )}

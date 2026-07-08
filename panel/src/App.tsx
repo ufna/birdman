@@ -3,6 +3,7 @@ import { I18nProvider, useT } from './lib/i18n';
 import { SessionProvider, canAdmin, canRead, useSession } from './lib/session';
 import { LiveProvider } from './lib/live';
 import { DrawerProvider } from './lib/drawer';
+import { ToastProvider } from './components/Toast';
 import { usePath } from './lib/usePath';
 import { Shell } from './components/Shell';
 import { Brand, Card } from './components/ui';
@@ -62,9 +63,11 @@ function Root() {
   }
   return (
     <LiveProvider>
-      <DrawerProvider>
-        <Routed />
-      </DrawerProvider>
+      <ToastProvider>
+        <DrawerProvider>
+          <Routed />
+        </DrawerProvider>
+      </ToastProvider>
     </LiveProvider>
   );
 }
