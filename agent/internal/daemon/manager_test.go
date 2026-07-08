@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -26,6 +27,7 @@ type fakeHandle struct {
 	killed  bool
 	deleted bool
 	states  []string // recorded SetState values "state/matchID"
+	pid     uint32
 }
 
 func newFakeHandle() *fakeHandle { return &fakeHandle{exit: make(chan Exit, 1)} }
@@ -54,6 +56,11 @@ func (h *fakeHandle) SetState(_ context.Context, state, matchID string) error {
 	defer h.mu.Unlock()
 	h.states = append(h.states, state+"/"+matchID)
 	return nil
+}
+func (h *fakeHandle) Pid() uint32 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.pid
 }
 func (h *fakeHandle) isDeleted() bool {
 	h.mu.Lock()
@@ -128,10 +135,17 @@ func (r *fakeRuntime) handle(id string) *fakeHandle {
 
 type sinkEvent struct{ serverID, kind, detail string }
 
+type logChunk struct {
+	serverID string
+	data     []byte
+	eof      bool
+}
+
 type fakeSink struct {
 	mu     sync.Mutex
 	events []sinkEvent
 	pulls  []string // "status ref"
+	chunks []logChunk
 }
 
 func (s *fakeSink) ServerEvent(serverID, kind, detail string) {
@@ -144,11 +158,42 @@ func (s *fakeSink) PullReport(_, imageRef, status, _ string) {
 	defer s.mu.Unlock()
 	s.pulls = append(s.pulls, status+" "+imageRef)
 }
+func (s *fakeSink) LogChunk(_ context.Context, _, serverID string, data []byte, eof bool) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.chunks = append(s.chunks, logChunk{serverID, append([]byte(nil), data...), eof})
+	return true
+}
 func (s *fakeSink) has(serverID, kind string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, e := range s.events {
 		if e.serverID == serverID && e.kind == kind {
+			return true
+		}
+	}
+	return false
+}
+
+// tailText concatenates the payloads of all LogChunk calls for serverID.
+func (s *fakeSink) tailText(serverID string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var b []byte
+	for _, c := range s.chunks {
+		if c.serverID == serverID {
+			b = append(b, c.data...)
+		}
+	}
+	return string(b)
+}
+
+// tailSawEOF reports whether a terminating (eof) chunk was sent for serverID.
+func (s *fakeSink) tailSawEOF(serverID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, c := range s.chunks {
+		if c.serverID == serverID && c.eof {
 			return true
 		}
 	}
@@ -251,12 +296,16 @@ func testManager(t *testing.T, rt Runtime) (*Manager, *fakeSink, string) {
 	}
 	t.Cleanup(func() { os.RemoveAll(sockDir) })
 	cfg := &config.Config{
-		Region:        "dev",
-		CapacitySlots: 4,
-		PortRange:     []int{20000, 20010},
-		LimitsDefault: config.Limits{CPUMillis: 500, MemMB: 128},
-		LogDir:        t.TempDir(),
-		DataDir:       t.TempDir(),
+		Region:               "dev",
+		CapacitySlots:        4,
+		PortRange:            []int{20000, 20010},
+		LimitsDefault:        config.Limits{CPUMillis: 500, MemMB: 128},
+		LogDir:               t.TempDir(),
+		DataDir:              t.TempDir(),
+		LogMaxSizeMB:         100,
+		LogRetentionDays:     7,
+		DiskGCWatermarkPct:   80, // agent.md §6
+		DiskFullWatermarkPct: 90, // agent.md §6 (0 would reject every start)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -627,16 +676,46 @@ func TestDrainServerDeliversToLiba(t *testing.T) {
 	eventually(t, "stopped after drain", stateIs(m, "s1", "stopped"))
 }
 
-func TestDrainAndUnsupportedAreAckOnly(t *testing.T) {
+// TestNodeDrainRejectsStart covers the node-level drain (итерация 4,
+// master.md §6 / agent.md §7): once drained the agent rejects new StartServer
+// with a `failed` event and never touches the runtime; undrain restores normal
+// starts. Both commands are idempotent.
+func TestNodeDrainRejectsStart(t *testing.T) {
 	rt := newFakeRuntime()
 	m, sink, _ := testManager(t, rt)
+
 	m.Drain(context.Background(), &agentlinkv1.Drain{CmdId: "d1", Reason: "maintenance"})
-	m.Unsupported(context.Background(), "tail_logs", "t1", "s1")
-	m.Unsupported(context.Background(), "upgrade_agent", "u1", "")
-	eventually(t, "unsupported event for tail_logs", func() bool {
-		return sink.has("s1", "unsupported")
-	})
-	if rt.startCount() != 0 {
-		t.Fatal("drain/unsupported must not touch the runtime")
+	if !m.Draining() {
+		t.Fatal("Draining() must be true after Drain")
 	}
+	m.Drain(context.Background(), &agentlinkv1.Drain{CmdId: "d2"}) // idempotent
+
+	m.Start(context.Background(), &agentlinkv1.StartServer{ServerId: "s1", ImageRef: "img:1", CmdId: "c1"})
+	eventually(t, "failed event for drained start", func() bool { return sink.has("s1", "failed") })
+	eventually(t, "s1 failed", stateIs(m, "s1", "failed"))
+	if rt.startCount() != 0 {
+		t.Fatal("drain must not touch the runtime")
+	}
+
+	m.Undrain(context.Background(), &agentlinkv1.Undrain{})
+	if m.Draining() {
+		t.Fatal("Draining() must be false after Undrain")
+	}
+	m.Undrain(context.Background(), &agentlinkv1.Undrain{}) // idempotent
+
+	m.Start(context.Background(), &agentlinkv1.StartServer{ServerId: "s2", ImageRef: "img:1", CmdId: "c2"})
+	eventually(t, "runtime started after undrain", func() bool { return rt.startCount() == 1 })
+}
+
+// TestTailLogsReportsNoLogs covers TailLogs (agent.md §5): a tail for a server
+// with no log files on disk streams a human-readable "no logs" chunk and
+// terminates the stream with an eof chunk instead of hanging.
+func TestTailLogsReportsNoLogs(t *testing.T) {
+	rt := newFakeRuntime()
+	m, sink, _ := testManager(t, rt)
+	m.TailLogs(context.Background(), &agentlinkv1.TailLogs{CmdId: "t1", ServerId: "ghost"})
+	eventually(t, "no-logs chunk", func() bool {
+		return strings.Contains(sink.tailText("ghost"), "no logs")
+	})
+	eventually(t, "tail eof", func() bool { return sink.tailSawEOF("ghost") })
 }
