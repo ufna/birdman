@@ -76,6 +76,9 @@ func defaults() Config {
 		ListenAPI:  ":8100",
 		ListenGRPC: ":8444",
 		TLS:        TLS{AutoCertDir: "certs"},
+		// VictoriaMetrics of the same box (ops.md §1 recommended stack); the
+		// metrics proxy returns 502 if it is not running, 503 only when unset.
+		Metrics: Metrics{VictoriaMetricsURL: "http://127.0.0.1:8428"},
 		Matchmaking: Matchmaking{
 			TickMS:      500,
 			WidenAfterS: 30,
