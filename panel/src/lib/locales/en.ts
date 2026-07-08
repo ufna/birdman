@@ -355,6 +355,14 @@ export const en = {
   'stats.range.7d': '7 d',
   'stats.range.30d': '30 d',
 
+  // — Statistics: live panels for granular windows (Task 5, "Статистика v1") —
+  'stats.live.online': 'Players online',
+  'stats.live.matchesRunning': 'Matches running',
+  'stats.live.queue': 'Matchmaker queue depth',
+  'stats.live.util': 'Slot utilization',
+  'stats.live.utilOverTime': 'Dedics by state over time',
+  'stats.live.utilOverTimeNote': 'live dedics by state',
+
   // — Statistics screen —
   'stats.utc': 'UTC',
   'stats.periodAria': 'Period, days',

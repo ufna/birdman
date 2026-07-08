@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import { I18nProvider } from '../lib/i18n';
@@ -90,24 +90,68 @@ const cost = {
   utilization_note: 'current snapshot',
 };
 
+// Фабрика Response, а не единственный экземпляр (mockResolvedValue): тело
+// Response читается один раз (fetch().text()), а Task 5 добавил сценарии с
+// НЕСКОЛЬКИМИ fetch-циклами за один тест (live → клик на product-окно →
+// refetch) — общий экземпляр даёт вторым чтением "Body has already been read".
 function stubJSON(body: unknown) {
-  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockImplementation(
+      () =>
+        Promise.resolve(
+          new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+        ),
+    ),
+  );
 }
 
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('Stats — полная композиция', () => {
+describe('Stats — полная композиция (product-режим, 7д)', () => {
   it('карточки, графики и распределение по версиям рендерятся', async () => {
     stubJSON(overview);
     renderEn(<Stats />);
+    // Дефолт экрана — live-окно 24ч (Task 5); переключаемся на продуктовое
+    // окно 7д (фикстур overview.days===7), чтобы проверить старый StatsBody.
+    fireEvent.click(screen.getByRole('button', { name: /7/ }));
     expect(await screen.findByText('Peak CCU')).toBeTruthy();
     expect(screen.getByText('Time to match')).toBeTruthy();
     expect(screen.getByRole('img', { name: 'Matches per day' })).toBeTruthy();
     expect(screen.getByRole('img', { name: 'Peak CCU per day' })).toBeTruthy();
     expect(screen.getByText('0.1.0')).toBeTruthy(); // версия в распределении
     // fill-rate из двух источников подписан (истинный queue→match и прокси).
+    expect(screen.getByText('queue → match')).toBeTruthy();
+    expect(screen.getByText('allocation → start')).toBeTruthy();
+  });
+});
+
+describe('Stats — режимы live/product (Task 5, "Статистика v1")', () => {
+  it('дефолт 24h — live-панели VM; переключение на 7д — продуктовые (matchesPerDay), live-панели уходят', async () => {
+    // days-эквивалент live-окна 24ч — 1 (см. ambiguity resolution #3); фикстур
+    // должен совпасть с запрошенным days, чтобы FillRateCard не завис в скелетоне.
+    stubJSON({ ...overview, days: 1 });
+    renderEn(<Stats />);
+    expect(await screen.findByText('Players online')).toBeTruthy();
+    expect(screen.queryByText('Matches per day')).toBeNull();
+
+    stubJSON(overview); // теперь запрашивается days=7 — фикстур продуктового окна
+    fireEvent.click(screen.getByRole('button', { name: /7/ }));
+    expect(await screen.findByText('Matches per day')).toBeTruthy();
+    expect(screen.queryByText('Players online')).toBeNull();
+  });
+
+  it('fill-rate (queue → match / allocation → start) показан и в live-, и в product-режиме', async () => {
+    stubJSON({ ...overview, days: 1 });
+    renderEn(<Stats />);
+    expect(await screen.findByText('queue → match')).toBeTruthy();
+    expect(screen.getByText('allocation → start')).toBeTruthy();
+
+    stubJSON(overview);
+    fireEvent.click(screen.getByRole('button', { name: /7/ }));
+    expect(await screen.findByText('Matches per day')).toBeTruthy();
     expect(screen.getByText('queue → match')).toBeTruthy();
     expect(screen.getByText('allocation → start')).toBeTruthy();
   });

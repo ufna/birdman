@@ -339,6 +339,14 @@ export const ru: Record<MessageKey, string> = {
   'stats.range.7d': '7 д',
   'stats.range.30d': '30 д',
 
+  // — Статистика: live-панели гранулярных окон (задача 5, «Статистика v1») —
+  'stats.live.online': 'Игроки онлайн',
+  'stats.live.matchesRunning': 'Матчи в игре',
+  'stats.live.queue': 'Глубина очереди матчмейкера',
+  'stats.live.util': 'Утилизация слотов',
+  'stats.live.utilOverTime': 'Дедики по состояниям во времени',
+  'stats.live.utilOverTimeNote': 'живые дедики по состоянию',
+
   // — экран «Статистика» —
   'stats.utc': 'UTC',
   'stats.periodAria': 'Период, дней',
