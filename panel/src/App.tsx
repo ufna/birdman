@@ -1,6 +1,6 @@
 import { ThemeProvider } from './lib/theme';
 import { I18nProvider, useT } from './lib/i18n';
-import { SessionProvider, canRead, useSession } from './lib/session';
+import { SessionProvider, canAdmin, canRead, useSession } from './lib/session';
 import { LiveProvider } from './lib/live';
 import { DrawerProvider } from './lib/drawer';
 import { usePath } from './lib/usePath';
@@ -12,6 +12,10 @@ import { Fleet } from './screens/Fleet';
 import { Matches } from './screens/Matches';
 import { Deploys } from './screens/Deploys';
 import { Events } from './screens/Events';
+import { Stats } from './screens/Stats';
+import { Cost } from './screens/Cost';
+import { Alerts } from './screens/Alerts';
+import { Access } from './screens/Access';
 
 export default function App() {
   return (
@@ -67,6 +71,8 @@ function Root() {
 
 function Routed() {
   const [path, navigate] = usePath();
+  const { session } = useSession();
+  const mayAdmin = session != null && canAdmin(session);
   const screen = path.startsWith('/fleet') ? (
     <Fleet />
   ) : path.startsWith('/matches') ? (
@@ -75,6 +81,15 @@ function Routed() {
     <Deploys />
   ) : path.startsWith('/events') ? (
     <Events />
+  ) : path.startsWith('/stats') ? (
+    <Stats />
+  ) : path.startsWith('/cost') ? (
+    <Cost />
+  ) : path.startsWith('/alerts') ? (
+    <Alerts />
+  ) : path.startsWith('/access') ? (
+    // Доступ — admin-only: не-admin по прямому URL уводим на Обзор (в нав его нет).
+    mayAdmin ? <Access /> : <Overview />
   ) : (
     <Overview />
   );

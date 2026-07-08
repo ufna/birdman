@@ -21,6 +21,9 @@ interface ConfirmButtonProps {
   onConfirm: () => Promise<void>;
   /** Доп. классы триггера (по умолчанию — компактная обводка). */
   triggerClass?: string;
+  /** Локализованное сообщение для конкретной ошибки (напр. 409 last_admin_key);
+   *  вернул undefined — падаем на дефолтный errMessage. */
+  errorOverride?: (e: unknown) => string | undefined;
 }
 
 const actionBg: Record<ActionTone, string> = {
@@ -37,6 +40,7 @@ export function ConfirmButton({
   disabled = false,
   onConfirm,
   triggerClass,
+  errorOverride,
 }: ConfirmButtonProps) {
   const { t } = useT();
   const [open, setOpen] = useState(false);
@@ -53,7 +57,7 @@ export function ConfirmButton({
       })
       .catch((e: unknown) => {
         setPending(false);
-        setError(errMessage(e, t));
+        setError(errorOverride?.(e) ?? errMessage(e, t));
       });
   };
 
