@@ -8,7 +8,13 @@ Requires=containerd.service
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/birdman-agent run --config /etc/birdman/agent.yaml
-Restart=on-failure
+# Restart=always (НЕ on-failure): self-upgrade (agent.md §7) выходит ЧИСТО
+# (exit 0) → systemd поднимает новый бинарь; при on-failure чистый выход не
+# рестартовал бы и агент остался бы лежать (нода в карантин, буфер провис).
+# `systemctl stop` — это commanded stop, его always не перезапускает (drain/
+# NodeDown-учение работает). Быстрый рестарт (RestartSec) держит heartbeat-gap
+# ниже порога карантина — живые дедики переживают апгрейд с теми же id.
+Restart=always
 RestartSec=2
 # Агент — 0, дедикам агент выставляет oom_score_adj=500 (спека §3):
 # при memory pressure ядро убивает дедики раньше агента.

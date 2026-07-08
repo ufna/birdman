@@ -29,9 +29,12 @@ birdman_alert_sink_port: 9094
 birdman_alertmanager_port: 9093
 
 # --- VictoriaMetrics / скрейп ---
+# 5s: NodeDown порог 30s + scrape + eval квантование. С 10s worst-case ~60с
+# (впритык к acceptance ≤60с); 5s даёт NodeDown в alerts.log ~40с с запасом.
+# Нагрузка на дев-боксе копеечная (3 таргета, метрик десятки).
 birdman_vm_retention: 30d
-birdman_scrape_interval: 15s
-birdman_eval_interval: 15s
+birdman_scrape_interval: 5s
+birdman_eval_interval: 5s
 
 # Цели скрейпа — список job'ов (расширяемо: добавить ноду = добавить target).
 # vmagent идёт в host-network, поэтому это 127.0.0.1 самого бокса.
