@@ -559,6 +559,74 @@ func TestPrePullReports(t *testing.T) {
 	})
 }
 
+// DrainServer (итерация 3): the dedik gets the `drain{deadline_s, reason}`
+// frame, moves to draining (label persisted), the frame is replayed to a
+// reconnecting liba, no signals are sent, and the clean self-exit after the
+// match leaves `stopped` (master reaps it).
+func TestDrainServerDeliversToLiba(t *testing.T) {
+	rt := newFakeRuntime()
+	m, _, _ := testManager(t, rt)
+	m.Start(context.Background(), &agentlinkv1.StartServer{ServerId: "s1", ImageRef: "img:1", CmdId: "c1"})
+	eventually(t, "started", func() bool { return rt.startCount() == 1 })
+	rt.mu.Lock()
+	sockPath := rt.started[0].SocketPath
+	rt.mu.Unlock()
+
+	liba := dialLiba(t, sockPath)
+	frames := liba.readFrames()
+	liba.send("ready", nil)
+	eventually(t, "ready", stateIs(m, "s1", "ready"))
+	m.Allocate(context.Background(), &agentlinkv1.AllocateServer{
+		ServerId: "s1", MatchId: "m-1", PlayersExpected: 2, CmdId: "a1",
+	})
+	eventually(t, "allocated", stateIs(m, "s1", "allocated"))
+
+	// Drain of an unknown server is an ignored no-op.
+	m.DrainServer(context.Background(), &agentlinkv1.DrainServer{
+		ServerId: "nope", DeadlineS: 30, Reason: "deploy", CmdId: "d0",
+	})
+
+	m.DrainServer(context.Background(), &agentlinkv1.DrainServer{
+		ServerId: "s1", DeadlineS: 300, Reason: "deploy 1.1.0", CmdId: "d1",
+	})
+	eventually(t, "draining state", stateIs(m, "s1", "draining"))
+	fr := awaitFrame(t, frames, "drain")
+	if fr.V != 1 || fr.Data["deadline_s"] != float64(300) || fr.Data["reason"] != "deploy 1.1.0" {
+		t.Fatalf("drain frame: %+v", fr)
+	}
+	eventually(t, "draining label persisted", func() bool {
+		return rt.handle("s1").lastState() == "draining/m-1"
+	})
+	// No signal: the dedik plays the match out on its own.
+	if rt.handle("s1").gotSignal(syscall.SIGTERM) {
+		t.Fatal("DrainServer must not signal the container")
+	}
+
+	// Replayed command (cmd_id cache lost) is idempotent: frame re-delivered.
+	m.DrainServer(context.Background(), &agentlinkv1.DrainServer{
+		ServerId: "s1", DeadlineS: 300, Reason: "deploy 1.1.0", CmdId: "d2",
+	})
+	if fr := awaitFrame(t, frames, "drain"); fr.Data["reason"] != "deploy 1.1.0" {
+		t.Fatalf("replayed drain frame: %+v", fr)
+	}
+	if s := snapshotOf(m, "s1"); s.GetState() != "draining" {
+		t.Fatalf("idempotent drain broke the state: %s", s.GetState())
+	}
+
+	// liba reconnect: the last drain frame is replayed from the cache.
+	liba.conn.Close()
+	liba2 := dialLiba(t, sockPath)
+	frames2 := liba2.readFrames()
+	if fr := awaitFrame(t, frames2, "drain"); fr.Data["deadline_s"] != float64(300) {
+		t.Fatalf("reconnect replay: %+v", fr)
+	}
+
+	// The match ends, the one-shot dedik exits 0 → stopped, not failed.
+	liba2.send("match_end", map[string]any{"match_id": "m-1", "result": "completed"})
+	rt.handle("s1").exit <- Exit{Code: 0}
+	eventually(t, "stopped after drain", stateIs(m, "s1", "stopped"))
+}
+
 func TestDrainAndUnsupportedAreAckOnly(t *testing.T) {
 	rt := newFakeRuntime()
 	m, sink, _ := testManager(t, rt)

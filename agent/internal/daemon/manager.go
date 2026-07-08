@@ -336,6 +336,48 @@ func (m *Manager) Drain(_ context.Context, cmd *agentlinkv1.Drain) {
 	m.logf("[daemon] drain requested (reason %q) — TODO iteration 4, ack only", cmd.GetReason())
 }
 
+// DrainServer handles the per-server drain (итерация 3: reap deprecated
+// versions on deploy, docs/specs/master.md §5): move the server to
+// `draining`, forward `drain{deadline_s, reason}` to liba (the UDS server
+// caches the frame and replays it to a (re)connecting liba) and let the dedik
+// finish its match and exit on its own — no signals, unlike StopServer.
+// Idempotent: a replayed command only re-delivers the frame.
+func (m *Manager) DrainServer(_ context.Context, cmd *agentlinkv1.DrainServer) {
+	id := cmd.GetServerId()
+	m.mu.Lock()
+	srv, ok := m.servers[id]
+	m.mu.Unlock()
+	if !ok {
+		m.logf("[daemon] drain %s: unknown server (idempotent no-op)", id)
+		return
+	}
+
+	switch cur := srv.machine.Current(); cur {
+	case lifecycle.StateReady, lifecycle.StateAllocated:
+		m.transition(srv, lifecycle.StateDraining,
+			fmt.Sprintf("drain requested by master (%s)", cmd.GetReason()))
+	case lifecycle.StateDraining:
+		m.logf("[daemon] drain %s: already draining (idempotent)", id)
+	default:
+		// Too early (starting) or already terminal — deliver the frame anyway,
+		// liba owns its own view; heartbeats keep reporting the real state.
+		m.logf("[daemon] drain %s: unexpected state %s", id, cur)
+	}
+
+	srv.mu.Lock()
+	sock := srv.sock
+	srv.mu.Unlock()
+	if sock == nil {
+		m.logf("[daemon] drain %s: no liba socket, frame undeliverable", id)
+		return
+	}
+	if err := sock.SendDrain(int(cmd.GetDeadlineS()), cmd.GetReason()); err != nil {
+		// ErrNotConnected is fine: the frame is cached and replayed when liba
+		// (re)connects (protocol.md §2).
+		m.logf("[daemon] drain %s: send drain: %v", id, err)
+	}
+}
+
 // Unsupported handles commands not implemented in v0 (UpgradeAgent,
 // TailLogs): ack + event so the master log shows why nothing happened.
 func (m *Manager) Unsupported(_ context.Context, kind, cmdID, serverID string) {

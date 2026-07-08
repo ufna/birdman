@@ -95,7 +95,22 @@ message MasterMsg {
     TailLogs tail = 6;
     Ack ack = 7; // reserved for master-side acknowledgements
     AllocateServer allocate = 8; // iteration 2: deliver a match to the dedik
+    DrainServer drain_server = 9; // iteration 3: per-server drain (deploy reap)
   }
+}
+
+// DrainServer asks ONE dedicated server to finish its current match and exit
+// (iteration 3, deploy manager reap of deprecated versions —
+// docs/specs/master.md §5). The agent moves the server to `draining`,
+// forwards the `drain{deadline_s, reason}` frame to liba over the per-server
+// socket (docs/specs/protocol.md §2) and replays it to a (re)connecting liba.
+// Unlike StopServer no signal is sent: the dedik plays the match out and
+// exits on its own; deadline_s is the in-game deadline for liba.
+message DrainServer {
+  string cmd_id = 1;
+  string server_id = 2;
+  int32 deadline_s = 3;
+  string reason = 4;
 }
 
 // AllocateServer tells the node's agent that master allocated a match to

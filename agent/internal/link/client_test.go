@@ -124,6 +124,7 @@ type fakeHandler struct {
 	allocates   []*agentlinkv1.AllocateServer
 	prepulls    []*agentlinkv1.PrePull
 	drains      []*agentlinkv1.Drain
+	srvDrains   []*agentlinkv1.DrainServer
 	unsupported []string
 }
 
@@ -151,6 +152,11 @@ func (h *fakeHandler) Drain(_ context.Context, c *agentlinkv1.Drain) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.drains = append(h.drains, c)
+}
+func (h *fakeHandler) DrainServer(_ context.Context, c *agentlinkv1.DrainServer) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.srvDrains = append(h.srvDrains, c)
 }
 func (h *fakeHandler) Unsupported(_ context.Context, kind, cmdID, serverID string) {
 	h.mu.Lock()
@@ -341,10 +347,14 @@ func TestCommandDispatchAckAndIdempotency(t *testing.T) {
 	h.fake.push(t, &agentlinkv1.MasterMsg{Msg: &agentlinkv1.MasterMsg_Allocate{Allocate: &agentlinkv1.AllocateServer{
 		ServerId: "s1", MatchId: "m-1", PlayersExpected: 2, CmdId: "cmd-4",
 	}}})
-	eventually(t, "stop, tail and allocate handled", func() bool {
+	h.fake.push(t, &agentlinkv1.MasterMsg{Msg: &agentlinkv1.MasterMsg_DrainServer{DrainServer: &agentlinkv1.DrainServer{
+		ServerId: "s1", DeadlineS: 300, Reason: "deploy", CmdId: "cmd-5",
+	}}})
+	eventually(t, "stop, tail, allocate and drain_server handled", func() bool {
 		handler.mu.Lock()
 		defer handler.mu.Unlock()
-		return len(handler.stops) == 1 && len(handler.unsupported) == 1 && len(handler.allocates) == 1
+		return len(handler.stops) == 1 && len(handler.unsupported) == 1 &&
+			len(handler.allocates) == 1 && len(handler.srvDrains) == 1
 	})
 	handler.mu.Lock()
 	if handler.unsupported[0] != "tail_logs" {
@@ -353,16 +363,23 @@ func TestCommandDispatchAckAndIdempotency(t *testing.T) {
 	if a := handler.allocates[0]; a.GetMatchId() != "m-1" || a.GetPlayersExpected() != 2 {
 		t.Fatalf("allocate command: %+v", a)
 	}
+	if d := handler.srvDrains[0]; d.GetServerId() != "s1" || d.GetDeadlineS() != 300 || d.GetReason() != "deploy" {
+		t.Fatalf("drain_server command: %+v", d)
+	}
 	handler.mu.Unlock()
-	eventually(t, "allocate acked", func() bool {
+	eventually(t, "allocate and drain_server acked", func() bool {
 		h.fake.mu.Lock()
 		defer h.fake.mu.Unlock()
+		var got4, got5 bool
 		for _, a := range h.fake.acks {
 			if a == "cmd-4" {
-				return true
+				got4 = true
+			}
+			if a == "cmd-5" {
+				got5 = true
 			}
 		}
-		return false
+		return got4 && got5
 	})
 }
 

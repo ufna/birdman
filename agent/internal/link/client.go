@@ -33,6 +33,9 @@ type Handler interface {
 	Allocate(ctx context.Context, cmd *agentlinkv1.AllocateServer)
 	PrePull(ctx context.Context, cmd *agentlinkv1.PrePull)
 	Drain(ctx context.Context, cmd *agentlinkv1.Drain)
+	// DrainServer drains ONE dedik (итерация 3, deploy reap): liba gets the
+	// `drain{deadline_s, reason}` frame and exits after the match on its own.
+	DrainServer(ctx context.Context, cmd *agentlinkv1.DrainServer)
 	// Unsupported handles commands the agent does not implement yet
 	// (UpgradeAgent, TailLogs — v0 TODO).
 	Unsupported(ctx context.Context, kind, cmdID, serverID string)
@@ -274,6 +277,8 @@ func (c *Client) dispatch(ctx context.Context, in *agentlinkv1.MasterMsg) {
 		c.h.PrePull(ctx, m.Prepull)
 	case *agentlinkv1.MasterMsg_Drain:
 		c.h.Drain(ctx, m.Drain)
+	case *agentlinkv1.MasterMsg_DrainServer:
+		c.h.DrainServer(ctx, m.DrainServer)
 	case *agentlinkv1.MasterMsg_Upgrade:
 		c.h.Unsupported(ctx, "upgrade_agent", m.Upgrade.GetCmdId(), "")
 	case *agentlinkv1.MasterMsg_Tail:
@@ -294,6 +299,8 @@ func commandID(m *agentlinkv1.MasterMsg) string {
 		return c.Prepull.GetCmdId()
 	case *agentlinkv1.MasterMsg_Drain:
 		return c.Drain.GetCmdId()
+	case *agentlinkv1.MasterMsg_DrainServer:
+		return c.DrainServer.GetCmdId()
 	case *agentlinkv1.MasterMsg_Upgrade:
 		return c.Upgrade.GetCmdId()
 	case *agentlinkv1.MasterMsg_Tail:

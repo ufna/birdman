@@ -26,6 +26,8 @@
 
 `StopServer{server_id, grace_s}`: SIGTERM → grace (деф. 30с) → SIGKILL → delete container, освободить порт и сокет.
 
+(Уточнено в v0, итерация 3.) `DrainServer{server_id, deadline_s, reason}` — per-server drain при reap deprecated-версии (deploy-менеджер, `master.md` §5): `ready|allocated → draining`, liba получает UDS-фрейм `drain{deadline_s, reason}` (кэшируется и реплеится при реконнекте liba); сигналов нет — дедик доигрывает матч и выходит сам (`match_end` → exit 0 → `stopped`, master делает `reaped`).
+
 ## 4. Health и heartbeat
 
 - liba-heartbeat: `players`, `tick_ms`, match-события через UDS (см. `protocol.md`); тишина от liba >15с при state=allocated → пометить `unhealthy` в heartbeat (master решает).
