@@ -93,7 +93,10 @@ func TestSessionAuth(t *testing.T) {
 		t.Fatalf("login scopes: %v", body)
 	}
 	c := sessionCookieOf(t, resp)
-	if !c.HttpOnly || !c.Secure || c.SameSite != http.SameSiteLaxMode || c.Path != "/" {
+	// Secure follows the scheme: this harness is plain HTTP, so Secure must be
+	// OFF here (else Safari drops the cookie over the dev SSH tunnel and login
+	// loops). The HTTPS case is covered by TestSessionCookieSecureFollowsScheme.
+	if !c.HttpOnly || c.Secure || c.SameSite != http.SameSiteLaxMode || c.Path != "/" {
 		t.Fatalf("cookie flags: %+v", c)
 	}
 	b.cookie = c

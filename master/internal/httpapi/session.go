@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -111,7 +112,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	http.SetCookie(w, sessionCookieFor(id, int(sessionTTL.Seconds())))
+	http.SetCookie(w, sessionCookieFor(id, int(sessionTTL.Seconds()), requestIsHTTPS(r)))
 	writeJSON(w, http.StatusOK, map[string]any{"scopes": key.Scopes, "name": key.Name})
 }
 
@@ -135,21 +136,29 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		}
 		s.auth.sessions.delete(c.Value)
 	}
-	http.SetCookie(w, sessionCookieFor("", -1))
+	http.SetCookie(w, sessionCookieFor("", -1, requestIsHTTPS(r)))
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// requestIsHTTPS reports whether the request effectively arrived over TLS —
+// directly (r.TLS) or via a TLS-terminating proxy (X-Forwarded-Proto=https).
+// Drives the Secure cookie flag: over plain HTTP (dev via SSH tunnel) Secure
+// must be off, or Safari/others silently drop the cookie and login loops.
+func requestIsHTTPS(r *http.Request) bool {
+	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
+
 // sessionCookieFor builds the session cookie (maxAge < 0 deletes it).
-// Secure is always set: over TLS that is the point; browsers still accept
-// Secure cookies from http://localhost, so the dev flow keeps working.
-func sessionCookieFor(value string, maxAge int) *http.Cookie {
+// Secure follows the connection: HTTPS in prod, off for the plain-HTTP dev
+// tunnel so the cookie actually persists in the browser.
+func sessionCookieFor(value string, maxAge int, secure bool) *http.Cookie {
 	return &http.Cookie{
 		Name:     sessionCookie,
 		Value:    value,
 		Path:     "/",
 		MaxAge:   maxAge,
 		HttpOnly: true,
-		Secure:   true,
+		Secure:   secure,
 		SameSite: http.SameSiteLaxMode,
 	}
 }
