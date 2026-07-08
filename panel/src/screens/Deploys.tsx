@@ -13,6 +13,7 @@ import { useData, useLive } from '../lib/live';
 import { canDeploy, useSession } from '../lib/session';
 import { shortId } from '../lib/format';
 import { useT, useFormat } from '../lib/i18n';
+import { useToast } from '../components/Toast';
 import { DataTable } from '../components/DataTable';
 import { StateBadge, toneOfVersionState } from '../components/Badge';
 import { ConfirmButton } from '../components/ConfirmDialog';
@@ -91,6 +92,7 @@ function ProjectDeploys({
 }) {
   const { t, tp } = useT();
   const fmt = useFormat();
+  const toast = useToast();
   const active = versions.find((v) => v.state === 'active');
   const deprecated = versions.filter((v) => v.state === 'deprecated');
   const prepulling = versions.filter((v) => v.state === 'prepulling');
@@ -158,7 +160,8 @@ function ProjectDeploys({
               description={t('deploys.rollback.desc', { semver: deprecated[0].semver })}
               confirmLabel={t('deploys.rollback')}
               onConfirm={async () => {
-                await api.rollback({ project });
+                const res = await api.rollback({ project });
+                toast.success(t('deploys.toast.rolledBack', { project, semver: res.version.semver }));
                 reload();
               }}
             />
@@ -190,6 +193,7 @@ function ProjectDeploys({
 /** Deploy-кнопка для строки версии: доступна для registered/deprecated. */
 function DeployAction({ version, onDone }: { version: VersionInfo; onDone: () => void }) {
   const { t } = useT();
+  const toast = useToast();
   if (version.state === 'prepulling') {
     return <span className="font-mono text-xs text-warn">{t('deploys.warming')}</span>;
   }
@@ -202,6 +206,7 @@ function DeployAction({ version, onDone }: { version: VersionInfo; onDone: () =>
       confirmLabel={t('deploys.deploy')}
       onConfirm={async () => {
         await api.deploy(version.id);
+        toast.success(t('deploys.toast.deployed', { semver: version.semver }));
         onDone();
       }}
     />

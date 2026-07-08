@@ -47,6 +47,71 @@ body {
   border-radius: 4px;
 }
 
+/* Skip-to-content: скрыта, пока не получит фокус (первый Tab) — уводит с
+ * навигации сразу в основной контент, минуя её на каждом экране. */
+.skip-link {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 100;
+  transform: translateY(-130%);
+  border: 1px solid var(--line);
+  border-radius: 0 0 8px 0;
+  background: var(--card);
+  color: var(--ink);
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  transition: transform 0.15s ease;
+}
+.skip-link:focus {
+  transform: translateY(0);
+}
+
+/* Бейдж critical в навигации: короткий мягкий пульс при появлении/росте
+ * (ключ = alarmKey перезапускает анимацию), затем гаснет. */
+@keyframes critical-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--dead) 60%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+.critical-pulse {
+  animation: critical-pulse 1.4s ease-out 3;
+}
+
+/* Тост: мягкий въезд снизу/из прозрачности. */
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.toast-item {
+  animation: toast-in 0.18s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skip-link {
+    transition: none;
+  }
+  .critical-pulse {
+    animation: none;
+  }
+  .toast-item {
+    animation: none;
+  }
+}
+
 /* Живой индикатор: точка «дышит», пока стрим подключён. */
 @keyframes live-pulse {
   0%,

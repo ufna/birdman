@@ -84,6 +84,7 @@ function LiveMatches() {
           onRowClick={(m) => {
             openMatch(m.id);
           }}
+          rowLabel={() => t('match.openDetails')}
           empty={t('matches.live.empty')}
         />
       )}
@@ -235,6 +236,7 @@ function MatchHistory() {
             onRowClick={(m) => {
               openMatch(m.id);
             }}
+            rowLabel={() => t('match.openDetails')}
             empty={page > 0 ? t('matches.history.emptyNext') : t('matches.history.emptyFilter')}
           />
           <footer className="flex items-center justify-between border-t border-line px-4 py-2.5">

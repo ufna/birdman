@@ -1,15 +1,20 @@
 // Каркас после логина: навигация, live-индикатор стрима, переключатели
 // языка и темы, выход. До 1280px страница не скроллится по горизонтали —
-// таблицы скроллятся внутри карточек.
+// таблицы скроллятся внутри карточек. <768px навигация сворачивается в
+// гамбургер-дровер (Radix Dialog: фокус-трап, Esc, возврат фокуса).
 
+import { useState } from 'react';
 import type { ReactNode } from 'react';
 import * as Tooltip from '@radix-ui/react-tooltip';
+import * as Dialog from '@radix-ui/react-dialog';
 import { useLive } from '../lib/live';
 import { canAdmin, useSession } from '../lib/session';
 import type { SessionInfo } from '../lib/api';
 import { useTheme } from '../lib/theme';
 import { useT } from '../lib/i18n';
 import type { Lang, MessageKey } from '../lib/i18n';
+import { useCriticalAlerts } from '../lib/useCriticalAlerts';
+import type { CriticalAlerts } from '../lib/useCriticalAlerts';
 import { Brand } from './ui';
 
 type NavIcon = 'overview' | 'fleet' | 'matches' | 'deploys' | 'events' | 'stats' | 'cost' | 'alerts' | 'access';
@@ -43,35 +48,53 @@ function isActive(item: string, path: string): boolean {
   return item === '/' ? path === '/' : path.startsWith(item);
 }
 
-function NavLinks({ path, navigate, row = false }: { path: string; navigate: (p: string) => void; row?: boolean }) {
+/** Бейдж активных critical-алертов на пункте «Алерты». Пульс на росте
+ *  (ключ = alarmKey перезапускает анимацию), уважает prefers-reduced-motion. */
+function CriticalBadge({ critical, label }: { critical: CriticalAlerts; label: string }) {
+  return (
+    <span
+      key={critical.alarmKey}
+      aria-label={label}
+      className="critical-pulse tabular inline-flex min-w-[1.1rem] shrink-0 items-center justify-center rounded-full bg-dead px-1 text-[10px] leading-none font-semibold text-white"
+    >
+      {critical.count > 99 ? '99+' : critical.count}
+    </span>
+  );
+}
+
+function NavLinks({
+  path,
+  navigate,
+  critical,
+}: {
+  path: string;
+  navigate: (p: string) => void;
+  critical: CriticalAlerts;
+}) {
   const { t } = useT();
   const { session } = useSession();
   const items = navItemsFor(session);
   return (
-    <nav
-      className={row ? 'flex min-w-0 items-center gap-0.5 overflow-x-auto' : 'flex flex-col gap-1'}
-      aria-label={t('nav.sections')}
-    >
+    <nav className="flex flex-col gap-1" aria-label={t('nav.sections')}>
       {items.map((item) => {
         const active = isActive(item.path, path);
-        const label = t(item.key);
+        const showBadge = item.icon === 'alerts' && critical.count > 0;
         return (
           <a
             key={item.path}
             href={item.path}
             aria-current={active ? 'page' : undefined}
-            aria-label={row ? label : undefined}
-            title={row ? label : undefined}
             onClick={(e) => {
               e.preventDefault();
               navigate(item.path);
             }}
-            className={`flex shrink-0 items-center gap-2 rounded-lg text-sm transition-colors ${
-              row ? 'px-2 py-1.5' : 'px-3 py-1.5'
-            } ${active ? 'bg-mark font-medium text-accent-ink' : 'text-muted hover:bg-paper hover:text-ink'}`}
+            className={`flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm transition-colors ${
+              active ? 'bg-mark font-medium text-accent-ink' : 'text-muted hover:bg-paper hover:text-ink'
+            }`}
           >
             <NavGlyph icon={item.icon} />
-            {!row && label}
+            <span className="min-w-0 flex-1 truncate">{t(item.key)}</span>
+            {showBadge && <CriticalBadge critical={critical} label={t('alerts.critical.badge', { count: critical.count })} />}
           </a>
         );
       })}
@@ -235,38 +258,111 @@ function SessionBox() {
   );
 }
 
+/** Нижний блок сайдбара/дровера: стрим, язык, тема, сессия. */
+function ShellFooter() {
+  return (
+    <div className="mt-auto flex flex-col gap-3 border-t border-line pt-4">
+      <div className="flex items-center justify-between">
+        <LiveIndicator />
+        <div className="flex items-center gap-2">
+          <LangToggle />
+          <ThemeToggle />
+        </div>
+      </div>
+      <SessionBox />
+    </div>
+  );
+}
+
+/** Мобильная навигация <md: гамбургер → дровер слева (Radix Dialog: фокус-трап,
+ *  Esc, возврат фокуса на триггер). На кнопке — точка при активных critical. */
+function MobileNav({
+  path,
+  navigate,
+  critical,
+}: {
+  path: string;
+  navigate: (p: string) => void;
+  critical: CriticalAlerts;
+}) {
+  const { t } = useT();
+  const [open, setOpen] = useState(false);
+  const go = (p: string) => {
+    navigate(p);
+    setOpen(false);
+  };
+  return (
+    <Dialog.Root open={open} onOpenChange={setOpen}>
+      <Dialog.Trigger asChild>
+        <button
+          type="button"
+          aria-label={t('nav.menu')}
+          className="relative rounded-lg border border-line p-1.5 text-muted hover:text-ink"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" className="size-5" aria-hidden>
+            <path d="M4 7h16M4 12h16M4 17h16" />
+          </svg>
+          {critical.count > 0 && (
+            <span aria-hidden className="absolute -top-0.5 -right-0.5 size-2 rounded-full bg-dead ring-2 ring-card" />
+          )}
+        </button>
+      </Dialog.Trigger>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-40 bg-black/40 backdrop-blur-[1px]" />
+        <Dialog.Content
+          aria-describedby={undefined}
+          className="fixed inset-y-0 left-0 z-50 flex w-[min(18rem,85vw)] flex-col gap-6 border-r border-line bg-card px-4 py-5 shadow-2xl focus:outline-none"
+        >
+          <div className="flex items-center justify-between">
+            <Dialog.Title asChild>
+              <span>
+                <Brand />
+              </span>
+            </Dialog.Title>
+            <Dialog.Close asChild>
+              <button type="button" aria-label={t('common.close')} className="rounded-lg border border-line p-1.5 text-muted hover:text-ink">
+                <svg viewBox="0 0 16 16" className="size-4" aria-hidden>
+                  <path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                </svg>
+              </button>
+            </Dialog.Close>
+          </div>
+          <NavLinks path={path} navigate={go} critical={critical} />
+          <ShellFooter />
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
 export function Shell({ path, navigate, children }: { path: string; navigate: (p: string) => void; children: ReactNode }) {
+  const { t } = useT();
+  const critical = useCriticalAlerts();
   return (
     <Tooltip.Provider delayDuration={300}>
+      <a href="#main-content" className="skip-link">
+        {t('a11y.skipToContent')}
+      </a>
       <div className="flex min-h-screen">
         {/* Боковая колонка ≥md */}
         <aside className="sticky top-0 hidden h-screen w-56 shrink-0 flex-col gap-6 border-r border-line bg-card px-4 py-5 md:flex">
           <Brand />
-          <NavLinks path={path} navigate={navigate} />
-          <div className="mt-auto flex flex-col gap-3 border-t border-line pt-4">
-            <div className="flex items-center justify-between">
-              <LiveIndicator />
-              <div className="flex items-center gap-2">
-                <LangToggle />
-                <ThemeToggle />
-              </div>
-            </div>
-            <SessionBox />
-          </div>
+          <NavLinks path={path} navigate={navigate} critical={critical} />
+          <ShellFooter />
         </aside>
 
         <div className="flex min-w-0 flex-1 flex-col">
           {/* Верхняя панель <md */}
           <header className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-line bg-card px-4 py-3 md:hidden">
             <Brand />
-            <NavLinks path={path} navigate={navigate} row />
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-3">
               <LiveIndicator />
-              <LangToggle />
-              <ThemeToggle />
+              <MobileNav path={path} navigate={navigate} critical={critical} />
             </div>
           </header>
-          <main className="mx-auto w-full max-w-[1400px] flex-1 px-4 py-5 md:px-6">{children}</main>
+          <main id="main-content" tabIndex={-1} className="mx-auto w-full max-w-[1400px] flex-1 px-4 py-5 focus:outline-none md:px-6">
+            {children}
+          </main>
         </div>
       </div>
     </Tooltip.Provider>

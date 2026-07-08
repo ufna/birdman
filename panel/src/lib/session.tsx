@@ -16,7 +16,9 @@ interface SessionContextValue {
   invalidate: () => void;
 }
 
-const SessionContext = createContext<SessionContextValue | null>(null);
+// Экспортируется для юнит-тестов (инъекция управляемой сессии, как LiveContext).
+// В приложении используется только через <SessionProvider>/useSession.
+export const SessionContext = createContext<SessionContextValue | null>(null);
 
 export function SessionProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<SessionInfo | null | undefined>(undefined);
@@ -61,10 +63,19 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
 }
 
+// Фолбэк без провайдера: «не залогинен» (session=null), операции — no-op.
+// Реальное приложение всегда обёрнуто в <SessionProvider>; фолбэк нужен
+// изолированным юнит-тестам экранов, которые гейтят кнопки по скоупу (как
+// FALLBACK_LIVE в live.tsx): без сессии admin-действия просто скрыты.
+const FALLBACK_SESSION: SessionContextValue = {
+  session: null,
+  login: async () => {},
+  logout: async () => {},
+  invalidate: () => {},
+};
+
 export function useSession(): SessionContextValue {
-  const ctx = useContext(SessionContext);
-  if (ctx === null) throw new Error('useSession must be used within a SessionProvider');
-  return ctx;
+  return useContext(SessionContext) ?? FALLBACK_SESSION;
 }
 
 /** true, если у сессии есть доступ на чтение (readonly или admin). */

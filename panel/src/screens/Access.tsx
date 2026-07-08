@@ -12,6 +12,7 @@ import type { ApiKey, CreatedApiKey, Scope } from '../lib/api';
 import { useAsync } from '../lib/useAsync';
 import { useT, useFormat } from '../lib/i18n';
 import type { I18nContextValue } from '../lib/i18n';
+import { useToast } from '../components/Toast';
 import { DataTable } from '../components/DataTable';
 import { StateBadge, toneOfKeyStatus } from '../components/Badge';
 import { ConfirmButton } from '../components/ConfirmDialog';
@@ -114,6 +115,7 @@ function ScopeChips({ scopes }: { scopes: Scope[] }) {
 
 function RevokeAction({ apiKey, onDone }: { apiKey: ApiKey; onDone: () => void }) {
   const { t } = useT();
+  const toast = useToast();
   return (
     <div className="flex justify-end">
       <ConfirmButton
@@ -125,6 +127,7 @@ function RevokeAction({ apiKey, onDone }: { apiKey: ApiKey; onDone: () => void }
         errorOverride={lastAdminKeyMessage(t)}
         onConfirm={async () => {
           await api.revokeApiKey(apiKey.id);
+          toast.success(t('access.toast.revoked', { name: apiKey.name }));
           onDone();
         }}
       />
@@ -136,6 +139,7 @@ function RevokeAction({ apiKey, onDone }: { apiKey: ApiKey; onDone: () => void }
 
 function CreateKeyDialog({ onCreated }: { onCreated: () => void }) {
   const { t } = useT();
+  const toast = useToast();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
   const [scopes, setScopes] = useState<Set<Scope>>(new Set());
@@ -161,6 +165,7 @@ function CreateKeyDialog({ onCreated }: { onCreated: () => void }) {
       .then((res) => {
         setCreated(res); // переключает диалог в режим показа секрета
         setPending(false);
+        toast.success(t('access.toast.created', { name: res.key.name }));
         onCreated();
       })
       .catch((e: unknown) => {
