@@ -8,6 +8,7 @@ import type { ColumnDef } from '@tanstack/react-table';
 import { api } from '../lib/api';
 import type { Match, MatchState } from '../lib/api';
 import { useData } from '../lib/live';
+import { useServerDrawer } from '../lib/drawer';
 import { useNow } from '../lib/useNow';
 import { ageOf, formatAge, formatStamp, shortId } from '../lib/format';
 import { DataTable } from '../components/DataTable';
@@ -79,6 +80,7 @@ function LiveMatches() {
 }
 
 function useLiveColumns(): ColumnDef<Match, unknown>[] {
+  const { open } = useServerDrawer();
   return useMemo(
     () => [
       idColumn(),
@@ -100,13 +102,27 @@ function useLiveColumns(): ColumnDef<Match, unknown>[] {
         cell: ({ row }) => (
           <div className="font-mono text-xs">
             {row.original.host}:{row.original.port}
-            <span className="text-muted"> · {shortId(row.original.server_id)}</span>
+            {row.original.server_id !== '' && (
+              <>
+                {' · '}
+                <button
+                  type="button"
+                  onClick={() => {
+                    open(row.original.server_id);
+                  }}
+                  className="text-accent-ink underline-offset-2 hover:underline"
+                  title="Открыть детали дедика"
+                >
+                  {shortId(row.original.server_id)}
+                </button>
+              </>
+            )}
           </div>
         ),
       },
       stateColumn(),
     ],
-    [],
+    [open],
   );
 }
 

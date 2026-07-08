@@ -13,6 +13,8 @@ const navItems = [
   { path: '/', label: 'Overview' },
   { path: '/fleet', label: 'Флот' },
   { path: '/matches', label: 'Матчи' },
+  { path: '/deploys', label: 'Деплои' },
+  { path: '/events', label: 'События' },
 ];
 
 function isActive(item: string, path: string): boolean {

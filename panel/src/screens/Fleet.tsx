@@ -4,12 +4,15 @@
 import { useMemo, useState } from 'react';
 import type { ColumnDef } from '@tanstack/react-table';
 import { api } from '../lib/api';
-import type { GameServer, NodeInfo } from '../lib/api';
+import type { ApiEvent, GameServer, NodeInfo } from '../lib/api';
 import { useData } from '../lib/live';
+import { canAdmin, useSession } from '../lib/session';
+import { useServerDrawer } from '../lib/drawer';
 import { useNow } from '../lib/useNow';
 import { ageOf, formatAge, heartbeatTone, shortId } from '../lib/format';
 import { DataTable } from '../components/DataTable';
 import { StateBadge, toneOfNodeState, toneOfServerState } from '../components/Badge';
+import { ConfirmButton } from '../components/ConfirmDialog';
 import { Card, CardHeader, ErrorNote, LoadingRow } from '../components/ui';
 
 const LIVE_SERVER_STATES = new Set(['creating', 'ready', 'allocated', 'draining']);
@@ -18,12 +21,18 @@ export function Fleet() {
   const nodes = useData(() => api.listNodes(), []);
   const servers = useData(() => api.listServers(), []);
   const versions = useData(() => api.listVersions(), []);
+  // Причина карантина — из последнего события node_quarantine ноды
+  // (server-side фильтра по node_id у /v1/events нет — фильтруем клиентом).
+  const events = useData(() => api.listEvents(500), []);
+  const { session } = useSession();
+  const mayAdmin = session != null && canAdmin(session);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const semverOf = useMemo(
     () => new Map((versions.data ?? []).map((v) => [v.id, v.semver])),
     [versions.data],
   );
+  const quarantineReason = useMemo(() => latestQuarantineReasons(events.data ?? []), [events.data]);
   const serversByNode = useMemo(() => {
     const m = new Map<string, GameServer[]>();
     for (const s of servers.data ?? []) {
@@ -61,7 +70,21 @@ export function Fleet() {
       {
         id: 'state',
         header: 'Состояние',
-        cell: ({ row }) => <StateBadge state={row.original.state} tone={toneOfNodeState(row.original.state)} />,
+        cell: ({ row }) => (
+          <div className="flex flex-col gap-1">
+            <StateBadge state={row.original.state} tone={toneOfNodeState(row.original.state)} />
+            {row.original.state === 'quarantine' && quarantineReason.get(row.original.id) !== undefined && (
+              <span className="max-w-40 truncate text-[11px] text-dead" title={quarantineReason.get(row.original.id)}>
+                {quarantineReason.get(row.original.id)}
+              </span>
+            )}
+            {row.original.state === 'draining' && (
+              <DrainProgress
+                playing={(serversByNode.get(row.original.id) ?? []).filter((s) => s.state === 'allocated').length}
+              />
+            )}
+          </div>
+        ),
       },
       {
         id: 'slots',
@@ -88,6 +111,12 @@ export function Fleet() {
         ),
       },
       {
+        id: 'actions',
+        header: '',
+        cell: ({ row }) =>
+          mayAdmin ? <NodeActions node={row.original} onDone={nodes.reload} /> : null,
+      },
+      {
         id: 'chevron',
         header: '',
         cell: ({ row }) => (
@@ -101,7 +130,7 @@ export function Fleet() {
         ),
       },
     ],
-    [serversByNode, expandedId],
+    [serversByNode, expandedId, quarantineReason, mayAdmin, nodes.reload],
   );
 
   const error = nodes.error ?? servers.error ?? versions.error;
@@ -157,6 +186,67 @@ function SlotsCell({ busy, total }: { busy: number; total: number }) {
   );
 }
 
+/** Drain/Undrain тачки (admin, confirm). stopPropagation — чтобы клик по
+ *  кнопке не разворачивал строку. */
+function NodeActions({ node, onDone }: { node: NodeInfo; onDone: () => void }) {
+  if (node.state === 'dead') return null;
+  const draining = node.state === 'draining';
+  return (
+    <div
+      onClick={(e) => {
+        e.stopPropagation();
+      }}
+      className="flex justify-end"
+    >
+      {draining ? (
+        <ConfirmButton
+          label="Undrain"
+          title={`Вернуть ${node.hostname} в ротацию?`}
+          description="Reconcile снова начнёт размещать дедики на этой тачке, агенту уйдёт Undrain."
+          confirmLabel="Undrain"
+          onConfirm={async () => {
+            await api.undrainNode(node.id);
+            onDone();
+          }}
+        />
+      ) : (
+        <ConfirmButton
+          label="Drain"
+          tone="dead"
+          title={`Вывести ${node.hostname} из ротации?`}
+          description="Новые дедики размещаться не будут, ready-буфер реапится, а allocated доигрывают свои матчи. Тачку можно вернуть кнопкой Undrain."
+          confirmLabel="Drain"
+          onConfirm={async () => {
+            await api.drainNode(node.id);
+            onDone();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/** Индикация опустошения draining-ноды: сколько allocated ещё доигрывает. */
+function DrainProgress({ playing }: { playing: number }) {
+  return (
+    <span className="font-mono text-[11px] text-warn">
+      {playing > 0 ? `${playing} доигрывает` : 'опустошена'}
+    </span>
+  );
+}
+
+/** node_id → причина последнего карантина (payload.reason события node_quarantine). */
+function latestQuarantineReasons(events: ApiEvent[]): Map<string, string> {
+  const m = new Map<string, string>();
+  // events отсортированы новыми вперёд — первое совпадение и есть последнее.
+  for (const e of events) {
+    if (e.kind !== 'node_quarantine' || e.node_id === undefined || m.has(e.node_id)) continue;
+    const reason = e.payload.reason ?? e.payload.detail;
+    if (typeof reason === 'string') m.set(e.node_id, reason);
+  }
+  return m;
+}
+
 /** Живой возраст heartbeat: тикает каждую секунду, тон — по свежести. */
 export function HeartbeatCell({ iso }: { iso?: string }) {
   const now = useNow();
@@ -173,6 +263,7 @@ export function HeartbeatCell({ iso }: { iso?: string }) {
 
 function NodeServers({ servers, semverOf }: { servers: GameServer[]; semverOf: Map<string, string> }) {
   const now = useNow();
+  const { open } = useServerDrawer();
   if (servers.length === 0) {
     return <p className="py-2 text-xs text-muted">На тачке нет дедиков.</p>;
   }
@@ -192,8 +283,15 @@ function NodeServers({ servers, semverOf }: { servers: GameServer[]; semverOf: M
         </thead>
         <tbody>
           {servers.map((s) => (
-            <tr key={s.id} className="border-b border-line last:border-0">
-              <td className="px-3 py-2 font-mono">{shortId(s.id)}</td>
+            <tr
+              key={s.id}
+              onClick={() => {
+                open(s.id);
+              }}
+              className="cursor-pointer border-b border-line transition-colors last:border-0 hover:bg-paper"
+              title="Открыть детали дедика: таймлайн, логи, метрики"
+            >
+              <td className="px-3 py-2 font-mono text-accent-ink underline-offset-2 hover:underline">{shortId(s.id)}</td>
               <td className="px-3 py-2">
                 <StateBadge state={s.state} tone={toneOfServerState(s.state)} />
               </td>
