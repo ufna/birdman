@@ -7,14 +7,19 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/ufna/birdman/agent/internal/cgroups"
 	"github.com/ufna/birdman/agent/internal/config"
 	"github.com/ufna/birdman/agent/internal/lifecycle"
+	"github.com/ufna/birdman/agent/internal/logrot"
+	"github.com/ufna/birdman/agent/internal/metrics"
 	"github.com/ufna/birdman/agent/internal/ports"
 	"github.com/ufna/birdman/agent/internal/stats"
 	"github.com/ufna/birdman/agent/internal/uds"
+	"github.com/ufna/birdman/agent/internal/upgrade"
 	agentlinkv1 "github.com/ufna/birdman/proto/agentlink/v1"
 )
 
@@ -39,6 +44,18 @@ type Options struct {
 	Sink      Sink
 	SocketDir string // default DefaultSocketDir
 	Logf      func(string, ...any)
+
+	// AgentVersion is the running build (Hello/UpgradeAgent no-op detection).
+	AgentVersion string
+	// BinaryPath is the file UpgradeAgent replaces; default os.Executable().
+	BinaryPath string
+	// OnUpgraded fires after a successful self-upgrade download+swap: the
+	// caller shuts the agent down cleanly and systemd restarts the new
+	// binary (agent.md §7). Containers survive (§2).
+	OnUpgraded func(version string)
+	// TouchImage feeds the image GC protected set on StartServer/PrePull
+	// (agent.md §6). May be nil.
+	TouchImage func(imageRef string)
 }
 
 // Manager supervises the node's dedicated servers: executes master commands,
@@ -55,8 +72,31 @@ type Manager struct {
 	sockDir string
 	logDir  string
 
+	agentVersion string
+	binaryPath   string
+	onUpgraded   func(string)
+	touchImage   func(string)
+	// applyUpgrade is upgrade.Apply, injectable for tests.
+	applyUpgrade func(ctx context.Context, url, sha256hex, dest string) error
+	// finalizeLog gzips a stopped server's logs (logrot.Rotator.Finalize).
+	finalizeLog func(serverID string)
+	// diskUsage samples the data_dir filesystem (stats.DiskUsage in prod).
+	diskUsage func() (used, total uint64)
+	// diskFullFrac refuses StartServer above this usage fraction (§6);
+	// 0 disables the guard (configs built without defaults, tests).
+	diskFullFrac float64
+
+	// draining is the node-level drain flag (итерация 4): while set, new
+	// StartServer commands are rejected with a failed event. The master's
+	// nodes.state stays authoritative — the flag only closes the race of
+	// commands already in flight when the drain landed.
+	draining atomic.Bool
+
 	mu      sync.Mutex
 	servers map[string]*server
+
+	tailsMu sync.Mutex
+	tails   map[string]context.CancelFunc // TailLogs cmd_id → cancel
 }
 
 // server is one supervised dedicated server.
@@ -87,6 +127,17 @@ func NewManager(ctx context.Context, o Options) (*Manager, error) {
 	if o.SocketDir == "" {
 		o.SocketDir = DefaultSocketDir
 	}
+	if o.TouchImage == nil {
+		o.TouchImage = func(string) {}
+	}
+	if o.OnUpgraded == nil {
+		o.OnUpgraded = func(string) {}
+	}
+	if o.BinaryPath == "" {
+		if exe, err := os.Executable(); err == nil {
+			o.BinaryPath = exe
+		}
+	}
 	pool, err := ports.New(o.Config.PortRange[0], o.Config.PortRange[1])
 	if err != nil {
 		return nil, fmt.Errorf("port pool: %w", err)
@@ -97,18 +148,35 @@ func NewManager(ctx context.Context, o Options) (*Manager, error) {
 			return nil, err
 		}
 	}
+	dataDir := o.Config.DataDir
 	return &Manager{
-		ctx:     ctx,
-		cfg:     o.Config,
-		rt:      o.Runtime,
-		sink:    o.Sink,
-		logf:    o.Logf,
-		stats:   stats.New(o.Config.DataDir),
-		pool:    pool,
-		sockDir: o.SocketDir,
-		logDir:  logDir,
-		servers: map[string]*server{},
+		ctx:          ctx,
+		cfg:          o.Config,
+		rt:           o.Runtime,
+		sink:         o.Sink,
+		logf:         o.Logf,
+		stats:        stats.New(dataDir),
+		pool:         pool,
+		sockDir:      o.SocketDir,
+		logDir:       logDir,
+		agentVersion: o.AgentVersion,
+		binaryPath:   o.BinaryPath,
+		onUpgraded:   o.OnUpgraded,
+		touchImage:   o.TouchImage,
+		applyUpgrade: upgrade.Apply,
+		finalizeLog:  func(string) {},
+		diskUsage:    func() (uint64, uint64) { return stats.DiskUsage(dataDir) },
+		servers:      map[string]*server{},
+		tails:        map[string]context.CancelFunc{},
 	}, nil
+}
+
+// SetLogFinalizer wires the log gzip hook called after a server container is
+// gone (logrot.Rotator.Finalize). Call before Restore/first command.
+func (m *Manager) SetLogFinalizer(fn func(serverID string)) {
+	if fn != nil {
+		m.finalizeLog = fn
+	}
 }
 
 // Restore rebuilds the server map from the runtime (agent.md §2): running
@@ -130,6 +198,7 @@ func (m *Manager) Restore(ctx context.Context) error {
 			if err := r.Handle.Delete(m.ctx); err != nil {
 				m.logf("[daemon] restore %s: cleanup: %v", r.ID, err)
 			}
+			go m.finalizeLog(r.ID)
 			continue
 		}
 
@@ -224,13 +293,82 @@ func (m *Manager) NodeStats() *agentlinkv1.NodeStats {
 		DiskUsed:  s.DiskUsed,
 		DiskTotal: s.DiskTotal,
 		Load1:     s.Load1,
+		Draining:  m.draining.Load(),
 	}
+}
+
+// LiveServerIDs lists non-terminal servers (log rotation targets).
+func (m *Manager) LiveServerIDs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, 0, len(m.servers))
+	for id, srv := range m.servers {
+		if !srv.machine.Current().Terminal() {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// MetricsSample snapshots the agent for the /metrics endpoint (agent.md §9).
+func (m *Manager) MetricsSample() metrics.Sample {
+	s := metrics.Sample{
+		Draining: m.draining.Load(),
+		States: map[string]int{
+			string(lifecycle.StatePulling): 0, string(lifecycle.StateStarting): 0,
+			string(lifecycle.StateReady): 0, string(lifecycle.StateAllocated): 0,
+			string(lifecycle.StateDraining): 0, string(lifecycle.StateStopped): 0,
+			string(lifecycle.StateFailed): 0,
+		},
+	}
+	m.mu.Lock()
+	type live struct {
+		sample metrics.ServerSample
+		handle Handle
+	}
+	var servers []live
+	for id, srv := range m.servers {
+		st := srv.machine.Current()
+		s.States[string(st)]++
+		if st.Terminal() {
+			continue // tombstones carry no live gauges
+		}
+		srv.mu.Lock()
+		servers = append(servers, live{
+			sample: metrics.ServerSample{
+				ID: id, State: string(st), Players: srv.players, TickMS: srv.tickMS,
+			},
+			handle: srv.handle,
+		})
+		srv.mu.Unlock()
+	}
+	m.mu.Unlock()
+
+	for _, lv := range servers {
+		if lv.handle != nil {
+			if pid := lv.handle.Pid(); pid > 0 {
+				if u, err := cgroups.Read(pid); err == nil {
+					lv.sample.HasUsage = true
+					lv.sample.CPUSeconds = u.CPUSeconds
+					lv.sample.MemBytes = u.MemBytes
+				}
+			}
+		}
+		s.Servers = append(s.Servers, lv.sample)
+	}
+	s.PortsUsed = m.pool.InUse()
+	s.PortsTotal = m.pool.Capacity()
+	s.DiskUsed, s.DiskTotal = m.diskUsage()
+	return s
 }
 
 // --- link.Handler ---
 
 // Start handles StartServer. Idempotent by server_id: a replayed command for
 // a known server (including one restored after an agent restart) is a no-op.
+// A draining node and a full disk reject the start with a failed event
+// (agent.md §6, итерация 4 node drain).
 func (m *Manager) Start(_ context.Context, cmd *agentlinkv1.StartServer) {
 	id := cmd.GetServerId()
 	if id == "" {
@@ -246,6 +384,20 @@ func (m *Manager) Start(_ context.Context, cmd *agentlinkv1.StartServer) {
 	srv := m.newServer(id, cmd.GetImageRef(), lifecycle.StatePulling)
 	m.servers[id] = srv
 	m.mu.Unlock()
+
+	if m.draining.Load() {
+		m.fail(srv, "node draining — start rejected")
+		return
+	}
+	if used, total := m.diskUsage(); total > 0 {
+		if frac := float64(used) / float64(total); frac >= float64(m.cfg.DiskFullWatermarkPct)/100 {
+			detail := fmt.Sprintf("data_dir disk %.0f%% >= %d%%", frac*100, m.cfg.DiskFullWatermarkPct)
+			m.sink.ServerEvent(id, "disk_full", detail)
+			m.fail(srv, "disk full — start rejected ("+detail+")")
+			return
+		}
+	}
+	m.touchImage(cmd.GetImageRef())
 	go m.launch(srv, cmd)
 }
 
@@ -318,6 +470,7 @@ func (m *Manager) Allocate(_ context.Context, cmd *agentlinkv1.AllocateServer) {
 
 // PrePull warms the image cache, reporting progress (protocol.md §1).
 func (m *Manager) PrePull(_ context.Context, cmd *agentlinkv1.PrePull) {
+	m.touchImage(cmd.GetImageRef())
 	go func() {
 		ref := cmd.GetImageRef()
 		m.sink.PullReport(cmd.GetCmdId(), ref, "pulling", "")
@@ -330,10 +483,105 @@ func (m *Manager) PrePull(_ context.Context, cmd *agentlinkv1.PrePull) {
 	}()
 }
 
-// Drain acknowledges the node-level drain. Full drain behavior (stop
-// creating, let matches finish, report drained) is iteration 4 — TODO.
+// Drain applies the node-level drain (итерация 4, master.md §6): mark the
+// node draining — new StartServer commands are rejected, running servers
+// play out (the master's reconcile reaps/переносит the rest). Heartbeats
+// report the flag (NodeStats.draining).
 func (m *Manager) Drain(_ context.Context, cmd *agentlinkv1.Drain) {
-	m.logf("[daemon] drain requested (reason %q) — TODO iteration 4, ack only", cmd.GetReason())
+	if m.draining.CompareAndSwap(false, true) {
+		m.logf("[daemon] node drain: rejecting new servers (reason %q)", cmd.GetReason())
+	} else {
+		m.logf("[daemon] node drain: already draining (idempotent)")
+	}
+}
+
+// Undrain lifts the node-level drain (итерация 4).
+func (m *Manager) Undrain(_ context.Context, _ *agentlinkv1.Undrain) {
+	if m.draining.CompareAndSwap(true, false) {
+		m.logf("[daemon] node undrain: accepting servers again")
+	} else {
+		m.logf("[daemon] node undrain: was not draining (idempotent)")
+	}
+}
+
+// Draining reports the node-level drain flag (tests).
+func (m *Manager) Draining() bool { return m.draining.Load() }
+
+// Upgrade handles UpgradeAgent (agent.md §7): download → sha256 → atomic
+// rename, then OnUpgraded — the caller exits cleanly and systemd restarts
+// the new binary (containers survive, §2). A replayed command for the
+// already-running version is a no-op: that breaks the restart loop when the
+// Ack raced the restart.
+func (m *Manager) Upgrade(_ context.Context, cmd *agentlinkv1.UpgradeAgent) {
+	version := cmd.GetVersion()
+	if version != "" && version == m.agentVersion {
+		m.logf("[daemon] upgrade to %s: already running it (no-op)", version)
+		return
+	}
+	if m.binaryPath == "" {
+		m.logf("[daemon] upgrade to %s: binary path unknown — refusing", version)
+		return
+	}
+	go func() {
+		m.logf("[daemon] upgrade to %s: downloading %s", version, cmd.GetUrl())
+		if err := m.applyUpgrade(m.ctx, cmd.GetUrl(), cmd.GetSha256(), m.binaryPath); err != nil {
+			// The master's watchdog raises agent_upgrade_failed when the new
+			// version does not Hello within 60s (ops.md §1).
+			m.logf("[daemon] upgrade to %s failed: %v (binary untouched)", version, err)
+			return
+		}
+		m.logf("[daemon] upgrade to %s: binary swapped — restarting (dediks keep running)", version)
+		m.onUpgraded(version)
+	}()
+}
+
+// TailLogs streams a server log to the master (agent.md §5): LogChunk frames
+// answer cmd_id until eof/cancel. Works for dead (reaped/failed) servers too —
+// the log files (or their gzip archives) stay on disk for the retention
+// period. A message carrying cancel_cmd_id stops that running tail instead.
+func (m *Manager) TailLogs(_ context.Context, cmd *agentlinkv1.TailLogs) {
+	if cc := cmd.GetCancelCmdId(); cc != "" {
+		m.tailsMu.Lock()
+		cancel, ok := m.tails[cc]
+		m.tailsMu.Unlock()
+		if ok {
+			cancel()
+			m.logf("[daemon] tail %s cancelled by master", cc)
+		}
+		return
+	}
+	cmdID, serverID := cmd.GetCmdId(), cmd.GetServerId()
+	tctx, cancel := context.WithCancel(m.ctx)
+	m.tailsMu.Lock()
+	m.tails[cmdID] = cancel
+	m.tailsMu.Unlock()
+
+	go func() {
+		defer func() {
+			cancel()
+			m.tailsMu.Lock()
+			delete(m.tails, cmdID)
+			m.tailsMu.Unlock()
+		}()
+		err := logrot.Stream(tctx, m.logDir, serverID, int(cmd.GetTailLines()), cmd.GetFollow(),
+			func(b []byte) error {
+				if !m.sink.LogChunk(tctx, cmdID, serverID, b, false) {
+					return fmt.Errorf("log chunk backpressure — cancelling tail")
+				}
+				return nil
+			})
+		switch {
+		case err == nil:
+		case err == logrot.ErrNoLogs:
+			m.sink.LogChunk(tctx, cmdID, serverID, []byte("no logs for server "+serverID+"\n"), false)
+		case tctx.Err() != nil:
+			// cancelled (master/agent shutdown) — eof below is best effort
+		default:
+			m.logf("[daemon] tail %s (%s): %v", cmdID, serverID, err)
+		}
+		m.sink.LogChunk(tctx, cmdID, serverID, nil, true)
+		m.logf("[daemon] tail %s (%s) finished", cmdID, serverID)
+	}()
 }
 
 // DrainServer handles the per-server drain (итерация 3: reap deprecated
@@ -375,15 +623,6 @@ func (m *Manager) DrainServer(_ context.Context, cmd *agentlinkv1.DrainServer) {
 		// ErrNotConnected is fine: the frame is cached and replayed when liba
 		// (re)connects (protocol.md §2).
 		m.logf("[daemon] drain %s: send drain: %v", id, err)
-	}
-}
-
-// Unsupported handles commands not implemented in v0 (UpgradeAgent,
-// TailLogs): ack + event so the master log shows why nothing happened.
-func (m *Manager) Unsupported(_ context.Context, kind, cmdID, serverID string) {
-	m.logf("[daemon] command %s (cmd_id %s) unsupported in v0 — TODO", kind, cmdID)
-	if serverID != "" {
-		m.sink.ServerEvent(serverID, "unsupported", kind+" is not implemented in agent v0")
 	}
 }
 
@@ -648,6 +887,9 @@ func (m *Manager) finish(srv *server, handle Handle, sock *uds.Server, exit Exit
 	srv.mu.Lock()
 	srv.doneAt = time.Now()
 	srv.mu.Unlock()
+	// The shim is gone with the container — gzip the log files (agent.md §5).
+	// Async: compressing up to 200MB must not stall supervision.
+	go m.finalizeLog(srv.id)
 }
 
 // fail marks a server failed before it ever ran (port/socket/start errors).

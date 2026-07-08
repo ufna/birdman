@@ -30,6 +30,9 @@ type Handle interface {
 	// SetState records the lifecycle state (and match id) in container
 	// labels — the source for map restore after an agent restart.
 	SetState(ctx context.Context, state, matchID string) error
+	// Pid returns the container init pid (0 when unknown) — cgroups v2
+	// usage for the metrics endpoint resolves through it (agent.md §9).
+	Pid() uint32
 }
 
 // StartSpec is everything needed to start one server container.
@@ -71,4 +74,9 @@ type Runtime interface {
 type Sink interface {
 	ServerEvent(serverID, kind, detail string)
 	PullReport(cmdID, imageRef, status, detail string)
+	// LogChunk queues one TailLogs answer chunk. Unlike events, log chunks
+	// are not persistent: the call blocks briefly for queue space and
+	// returns false on overflow/timeout — the tail must then cancel
+	// (backpressure instead of drowning the event outbox).
+	LogChunk(ctx context.Context, cmdID, serverID string, data []byte, eof bool) bool
 }
