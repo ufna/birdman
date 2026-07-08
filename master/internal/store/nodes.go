@@ -123,6 +123,85 @@ func (s *Store) AuthNodeToken(ctx context.Context, token string) (Node, error) {
 	return n, nil
 }
 
+// GetNode returns one node with its project slug.
+func (s *Store) GetNode(ctx context.Context, id string) (Node, error) {
+	var n Node
+	var labels []byte
+	err := s.Pool.QueryRow(ctx, `
+		select n.id::text, n.project_id::text, p.slug, n.region, n.hostname, host(n.public_ip),
+		       n.capacity_slots, n.agent_version, n.state, n.last_heartbeat_at, n.labels, n.created_at
+		from nodes n join projects p on p.id = n.project_id
+		where n.id = $1::uuid`, id).
+		Scan(&n.ID, &n.ProjectID, &n.Project, &n.Region, &n.Hostname, &n.PublicIP,
+			&n.CapacitySlots, &n.AgentVersion, &n.State, &n.LastHeartbeatAt, &labels, &n.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Node{}, ErrNotFound
+	}
+	if err != nil {
+		return Node{}, err
+	}
+	if len(labels) > 0 {
+		_ = json.Unmarshal(labels, &n.Labels)
+	}
+	return n, nil
+}
+
+// DrainNode marks a node draining (итерация 4, docs/specs/master.md §6): the
+// reconcile loop stops placing new servers on it and reaps its ready buffer,
+// while allocated servers play their matches out. Idempotent; a node_drain
+// event is emitted only on the active→draining transition. Dead nodes cannot
+// be drained.
+func (s *Store) DrainNode(ctx context.Context, id string) (Node, error) {
+	return s.setNodeDrain(ctx, id, true)
+}
+
+// UndrainNode lifts a node drain (draining→active); idempotent, node_undrain
+// event only on an actual transition.
+func (s *Store) UndrainNode(ctx context.Context, id string) (Node, error) {
+	return s.setNodeDrain(ctx, id, false)
+}
+
+func (s *Store) setNodeDrain(ctx context.Context, id string, drain bool) (Node, error) {
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return Node{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	var cur string
+	err = tx.QueryRow(ctx, `select state from nodes where id = $1::uuid for update`, id).Scan(&cur)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Node{}, ErrNotFound
+	}
+	if err != nil {
+		return Node{}, err
+	}
+
+	target, kind := cur, ""
+	if drain {
+		if cur == "dead" {
+			return Node{}, fmt.Errorf("cannot drain a dead node")
+		}
+		target, kind = "draining", EventNodeDrain
+	} else if cur == "draining" {
+		target, kind = "active", EventNodeUndrain
+	}
+
+	if target != cur {
+		if _, err := tx.Exec(ctx, `update nodes set state = $2 where id = $1::uuid`, id, target); err != nil {
+			return Node{}, err
+		}
+		if err := insertEvent(ctx, tx, kind, EventRef{NodeID: &id},
+			map[string]any{"from": cur, "to": target}); err != nil {
+			return Node{}, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Node{}, err
+	}
+	return s.GetNode(ctx, id)
+}
+
 // ListNodes returns all nodes with project slugs.
 func (s *Store) ListNodes(ctx context.Context) ([]Node, error) {
 	rows, err := s.Pool.Query(ctx, `

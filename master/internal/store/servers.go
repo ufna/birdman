@@ -2,9 +2,12 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 type ServerFilter struct {
@@ -61,6 +64,19 @@ func (s *Store) ListServers(ctx context.Context, f ServerFilter) ([]Server, erro
 }
 
 // GetServer returns one server by id (tests / debugging).
+// ServerNodeID returns the node a server lives on — the logs proxy target
+// (итерация 4, GET /v1/servers/{id}/logs). Works for dead servers too: their
+// row stays (state reaped/failed) with the node_id, so logs of a finished
+// match remain reachable. ErrNotFound when the server id is unknown.
+func (s *Store) ServerNodeID(ctx context.Context, id string) (string, error) {
+	var nodeID string
+	err := s.Pool.QueryRow(ctx, `select node_id::text from servers where id = $1::uuid`, id).Scan(&nodeID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return nodeID, err
+}
+
 func (s *Store) GetServer(ctx context.Context, id string) (Server, error) {
 	var sv Server
 	err := s.Pool.QueryRow(ctx, `

@@ -99,6 +99,9 @@ func run() error {
 		}),
 	)
 	hub := agentlink.NewHub(log)
+	// Routes TailLogs answer chunks from agents to the REST logs proxy
+	// (итерация 4, GET /v1/servers/{id}/logs).
+	logRouter := agentlink.NewLogRouter()
 	// Allocations notify the dedik's agent (AllocateServer → liba `allocated`,
 	// итерация 2) — wire the dispatcher before anything can allocate.
 	st.SetCommandSender(hub)
@@ -113,7 +116,7 @@ func run() error {
 		return fmt.Errorf("deploy resume: %w", err)
 	}
 
-	agentlinkv1.RegisterAgentLinkServer(grpcServer, agentlink.NewService(st, hub, dep, log))
+	agentlinkv1.RegisterAgentLinkServer(grpcServer, agentlink.NewService(st, hub, dep, logRouter, log))
 	grpcLis, err := net.Listen("tcp", cfg.ListenGRPC)
 	if err != nil {
 		return fmt.Errorf("listen grpc: %w", err)
@@ -126,7 +129,7 @@ func run() error {
 	mm := matchmaker.New(st, m, mmCfg, log)
 	api := &http.Server{
 		Addr:              cfg.ListenAPI,
-		Handler:           httpapi.New(st, m, mm, dep, log),
+		Handler:           httpapi.New(st, m, mm, dep, hub, logRouter, cfg.Metrics.VictoriaMetricsURL, log),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

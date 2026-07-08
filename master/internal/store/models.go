@@ -85,6 +85,8 @@ const (
 	EventNodeCreated       = "node_created"
 	EventNodeQuarantine    = "node_quarantine"
 	EventNodeRecovered     = "node_recovered"
+	EventNodeDrain         = "node_drain"   // admin drained a node (итерация 4)
+	EventNodeUndrain       = "node_undrain" // admin lifted a node drain (итерация 4)
 	EventServerFailed      = "server_failed"
 	EventServerRecovered   = "server_recovered"
 	EventCrashLoop         = "crash_loop"
@@ -100,4 +102,9 @@ const (
 	EventDeployRolledBack = "deploy_rolled_back" // deprecated ↔ active flip back
 	EventVersionDisabled  = "version_disabled"   // deprecated → disabled (TTL/flip)
 	EventServerDrain      = "server_drain"       // per-server drain sent (reap TTL)
+
+	// Self-upgrade (итерация 4, docs/specs/agent.md §7, master.md §6).
+	EventAgentUpgrade          = "agent_upgrade"           // UpgradeAgent command sent
+	EventAgentUpgradeSucceeded = "agent_upgrade_succeeded" // node re-Hello'd with target version
+	EventAgentUpgradeFailed    = "agent_upgrade_failed"    // no re-Hello with target version in time
 )

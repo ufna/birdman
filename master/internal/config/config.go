@@ -52,6 +52,15 @@ type Compat struct {
 	Overrides []CompatOverride `yaml:"overrides"`
 }
 
+// Metrics configures the read-only metrics query proxy
+// (docs/specs/panel.md §1.3, ops.md §1): the panel reads graphs from
+// VictoriaMetrics through master, never touching the TSDB directly.
+type Metrics struct {
+	// VictoriaMetricsURL is the base URL of the VictoriaMetrics HTTP API
+	// (e.g. http://127.0.0.1:8428); empty → the query proxy returns 503.
+	VictoriaMetricsURL string `yaml:"victoriametrics_url"`
+}
+
 type Config struct {
 	DSN         string      `yaml:"dsn"`
 	ListenAPI   string      `yaml:"listen_api"`
@@ -59,6 +68,7 @@ type Config struct {
 	TLS         TLS         `yaml:"tls"`
 	Matchmaking Matchmaking `yaml:"matchmaking"`
 	Compat      Compat      `yaml:"compat"`
+	Metrics     Metrics     `yaml:"metrics"`
 }
 
 func defaults() Config {
@@ -99,6 +109,9 @@ func Load(path string) (Config, error) {
 	}
 	if v := os.Getenv("BIRDMAN_MM_JOIN_SECRET"); v != "" {
 		cfg.Matchmaking.JoinToken.Secret = v
+	}
+	if v := os.Getenv("BIRDMAN_VM_URL"); v != "" {
+		cfg.Metrics.VictoriaMetricsURL = v
 	}
 	if cfg.ListenAPI == "" {
 		cfg.ListenAPI = ":8100"

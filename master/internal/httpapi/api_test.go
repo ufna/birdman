@@ -68,7 +68,7 @@ func TestRESTFlow(t *testing.T) {
 	m := metrics.New(st, log)
 	mm := matchmaker.New(st, m, matchmaker.Config{}, log)
 	dep := deploy.New(deploy.Options{Store: st, Sender: &testdb.CommandRecorder{}, Log: log})
-	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, log))
+	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", log))
 	t.Cleanup(ts.Close)
 	ctx := t.Context()
 

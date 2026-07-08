@@ -147,6 +147,8 @@ func stampCmdID(m *agentlinkv1.MasterMsg, cmdID string) {
 		c.Prepull.CmdId = cmdID
 	case *agentlinkv1.MasterMsg_Drain:
 		c.Drain.CmdId = cmdID
+	case *agentlinkv1.MasterMsg_Undrain:
+		c.Undrain.CmdId = cmdID
 	case *agentlinkv1.MasterMsg_Upgrade:
 		c.Upgrade.CmdId = cmdID
 	case *agentlinkv1.MasterMsg_Tail:
@@ -170,6 +172,8 @@ func commandID(m *agentlinkv1.MasterMsg) string {
 		return c.Prepull.GetCmdId()
 	case *agentlinkv1.MasterMsg_Drain:
 		return c.Drain.GetCmdId()
+	case *agentlinkv1.MasterMsg_Undrain:
+		return c.Undrain.GetCmdId()
 	case *agentlinkv1.MasterMsg_Upgrade:
 		return c.Upgrade.GetCmdId()
 	case *agentlinkv1.MasterMsg_Tail:
