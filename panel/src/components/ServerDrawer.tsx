@@ -13,7 +13,8 @@ import type { ApiEvent, GameServer } from '../lib/api';
 import { useData, useLive } from '../lib/live';
 import { useNow } from '../lib/useNow';
 import { serverMetricQueries } from '../lib/metrics';
-import { formatAge, formatClock, shortId, summarizePayload } from '../lib/format';
+import { shortId, summarizePayload } from '../lib/format';
+import { useT, useFormat } from '../lib/i18n';
 import { StateBadge, toneOfEventKind, toneOfServerState } from './Badge';
 import { MetricChart } from './MetricChart';
 import { LogViewer } from './LogViewer';
@@ -36,7 +37,7 @@ export function ServerDrawer({ serverId, onClose }: { serverId: string | null; o
           {serverId !== null ? (
             <DrawerBody serverId={serverId} />
           ) : (
-            <Dialog.Title className="sr-only">Дедик</Dialog.Title>
+            <HiddenTitle />
           )}
         </Dialog.Content>
       </Dialog.Portal>
@@ -44,7 +45,13 @@ export function ServerDrawer({ serverId, onClose }: { serverId: string | null; o
   );
 }
 
+function HiddenTitle() {
+  const { t } = useT();
+  return <Dialog.Title className="sr-only">{t('server.dedic')}</Dialog.Title>;
+}
+
 function DrawerBody({ serverId }: { serverId: string }) {
+  const { t } = useT();
   const servers = useData(() => api.listServers(), []);
   const versions = useData(() => api.listVersions(), []);
   const now = useNow();
@@ -65,17 +72,17 @@ function DrawerBody({ serverId }: { serverId: string }) {
       <header className="flex items-start justify-between gap-3 border-b border-line px-5 py-4">
         <div className="min-w-0">
           <Dialog.Title className="flex items-center gap-2 text-base font-semibold">
-            <span className="font-mono">Дедик {shortId(serverId)}</span>
-            {server !== undefined && <StateBadge state={server.state} tone={toneOfServerState(server.state)} />}
+            <span className="font-mono">{t('server.dedic')} {shortId(serverId)}</span>
+            {server !== undefined && <StateBadge state={server.state} tone={toneOfServerState(server.state)} domain="server" />}
           </Dialog.Title>
           <p className="mt-1 truncate font-mono text-xs text-muted">
-            {server !== undefined ? <ServerMeta server={server} semver={semver} now={now} /> : 'нет в текущем списке дедиков (возможно, reaped) — логи и метрики доступны'}
+            {server !== undefined ? <ServerMeta server={server} semver={semver} now={now} /> : t('server.notInList')}
           </p>
         </div>
         <Dialog.Close asChild>
           <button
             type="button"
-            aria-label="Закрыть"
+            aria-label={t('common.close')}
             className="shrink-0 rounded-lg border border-line p-1.5 text-muted hover:text-ink"
           >
             <svg viewBox="0 0 16 16" className="size-4" aria-hidden>
@@ -86,18 +93,18 @@ function DrawerBody({ serverId }: { serverId: string }) {
       </header>
 
       <Tabs.Root defaultValue="timeline" className="flex min-h-0 flex-1 flex-col">
-        <Tabs.List className="flex gap-1 border-b border-line px-5 py-2" aria-label="Разделы дедика">
+        <Tabs.List className="flex gap-1 border-b border-line px-5 py-2" aria-label={t('server.tabs.aria')}>
           {[
-            { v: 'timeline', l: 'Таймлайн' },
-            { v: 'logs', l: 'Логи' },
-            { v: 'metrics', l: 'Метрики' },
-          ].map((t) => (
+            { v: 'timeline', l: t('server.tab.timeline') },
+            { v: 'logs', l: t('server.tab.logs') },
+            { v: 'metrics', l: t('server.tab.metrics') },
+          ].map((tab) => (
             <Tabs.Trigger
-              key={t.v}
-              value={t.v}
+              key={tab.v}
+              value={tab.v}
               className="rounded-md px-3 py-1 text-sm text-muted transition-colors data-[state=active]:bg-mark data-[state=active]:font-medium data-[state=active]:text-accent-ink"
             >
-              {t.l}
+              {tab.l}
             </Tabs.Trigger>
           ))}
         </Tabs.List>
@@ -110,12 +117,10 @@ function DrawerBody({ serverId }: { serverId: string }) {
             <LogViewer serverId={serverId} />
           </Tabs.Content>
           <Tabs.Content value="metrics">
-            <p className="mb-3 text-xs text-muted">
-              Метрики этого дедика из VictoriaMetrics через master-proxy. Окно 30 минут, обновление каждые 15с.
-            </p>
+            <p className="mb-3 text-xs text-muted">{t('server.metricsNote')}</p>
             <div className="grid gap-3 sm:grid-cols-2">
               {queries.map((q) => (
-                <MetricChart key={q.key} query={q.expr} title={q.title} unit={q.unit} />
+                <MetricChart key={q.key} query={q.expr} title={t(q.titleKey)} unit={q.unit} />
               ))}
             </div>
           </Tabs.Content>
@@ -126,11 +131,13 @@ function DrawerBody({ serverId }: { serverId: string }) {
 }
 
 function ServerMeta({ server, semver, now }: { server: GameServer; semver?: string; now: number }) {
-  const uptime = formatAge(Math.max(0, now - new Date(server.created_at).getTime()));
+  const { t, tp } = useT();
+  const fmt = useFormat();
+  const uptime = fmt.age(Math.max(0, now - new Date(server.created_at).getTime()));
   return (
     <>
-      node {shortId(server.node_id)} · {server.region} · v{semver ?? shortId(server.version_id)} · порт {server.port} ·{' '}
-      {server.players} игроков · аптайм {uptime}
+      node {shortId(server.node_id)} · {server.region} · v{semver ?? shortId(server.version_id)} · {t('common.port')}{' '}
+      {server.port} · {tp('common.playersCount', server.players)} · {t('common.uptime')} {uptime}
     </>
   );
 }
@@ -141,6 +148,8 @@ const TIMELINE_CAP = 100;
  *  (server-side фильтра по server_id в API нет) + live-дополнение из SSE. */
 function ServerTimeline({ serverId }: { serverId: string }) {
   const { subscribe } = useLive();
+  const { t } = useT();
+  const fmt = useFormat();
   const [events, setEvents] = useState<ApiEvent[] | null>(null);
   const [failed, setFailed] = useState(false);
 
@@ -176,16 +185,16 @@ function ServerTimeline({ serverId }: { serverId: string }) {
     [subscribe, serverId],
   );
 
-  if (failed) return <EmptyState>Лента событий недоступна.</EmptyState>;
+  if (failed) return <EmptyState>{t('events.feedUnavailable')}</EmptyState>;
   if (events === null) return <LoadingRow />;
-  if (events.length === 0) return <EmptyState>Событий по этому дедику пока нет.</EmptyState>;
+  if (events.length === 0) return <EmptyState>{t('server.noEvents')}</EmptyState>;
 
   return (
     <ol className="relative ml-2 border-l border-line">
       {events.map((e) => (
         <li key={e.id} className="relative flex items-start gap-3 py-2 pl-5">
           <span aria-hidden className="absolute top-3.5 -left-[5px] size-2 rounded-full bg-accent" />
-          <span className="tabular shrink-0 pt-0.5 font-mono text-xs text-muted">{formatClock(e.ts)}</span>
+          <span className="tabular shrink-0 pt-0.5 font-mono text-xs text-muted">{fmt.clock(e.ts)}</span>
           <StateBadge state={e.kind} tone={toneOfEventKind(e.kind)} />
           {Object.keys(e.payload).length > 0 && (
             <span className="min-w-0 flex-1 truncate pt-0.5 text-xs text-muted">{summarizePayload(e.payload)}</span>

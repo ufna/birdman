@@ -4,10 +4,12 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
 import { loginErrorMessage, useSession } from '../lib/session';
+import { useT } from '../lib/i18n';
 import { Brand, Card } from '../components/ui';
 
 export function Login() {
   const { login } = useSession();
+  const { t } = useT();
   const [key, setKey] = useState('');
   const [reveal, setReveal] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -20,7 +22,7 @@ export function Login() {
     setPending(true);
     setError(null);
     login(trimmed).catch((err: unknown) => {
-      setError(loginErrorMessage(err));
+      setError(loginErrorMessage(err, t));
       setPending(false);
     });
   };
@@ -34,7 +36,7 @@ export function Login() {
         <Card className="p-5">
           <form onSubmit={submit} className="flex flex-col gap-3">
             <label htmlFor="api-key" className="text-sm font-medium">
-              API-ключ
+              {t('login.apiKey')}
             </label>
             <div className="relative">
               <input
@@ -55,9 +57,9 @@ export function Login() {
                 onClick={() => {
                   setReveal((v) => !v);
                 }}
-                aria-label={reveal ? 'Скрыть ключ' : 'Показать ключ'}
+                aria-label={reveal ? t('login.hide') : t('login.reveal')}
                 aria-pressed={reveal}
-                title={reveal ? 'Скрыть ключ' : 'Показать ключ'}
+                title={reveal ? t('login.hide') : t('login.reveal')}
                 className="absolute inset-y-0 right-0 flex w-10 items-center justify-center text-muted hover:text-ink"
               >
                 {reveal ? <EyeOff /> : <Eye />}
@@ -73,15 +75,11 @@ export function Login() {
               disabled={pending || key.trim() === ''}
               className="rounded-lg bg-accent px-3 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
             >
-              {pending ? 'Проверяем…' : 'Войти'}
+              {pending ? t('login.checking') : t('login.submit')}
             </button>
           </form>
         </Card>
-        <p className="mt-4 text-center text-xs text-muted">
-          Нужен ключ со скоупом <span className="font-mono">readonly</span> или{' '}
-          <span className="font-mono">admin</span>. Первый admin-ключ master печатает в лог при
-          старте с пустой таблицей ключей.
-        </p>
+        <p className="mt-4 text-center text-xs text-muted">{t('login.hint')}</p>
       </div>
     </div>
   );

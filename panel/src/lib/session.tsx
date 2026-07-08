@@ -5,6 +5,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState } 
 import type { ReactNode } from 'react';
 import { api, ApiError } from './api';
 import type { SessionInfo } from './api';
+import type { I18nContextValue } from './i18n';
 
 interface SessionContextValue {
   /** null — не залогинен; undefined — ещё проверяем cookie. */
@@ -84,11 +85,11 @@ export function canAdmin(s: SessionInfo): boolean {
   return s.scopes.includes('admin');
 }
 
-/** Человеческое сообщение об ошибке логина. */
-export function loginErrorMessage(e: unknown): string {
+/** Человеческое сообщение об ошибке логина (локализуется через переданный t). */
+export function loginErrorMessage(e: unknown, t: I18nContextValue['t']): string {
   if (e instanceof ApiError) {
-    if (e.status === 401) return 'Ключ не подошёл. Проверьте значение и что он не отозван.';
+    if (e.status === 401) return t('login.err.badKey');
     return e.detail !== undefined ? `${e.code}: ${e.detail}` : e.code;
   }
-  return 'Master недоступен. Проверьте, что процесс запущен.';
+  return t('login.err.unreachable');
 }

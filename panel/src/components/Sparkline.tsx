@@ -5,6 +5,7 @@ import { useEffect, useRef } from 'react';
 import uPlot from 'uplot';
 import 'uplot/dist/uPlot.min.css';
 import { cssVar, useTheme } from '../lib/theme';
+import { useT } from '../lib/i18n';
 
 export interface SparkPoint {
   /** unix-время начала минутной корзины, сек */
@@ -16,6 +17,7 @@ export function Sparkline({ points, height = 72 }: { points: SparkPoint[]; heigh
   const holder = useRef<HTMLDivElement>(null);
   const plot = useRef<uPlot | null>(null);
   const { theme } = useTheme(); // пересоздание при смене темы: canvas не умеет var()
+  const { t } = useT();
 
   useEffect(() => {
     const el = holder.current;
@@ -72,7 +74,7 @@ export function Sparkline({ points, height = 72 }: { points: SparkPoint[]; heigh
     plot.current?.setData([points.map((p) => p.t), points.map((p) => p.v)]);
   }, [points]);
 
-  return <div ref={holder} role="img" aria-label="Матчи за последний час, по минутам" />;
+  return <div ref={holder} role="img" aria-label={t('ov.sparkAria')} />;
 }
 
 /** #RRGGBB → rgba(): заливка под линией (canvas не понимает color-mix). */

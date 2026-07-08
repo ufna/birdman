@@ -6,6 +6,7 @@ import { api } from '../lib/api';
 import type { GameServer, Match, NodeInfo, VersionInfo } from '../lib/api';
 import { useData } from '../lib/live';
 import { useNow } from '../lib/useNow';
+import { useT } from '../lib/i18n';
 import { Card, CardHeader, ErrorNote, LoadingRow, StatCard } from '../components/ui';
 import { EventsFeed } from '../components/EventsFeed';
 import { Sparkline, bucketPerMinute } from '../components/Sparkline';
@@ -48,6 +49,7 @@ export function Overview() {
 }
 
 function OverviewBody({ stats, matches, now }: { stats: Stats; matches: Match[]; now: number }) {
+  const { t } = useT();
   const lastHour = useMemo(
     () => matches.filter((m) => now - new Date(m.created_at).getTime() < HOUR_MS),
     [matches, now],
@@ -58,18 +60,18 @@ function OverviewBody({ stats, matches, now }: { stats: Stats; matches: Match[];
     <div className="flex flex-col gap-4">
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
         <StatCard
-          label="Живые матчи"
+          label={t('ov.liveMatches')}
           value={stats.liveMatches}
-          detail={`running ${stats.runningMatches} · pending ${stats.pendingMatches}`}
+          detail={t('ov.liveDetail', { running: stats.runningMatches, pending: stats.pendingMatches })}
         />
-        <StatCard label="Игроки онлайн" value={stats.playersOnline} detail="по allocated-дедикам" />
+        <StatCard label={t('ov.playersOnline')} value={stats.playersOnline} detail={t('ov.playersDetail')} />
         <StatCard
-          label="Ready-буфер"
+          label={t('ov.readyBuffer')}
           value={stats.readyTotal}
-          detail={chips(stats.readyByRegion) || 'нет ready-дедиков'}
+          detail={chips(stats.readyByRegion) || t('ov.noReady')}
         />
         <StatCard
-          label="Тачки"
+          label={t('ov.nodes')}
           value={
             <>
               {stats.nodesActive}
@@ -78,19 +80,19 @@ function OverviewBody({ stats, matches, now }: { stats: Stats; matches: Match[];
           }
           detail={
             stats.nodesQuarantine > 0 ? (
-              <span className="font-medium text-dead">{stats.nodesQuarantine} в карантине</span>
+              <span className="font-medium text-dead">{t('ov.inQuarantine', { count: stats.nodesQuarantine })}</span>
             ) : (
-              'все активны'
+              t('ov.allActive')
             )
           }
         />
         <StatCard
-          label="Версия флита"
+          label={t('ov.fleetVersion')}
           value={stats.fleetVersions.length > 0 ? stats.fleetVersions[0].semver : '—'}
           detail={
             stats.fleetVersions.length > 0
               ? stats.fleetVersions.map((v) => `${v.region} ${v.semver}${v.extra > 0 ? ` +${v.extra}` : ''}`).join(' · ')
-              : 'нет живых дедиков'
+              : t('ov.noLiveDedics')
           }
         />
       </div>
@@ -98,7 +100,7 @@ function OverviewBody({ stats, matches, now }: { stats: Stats; matches: Match[];
       <div className="grid gap-4 lg:grid-cols-5">
         <Card className="lg:col-span-2">
           <CardHeader
-            title="Матчи за час"
+            title={t('ov.matchesHour')}
             aside={<span className="tabular font-mono text-sm text-muted">{lastHour.length}</span>}
           />
           <div className="px-3 py-3">
@@ -106,7 +108,7 @@ function OverviewBody({ stats, matches, now }: { stats: Stats; matches: Match[];
           </div>
         </Card>
         <Card className="lg:col-span-3">
-          <CardHeader title="Последние события" />
+          <CardHeader title={t('ov.recentEvents')} />
           <EventsFeed />
         </Card>
       </div>

@@ -3,6 +3,7 @@
 
 import type { ReactNode } from 'react';
 import { ApiError } from '../lib/api';
+import { useT } from '../lib/i18n';
 
 export function Card({ children, className = '' }: { children: ReactNode; className?: string }) {
   return (
@@ -43,28 +44,28 @@ export function EmptyState({ children }: { children: ReactNode }) {
 }
 
 export function ErrorNote({ error, retry }: { error: Error; retry?: () => void }) {
-  const text =
-    error instanceof ApiError && error.status === 403
-      ? 'Не хватает прав: нужен ключ со скоупом readonly или admin.'
-      : error.message;
+  const { t } = useT();
+  const detail =
+    error instanceof ApiError && error.status === 403 ? t('ui.err.forbidden') : error.message;
   return (
     <div className="flex items-center justify-between gap-3 rounded-lg bg-dead-bg px-4 py-2.5 text-sm text-dead">
-      <span>Не удалось загрузить данные: {text}</span>
+      <span>{t('ui.err.loadFailed', { detail })}</span>
       {retry !== undefined && (
         <button
           type="button"
           onClick={retry}
           className="shrink-0 rounded-md border border-current px-2 py-0.5 text-xs font-medium hover:opacity-80"
         >
-          Повторить
+          {t('common.retry')}
         </button>
       )}
     </div>
   );
 }
 
-export function LoadingRow({ label = 'Загрузка…' }: { label?: string }) {
-  return <div className="px-4 py-10 text-center text-sm text-muted">{label}</div>;
+export function LoadingRow({ label }: { label?: string }) {
+  const { t } = useT();
+  return <div className="px-4 py-10 text-center text-sm text-muted">{label ?? t('common.loading')}</div>;
 }
 
 /** Логотип: две «птичьи» галки + моно-словомарка. */

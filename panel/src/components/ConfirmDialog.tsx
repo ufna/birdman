@@ -6,6 +6,8 @@ import { useState } from 'react';
 import type { ReactNode } from 'react';
 import * as AlertDialog from '@radix-ui/react-alert-dialog';
 import { ApiError } from '../lib/api';
+import { useT } from '../lib/i18n';
+import type { I18nContextValue } from '../lib/i18n';
 
 export type ActionTone = 'accent' | 'dead';
 
@@ -36,6 +38,7 @@ export function ConfirmButton({
   onConfirm,
   triggerClass,
 }: ConfirmButtonProps) {
+  const { t } = useT();
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -50,7 +53,7 @@ export function ConfirmButton({
       })
       .catch((e: unknown) => {
         setPending(false);
-        setError(errMessage(e));
+        setError(errMessage(e, t));
       });
   };
 
@@ -99,7 +102,7 @@ export function ConfirmButton({
                 disabled={pending}
                 className="rounded-lg border border-line px-3 py-1.5 text-sm text-muted transition-colors hover:text-ink disabled:opacity-40"
               >
-                Отмена
+                {t('common.cancel')}
               </button>
             </AlertDialog.Cancel>
             <button
@@ -108,7 +111,7 @@ export function ConfirmButton({
               onClick={run}
               className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-opacity disabled:opacity-60 ${actionBg[tone]}`}
             >
-              {pending ? 'Выполняем…' : confirmLabel}
+              {pending ? t('common.running') : confirmLabel}
             </button>
           </div>
         </AlertDialog.Content>
@@ -117,11 +120,11 @@ export function ConfirmButton({
   );
 }
 
-function errMessage(e: unknown): string {
+function errMessage(e: unknown, t: I18nContextValue['t']): string {
   if (e instanceof ApiError) {
-    if (e.status === 403) return 'Недостаточно прав для этого действия.';
-    if (e.status === 409) return e.detail ?? 'Конфликт состояния — действие сейчас недоступно.';
+    if (e.status === 403) return t('confirm.err.forbidden');
+    if (e.status === 409) return e.detail ?? t('confirm.err.conflict');
     return e.detail !== undefined ? `${e.code}: ${e.detail}` : e.code;
   }
-  return e instanceof Error ? e.message : 'Не удалось выполнить действие.';
+  return e instanceof Error ? e.message : t('confirm.err.generic');
 }

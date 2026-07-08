@@ -5,7 +5,8 @@ import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import type { ApiEvent } from '../lib/api';
 import { useLive } from '../lib/live';
-import { formatClock, shortId, summarizePayload } from '../lib/format';
+import { shortId, summarizePayload } from '../lib/format';
+import { useT, useFormat } from '../lib/i18n';
 import { StateBadge, toneOfEventKind } from './Badge';
 import { EmptyState, LoadingRow } from './ui';
 
@@ -13,6 +14,8 @@ const FEED_CAP = 60;
 
 export function EventsFeed() {
   const { subscribe } = useLive();
+  const { t } = useT();
+  const fmt = useFormat();
   const [events, setEvents] = useState<ApiEvent[] | null>(null);
   const [failed, setFailed] = useState(false);
 
@@ -43,15 +46,15 @@ export function EventsFeed() {
     [subscribe],
   );
 
-  if (failed) return <EmptyState>Лента событий недоступна.</EmptyState>;
+  if (failed) return <EmptyState>{t('events.feedUnavailable')}</EmptyState>;
   if (events === null) return <LoadingRow />;
-  if (events.length === 0) return <EmptyState>Событий ещё не было.</EmptyState>;
+  if (events.length === 0) return <EmptyState>{t('events.none')}</EmptyState>;
 
   return (
     <ul className="max-h-[420px] divide-y divide-line overflow-y-auto">
       {events.map((e) => (
         <li key={e.id} className="flex items-start gap-3 px-4 py-2">
-          <span className="tabular shrink-0 pt-0.5 font-mono text-xs text-muted">{formatClock(e.ts)}</span>
+          <span className="tabular shrink-0 pt-0.5 font-mono text-xs text-muted">{fmt.clock(e.ts)}</span>
           <StateBadge state={e.kind} tone={toneOfEventKind(e.kind)} />
           <span className="min-w-0 flex-1 truncate pt-0.5 text-xs text-muted">
             {refsOf(e)}

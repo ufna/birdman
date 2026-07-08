@@ -10,17 +10,19 @@ import { api } from '../lib/api';
 import type { ApiEvent, NodeInfo } from '../lib/api';
 import { useData, useLive } from '../lib/live';
 import { useServerDrawer } from '../lib/drawer';
-import { formatStamp, shortId, summarizePayload } from '../lib/format';
+import { shortId, summarizePayload } from '../lib/format';
+import { useT, useFormat } from '../lib/i18n';
+import type { MessageKey } from '../lib/i18n';
 import { StateBadge, toneOfEventKind } from '../components/Badge';
 import { Card, CardHeader, EmptyState, ErrorNote, LoadingRow } from '../components/ui';
 
 const PAGE_SIZE = 50;
 const WINDOWS = [200, 500, 1000];
-const PERIODS: { value: string; label: string; ms: number }[] = [
-  { value: 'all', label: 'всё время', ms: 0 },
-  { value: '15m', label: '15 минут', ms: 15 * 60_000 },
-  { value: '1h', label: '1 час', ms: 3_600_000 },
-  { value: '24h', label: '24 часа', ms: 86_400_000 },
+const PERIODS: { value: string; labelKey: MessageKey; ms: number }[] = [
+  { value: 'all', labelKey: 'period.all', ms: 0 },
+  { value: '15m', labelKey: 'period.15m', ms: 15 * 60_000 },
+  { value: '1h', labelKey: 'period.1h', ms: 3_600_000 },
+  { value: '24h', labelKey: 'period.24h', ms: 86_400_000 },
 ];
 
 // Известные kind'ы (models.go master) — на случай пустой ленты дропдаун не пуст.
@@ -34,6 +36,7 @@ const KNOWN_KINDS = [
 
 export function Events() {
   const { subscribe } = useLive();
+  const { t, tp } = useT();
   const nodes = useData(() => api.listNodes(), []);
 
   const [limit, setLimit] = useState(500);
@@ -106,29 +109,29 @@ export function Events() {
   return (
     <Card>
       <CardHeader
-        title="События"
+        title={t('nav.events')}
         aside={
           <div className="flex flex-wrap items-center gap-2">
-            <select aria-label="Фильтр по kind" className={select} value={kind} onChange={(e) => { setKind(e.target.value); resetPage(); }}>
-              <option value="">все kind</option>
+            <select aria-label={t('events.kindAria')} className={select} value={kind} onChange={(e) => { setKind(e.target.value); resetPage(); }}>
+              <option value="">{t('events.allKinds')}</option>
               {kinds.map((k) => (
                 <option key={k} value={k}>{k}</option>
               ))}
             </select>
-            <select aria-label="Фильтр по тачке" className={select} value={node} onChange={(e) => { setNode(e.target.value); resetPage(); }}>
-              <option value="">все тачки</option>
+            <select aria-label={t('events.nodeAria')} className={select} value={node} onChange={(e) => { setNode(e.target.value); resetPage(); }}>
+              <option value="">{t('events.allNodes')}</option>
               {(nodes.data ?? []).map((n: NodeInfo) => (
                 <option key={n.id} value={n.id}>{n.hostname} · {shortId(n.id)}</option>
               ))}
             </select>
-            <select aria-label="Период" className={select} value={period} onChange={(e) => { setPeriod(e.target.value); resetPage(); }}>
+            <select aria-label={t('events.periodAria')} className={select} value={period} onChange={(e) => { setPeriod(e.target.value); resetPage(); }}>
               {PERIODS.map((p) => (
-                <option key={p.value} value={p.value}>{p.label}</option>
+                <option key={p.value} value={p.value}>{t(p.labelKey)}</option>
               ))}
             </select>
-            <select aria-label="Размер окна ленты" className={select} value={limit} onChange={(e) => { setLimit(Number(e.target.value)); resetPage(); }}>
+            <select aria-label={t('events.windowAria')} className={select} value={limit} onChange={(e) => { setLimit(Number(e.target.value)); resetPage(); }}>
               {WINDOWS.map((n) => (
-                <option key={n} value={n}>окно {n}</option>
+                <option key={n} value={n}>{t('events.window', { count: n })}</option>
               ))}
             </select>
           </div>
@@ -136,22 +139,22 @@ export function Events() {
       />
       {failed && all === null ? (
         <div className="p-4">
-          <ErrorNote error={new Error('лента событий недоступна')} retry={() => { setReloadKey((k) => k + 1); }} />
+          <ErrorNote error={new Error(t('events.feedUnavailable'))} retry={() => { setReloadKey((k) => k + 1); }} />
         </div>
       ) : all === null ? (
         <LoadingRow />
       ) : visible.length === 0 ? (
-        <EmptyState>Под эти фильтры событий нет.</EmptyState>
+        <EmptyState>{t('events.emptyFilter')}</EmptyState>
       ) : (
         <>
           <EventRows events={visible} />
           <footer className="flex items-center justify-between border-t border-line px-4 py-2.5">
             <span className="tabular font-mono text-xs text-muted">
-              {filtered.length} событий{filtered.length !== (all.length) ? ` из ${all.length}` : ''} · стр. {clampedPage + 1}/{pageCount}
+              {tp('events.eventsCount', filtered.length)}{filtered.length !== all.length ? ` ${t('events.ofTotal', { total: all.length })}` : ''} · {t('events.pageOf', { page: clampedPage + 1, pages: pageCount })}
             </span>
             <div className="flex gap-2">
-              <PagerButton disabled={clampedPage === 0} onClick={() => { setPage(Math.max(0, clampedPage - 1)); }}>← Новее</PagerButton>
-              <PagerButton disabled={clampedPage >= pageCount - 1} onClick={() => { setPage(clampedPage + 1); }}>Старше →</PagerButton>
+              <PagerButton disabled={clampedPage === 0} onClick={() => { setPage(Math.max(0, clampedPage - 1)); }}>{t('pager.newer')}</PagerButton>
+              <PagerButton disabled={clampedPage >= pageCount - 1} onClick={() => { setPage(clampedPage + 1); }}>{t('pager.older')}</PagerButton>
             </div>
           </footer>
         </>
@@ -162,11 +165,12 @@ export function Events() {
 
 function EventRows({ events }: { events: ApiEvent[] }) {
   const { open } = useServerDrawer();
+  const fmt = useFormat();
   return (
     <ul className="divide-y divide-line">
       {events.map((e) => (
         <li key={e.id} className="flex items-start gap-3 px-4 py-2.5">
-          <span className="tabular shrink-0 pt-0.5 font-mono text-xs text-muted">{formatStamp(e.ts)}</span>
+          <span className="tabular shrink-0 pt-0.5 font-mono text-xs text-muted">{fmt.stamp(e.ts)}</span>
           <StateBadge state={e.kind} tone={toneOfEventKind(e.kind)} />
           <span className="min-w-0 flex-1 pt-0.5 text-xs">
             <span className="text-muted">{refsOf(e, open)}</span>
