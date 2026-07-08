@@ -5,19 +5,39 @@
 import type { ReactNode } from 'react';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import { useLive } from '../lib/live';
-import { useSession } from '../lib/session';
+import { canAdmin, useSession } from '../lib/session';
+import type { SessionInfo } from '../lib/api';
 import { useTheme } from '../lib/theme';
 import { useT } from '../lib/i18n';
 import type { Lang, MessageKey } from '../lib/i18n';
 import { Brand } from './ui';
 
-const navItems: { path: string; key: MessageKey }[] = [
-  { path: '/', key: 'nav.overview' },
-  { path: '/fleet', key: 'nav.fleet' },
-  { path: '/matches', key: 'nav.matches' },
-  { path: '/deploys', key: 'nav.deploys' },
-  { path: '/events', key: 'nav.events' },
+type NavIcon = 'overview' | 'fleet' | 'matches' | 'deploys' | 'events' | 'stats' | 'cost' | 'alerts' | 'access';
+
+export interface NavItem {
+  path: string;
+  key: MessageKey;
+  icon: NavIcon;
+  /** Только для admin-сессии (эндпоинты admin-scoped) — иначе скрыт. */
+  adminOnly?: boolean;
+}
+
+const NAV_ITEMS: NavItem[] = [
+  { path: '/', key: 'nav.overview', icon: 'overview' },
+  { path: '/fleet', key: 'nav.fleet', icon: 'fleet' },
+  { path: '/matches', key: 'nav.matches', icon: 'matches' },
+  { path: '/deploys', key: 'nav.deploys', icon: 'deploys' },
+  { path: '/events', key: 'nav.events', icon: 'events' },
+  { path: '/stats', key: 'nav.stats', icon: 'stats' },
+  { path: '/cost', key: 'nav.cost', icon: 'cost' },
+  { path: '/alerts', key: 'nav.alerts', icon: 'alerts' },
+  { path: '/access', key: 'nav.access', icon: 'access', adminOnly: true },
 ];
+
+/** Пункты навигации для сессии: admin-only скрыты у не-admin. Чистая — тест scope-гейта. */
+export function navItemsFor(session: SessionInfo | null | undefined): NavItem[] {
+  return NAV_ITEMS.filter((it) => it.adminOnly !== true || (session != null && canAdmin(session)));
+}
 
 function isActive(item: string, path: string): boolean {
   return item === '/' ? path === '/' : path.startsWith(item);
@@ -25,30 +45,57 @@ function isActive(item: string, path: string): boolean {
 
 function NavLinks({ path, navigate, row = false }: { path: string; navigate: (p: string) => void; row?: boolean }) {
   const { t } = useT();
+  const { session } = useSession();
+  const items = navItemsFor(session);
   return (
-    <nav className={row ? 'flex items-center gap-1' : 'flex flex-col gap-1'} aria-label={t('nav.sections')}>
-      {navItems.map((item) => {
+    <nav
+      className={row ? 'flex min-w-0 items-center gap-0.5 overflow-x-auto' : 'flex flex-col gap-1'}
+      aria-label={t('nav.sections')}
+    >
+      {items.map((item) => {
         const active = isActive(item.path, path);
+        const label = t(item.key);
         return (
           <a
             key={item.path}
             href={item.path}
             aria-current={active ? 'page' : undefined}
+            aria-label={row ? label : undefined}
+            title={row ? label : undefined}
             onClick={(e) => {
               e.preventDefault();
               navigate(item.path);
             }}
-            className={`rounded-lg px-3 py-1.5 text-sm transition-colors ${
-              active
-                ? 'bg-mark font-medium text-accent-ink'
-                : 'text-muted hover:bg-paper hover:text-ink'
-            }`}
+            className={`flex shrink-0 items-center gap-2 rounded-lg text-sm transition-colors ${
+              row ? 'px-2 py-1.5' : 'px-3 py-1.5'
+            } ${active ? 'bg-mark font-medium text-accent-ink' : 'text-muted hover:bg-paper hover:text-ink'}`}
           >
-            {t(item.key)}
+            <NavGlyph icon={item.icon} />
+            {!row && label}
           </a>
         );
       })}
     </nav>
+  );
+}
+
+/** Инлайновые нав-иконки (CSP-safe, как в Login): 24-viewBox, stroke=currentColor. */
+function NavGlyph({ icon }: { icon: NavIcon }) {
+  const p: Record<NavIcon, ReactNode> = {
+    overview: <path d="M4 4h6v6H4V4Zm10 0h6v6h-6V4ZM4 14h6v6H4v-6Zm10 0h6v6h-6v-6Z" />,
+    fleet: <path d="M4 5h16v5H4V5Zm0 9h16v5H4v-5ZM7.5 7.5h.01M7.5 16.5h.01" />,
+    matches: <path d="M6 12a6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6 6 6 0 0 1-6-6Zm4.5-2.5 4 2.5-4 2.5v-5Z" />,
+    deploys: <path d="M12 3v12m0-12 4 4m-4-4-4 4M5 21h14" />,
+    events: <path d="M4 6h16M4 12h16M4 18h10" />,
+    stats: <path d="M5 20V10m6 10V4m6 16v-7M3 20h18" />,
+    cost: <path d="M12 3a4 9 0 0 0 0 18 4 9 0 0 0 0-18Zm-8 6h16M4 15h16" />,
+    alerts: <path d="M12 4a5 5 0 0 0-5 5c0 5-2 6-2 6h14s-2-1-2-6a5 5 0 0 0-5-5Zm-2 15a2 2 0 0 0 4 0" />,
+    access: <path d="M14 7a4 4 0 1 0-3.5 6L9 14.5l1.5 1.5L9 17.5l1.5 1.5L13 16l-1.5-1.5.9-.9A4 4 0 0 0 14 7Zm.5 2.5h.01" />,
+  };
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden className="size-4 shrink-0">
+      {p[icon]}
+    </svg>
   );
 }
 
