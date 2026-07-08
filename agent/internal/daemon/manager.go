@@ -268,6 +268,54 @@ func (m *Manager) Stop(_ context.Context, cmd *agentlinkv1.StopServer) {
 	}
 }
 
+// Allocate handles AllocateServer (итерация 2): the master claimed this
+// server for a match — forward `allocated{match_id, players_expected}` to
+// liba (the UDS server caches the frame and replays it to a (re)connecting
+// liba), move ready → allocated and persist it to the container labels so an
+// agent restart keeps the match. Idempotent: a replayed command for an
+// already-allocated server only refreshes the frame/labels.
+func (m *Manager) Allocate(_ context.Context, cmd *agentlinkv1.AllocateServer) {
+	id := cmd.GetServerId()
+	m.mu.Lock()
+	srv, ok := m.servers[id]
+	m.mu.Unlock()
+	if !ok {
+		m.logf("[daemon] allocate %s: unknown server ignored (match %s)", id, cmd.GetMatchId())
+		return
+	}
+
+	srv.mu.Lock()
+	srv.matchID = cmd.GetMatchId()
+	sock := srv.sock
+	srv.mu.Unlock()
+
+	switch cur := srv.machine.Current(); cur {
+	case lifecycle.StateReady:
+		m.transition(srv, lifecycle.StateAllocated,
+			fmt.Sprintf("allocated by master (match %s)", cmd.GetMatchId()))
+	case lifecycle.StateAllocated:
+		// Replay after an agent restart (cmd_id cache is gone) — make sure
+		// the labels carry the match id even if the first run missed it.
+		m.logf("[daemon] allocate %s: already allocated (idempotent)", id)
+		m.storeState(srv)
+	default:
+		// Master allocates only DB-ready servers; a mismatch is a stale or
+		// racing command. Still deliver the frame — liba owns its own view —
+		// while heartbeats keep reporting the real state.
+		m.logf("[daemon] allocate %s: unexpected state %s (match %s)", id, cur, cmd.GetMatchId())
+	}
+
+	if sock == nil {
+		m.logf("[daemon] allocate %s: no liba socket, frame undeliverable", id)
+		return
+	}
+	if err := sock.SendAllocated(cmd.GetMatchId(), int(cmd.GetPlayersExpected())); err != nil {
+		// ErrNotConnected is fine: the frame is cached and replayed when liba
+		// (re)connects (protocol.md §2).
+		m.logf("[daemon] allocate %s: send allocated: %v", id, err)
+	}
+}
+
 // PrePull warms the image cache, reporting progress (protocol.md §1).
 func (m *Manager) PrePull(_ context.Context, cmd *agentlinkv1.PrePull) {
 	go func() {

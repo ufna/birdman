@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -191,6 +192,54 @@ func (f *fakeLiba) send(typ string, data map[string]any) {
 	}
 }
 
+// libaFrame is one decoded agent→liba frame.
+type libaFrame struct {
+	V    int            `json:"v"`
+	Type string         `json:"type"`
+	Data map[string]any `json:"data"`
+}
+
+// readFrames drains agent→liba frames into the returned channel (closed on
+// disconnect). Call once per connection.
+func (f *fakeLiba) readFrames() <-chan libaFrame {
+	ch := make(chan libaFrame, 64)
+	go func() {
+		defer close(ch)
+		sc := bufio.NewScanner(f.conn)
+		sc.Buffer(make([]byte, 64*1024), 64*1024)
+		for sc.Scan() {
+			var fr libaFrame
+			if json.Unmarshal(sc.Bytes(), &fr) == nil {
+				select {
+				case ch <- fr:
+				default: // slow test — drop rather than deadlock
+				}
+			}
+		}
+	}()
+	return ch
+}
+
+// awaitFrame waits for the next frame of the given type (skipping others,
+// e.g. pings).
+func awaitFrame(t *testing.T, ch <-chan libaFrame, typ string) libaFrame {
+	t.Helper()
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case fr, ok := <-ch:
+			if !ok {
+				t.Fatalf("liba connection closed while waiting for %q", typ)
+			}
+			if fr.Type == typ {
+				return fr
+			}
+		case <-deadline:
+			t.Fatalf("no %q frame in time", typ)
+		}
+	}
+}
+
 // --- helpers ---
 
 func testManager(t *testing.T, rt Runtime) (*Manager, *fakeSink, string) {
@@ -309,6 +358,75 @@ func TestStartIdempotentByServerID(t *testing.T) {
 	if rt.startCount() != 1 {
 		t.Fatalf("duplicate StartServer started %d containers", rt.startCount())
 	}
+}
+
+// AllocateServer → `allocated` frame in liba, state ready → allocated with
+// the match id persisted to labels; the frame is cached and replayed to a
+// reconnecting liba; a clean exit after the match leaves `stopped`, not
+// `failed` (итерация 2).
+func TestAllocateDeliversToLiba(t *testing.T) {
+	rt := newFakeRuntime()
+	m, _, _ := testManager(t, rt)
+	m.Start(context.Background(), &agentlinkv1.StartServer{ServerId: "s1", ImageRef: "img:1", CmdId: "c1"})
+	eventually(t, "started", func() bool { return rt.startCount() == 1 })
+	rt.mu.Lock()
+	sockPath := rt.started[0].SocketPath
+	rt.mu.Unlock()
+
+	liba := dialLiba(t, sockPath)
+	frames := liba.readFrames()
+	liba.send("hello", map[string]any{"sdk_version": "stub/1"})
+	liba.send("ready", nil)
+	eventually(t, "ready", stateIs(m, "s1", "ready"))
+
+	// Allocate of an unknown server is an ignored no-op.
+	m.Allocate(context.Background(), &agentlinkv1.AllocateServer{
+		ServerId: "nope", MatchId: "m-0", CmdId: "a0",
+	})
+
+	m.Allocate(context.Background(), &agentlinkv1.AllocateServer{
+		ServerId: "s1", MatchId: "m-42", PlayersExpected: 2, CmdId: "a1",
+	})
+	eventually(t, "allocated state", stateIs(m, "s1", "allocated"))
+	if s := snapshotOf(m, "s1"); s.GetMatchId() != "m-42" {
+		t.Fatalf("snapshot match id: %+v", s)
+	}
+	eventually(t, "allocated label persisted", func() bool {
+		return rt.handle("s1").lastState() == "allocated/m-42"
+	})
+	fr := awaitFrame(t, frames, "allocated")
+	if fr.V != 1 || fr.Data["match_id"] != "m-42" || fr.Data["players_expected"] != float64(2) {
+		t.Fatalf("allocated frame: %+v", fr)
+	}
+
+	// Replayed command (agent restart lost the cmd_id cache) stays idempotent
+	// and re-delivers the frame.
+	m.Allocate(context.Background(), &agentlinkv1.AllocateServer{
+		ServerId: "s1", MatchId: "m-42", PlayersExpected: 2, CmdId: "a2",
+	})
+	if fr := awaitFrame(t, frames, "allocated"); fr.Data["match_id"] != "m-42" {
+		t.Fatalf("replayed frame: %+v", fr)
+	}
+	if s := snapshotOf(m, "s1"); s.GetState() != "allocated" {
+		t.Fatalf("idempotent allocate broke the state: %s", s.GetState())
+	}
+
+	// liba reconnect: the last allocated frame is replayed from the cache.
+	liba.conn.Close()
+	liba2 := dialLiba(t, sockPath)
+	frames2 := liba2.readFrames()
+	fr = awaitFrame(t, frames2, "allocated")
+	if fr.Data["match_id"] != "m-42" || fr.Data["players_expected"] != float64(2) {
+		t.Fatalf("reconnect replay: %+v", fr)
+	}
+
+	// Match plays out; the one-shot dedik exits 0 → stopped (master reaps it),
+	// NOT failed.
+	liba2.send("players", map[string]any{"count": 2})
+	liba2.send("match_start", map[string]any{"match_id": "m-42"})
+	liba2.send("match_end", map[string]any{"match_id": "m-42", "result": "completed"})
+	rt.handle("s1").exit <- Exit{Code: 0}
+	eventually(t, "stopped after clean exit", stateIs(m, "s1", "stopped"))
 }
 
 func TestStopServerGraceful(t *testing.T) {

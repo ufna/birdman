@@ -28,6 +28,9 @@ import (
 type Handler interface {
 	Start(ctx context.Context, cmd *agentlinkv1.StartServer)
 	Stop(ctx context.Context, cmd *agentlinkv1.StopServer)
+	// Allocate delivers a master-allocated match to the dedik's liba
+	// (итерация 2: `allocated{match_id, players_expected}` over UDS).
+	Allocate(ctx context.Context, cmd *agentlinkv1.AllocateServer)
 	PrePull(ctx context.Context, cmd *agentlinkv1.PrePull)
 	Drain(ctx context.Context, cmd *agentlinkv1.Drain)
 	// Unsupported handles commands the agent does not implement yet
@@ -265,6 +268,8 @@ func (c *Client) dispatch(ctx context.Context, in *agentlinkv1.MasterMsg) {
 		c.h.Start(ctx, m.Start)
 	case *agentlinkv1.MasterMsg_Stop:
 		c.h.Stop(ctx, m.Stop)
+	case *agentlinkv1.MasterMsg_Allocate:
+		c.h.Allocate(ctx, m.Allocate)
 	case *agentlinkv1.MasterMsg_Prepull:
 		c.h.PrePull(ctx, m.Prepull)
 	case *agentlinkv1.MasterMsg_Drain:
@@ -283,6 +288,8 @@ func commandID(m *agentlinkv1.MasterMsg) string {
 		return c.Start.GetCmdId()
 	case *agentlinkv1.MasterMsg_Stop:
 		return c.Stop.GetCmdId()
+	case *agentlinkv1.MasterMsg_Allocate:
+		return c.Allocate.GetCmdId()
 	case *agentlinkv1.MasterMsg_Prepull:
 		return c.Prepull.GetCmdId()
 	case *agentlinkv1.MasterMsg_Drain:

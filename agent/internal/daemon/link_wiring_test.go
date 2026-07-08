@@ -190,6 +190,7 @@ func TestAgentLinkEndToEnd(t *testing.T) {
 	sockPath := rt.started[0].SocketPath
 	rt.mu.Unlock()
 	liba := dialLiba(t, sockPath)
+	frames := liba.readFrames()
 	liba.send("hello", map[string]any{"sdk_version": "stub/1"})
 	liba.send("ready", nil)
 	eventually(t, "ready event reached master", func() bool { return fake.hasEvent("new-1", "ready") })
@@ -204,5 +205,43 @@ func TestAgentLinkEndToEnd(t *testing.T) {
 	eventually(t, "duplicate re-acked", func() bool { return fake.ackCount("cmd-start-1") == 2 })
 	if rt.startCount() != 1 {
 		t.Fatalf("duplicate cmd started %d containers", rt.startCount())
+	}
+
+	// 6. AllocateServer over the stream → Ack, `allocated` frame in liba,
+	// allocated state (+match id) in heartbeats (итерация 2).
+	fake.push(t, &agentlinkv1.MasterMsg{Msg: &agentlinkv1.MasterMsg_Allocate{Allocate: &agentlinkv1.AllocateServer{
+		ServerId: "new-1", MatchId: "m-77", PlayersExpected: 2, CmdId: "cmd-alloc-1",
+	}}})
+	eventually(t, "allocate acked", func() bool { return fake.ackCount("cmd-alloc-1") == 1 })
+	fr := awaitFrame(t, frames, "allocated")
+	if fr.Data["match_id"] != "m-77" || fr.Data["players_expected"] != float64(2) {
+		t.Fatalf("allocated frame: %+v", fr)
+	}
+	eventually(t, "heartbeat shows allocated with match id", func() bool {
+		fake.mu.Lock()
+		defer fake.mu.Unlock()
+		for i := len(fake.heartbeats) - 1; i >= 0; i-- {
+			for _, s := range fake.heartbeats[i].GetServers() {
+				if s.GetServerId() == "new-1" {
+					return s.GetState() == "allocated" && s.GetMatchId() == "m-77"
+				}
+			}
+		}
+		return false
+	})
+
+	// 7. Match ends, the dedik exits 0: match events + a `stopped` state in
+	// heartbeats — the master reaps it, no failure anywhere.
+	liba.send("match_start", map[string]any{"match_id": "m-77"})
+	liba.send("match_end", map[string]any{"match_id": "m-77", "result": "completed"})
+	eventually(t, "match events reached master", func() bool {
+		return fake.hasEvent("new-1", "match_start") && fake.hasEvent("new-1", "match_end")
+	})
+	rt.handle("new-1").exit <- Exit{Code: 0}
+	eventually(t, "heartbeat shows stopped", func() bool {
+		return fake.lastHeartbeatState("new-1") == "stopped"
+	})
+	if fake.hasEvent("new-1", "failed") {
+		t.Fatal("clean exit after match_end must not report failed")
 	}
 }

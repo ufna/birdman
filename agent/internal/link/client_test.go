@@ -121,6 +121,7 @@ type fakeHandler struct {
 	mu          sync.Mutex
 	starts      []*agentlinkv1.StartServer
 	stops       []*agentlinkv1.StopServer
+	allocates   []*agentlinkv1.AllocateServer
 	prepulls    []*agentlinkv1.PrePull
 	drains      []*agentlinkv1.Drain
 	unsupported []string
@@ -135,6 +136,11 @@ func (h *fakeHandler) Stop(_ context.Context, c *agentlinkv1.StopServer) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.stops = append(h.stops, c)
+}
+func (h *fakeHandler) Allocate(_ context.Context, c *agentlinkv1.AllocateServer) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.allocates = append(h.allocates, c)
 }
 func (h *fakeHandler) PrePull(_ context.Context, c *agentlinkv1.PrePull) {
 	h.mu.Lock()
@@ -332,16 +338,32 @@ func TestCommandDispatchAckAndIdempotency(t *testing.T) {
 	h.fake.push(t, &agentlinkv1.MasterMsg{Msg: &agentlinkv1.MasterMsg_Tail{Tail: &agentlinkv1.TailLogs{
 		ServerId: "s1", CmdId: "cmd-3",
 	}}})
-	eventually(t, "stop and tail handled", func() bool {
+	h.fake.push(t, &agentlinkv1.MasterMsg{Msg: &agentlinkv1.MasterMsg_Allocate{Allocate: &agentlinkv1.AllocateServer{
+		ServerId: "s1", MatchId: "m-1", PlayersExpected: 2, CmdId: "cmd-4",
+	}}})
+	eventually(t, "stop, tail and allocate handled", func() bool {
 		handler.mu.Lock()
 		defer handler.mu.Unlock()
-		return len(handler.stops) == 1 && len(handler.unsupported) == 1
+		return len(handler.stops) == 1 && len(handler.unsupported) == 1 && len(handler.allocates) == 1
 	})
 	handler.mu.Lock()
 	if handler.unsupported[0] != "tail_logs" {
 		t.Fatalf("unsupported: %v", handler.unsupported)
 	}
+	if a := handler.allocates[0]; a.GetMatchId() != "m-1" || a.GetPlayersExpected() != 2 {
+		t.Fatalf("allocate command: %+v", a)
+	}
 	handler.mu.Unlock()
+	eventually(t, "allocate acked", func() bool {
+		h.fake.mu.Lock()
+		defer h.fake.mu.Unlock()
+		for _, a := range h.fake.acks {
+			if a == "cmd-4" {
+				return true
+			}
+		}
+		return false
+	})
 }
 
 func TestReconnectCycle(t *testing.T) {
