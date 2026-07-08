@@ -61,6 +61,18 @@ type Metrics struct {
 	VictoriaMetricsURL string `yaml:"victoriametrics_url"`
 }
 
+// Alerts configures the panel П2 Alerts endpoints (docs/specs/panel.md §3,
+// ops.md §1): rules and live firing state come from the vmalert HTTP API,
+// history from the alert-sink log the vmalert stack writes on the box.
+type Alerts struct {
+	// VmalertURL is the base URL of the vmalert HTTP API (e.g.
+	// http://127.0.0.1:8880); empty → /v1/alerts/rules and /active return 503.
+	VmalertURL string `yaml:"vmalert_url"`
+	// LogPath is the alert-sink log (alertmanager-v2 JSON lines); missing file
+	// → /v1/alerts/history returns an empty list, not 500.
+	LogPath string `yaml:"log_path"`
+}
+
 type Config struct {
 	DSN         string      `yaml:"dsn"`
 	ListenAPI   string      `yaml:"listen_api"`
@@ -69,6 +81,7 @@ type Config struct {
 	Matchmaking Matchmaking `yaml:"matchmaking"`
 	Compat      Compat      `yaml:"compat"`
 	Metrics     Metrics     `yaml:"metrics"`
+	Alerts      Alerts      `yaml:"alerts"`
 }
 
 func defaults() Config {
@@ -79,6 +92,12 @@ func defaults() Config {
 		// VictoriaMetrics of the same box (ops.md §1 recommended stack); the
 		// metrics proxy returns 502 if it is not running, 503 only when unset.
 		Metrics: Metrics{VictoriaMetricsURL: "http://127.0.0.1:8428"},
+		// vmalert + alert sink on the same box (ops.md §1); the alerts
+		// endpoints degrade gracefully (503 unset / 502 unreachable / [] no log).
+		Alerts: Alerts{
+			VmalertURL: "http://127.0.0.1:8880",
+			LogPath:    "/var/log/birdman/alerts.log",
+		},
 		Matchmaking: Matchmaking{
 			TickMS:      500,
 			WidenAfterS: 30,
@@ -115,6 +134,9 @@ func Load(path string) (Config, error) {
 	}
 	if v := os.Getenv("BIRDMAN_VM_URL"); v != "" {
 		cfg.Metrics.VictoriaMetricsURL = v
+	}
+	if v := os.Getenv("BIRDMAN_VMALERT_URL"); v != "" {
+		cfg.Alerts.VmalertURL = v
 	}
 	if cfg.ListenAPI == "" {
 		cfg.ListenAPI = ":8100"

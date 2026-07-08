@@ -29,17 +29,19 @@ import (
 const mmRateLimit = 5
 
 type Server struct {
-	st      *store.Store
-	m       *metrics.Metrics
-	mm      *matchmaker.Matchmaker
-	dep     *deploy.Manager
-	sender  CommandSender      // agent command dispatch (agentlink.Hub)
-	logs    *agentlink.LogRouter // TailLogs chunk router
-	vmURL   string             // VictoriaMetrics base URL for the metrics proxy
-	mmLimit *rateLimiter
-	auth    *authenticator
-	log     *slog.Logger
-	mux     *http.ServeMux
+	st            *store.Store
+	m             *metrics.Metrics
+	mm            *matchmaker.Matchmaker
+	dep           *deploy.Manager
+	sender        CommandSender        // agent command dispatch (agentlink.Hub)
+	logs          *agentlink.LogRouter // TailLogs chunk router
+	vmURL         string               // VictoriaMetrics base URL for the metrics proxy
+	vmalertURL    string               // vmalert base URL for the alerts endpoints
+	alertsLogPath string               // alert sink log for GET /v1/alerts/history
+	mmLimit       *rateLimiter
+	auth          *authenticator
+	log           *slog.Logger
+	mux           *http.ServeMux
 }
 
 func New(st *store.Store, m *metrics.Metrics, mm *matchmaker.Matchmaker, dep *deploy.Manager, sender CommandSender, logs *agentlink.LogRouter, vmURL string, log *slog.Logger) *Server {
@@ -73,6 +75,17 @@ func New(st *store.Store, m *metrics.Metrics, mm *matchmaker.Matchmaker, dep *de
 	s.mux.HandleFunc("GET /v1/matches/{id}", s.requireScope(ScopeReadonly, s.handleGetMatch))
 	s.mux.HandleFunc("POST /v1/allocate", s.requireScope(ScopeAllocate, s.handleAllocate))
 
+	// API-key management (П2 Access, apikeys.go); stats aggregates (П2
+	// Statistics/Cost-view, stats.go); alerts (П2 Alerts, alerts.go).
+	s.mux.HandleFunc("GET /v1/apikeys", s.requireScope(ScopeAdmin, s.handleListAPIKeys))
+	s.mux.HandleFunc("POST /v1/apikeys", s.requireScope(ScopeAdmin, s.handleCreateAPIKey))
+	s.mux.HandleFunc("DELETE /v1/apikeys/{id}", s.requireScope(ScopeAdmin, s.handleRevokeAPIKey))
+	s.mux.HandleFunc("GET /v1/stats/overview", s.requireScope(ScopeReadonly, s.handleStatsOverview))
+	s.mux.HandleFunc("GET /v1/stats/cost", s.requireScope(ScopeReadonly, s.handleStatsCost))
+	s.mux.HandleFunc("GET /v1/alerts/rules", s.requireScope(ScopeReadonly, s.handleAlertRules))
+	s.mux.HandleFunc("GET /v1/alerts/history", s.requireScope(ScopeReadonly, s.handleAlertHistory))
+	s.mux.HandleFunc("GET /v1/alerts/active", s.requireScope(ScopeReadonly, s.handleAlertsActive))
+
 	s.mux.HandleFunc("POST /v1/matchmaking/tickets", s.requireScope(ScopeMatchmaking, s.handleCreateTicket))
 	s.mux.HandleFunc("GET /v1/matchmaking/tickets/{id}", s.requireScope(ScopeMatchmaking, s.handleGetTicket))
 	s.mux.HandleFunc("DELETE /v1/matchmaking/tickets/{id}", s.requireScope(ScopeMatchmaking, s.handleCancelTicket))
@@ -88,6 +101,18 @@ func New(st *store.Store, m *metrics.Metrics, mm *matchmaker.Matchmaker, dep *de
 	// (panelui). Registered last — "/" catches everything unrouted.
 	s.mux.Handle("/", panelui.Handler())
 
+	return s
+}
+
+// WithAlertsSources wires the vmalert base URL and the alert-sink log path for
+// the П2 alerts endpoints (config.Alerts; alerts.go). Kept a setter rather than
+// a New parameter so the existing New signature — and its call sites — stay
+// untouched; the alert handlers read these at request time. Returns s for
+// chaining. Empty vmalert URL → the rules/active endpoints answer 503; a
+// missing log file → history answers an empty list.
+func (s *Server) WithAlertsSources(vmalertURL, alertsLogPath string) *Server {
+	s.vmalertURL = vmalertURL
+	s.alertsLogPath = alertsLogPath
 	return s
 }
 
