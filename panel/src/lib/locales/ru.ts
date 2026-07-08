@@ -1,6 +1,7 @@
 // Русский перевод. Ключи 1:1 с en.ts (тип Record<MessageKey, string> не даст
 // разойтись: пропуск ключа или лишний ключ — ошибка компиляции; плюс есть
-// runtime-тест паритета). Тон — как в текущем UI. Глоссарий — см. en.ts.
+// runtime-тест паритета). Тон — как в текущем UI. Глоссарий и правило 100%
+// покрытия (никаких захардкоженных строк) — см. en.ts.
 
 import type { MessageKey } from './en';
 
@@ -38,6 +39,7 @@ export const ru: Record<MessageKey, string> = {
   'theme.toDark': 'Тёмная тема',
   'lang.switch': 'Язык',
   'shell.keyName': 'Имя API-ключа сессии',
+  'shell.scopes': 'Скоупы сессии',
   'shell.logout': 'Выйти',
 
   // — гейт доступа (корень) —
@@ -102,6 +104,41 @@ export const ru: Record<MessageKey, string> = {
   'state.version.deprecated': 'Депрекейт',
   'state.version.disabled': 'Отключена',
 
+  // — подписи видов событий (сырой код — в title бейджа; неизвестный → код) —
+  'event.node_created': 'Тачка зарегистрирована',
+  'event.node_quarantine': 'Тачка в карантине',
+  'event.node_recovered': 'Тачка восстановлена',
+  'event.node_drain': 'Тачка опустошается',
+  'event.node_undrain': 'Тачка возвращена',
+  'event.server_failed': 'Дедик упал',
+  'event.server_recovered': 'Дедик восстановлен',
+  'event.server_drain': 'Дедик опустошается',
+  'event.crash_loop': 'Цикл падений',
+  'event.allocation_failed': 'Аллокация не удалась',
+  'event.version_registered': 'Версия зарегистрирована',
+  'event.version_disabled': 'Версия отключена',
+  'event.fleet_updated': 'Флот обновлён',
+  'event.deploy_started': 'Деплой начат',
+  'event.deploy_node_pulled': 'Образ спрогрет на тачке',
+  'event.deploy_activated': 'Деплой активирован',
+  'event.deploy_failed': 'Деплой не удался',
+  'event.deploy_rolled_back': 'Откат выполнен',
+  'event.agent_upgrade': 'Обновление агента',
+  'event.agent_upgrade_succeeded': 'Агент обновлён',
+  'event.agent_upgrade_failed': 'Обновление агента не удалось',
+
+  // — подписи скоупов API-ключа (коды остаются в API) —
+  'scope.admin': 'Админ',
+  'scope.deploy': 'Деплой',
+  'scope.matchmaking': 'Матчмейкинг',
+  'scope.allocate': 'Аллокация',
+  'scope.readonly': 'Только чтение',
+
+  // — компактные префиксы ссылок в ленте (моно, одинаковы в обоих языках) —
+  'ref.node': 'node',
+  'ref.srv': 'srv',
+  'ref.match': 'match',
+
   // — экран «Матчи» —
   'matches.tabs': 'Матчи',
   'matches.tab.live': 'Live',
@@ -155,7 +192,9 @@ export const ru: Record<MessageKey, string> = {
   'metric.cpu': 'CPU, ядра',
   'metric.mem': 'Память',
 
-  // — просмотр логов —
+  // — просмотр логов (tail/follow — терминальный жаргон, оставляем как есть) —
+  'logs.tail': 'tail',
+  'logs.follow': 'follow',
   'logs.tailAria': 'Сколько последних строк тянуть',
   'logs.preparing': 'Готовим…',
   'logs.download': 'Скачать',

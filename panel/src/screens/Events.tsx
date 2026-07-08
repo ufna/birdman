@@ -12,8 +12,8 @@ import { useData, useLive } from '../lib/live';
 import { useServerDrawer } from '../lib/drawer';
 import { shortId, summarizePayload } from '../lib/format';
 import { useT, useFormat } from '../lib/i18n';
-import type { MessageKey } from '../lib/i18n';
-import { StateBadge, toneOfEventKind } from '../components/Badge';
+import type { I18nContextValue, MessageKey } from '../lib/i18n';
+import { EVENT_KINDS, StateBadge, toneOfEventKind } from '../components/Badge';
 import { Card, CardHeader, EmptyState, ErrorNote, LoadingRow } from '../components/ui';
 
 const PAGE_SIZE = 50;
@@ -25,18 +25,16 @@ const PERIODS: { value: string; labelKey: MessageKey; ms: number }[] = [
   { value: '24h', labelKey: 'period.24h', ms: 86_400_000 },
 ];
 
-// Известные kind'ы (models.go master) — на случай пустой ленты дропдаун не пуст.
-const KNOWN_KINDS = [
-  'node_created', 'node_quarantine', 'node_recovered', 'node_drain', 'node_undrain',
-  'server_failed', 'server_recovered', 'crash_loop', 'allocation_failed',
-  'version_registered', 'fleet_updated', 'deploy_started', 'deploy_node_pulled',
-  'deploy_activated', 'deploy_failed', 'deploy_rolled_back', 'version_disabled',
-  'server_drain', 'agent_upgrade', 'agent_upgrade_succeeded', 'agent_upgrade_failed',
-];
+/** Человекочитаемая подпись вида события; неизвестный код → сам код. */
+function kindLabel(kind: string, i18n: Pick<I18nContextValue, 't' | 'has'>): string {
+  const key = `event.${kind}`;
+  return i18n.has(key) ? i18n.t(key as MessageKey) : kind;
+}
 
 export function Events() {
   const { subscribe } = useLive();
-  const { t, tp } = useT();
+  const i18n = useT();
+  const { t, tp } = i18n;
   const nodes = useData(() => api.listNodes(), []);
 
   const [limit, setLimit] = useState(500);
@@ -81,7 +79,7 @@ export function Events() {
   );
 
   const kinds = useMemo(() => {
-    const set = new Set(KNOWN_KINDS);
+    const set = new Set<string>(EVENT_KINDS);
     for (const e of all ?? []) set.add(e.kind);
     return [...set].sort((a, b) => a.localeCompare(b));
   }, [all]);
@@ -115,7 +113,7 @@ export function Events() {
             <select aria-label={t('events.kindAria')} className={select} value={kind} onChange={(e) => { setKind(e.target.value); resetPage(); }}>
               <option value="">{t('events.allKinds')}</option>
               {kinds.map((k) => (
-                <option key={k} value={k}>{k}</option>
+                <option key={k} value={k}>{kindLabel(k, i18n)}</option>
               ))}
             </select>
             <select aria-label={t('events.nodeAria')} className={select} value={node} onChange={(e) => { setNode(e.target.value); resetPage(); }}>
@@ -165,15 +163,16 @@ export function Events() {
 
 function EventRows({ events }: { events: ApiEvent[] }) {
   const { open } = useServerDrawer();
+  const { t } = useT();
   const fmt = useFormat();
   return (
     <ul className="divide-y divide-line">
       {events.map((e) => (
         <li key={e.id} className="flex items-start gap-3 px-4 py-2.5">
           <span className="tabular shrink-0 pt-0.5 font-mono text-xs text-muted">{fmt.stamp(e.ts)}</span>
-          <StateBadge state={e.kind} tone={toneOfEventKind(e.kind)} />
+          <StateBadge state={e.kind} tone={toneOfEventKind(e.kind)} domain="event" />
           <span className="min-w-0 flex-1 pt-0.5 text-xs">
-            <span className="text-muted">{refsOf(e, open)}</span>
+            <span className="text-muted">{refsOf(e, open, t)}</span>
             {Object.keys(e.payload).length > 0 && <span className="text-ink/80">{summarizePayload(e.payload)}</span>}
           </span>
         </li>
@@ -182,9 +181,9 @@ function EventRows({ events }: { events: ApiEvent[] }) {
   );
 }
 
-function refsOf(e: ApiEvent, openServer: (id: string) => void): ReactNode {
+function refsOf(e: ApiEvent, openServer: (id: string) => void, t: I18nContextValue['t']): ReactNode {
   const parts: ReactNode[] = [];
-  if (e.node_id !== undefined) parts.push(<span key="n" className="font-mono">node {shortId(e.node_id)}</span>);
+  if (e.node_id !== undefined) parts.push(<span key="n" className="font-mono">{t('ref.node')} {shortId(e.node_id)}</span>);
   if (e.server_id !== undefined) {
     const sid = e.server_id;
     parts.push(
@@ -194,11 +193,11 @@ function refsOf(e: ApiEvent, openServer: (id: string) => void): ReactNode {
         onClick={() => { openServer(sid); }}
         className="font-mono text-accent-ink underline-offset-2 hover:underline"
       >
-        srv {shortId(sid)}
+        {t('ref.srv')} {shortId(sid)}
       </button>,
     );
   }
-  if (e.match_id !== undefined) parts.push(<span key="m" className="font-mono">match {shortId(e.match_id)}</span>);
+  if (e.match_id !== undefined) parts.push(<span key="m" className="font-mono">{t('ref.match')} {shortId(e.match_id)}</span>);
   if (parts.length === 0) return null;
   return (
     <>

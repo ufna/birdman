@@ -150,21 +150,40 @@ function ThemeToggle() {
 
 function SessionBox() {
   const { session, logout } = useSession();
-  const { t } = useT();
+  const { t, has } = useT();
+  const scopeLabel = (s: string) => {
+    const key = `scope.${s}`;
+    return has(key) ? t(key as MessageKey) : s;
+  };
   return (
-    <div className="flex items-center justify-between gap-2">
-      <span className="truncate font-mono text-xs text-muted" title={t('shell.keyName')}>
-        {session?.name ?? ''}
-      </span>
-      <button
-        type="button"
-        onClick={() => {
-          void logout();
-        }}
-        className="rounded-lg border border-line px-2.5 py-1 text-xs text-muted hover:text-ink"
-      >
-        {t('shell.logout')}
-      </button>
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-center justify-between gap-2">
+        <span className="truncate font-mono text-xs text-muted" title={t('shell.keyName')}>
+          {session?.name ?? ''}
+        </span>
+        <button
+          type="button"
+          onClick={() => {
+            void logout();
+          }}
+          className="rounded-lg border border-line px-2.5 py-1 text-xs text-muted hover:text-ink"
+        >
+          {t('shell.logout')}
+        </button>
+      </div>
+      {session != null && session.scopes.length > 0 && (
+        <div className="flex flex-wrap gap-1" aria-label={t('shell.scopes')}>
+          {session.scopes.map((s) => (
+            <span
+              key={s}
+              title={s}
+              className="rounded border border-line px-1.5 py-0.5 text-[10px] tracking-wide text-muted uppercase"
+            >
+              {scopeLabel(s)}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

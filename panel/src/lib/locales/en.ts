@@ -1,6 +1,11 @@
 // Canonical message catalog (source of truth). ru.ts mirrors these keys 1:1
 // (enforced at compile time via Record<MessageKey, string> and a parity test).
 //
+// RULE (100% coverage): every user-facing string in panel/src goes through
+// t()/tp() — NO hardcoded UI text. Regressions are caught by the parity test
+// and by src/test/no-hardcoded.test.ts (fails on Cyrillic literals outside
+// locales/format). When you add UI text, add a key here first.
+//
 // Glossary — keep terms consistent across the whole UI:
 //   Fleet=Флот · Node=Тачка · Dedic=Дедик · Match=Матч · Deploy=Деплой
 //   Warm/Ready buffer=Ready-буфер · Multi-version window=Окно мультиверсий
@@ -11,8 +16,10 @@
 //   - Plural bases have .one/.few/.many/.other; tp() picks via Intl.PluralRules.
 //     English only ever selects one/other, but all four forms are present to
 //     keep key parity with Russian.
-//   - Brand ("birdman"), API tokens (semver, ids, state codes like
-//     ready/allocated, event kinds) are NOT translated.
+//   - Brand ("birdman") and API tokens (semver, ids, raw state/event codes) are
+//     never shown raw as prose — but their human-readable LABELS live here
+//     (state.*, event.*, scope.*). A few compact mono tokens (ref.*, logs.tail/
+//     follow) are intentionally identical in both languages.
 
 export const en = {
   // — common —
@@ -48,6 +55,7 @@ export const en = {
   'theme.toDark': 'Dark theme',
   'lang.switch': 'Language',
   'shell.keyName': 'Session API key name',
+  'shell.scopes': 'Session scopes',
   'shell.logout': 'Sign out',
 
   // — access gate (App root) —
@@ -112,6 +120,41 @@ export const en = {
   'state.version.deprecated': 'Deprecated',
   'state.version.disabled': 'Disabled',
 
+  // — event-kind labels (raw code kept in the badge title; unknown → code) —
+  'event.node_created': 'Node registered',
+  'event.node_quarantine': 'Node quarantined',
+  'event.node_recovered': 'Node recovered',
+  'event.node_drain': 'Node draining',
+  'event.node_undrain': 'Node returned',
+  'event.server_failed': 'Dedic failed',
+  'event.server_recovered': 'Dedic recovered',
+  'event.server_drain': 'Dedic draining',
+  'event.crash_loop': 'Crash loop',
+  'event.allocation_failed': 'Allocation failed',
+  'event.version_registered': 'Version registered',
+  'event.version_disabled': 'Version disabled',
+  'event.fleet_updated': 'Fleet updated',
+  'event.deploy_started': 'Deploy started',
+  'event.deploy_node_pulled': 'Image pulled on node',
+  'event.deploy_activated': 'Deploy activated',
+  'event.deploy_failed': 'Deploy failed',
+  'event.deploy_rolled_back': 'Rolled back',
+  'event.agent_upgrade': 'Agent upgrade',
+  'event.agent_upgrade_succeeded': 'Agent upgraded',
+  'event.agent_upgrade_failed': 'Agent upgrade failed',
+
+  // — API-key scope labels (codes stay in the API) —
+  'scope.admin': 'Admin',
+  'scope.deploy': 'Deploy',
+  'scope.matchmaking': 'Matchmaking',
+  'scope.allocate': 'Allocate',
+  'scope.readonly': 'Read-only',
+
+  // — compact entity-ref prefixes in the event feed (mono, same in both langs) —
+  'ref.node': 'node',
+  'ref.srv': 'srv',
+  'ref.match': 'match',
+
   // — Matches screen —
   'matches.tabs': 'Matches',
   'matches.tab.live': 'Live',
@@ -165,7 +208,9 @@ export const en = {
   'metric.cpu': 'CPU, cores',
   'metric.mem': 'Memory',
 
-  // — log viewer —
+  // — log viewer (tail/follow kept as terminal-log jargon in both langs) —
+  'logs.tail': 'tail',
+  'logs.follow': 'follow',
   'logs.tailAria': 'How many trailing lines to fetch',
   'logs.preparing': 'Preparing…',
   'logs.download': 'Download',

@@ -136,7 +136,7 @@ function ServerMeta({ server, semver, now }: { server: GameServer; semver?: stri
   const uptime = fmt.age(Math.max(0, now - new Date(server.created_at).getTime()));
   return (
     <>
-      node {shortId(server.node_id)} · {server.region} · v{semver ?? shortId(server.version_id)} · {t('common.port')}{' '}
+      {t('ref.node')} {shortId(server.node_id)} · {server.region} · v{semver ?? shortId(server.version_id)} · {t('common.port')}{' '}
       {server.port} · {tp('common.playersCount', server.players)} · {t('common.uptime')} {uptime}
     </>
   );
@@ -195,7 +195,7 @@ function ServerTimeline({ serverId }: { serverId: string }) {
         <li key={e.id} className="relative flex items-start gap-3 py-2 pl-5">
           <span aria-hidden className="absolute top-3.5 -left-[5px] size-2 rounded-full bg-accent" />
           <span className="tabular shrink-0 pt-0.5 font-mono text-xs text-muted">{fmt.clock(e.ts)}</span>
-          <StateBadge state={e.kind} tone={toneOfEventKind(e.kind)} />
+          <StateBadge state={e.kind} tone={toneOfEventKind(e.kind)} domain="event" />
           {Object.keys(e.payload).length > 0 && (
             <span className="min-w-0 flex-1 truncate pt-0.5 text-xs text-muted">{summarizePayload(e.payload)}</span>
           )}

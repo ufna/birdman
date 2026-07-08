@@ -77,7 +77,7 @@ export function LogViewer({ serverId, initialFollow = true }: { serverId: string
       <div className="flex flex-wrap items-center gap-2">
         <LogStatus status={status} follow={follow} />
         <label className="ml-auto flex items-center gap-1.5 text-xs text-muted">
-          tail
+          {t('logs.tail')}
           <select
             aria-label={t('logs.tailAria')}
             className="rounded-md border border-line bg-card px-1.5 py-0.5 text-xs"
@@ -101,7 +101,7 @@ export function LogViewer({ serverId, initialFollow = true }: { serverId: string
               setFollow(e.target.checked);
             }}
           />
-          follow
+          {t('logs.follow')}
         </label>
         <button
           type="button"

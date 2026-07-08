@@ -7,6 +7,7 @@ import type { ApiEvent } from '../lib/api';
 import { useLive } from '../lib/live';
 import { shortId, summarizePayload } from '../lib/format';
 import { useT, useFormat } from '../lib/i18n';
+import type { I18nContextValue } from '../lib/i18n';
 import { StateBadge, toneOfEventKind } from './Badge';
 import { EmptyState, LoadingRow } from './ui';
 
@@ -55,9 +56,9 @@ export function EventsFeed() {
       {events.map((e) => (
         <li key={e.id} className="flex items-start gap-3 px-4 py-2">
           <span className="tabular shrink-0 pt-0.5 font-mono text-xs text-muted">{fmt.clock(e.ts)}</span>
-          <StateBadge state={e.kind} tone={toneOfEventKind(e.kind)} />
+          <StateBadge state={e.kind} tone={toneOfEventKind(e.kind)} domain="event" />
           <span className="min-w-0 flex-1 truncate pt-0.5 text-xs text-muted">
-            {refsOf(e)}
+            {refsOf(e, t)}
             {Object.keys(e.payload).length > 0 && (
               <span className="text-ink/80"> {summarizePayload(e.payload)}</span>
             )}
@@ -68,10 +69,10 @@ export function EventsFeed() {
   );
 }
 
-function refsOf(e: ApiEvent): string {
+function refsOf(e: ApiEvent, t: I18nContextValue['t']): string {
   const refs: string[] = [];
-  if (e.node_id !== undefined) refs.push(`node ${shortId(e.node_id)}`);
-  if (e.server_id !== undefined) refs.push(`srv ${shortId(e.server_id)}`);
-  if (e.match_id !== undefined) refs.push(`match ${shortId(e.match_id)}`);
+  if (e.node_id !== undefined) refs.push(`${t('ref.node')} ${shortId(e.node_id)}`);
+  if (e.server_id !== undefined) refs.push(`${t('ref.srv')} ${shortId(e.server_id)}`);
+  if (e.match_id !== undefined) refs.push(`${t('ref.match')} ${shortId(e.match_id)}`);
   return refs.length > 0 ? `${refs.join(' · ')} · ` : '';
 }
