@@ -7,6 +7,7 @@ import {
   toSimpleColumns,
   toStackModel,
   utilizationModel,
+  versionColor,
   versionShareModel,
 } from '../lib/stats';
 
@@ -45,6 +46,29 @@ describe('seriesColor — стабильный слот по индексу', ()
     expect(seriesColor(7)).toBe('var(--cat-8)');
     expect(seriesColor(8)).toBe('var(--cat-other)');
     expect(seriesColor(-1)).toBe('var(--cat-other)');
+  });
+});
+
+describe('versionColor — единый детерминированный цвет версии', () => {
+  it('детерминизм: одна версия → один и тот же слот при повторе', () => {
+    expect(versionColor('0.1.0')).toBe(versionColor('0.1.0'));
+    expect(versionColor('1.2.3')).toBe(versionColor('1.2.3'));
+  });
+
+  it('всегда валидный слот категориальной палитры --cat-1..8', () => {
+    for (const v of ['0.1.0', '0.1.1', '0.9.0', '1.0.0', '2.14.7', 'v3.0.0-rc.1', '']) {
+      expect(versionColor(v)).toMatch(/^var\(--cat-[1-8]\)$/);
+    }
+  });
+
+  it('не зависит от позиции/окружения (цвет следует за версией, не за рангом)', () => {
+    // Тот же цвет, каким бы ни был порядок соседей на экране.
+    const a = versionColor('0.2.0');
+    const b = versionColor('0.2.0');
+    expect(a).toBe(b);
+    // Разные версии обычно (не гарантированно) попадают в разные слоты — но
+    // ключевое свойство: маппинг стабилен и валиден.
+    expect(versionColor('0.1.0')).not.toBe('var(--cat-other)');
   });
 });
 
@@ -92,6 +116,13 @@ describe('toStackModel', () => {
     expect(m.max).toBeCloseTo(0.2, 6);
   });
 
+  it('colorFor: стек по версиям красится единым versionColor (Cost by_version)', () => {
+    const m = toStackModel(byVersion, (k) => versionColor(k));
+    expect(m.columns[1].segments.map((s) => s.color)).toEqual(byVersion.keys.map((k) => versionColor(k)));
+    // Тот же цвет версии, что и в распределении версий Stats.
+    expect(m.columns[1].segments[0].color).toBe(versionShareModel([{ version: '0.1.0', matches: 1, share: 1 }])[0].color);
+  });
+
   it('полностью нулевое окно → empty=true, max=1', () => {
     const zero: StackedSeries = {
       unit: 'matches/day',
@@ -121,14 +152,16 @@ describe('toSimpleColumns', () => {
 });
 
 describe('versionShareModel', () => {
-  it('доли + цвета по порядку', () => {
+  it('доли + ЕДИНЫЙ цвет версии (хэш semver, не ранг в списке)', () => {
     const dist: VersionShare[] = [
       { version: '0.1.0', matches: 4, share: 0.4 },
       { version: '0.1.1', matches: 3, share: 0.3 },
     ];
+    // Цвет — versionColor(version): совпадает со Stats/Cost/Matches и не зависит
+    // от позиции версии в распределении.
     expect(versionShareModel(dist)).toEqual([
-      { version: '0.1.0', matches: 4, share: 0.4, color: 'var(--cat-1)' },
-      { version: '0.1.1', matches: 3, share: 0.3, color: 'var(--cat-2)' },
+      { version: '0.1.0', matches: 4, share: 0.4, color: versionColor('0.1.0') },
+      { version: '0.1.1', matches: 3, share: 0.3, color: versionColor('0.1.1') },
     ]);
   });
 });

@@ -6,8 +6,8 @@ import { api } from '../lib/api';
 import type { GameServer, Match, NodeInfo, VersionInfo } from '../lib/api';
 import { useData } from '../lib/live';
 import { useNow } from '../lib/useNow';
-import { useT } from '../lib/i18n';
-import { Card, CardHeader, ErrorNote, LoadingRow, StatCard } from '../components/ui';
+import { useT, useFormat } from '../lib/i18n';
+import { Card, CardHeader, ErrorNote, LiveValue, LoadingRow, StatCard } from '../components/ui';
 import { EventsFeed } from '../components/EventsFeed';
 import { Sparkline, bucketPerMinute } from '../components/Sparkline';
 
@@ -45,10 +45,23 @@ export function Overview() {
   if (loading) return <LoadingRow />;
 
   const stats = computeStats(nodes.data ?? [], servers.data ?? [], versions.data ?? [], matches.data ?? []);
-  return <OverviewBody stats={stats} matches={matches.data ?? []} now={now} />;
+  // Свежесть = самое недавнее успешное чтение среди источников (все рефетчатся
+  // вместе по SSE); индикатор «обновлено N назад».
+  const updatedAt = maxDefined([nodes.updatedAt, servers.updatedAt, versions.updatedAt, matches.updatedAt]);
+  return <OverviewBody stats={stats} matches={matches.data ?? []} now={now} updatedAt={updatedAt} />;
 }
 
-function OverviewBody({ stats, matches, now }: { stats: Stats; matches: Match[]; now: number }) {
+function OverviewBody({
+  stats,
+  matches,
+  now,
+  updatedAt,
+}: {
+  stats: Stats;
+  matches: Match[];
+  now: number;
+  updatedAt: number | undefined;
+}) {
   const { t } = useT();
   const lastHour = useMemo(
     () => matches.filter((m) => now - new Date(m.created_at).getTime() < HOUR_MS),
@@ -58,16 +71,19 @@ function OverviewBody({ stats, matches, now }: { stats: Stats; matches: Match[];
 
   return (
     <div className="flex flex-col gap-4">
+      <div className="flex items-center justify-end">
+        <Freshness updatedAt={updatedAt} now={now} />
+      </div>
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
         <StatCard
           label={t('ov.liveMatches')}
-          value={stats.liveMatches}
+          value={<LiveValue value={stats.liveMatches} />}
           detail={t('ov.liveDetail', { running: stats.runningMatches, pending: stats.pendingMatches })}
         />
-        <StatCard label={t('ov.playersOnline')} value={stats.playersOnline} detail={t('ov.playersDetail')} />
+        <StatCard label={t('ov.playersOnline')} value={<LiveValue value={stats.playersOnline} />} detail={t('ov.playersDetail')} />
         <StatCard
           label={t('ov.readyBuffer')}
-          value={stats.readyTotal}
+          value={<LiveValue value={stats.readyTotal} />}
           detail={chips(stats.readyByRegion) || t('ov.noReady')}
         />
         <StatCard
@@ -114,6 +130,30 @@ function OverviewBody({ stats, matches, now }: { stats: Stats; matches: Match[];
       </div>
     </div>
   );
+}
+
+/** Индикатор свежести: «обновлено N назад» + живая точка (дышит, пока стрим жив). */
+function Freshness({ updatedAt, now }: { updatedAt: number | undefined; now: number }) {
+  const { t } = useT();
+  const fmt = useFormat();
+  if (updatedAt === undefined) return null;
+  const ageMs = Math.max(0, now - updatedAt);
+  const label = ageMs < 5000 ? t('ov.updatedNow') : t('ov.updated', { ago: fmt.ago(ageMs) });
+  return (
+    <span className="inline-flex items-center gap-1.5 text-xs text-muted" aria-label={t('ov.liveAria')}>
+      <span aria-hidden className="size-1.5 rounded-full bg-good live-dot-on" />
+      <span className="tabular">{label}</span>
+    </span>
+  );
+}
+
+/** Наибольшее из заданных чисел (undefined пропускаются); все пусты → undefined. */
+function maxDefined(xs: (number | undefined)[]): number | undefined {
+  let max: number | undefined;
+  for (const x of xs) {
+    if (x !== undefined && (max === undefined || x > max)) max = x;
+  }
+  return max;
 }
 
 interface Stats {

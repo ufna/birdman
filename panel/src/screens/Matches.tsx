@@ -11,6 +11,7 @@ import type { Match, MatchState } from '../lib/api';
 import { useData } from '../lib/live';
 import { useMatchDrawer, useServerDrawer } from '../lib/drawer';
 import { useNow } from '../lib/useNow';
+import { versionColor } from '../lib/stats';
 import { ageOf, shortId } from '../lib/format';
 import { useT, useFormat } from '../lib/i18n';
 import type { I18nContextValue, MessageKey } from '../lib/i18n';
@@ -344,8 +345,18 @@ function versionColumn(t: T): ColumnDef<Match, unknown> {
   return {
     id: 'version',
     header: t('col.version'),
-    cell: ({ row }) => <span className="font-mono text-xs">{row.original.semver}</span>,
+    cell: ({ row }) => <VersionTag semver={row.original.semver} />,
   };
+}
+
+/** Версия с единым цветом-меткой (хэш semver) — совпадает со Stats/Cost. */
+export function VersionTag({ semver }: { semver: string }) {
+  return (
+    <span className="inline-flex items-center gap-1.5 font-mono text-xs">
+      <span aria-hidden className="size-2 shrink-0 rounded-[2px]" style={{ background: versionColor(semver) }} />
+      {semver}
+    </span>
+  );
 }
 
 function stateColumn(t: T): ColumnDef<Match, unknown> {

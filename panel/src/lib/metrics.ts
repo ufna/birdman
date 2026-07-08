@@ -28,6 +28,8 @@ export type MetricsResult =
 interface VMMatrixResult {
   metric?: Record<string, string>;
   values?: [number, string][];
+  /** instant-запрос (`/api/v1/query`) отдаёт одну точку `value`, не `values`. */
+  value?: [number, string];
 }
 interface VMResponse {
   status?: string;
@@ -58,6 +60,36 @@ export function parseMatrix(body: unknown): MetricSeries[] {
       points.push([t, Number.isFinite(raw) ? raw : null]);
     }
     out.push({ labels, name: labels.__name__ ?? '', points });
+  }
+  return out;
+}
+
+/** Одна точка instant-вектора: подписи + значение (null — NaN/+Inf/нет данных). */
+export interface VectorSample {
+  labels: Record<string, string>;
+  name: string;
+  value: number | null;
+}
+
+/**
+ * VM/Prometheus vector (`/api/v1/query`) → образцы. `value` строкой, как и в
+ * matrix; NaN/±Inf → null. Чистая функция — точка тестирования (гистограммные
+ * перцентили time-to-match приходят именно вектором).
+ */
+export function parseVector(body: unknown): VectorSample[] {
+  const resp = body as VMResponse | null;
+  const result = resp?.data?.result;
+  if (!Array.isArray(result)) return [];
+  const out: VectorSample[] = [];
+  for (const item of result) {
+    const labels = item.metric ?? {};
+    const pair = item.value;
+    let value: number | null = null;
+    if (Array.isArray(pair) && pair.length >= 2) {
+      const raw = Number(pair[1]);
+      value = Number.isFinite(raw) ? raw : null;
+    }
+    out.push({ labels, name: labels.__name__ ?? '', value });
   }
   return out;
 }
@@ -99,18 +131,15 @@ export interface QueryRangeArgs {
   signal?: AbortSignal;
 }
 
+type Unavailable = { kind: 'unavailable'; reason: 'unconfigured' | 'upstream' };
+
 /**
- * GET /v1/metrics/query_range. Возвращает серии, либо `unconfigured`, если на
- * этом master не задан victoriametrics_url (503). Прочие ошибки — ApiError.
+ * Общий вызов metrics-proxy: GET path → либо мягкое `unavailable` (VM не
+ * настроена / апстрим лежит), либо распарсенное тело VM (валидный успех). Битый
+ * PromQL и прочие жёсткие ошибки — ApiError. Разделяет query и query_range.
  */
-export async function queryRange(args: QueryRangeArgs): Promise<MetricsResult> {
-  const path = `/v1/metrics/query_range${qs({
-    query: args.query,
-    start: args.start,
-    end: args.end,
-    step: `${args.step}s`,
-  })}`;
-  const res = await fetch(path, { credentials: 'same-origin', signal: args.signal });
+async function fetchVM(path: string, signal?: AbortSignal): Promise<Unavailable | { kind: 'body'; body: unknown }> {
+  const res = await fetch(path, { credentials: 'same-origin', signal });
   const text = await res.text();
   let body: unknown;
   try {
@@ -134,7 +163,46 @@ export async function queryRange(args: QueryRangeArgs): Promise<MetricsResult> {
   if (vm?.status === 'error') {
     throw new ApiError(res.status, vm.errorType ?? 'metrics_error', vm.error);
   }
-  return { kind: 'ok', series: parseMatrix(body) };
+  return { kind: 'body', body };
+}
+
+/**
+ * GET /v1/metrics/query_range. Возвращает серии, либо `unconfigured`, если на
+ * этом master не задан victoriametrics_url (503). Прочие ошибки — ApiError.
+ */
+export async function queryRange(args: QueryRangeArgs): Promise<MetricsResult> {
+  const path = `/v1/metrics/query_range${qs({
+    query: args.query,
+    start: args.start,
+    end: args.end,
+    step: `${args.step}s`,
+  })}`;
+  const res = await fetchVM(path, args.signal);
+  if (res.kind === 'unavailable') return res;
+  return { kind: 'ok', series: parseMatrix(res.body) };
+}
+
+export interface QueryInstantArgs {
+  query: string;
+  /** unix-секунды (по умолчанию — «сейчас» на стороне VM). */
+  time?: number;
+  signal?: AbortSignal;
+}
+
+/** Результат instant-запроса: вектор образцов либо мягкая недоступность VM. */
+export type InstantResult =
+  | { kind: 'ok'; vector: VectorSample[] }
+  | Unavailable;
+
+/**
+ * GET /v1/metrics/query — instant-вектор (histogram_quantile перцентили
+ * time-to-match и т.п.). Та же мягкая деградация, что и у query_range.
+ */
+export async function queryInstant(args: QueryInstantArgs): Promise<InstantResult> {
+  const path = `/v1/metrics/query${qs({ query: args.query, time: args.time })}`;
+  const res = await fetchVM(path, args.signal);
+  if (res.kind === 'unavailable') return res;
+  return { kind: 'ok', vector: parseVector(res.body) };
 }
 
 /**
@@ -172,6 +240,74 @@ export function matchMetricQueries(serverID: string): MetricQuery[] {
     { key: 'players', titleKey: 'metric.players', expr: `birdman_server_players${sel}`, unit: 'int' },
     { key: 'tick', titleKey: 'metric.tick', expr: `birdman_server_tick_ms${sel}`, unit: 'ms' },
   ];
+}
+
+/**
+ * PromQL: число дедиков по состоянию (`birdman_servers{state,region,version}`)
+ * — ряд утилизации во времени для Cost. Сумма по всем регионам/версиям, разбивка
+ * только по состоянию (occupancy флота).
+ */
+export function serversByStateQuery(): string {
+  return 'sum by (state) (birdman_servers)';
+}
+
+/**
+ * PromQL истинного time-to-match: перцентиль по гистограмме
+ * `birdman_mm_time_to_match_seconds` за выбранный период (increase бакетов за N
+ * дней). Мало данных / нет матчей → VM вернёт NaN → образец с value=null, и вью
+ * деградирует на прокси allocation→match_start.
+ */
+export function timeToMatchQuantileQuery(quantile: number, days: number): string {
+  return `histogram_quantile(${quantile}, sum by (le) (increase(birdman_mm_time_to_match_seconds_bucket[${days}d])))`;
+}
+
+/** «Живые» состояния дедиков в стабильном порядке стека утилизации (низ→верх). */
+export const UTIL_STATES = ['allocated', 'ready', 'draining', 'creating'] as const;
+export type UtilStateName = (typeof UTIL_STATES)[number];
+
+// Цвета — те же тона, что у метра-снапшота (charts.UtilBar), чтобы снапшот и
+// ряд во времени читались как одно: allocated=accent, ready=good, draining=warn.
+const UTIL_STATE_COLOR: Record<UtilStateName, string> = {
+  allocated: 'var(--accent)',
+  ready: 'var(--good)',
+  draining: 'var(--warn)',
+  creating: 'var(--cat-1)',
+};
+
+const UTIL_STATE_LABEL: Record<UtilStateName, MessageKey> = {
+  allocated: 'stats.util.allocated',
+  ready: 'stats.util.ready',
+  draining: 'stats.util.draining',
+  creating: 'stats.util.creating',
+};
+
+/** Ряд утилизации во времени: состояние, цвет, i18n-ключ подписи, точки. */
+export interface StateSeries {
+  state: UtilStateName;
+  color: string;
+  labelKey: MessageKey;
+  points: [number, number | null][];
+}
+
+/**
+ * MetricSeries[] из `sum by (state)(birdman_servers)` → ряды по «живым»
+ * состояниям в стабильном порядке и цвете. Состояния вне UTIL_STATES (failed/
+ * reaped) отбрасываются — это не занятость ёмкости. Состояние без точек
+ * пропускается. Пустой вход → [] (вью покажет «нет данных»).
+ */
+export function utilizationSeriesModel(series: MetricSeries[]): StateSeries[] {
+  const byState = new Map<string, [number, number | null][]>();
+  for (const s of series) {
+    const st = s.labels.state;
+    if (st !== undefined && !byState.has(st)) byState.set(st, s.points);
+  }
+  const out: StateSeries[] = [];
+  for (const state of UTIL_STATES) {
+    const points = byState.get(state);
+    if (points === undefined || points.length === 0) continue;
+    out.push({ state, color: UTIL_STATE_COLOR[state], labelKey: UTIL_STATE_LABEL[state], points });
+  }
+  return out;
 }
 
 export type Unit = 'int' | 'ms' | 'cores' | 'bytes';

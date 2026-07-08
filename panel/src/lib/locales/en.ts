@@ -266,6 +266,9 @@ export const en = {
   'ov.matchesHour': 'Matches this hour',
   'ov.recentEvents': 'Recent events',
   'ov.sparkAria': 'Matches over the last hour, by minute',
+  'ov.updated': 'updated {ago}',
+  'ov.updatedNow': 'updated just now',
+  'ov.liveAria': 'Live counter, updates from the event stream',
 
   // — Events screen —
   'events.feedUnavailable': 'Event feed is unavailable.',
@@ -364,11 +367,18 @@ export const en = {
   'stats.ttm.p95': 'p95',
   'stats.ttm.note': 'Allocation → match start (server readiness), a fill-rate proxy. Sample size: {count}.',
   'stats.ttm.source': 'source',
+  'stats.ttm.srcQueue': 'queue → match',
+  'stats.ttm.srcAlloc': 'allocation → start',
+  'stats.ttm.srcQueueNote': 'True wait from the birdman_mm_time_to_match_seconds histogram over the period.',
+  'stats.ttm.trueDegraded': 'Too few matchmaker samples in this period — using the allocation→start proxy.',
+  'stats.ttm.trueUnavailable': 'Metrics proxy unavailable — histogram time-to-match is hidden.',
+  'stats.ttm.trueLoading': 'Loading histogram…',
 
   // — utilization meter (Cost) —
   'stats.util.allocated': 'allocated',
   'stats.util.ready': 'ready',
   'stats.util.draining': 'draining',
+  'stats.util.creating': 'creating',
   'stats.util.free': 'free',
   'stats.util.aria': 'Slot utilization for region {region}',
   'stats.util.slots.one': '{used}/{capacity} slot',
@@ -386,7 +396,9 @@ export const en = {
   'cost.utilSnapshot': 'current snapshot',
   'cost.noUtil': 'No active nodes to report utilization.',
   'cost.utilNote':
-    'Snapshot of allocated/ready/draining vs active-node capacity. Utilization over time is available via the metrics proxy.',
+    'Snapshot of allocated/ready/draining vs active-node capacity. Utilization over time is charted below.',
+  'cost.utilOverTime': 'Utilization over time',
+  'cost.utilOverTimeNote': 'live dedics by state · {hours}h window',
 
   // — Alerts screen (descriptions come from vmalert as-is; UI chrome only) —
   'alerts.readonly': 'read-only · mute/edit is vmalert config (TODO)',

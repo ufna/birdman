@@ -15,6 +15,7 @@ import { useData } from '../lib/live';
 import { useNow } from '../lib/useNow';
 import { useT, useFormat } from '../lib/i18n';
 import { shortId } from '../lib/format';
+import { versionColor } from '../lib/stats';
 import { matchDurationMs, matchMetricRange, isMatchOver } from '../lib/match';
 import { matchMetricQueries } from '../lib/metrics';
 import { StateBadge, toneOfMatchState } from './Badge';
@@ -157,9 +158,9 @@ function MatchMeta({ m }: { m: Match }) {
   const now = useNow();
   const durationMs = matchDurationMs(m, now);
 
-  const rows: { label: string; value: string }[] = [
+  const rows: { label: string; value: string; color?: string }[] = [
     { label: t('col.region'), value: m.region },
-    { label: t('col.version'), value: m.semver },
+    { label: t('col.version'), value: m.semver, color: versionColor(m.semver) },
     { label: t('col.duration'), value: durationMs === null ? '—' : fmt.age(durationMs) },
     { label: t('col.playersPeak'), value: tp('common.playersCount', m.players_peak) },
     { label: t('match.started'), value: fmt.stamp(m.started_at ?? m.created_at) },
@@ -172,7 +173,12 @@ function MatchMeta({ m }: { m: Match }) {
       {rows.map((r) => (
         <div key={r.label} className="min-w-0">
           <dt className="text-xs tracking-wide text-muted uppercase">{r.label}</dt>
-          <dd className="tabular mt-0.5 truncate font-mono text-sm">{r.value}</dd>
+          <dd className="tabular mt-0.5 flex items-center gap-1.5 truncate font-mono text-sm">
+            {r.color !== undefined && (
+              <span aria-hidden className="size-2 shrink-0 rounded-[2px]" style={{ background: r.color }} />
+            )}
+            <span className="truncate">{r.value}</span>
+          </dd>
         </div>
       ))}
     </dl>
