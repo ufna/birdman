@@ -459,7 +459,257 @@ func TestJoinTokenIssued(t *testing.T) {
 	}
 }
 
+// --- multi-version window (итерация 3, master.md §5 + ops.md §3) ---
+
+// deprecateAndActivate flips v2 active through the real store path,
+// leaving the previous active version deprecated (the window is open).
+func deprecateAndActivate(t *testing.T, st *store.Store, versionID string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := st.Pool.Exec(ctx,
+		`update versions set state = 'prepulling' where id = $1::uuid`, versionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.ActivateVersion(ctx, versionID, "prepulling", store.EventDeployActivated, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// In the window old clients (compat with deprecated only) match onto the
+// deprecated version, new clients onto the active one; a client covered by
+// the active version never lands on the deprecated one.
+func TestWindowRoutesClientsByCompat(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10) // 1.0.0 active via fleet
+	f.UpsertFleet(t, 2, 50)
+	v2 := f.AddVersion(t, "1.1.0")
+	deprecateAndActivate(t, st, v2) // active 1.1.0, deprecated 1.0.0
+
+	oldSrv := f.InsertServer(t, f.NodeID, f.VersionID, "ready", 20001, 0)
+	newSrv := f.InsertServer(t, f.NodeID, v2, "ready", 20002, 0)
+	mm := newMM(t, st, matchmaker.Config{})
+
+	tOld1 := submit(t, mm, "old1", "1.0.3", regions("eu", 10))
+	tOld2 := submit(t, mm, "old2", "1.0.5", regions("eu", 10))
+	tNew1 := submit(t, mm, "new1", "1.1.0", regions("eu", 10))
+	tNew2 := submit(t, mm, "new2", "1.1.2", regions("eu", 10))
+	for _, tk := range []matchmaker.Ticket{tOld1, tOld2, tNew1, tNew2} {
+		if tk.Status != matchmaker.StatusQueued {
+			t.Fatalf("ticket %s: want queued, got %s", tk.PlayerID, tk.Status)
+		}
+	}
+	runOnce(t, mm)
+
+	gOld, gNew := get(t, mm, tOld1.ID), get(t, mm, tNew1.ID)
+	if gOld.Status != matchmaker.StatusMatched || gNew.Status != matchmaker.StatusMatched {
+		t.Fatalf("want both matched, got %s / %s", gOld.Status, gNew.Status)
+	}
+	if gOld.Match.Port != 20001 {
+		t.Fatalf("old clients must land on the deprecated server 20001, got %d", gOld.Match.Port)
+	}
+	if gNew.Match.Port != 20002 {
+		t.Fatalf("new clients must land on the active server 20002, got %d", gNew.Match.Port)
+	}
+	assertServerVersion(t, st, oldSrv, f.VersionID)
+	assertServerVersion(t, st, newSrv, v2)
+}
+
+// update_required comes only when the client is compatible with NO live
+// version: deprecated still counts until it is disabled.
+func TestWindowUpdateRequiredOnlyWhenNoLiveVersion(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10)
+	f.UpsertFleet(t, 2, 50)
+	v2 := f.AddVersion(t, "1.1.0")
+	deprecateAndActivate(t, st, v2)
+	mm := newMM(t, st, matchmaker.Config{})
+
+	// Old client: compatible with the deprecated 1.0.0 → queued, not rejected.
+	tOld := submit(t, mm, "old", "1.0.9", regions("eu", 10))
+	if tOld.Status != matchmaker.StatusQueued {
+		t.Fatalf("old client in window: want queued, got %s", tOld.Status)
+	}
+	// Ancient client: no live version at all → update_required at submit.
+	if tk := submit(t, mm, "ancient", "0.5.0", regions("eu", 10)); tk.Status != matchmaker.StatusUpdateRequired {
+		t.Fatalf("ancient client: want update_required, got %s", tk.Status)
+	}
+
+	// The window closes (deprecated → disabled): the queued old client gets
+	// update_required on the next tick, new submits too.
+	if _, err := st.Pool.Exec(context.Background(),
+		`update versions set state = 'disabled' where id = $1::uuid`, f.VersionID); err != nil {
+		t.Fatal(err)
+	}
+	runOnce(t, mm)
+	if g := get(t, mm, tOld.ID); g.Status != matchmaker.StatusUpdateRequired {
+		t.Fatalf("after window close: want update_required, got %s", g.Status)
+	}
+	if tk := submit(t, mm, "old2", "1.0.9", regions("eu", 10)); tk.Status != matchmaker.StatusUpdateRequired {
+		t.Fatalf("old client after window close: want update_required, got %s", tk.Status)
+	}
+}
+
+// compat.overrides (ops.md §3): the migration window lets old clients play
+// on new servers; override buckets do not mix with plain ones.
+func TestCompatOverridesRouteOldClients(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10) // 1.0.0
+	f.UpsertFleet(t, 2, 50)
+	v2 := f.AddVersion(t, "1.1.0")
+	deprecateAndActivate(t, st, v2)
+	// Only the new version has capacity: without the override old clients
+	// would wait for a 1.0.0 server forever.
+	f.InsertServer(t, f.NodeID, v2, "ready", 20002, 0)
+
+	compat, err := matchmaker.NewCompat([]matchmaker.Override{
+		{Client: "1.0.x", Servers: []string{"1.1.x"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mm := newMM(t, st, matchmaker.Config{Compat: compat})
+
+	// Two old clients: by the override they may play on 1.1.0.
+	t1 := submit(t, mm, "p1", "1.0.2", regions("eu", 10))
+	t2 := submit(t, mm, "p2", "1.0.7", regions("eu", 10))
+	runOnce(t, mm)
+	g1, g2 := get(t, mm, t1.ID), get(t, mm, t2.ID)
+	if g1.Status != matchmaker.StatusMatched || g2.Status != matchmaker.StatusMatched {
+		t.Fatalf("override clients: want matched, got %s / %s", g1.Status, g2.Status)
+	}
+	if g1.Match.Port != 20002 || g1.Match.MatchID != g2.Match.MatchID {
+		t.Fatalf("override match: %+v / %+v", g1.Match, g2.Match)
+	}
+
+	// «deprecated не получает НОВЫХ матчей, если compat клиента покрывается
+	// active»: the override makes the ACTIVE 1.1.0 compatible with the old
+	// clients, so they land there even when deprecated 1.0.0 capacity exists
+	// (the matchmaker takes the first compatible candidate, active first).
+	f.InsertServer(t, f.NodeID, f.VersionID, "ready", 20001, 0)
+	f.InsertServer(t, f.NodeID, v2, "ready", 20003, 0)
+	t3 := submit(t, mm, "p3", "1.0.2", regions("eu", 10))
+	t4 := submit(t, mm, "p4", "1.0.7", regions("eu", 10))
+	runOnce(t, mm)
+	g3, g4 := get(t, mm, t3.ID), get(t, mm, t4.ID)
+	if g3.Status != matchmaker.StatusMatched || g3.Match.Port != 20003 || g4.Match.Port != 20003 {
+		t.Fatalf("override must prefer the active version: %+v / %+v", g3.Match, g4.Match)
+	}
+}
+
+// Clients whose override sets differ do not share a bucket: a 1.0.2 client
+// under an exact-patch override must not group with a 1.0.7 one.
+func TestCompatOverrideSplitsBuckets(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10)
+	f.UpsertFleet(t, 2, 50)
+	f.InsertServer(t, f.NodeID, f.VersionID, "ready", 20001, 0)
+
+	compat, err := matchmaker.NewCompat([]matchmaker.Override{
+		{Client: "1.0.2", Servers: []string{"2.0.x"}}, // exact patch
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mm := newMM(t, st, matchmaker.Config{Compat: compat})
+
+	t1 := submit(t, mm, "p1", "1.0.2", regions("eu", 10))
+	t2 := submit(t, mm, "p2", "1.0.7", regions("eu", 10))
+	runOnce(t, mm)
+	g1, g2 := get(t, mm, t1.ID), get(t, mm, t2.ID)
+	if g1.Status == matchmaker.StatusMatched || g2.Status == matchmaker.StatusMatched {
+		t.Fatalf("split buckets must not form a match: %s / %s", g1.Status, g2.Status)
+	}
+
+	// Same override set → same bucket → they match.
+	t3 := submit(t, mm, "p3", "1.0.7", regions("eu", 10))
+	runOnce(t, mm)
+	g2, g3 := get(t, mm, t2.ID), get(t, mm, t3.ID)
+	if g2.Status != matchmaker.StatusMatched || g3.Status != matchmaker.StatusMatched ||
+		g2.Match.MatchID != g3.Match.MatchID {
+		t.Fatalf("same-bucket clients must match: %s / %s", g2.Status, g3.Status)
+	}
+}
+
+func assertServerVersion(t *testing.T, st *store.Store, serverID, versionID string) {
+	t.Helper()
+	sv, err := st.GetServer(context.Background(), serverID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sv.State != "allocated" {
+		t.Fatalf("server %s: want allocated, got %s", serverID, sv.State)
+	}
+	if sv.VersionID != versionID {
+		t.Fatalf("server %s: version %s, want %s", serverID, sv.VersionID, versionID)
+	}
+}
+
 // --- pure unit tests (no database) ---
+
+func TestCompatDefaultAndOverrides(t *testing.T) {
+	plain := &matchmaker.Compat{} // default MAJOR.MINOR rule only
+	if !plain.Compatible("1.4.2", "1.4.9") || plain.Compatible("1.4.2", "1.5.0") {
+		t.Fatal("default rule broken")
+	}
+
+	c, err := matchmaker.NewCompat([]matchmaker.Override{
+		{Client: "1.4.x", Servers: []string{"1.4.x", "1.5.x"}},
+		{Client: "2.0.1", Servers: []string{"2.1.0"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		client, server string
+		want           bool
+	}{
+		{"1.4.2", "1.4.9", true},  // default rule
+		{"1.4.2", "1.5.3", true},  // override window
+		{"1.4.2", "1.6.0", false}, // outside the override
+		{"1.3.0", "1.5.0", false}, // client not in override
+		{"2.0.1", "2.1.0", true},  // exact-patch override
+		{"2.0.2", "2.1.0", false}, // different patch
+		{"2.0.1", "2.1.1", false}, // server pattern is exact too
+		{"1.4.2-rc1", "1.5.0+b7", true}, // suffixes ignored
+		{"bogus", "1.4.2", false},
+		{"1.4.2", "bogus", false},
+	}
+	for _, tc := range cases {
+		if got := c.Compatible(tc.client, tc.server); got != tc.want {
+			t.Fatalf("Compatible(%q, %q) = %v, want %v", tc.client, tc.server, got, tc.want)
+		}
+	}
+
+	// Buckets: override membership is part of the bucket key.
+	b1, err := c.BucketOf("1.4.2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b2, _ := c.BucketOf("1.4.9")
+	b3, _ := c.BucketOf("1.3.0")
+	b4, _ := plain.BucketOf("1.4.2")
+	if b1 != b2 {
+		t.Fatalf("same override set must share a bucket: %q vs %q", b1, b2)
+	}
+	if b1 == b3 {
+		t.Fatalf("different major.minor must split buckets: %q", b1)
+	}
+	if b1 == b4 {
+		t.Fatalf("override membership must be part of the bucket: %q", b1)
+	}
+
+	// Validation errors.
+	for _, bad := range [][]matchmaker.Override{
+		{{Client: "x.4", Servers: []string{"1.4"}}},
+		{{Client: "1.4", Servers: nil}},
+		{{Client: "1.4", Servers: []string{"1.x.2"}}},
+		{{Client: "", Servers: []string{"1.4"}}},
+	} {
+		if _, err := matchmaker.NewCompat(bad); err == nil {
+			t.Fatalf("NewCompat(%+v) must fail", bad)
+		}
+	}
+}
 
 func TestMajorMinor(t *testing.T) {
 	ok := map[string]string{

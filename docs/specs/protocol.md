@@ -41,7 +41,8 @@ message MasterMsg {
     UpgradeAgent upgrade = 5;   // url, sha256, version
     TailLogs     tail = 6;      // server_id, follow
     Ack          ack = 7;
-    AllocateServer allocate = 8; // (добавлено в итерации 2, аддитивно)
+    AllocateServer allocate = 8;    // (добавлено в итерации 2, аддитивно)
+    DrainServer  drain_server = 9;  // (добавлено в итерации 3, аддитивно)
   }
 }
 message StartServer { string server_id=1; string image_ref=2; map<string,string> env=3;
@@ -64,6 +65,14 @@ message PullReport  { string cmd_id=1; string image_ref=2; string status=3; stri
 // и кэширует его для реплея при реконнекте liba. players_expected=0 = «не знаю»
 // (внешний матчмейкер через REST его не сообщает).
 message AllocateServer { string cmd_id=1; string server_id=2; string match_id=3; int32 players_expected=4; }
+
+// (добавлено в итерации 3, аддитивно) per-server drain — reap deprecated-версий
+// deploy-менеджером (master.md §5): агент переводит ОДИН дедик в draining и шлёт
+// liba UDS-фрейм `drain{deadline_s, reason}` (§2; кэшируется и реплеится при
+// реконнекте liba, как allocated). В отличие от StopServer сигналов нет: дедик
+// доигрывает матч и выходит сам; deadline_s — внутриигровой дедлайн для liba.
+// Node-level Drain (поле 4) остаётся отдельной командой вывода тачки.
+message DrainServer { string cmd_id=1; string server_id=2; int32 deadline_s=3; string reason=4; }
 ```
 
 Правила: каждое команда-сообщение несёт `cmd_id`, агент подтверждает `Ack{cmd_id}` (или Event с ошибкой) — master ретраит неподтверждённые при реконнекте, поэтому обработка команд на агенте идемпотентна по `cmd_id` (at-least-once). Поля protobuf только добавляем, номера не переиспользуем (`reserved`). (Уточнено в v0: `Ack` добавлен в `AgentMsg` — именно агент подтверждает команды; `MasterMsg.Ack` зарезервирован под подтверждения master'ом агентских сообщений.)

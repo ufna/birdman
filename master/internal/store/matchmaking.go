@@ -6,43 +6,56 @@ import (
 
 // RegionVersion is one allocatable (region, server version) candidate the
 // matchmaker checks client compatibility against (docs/specs/master.md §4,
-// docs/specs/ops.md §3).
+// docs/specs/ops.md §3). A region's candidate set, preference-ordered:
+//   - rank 0 — the region's fleet_configs.active_version: what the fleet
+//     actually runs (any channel: dev setups deploy staging builds);
+//   - rank 1 — project versions with state='active', channel='prod'
+//     (the spec'd rule);
+//   - rank 2 — versions with state='deprecated': the multi-version window
+//     (итерация 3, master.md §5) — old clients keep matching onto them until
+//     the version is disabled, but a client covered by an active version
+//     never lands here (the matchmaker takes the first compatible candidate).
 //
-// (Уточнено в v0.) The deploy manager does not exist yet, so nothing flips
-// versions.state to 'active'. A region's candidate set is therefore:
-//   - the region's fleet_configs.active_version — what the fleet actually
-//     runs (any channel: dev setups deploy staging builds);
-//   - plus every project version with state='active' and channel='prod'
-//     (the spec'd rule; becomes meaningful with the deploy manager).
+// Disabled versions are never candidates.
 type RegionVersion struct {
-	Region      string
-	VersionID   string
-	Semver      string
-	FleetActive bool // true — the region's fleet_configs.active_version
+	Region    string
+	VersionID string
+	Semver    string
+	Rank      int // 0 fleet-active, 1 active, 2 deprecated (window)
 }
 
+// Deprecated reports whether the candidate is a multi-version-window one.
+func (rv RegionVersion) Deprecated() bool { return rv.Rank >= 2 }
+
 // ActiveRegionVersions returns matchmaking version candidates per region for
-// a project, fleet-active versions first, newest first within a rank.
+// a project, preference-ordered (rank asc, newest first within a rank).
 func (s *Store) ActiveRegionVersions(ctx context.Context, project string) ([]RegionVersion, error) {
 	rows, err := s.Pool.Query(ctx, `
-		select region, version_id, semver, bool_or(fleet_active)
+		select region, version_id, semver, min(rank)
 		from (
 			select f.region, v.id::text as version_id, v.semver,
-			       true as fleet_active, v.created_at
+			       0 as rank, v.created_at
 			from fleet_configs f
 			join projects p on p.id = f.project_id
 			join versions v on v.id = f.active_version
 			where p.slug = $1
 			union all
-			select f.region, v.id::text, v.semver, false, v.created_at
+			select f.region, v.id::text, v.semver, 1, v.created_at
 			from fleet_configs f
 			join projects p on p.id = f.project_id
 			join versions v on v.project_id = p.id
 			     and v.channel = 'prod' and v.state = 'active'
 			where p.slug = $1
+			union all
+			select f.region, v.id::text, v.semver, 2, v.created_at
+			from fleet_configs f
+			join projects p on p.id = f.project_id
+			join versions v on v.project_id = p.id
+			     and v.state = 'deprecated'
+			where p.slug = $1
 		) t
 		group by region, version_id, semver
-		order by region, bool_or(fleet_active) desc, max(created_at) desc`,
+		order by region, min(rank), max(created_at) desc`,
 		project)
 	if err != nil {
 		return nil, err
@@ -51,7 +64,7 @@ func (s *Store) ActiveRegionVersions(ctx context.Context, project string) ([]Reg
 	var out []RegionVersion
 	for rows.Next() {
 		var rv RegionVersion
-		if err := rows.Scan(&rv.Region, &rv.VersionID, &rv.Semver, &rv.FleetActive); err != nil {
+		if err := rows.Scan(&rv.Region, &rv.VersionID, &rv.Semver, &rv.Rank); err != nil {
 			return nil, err
 		}
 		out = append(out, rv)

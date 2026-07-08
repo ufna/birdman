@@ -26,6 +26,9 @@ type Version struct {
 	Channel   string    `json:"channel"`
 	State     string    `json:"state"`
 	CreatedAt time.Time `json:"created_at"`
+	// DeprecatedAt is set when the deploy manager demotes the version
+	// active → deprecated; reap_ttl_min counts from it (итерация 3).
+	DeprecatedAt *time.Time `json:"deprecated_at,omitempty"`
 }
 
 type Server struct {
@@ -88,4 +91,13 @@ const (
 	EventAllocationFailed  = "allocation_failed"
 	EventVersionRegistered = "version_registered"
 	EventFleetUpdated      = "fleet_updated"
+
+	// Deploy manager (итерация 3, docs/specs/master.md §5).
+	EventDeployStarted    = "deploy_started"     // version → prepulling, PrePull sent
+	EventDeployNodePulled = "deploy_node_pulled" // one node reported pulled
+	EventDeployActivated  = "deploy_activated"   // atomic flip done
+	EventDeployFailed     = "deploy_failed"      // prepull timeout/failure → abort
+	EventDeployRolledBack = "deploy_rolled_back" // deprecated ↔ active flip back
+	EventVersionDisabled  = "version_disabled"   // deprecated → disabled (TTL/flip)
+	EventServerDrain      = "server_drain"       // per-server drain sent (reap TTL)
 )

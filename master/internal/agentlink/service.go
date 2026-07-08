@@ -12,19 +12,26 @@ import (
 	agentlinkv1 "github.com/ufna/birdman/proto/agentlink/v1"
 )
 
+// PullSink consumes agent PullReports (the deploy manager waits for `pulled`
+// from every fleet node — итерация 3, docs/specs/master.md §5). May be nil.
+type PullSink interface {
+	HandlePullReport(nodeID string, r *agentlinkv1.PullReport)
+}
+
 // Service implements agentlink.v1.AgentLink. Nodes are pre-registered via
 // REST (POST /v1/nodes → node_token); Hello{node_token} authenticates the
 // stream (v0 auth clarification in docs/specs/protocol.md §Auth).
 type Service struct {
 	agentlinkv1.UnimplementedAgentLinkServer
 
-	st  *store.Store
-	hub *Hub
-	log *slog.Logger
+	st   *store.Store
+	hub  *Hub
+	pull PullSink
+	log  *slog.Logger
 }
 
-func NewService(st *store.Store, hub *Hub, log *slog.Logger) *Service {
-	return &Service{st: st, hub: hub, log: log}
+func NewService(st *store.Store, hub *Hub, pull PullSink, log *slog.Logger) *Service {
+	return &Service{st: st, hub: hub, pull: pull, log: log}
 }
 
 func (s *Service) Session(stream agentlinkv1.AgentLink_SessionServer) error {
@@ -113,10 +120,13 @@ func (s *Service) readLoop(ctx context.Context, stream agentlinkv1.AgentLink_Ses
 		case *agentlinkv1.AgentMsg_Ack:
 			s.hub.Ack(nodeID, m.Ack.GetCmdId())
 		case *agentlinkv1.AgentMsg_Pull:
-			// PrePull orchestration is a later iteration (deploy manager);
-			// v0 records progress in the log only.
 			s.log.Info("agentlink: pull report", "node_id", nodeID,
 				"image_ref", m.Pull.GetImageRef(), "status", m.Pull.GetStatus(), "detail", m.Pull.GetDetail())
+			// The deploy manager waits for `pulled` from every fleet node
+			// (итерация 3, master.md §5).
+			if s.pull != nil {
+				s.pull.HandlePullReport(nodeID, m.Pull)
+			}
 		case *agentlinkv1.AgentMsg_Log:
 			// TailLogs streaming to REST is a later iteration.
 		case *agentlinkv1.AgentMsg_Hello:

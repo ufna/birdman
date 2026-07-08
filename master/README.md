@@ -1,8 +1,8 @@
 # birdman-master v0
 
-Флот-контроллер + Allocation API + матчмейкер v0 + gRPC AgentLink — итерации
-1–2 из `docs/05-runtime-iterations.md`. Спека: `docs/specs/master.md`
-(источник истины).
+Флот-контроллер + Allocation API + матчмейкер v0 + deploy-менеджер + gRPC
+AgentLink — итерации 1–3 из `docs/05-runtime-iterations.md`. Спека:
+`docs/specs/master.md` (источник истины).
 
 Что внутри v0:
 
@@ -37,9 +37,27 @@
   (деф. 2, правится `PUT /v1/projects/{slug}`), регион по минимальному
   медианному rtt группы, widen на следующий по rtt регион игрока через
   `widen_after_s` (30с), TTL тикета 120с → `expired`, анти-дубль по
-  player_id, совместимость client_version по major.minor (`ops.md` §3),
+  player_id, совместимость client_version по major.minor (`ops.md` §3)
+  + **`compat.overrides` из конфига** (окна миграции; override-set входит
+  в ключ очереди — клиенты с разной совместимостью не смешиваются),
   `no_capacity` → тикеты ждут ретрая; join_token (HMAC) — за флагом,
   по умолчанию выключен;
+- **deploy-менеджер** (итерация 3, `master.md` §5): `POST /v1/deploy
+  {version_id}` (скоуп deploy) → version `prepulling` + PrePull всем живым
+  нодам регионов флита → все `PullReport pulled` (таймаут 15 мин или
+  `failed`-репорт → abort, событие `deploy_failed`) → атомарный флип
+  (старая active→deprecated, новая→active,
+  `fleet_configs.active_version`; событие `deploy_activated`); повторный
+  вызов идемпотентен; рестарт master резюмирует prepull. Окно
+  мультиверсий: reconcile держит полный buffer active + min(2, buffer)
+  deprecated; матчмейкер матчит старых клиентов на deprecated, пока она
+  жива; `reap_ttl_min` закрывает окно (deprecated→`disabled`,
+  `version_disabled`): ready-буфер реапится, живые матчи получают
+  per-server `DrainServer{deadline_s:300}` → liba-фрейм `drain`, дедик
+  доигрывает и выходит сам (событие `server_drain`). `POST /v1/rollback
+  {project?, region?}` — обратный флип deprecated↔active за секунды
+  (образы уже на тачках; `deploy_rolled_back`). Метрики:
+  `birdman_deploy_prepull_seconds`, `birdman_versions{project,state}`;
 - **REST** (`:8100`, Bearer API-ключи из таблицы `api_keys`, скоупы
   admin/deploy/matchmaking/allocate/readonly; bcrypt + кэш):
   - `POST /v1/matchmaking/tickets` `{player_id, client_version,
@@ -70,8 +88,8 @@
 - **встроенная админ-панель** (`/`, П0 read-only) — см. раздел «Панель».
 
 Отложено (TODO, спеки помечены): обмен node_token → клиентский mTLS-серт,
-проверка join_token на дедике (liba), compat-overrides, deploy/rollback,
-drain ноды, logs-proxy.
+проверка join_token на дедике (liba), drain ноды, logs-proxy, деплой-хук
+из CI в master (master не публичен — `ops.md` §2).
 
 ## Конфиг
 
@@ -105,9 +123,15 @@ curl -s -X POST localhost:8100/v1/nodes -H "Authorization: Bearer $KEY" \
 curl -s -X POST localhost:8100/v1/versions -H "Authorization: Bearer $KEY" \
   -d '{"project":"game","semver":"1.0.0","image_ref":"ghcr.io/org/game:1.0.0","channel":"staging"}'
 
-# 3. включить warm pool региона
+# 3. включить warm pool региона (active_version можно не задавать — его
+#    выставит деплой; отсутствие поля НЕ сбрасывает текущую версию)
 curl -s -X PUT localhost:8100/v1/fleets/eu -H "Authorization: Bearer $KEY" \
-  -d '{"project":"game","active_version":"<version_id>","buffer_ready":2}'
+  -d '{"project":"game","buffer_ready":2}'
+
+# 3a. мягкий деплой версии (prepull → атомарный флип) и откат
+curl -s -X POST localhost:8100/v1/deploy -H "Authorization: Bearer $KEY" \
+  -d '{"version_id":"<version_id>"}'
+curl -s -X POST localhost:8100/v1/rollback -H "Authorization: Bearer $KEY" -d '{}'
 
 # 4. аллокация (после того как агент поднял ready-сервера)
 curl -s -X POST localhost:8100/v1/allocate -H "Authorization: Bearer $KEY" \

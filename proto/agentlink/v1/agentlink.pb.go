@@ -739,6 +739,7 @@ type MasterMsg struct {
 	//	*MasterMsg_Tail
 	//	*MasterMsg_Ack
 	//	*MasterMsg_Allocate
+	//	*MasterMsg_DrainServer
 	Msg           isMasterMsg_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -853,6 +854,15 @@ func (x *MasterMsg) GetAllocate() *AllocateServer {
 	return nil
 }
 
+func (x *MasterMsg) GetDrainServer() *DrainServer {
+	if x != nil {
+		if x, ok := x.Msg.(*MasterMsg_DrainServer); ok {
+			return x.DrainServer
+		}
+	}
+	return nil
+}
+
 type isMasterMsg_Msg interface {
 	isMasterMsg_Msg()
 }
@@ -889,6 +899,10 @@ type MasterMsg_Allocate struct {
 	Allocate *AllocateServer `protobuf:"bytes,8,opt,name=allocate,proto3,oneof"` // iteration 2: deliver a match to the dedik
 }
 
+type MasterMsg_DrainServer struct {
+	DrainServer *DrainServer `protobuf:"bytes,9,opt,name=drain_server,json=drainServer,proto3,oneof"` // iteration 3: per-server drain (deploy reap)
+}
+
 func (*MasterMsg_Start) isMasterMsg_Msg() {}
 
 func (*MasterMsg_Stop) isMasterMsg_Msg() {}
@@ -904,6 +918,83 @@ func (*MasterMsg_Tail) isMasterMsg_Msg() {}
 func (*MasterMsg_Ack) isMasterMsg_Msg() {}
 
 func (*MasterMsg_Allocate) isMasterMsg_Msg() {}
+
+func (*MasterMsg_DrainServer) isMasterMsg_Msg() {}
+
+// DrainServer asks ONE dedicated server to finish its current match and exit
+// (iteration 3, deploy manager reap of deprecated versions —
+// docs/specs/master.md §5). The agent moves the server to `draining`,
+// forwards the `drain{deadline_s, reason}` frame to liba over the per-server
+// socket (docs/specs/protocol.md §2) and replays it to a (re)connecting liba.
+// Unlike StopServer no signal is sent: the dedik plays the match out and
+// exits on its own; deadline_s is the in-game deadline for liba.
+type DrainServer struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	CmdId         string                 `protobuf:"bytes,1,opt,name=cmd_id,json=cmdId,proto3" json:"cmd_id,omitempty"`
+	ServerId      string                 `protobuf:"bytes,2,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
+	DeadlineS     int32                  `protobuf:"varint,3,opt,name=deadline_s,json=deadlineS,proto3" json:"deadline_s,omitempty"`
+	Reason        string                 `protobuf:"bytes,4,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DrainServer) Reset() {
+	*x = DrainServer{}
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DrainServer) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DrainServer) ProtoMessage() {}
+
+func (x *DrainServer) ProtoReflect() protoreflect.Message {
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DrainServer.ProtoReflect.Descriptor instead.
+func (*DrainServer) Descriptor() ([]byte, []int) {
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *DrainServer) GetCmdId() string {
+	if x != nil {
+		return x.CmdId
+	}
+	return ""
+}
+
+func (x *DrainServer) GetServerId() string {
+	if x != nil {
+		return x.ServerId
+	}
+	return ""
+}
+
+func (x *DrainServer) GetDeadlineS() int32 {
+	if x != nil {
+		return x.DeadlineS
+	}
+	return 0
+}
+
+func (x *DrainServer) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
 
 // AllocateServer tells the node's agent that master allocated a match to
 // server_id: the agent forwards the `allocated{match_id, players_expected}`
@@ -923,7 +1014,7 @@ type AllocateServer struct {
 
 func (x *AllocateServer) Reset() {
 	*x = AllocateServer{}
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[10]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -935,7 +1026,7 @@ func (x *AllocateServer) String() string {
 func (*AllocateServer) ProtoMessage() {}
 
 func (x *AllocateServer) ProtoReflect() protoreflect.Message {
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[10]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -948,7 +1039,7 @@ func (x *AllocateServer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AllocateServer.ProtoReflect.Descriptor instead.
 func (*AllocateServer) Descriptor() ([]byte, []int) {
-	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{10}
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *AllocateServer) GetCmdId() string {
@@ -993,7 +1084,7 @@ type StartServer struct {
 
 func (x *StartServer) Reset() {
 	*x = StartServer{}
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[11]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1005,7 +1096,7 @@ func (x *StartServer) String() string {
 func (*StartServer) ProtoMessage() {}
 
 func (x *StartServer) ProtoReflect() protoreflect.Message {
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[11]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1018,7 +1109,7 @@ func (x *StartServer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartServer.ProtoReflect.Descriptor instead.
 func (*StartServer) Descriptor() ([]byte, []int) {
-	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{11}
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *StartServer) GetServerId() string {
@@ -1073,7 +1164,7 @@ type Limits struct {
 
 func (x *Limits) Reset() {
 	*x = Limits{}
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[12]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1085,7 +1176,7 @@ func (x *Limits) String() string {
 func (*Limits) ProtoMessage() {}
 
 func (x *Limits) ProtoReflect() protoreflect.Message {
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[12]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1098,7 +1189,7 @@ func (x *Limits) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Limits.ProtoReflect.Descriptor instead.
 func (*Limits) Descriptor() ([]byte, []int) {
-	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{12}
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *Limits) GetCpuMillis() int32 {
@@ -1126,7 +1217,7 @@ type StopServer struct {
 
 func (x *StopServer) Reset() {
 	*x = StopServer{}
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[13]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1138,7 +1229,7 @@ func (x *StopServer) String() string {
 func (*StopServer) ProtoMessage() {}
 
 func (x *StopServer) ProtoReflect() protoreflect.Message {
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[13]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1151,7 +1242,7 @@ func (x *StopServer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StopServer.ProtoReflect.Descriptor instead.
 func (*StopServer) Descriptor() ([]byte, []int) {
-	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{13}
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *StopServer) GetServerId() string {
@@ -1185,7 +1276,7 @@ type PrePull struct {
 
 func (x *PrePull) Reset() {
 	*x = PrePull{}
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[14]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1197,7 +1288,7 @@ func (x *PrePull) String() string {
 func (*PrePull) ProtoMessage() {}
 
 func (x *PrePull) ProtoReflect() protoreflect.Message {
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[14]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1210,7 +1301,7 @@ func (x *PrePull) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrePull.ProtoReflect.Descriptor instead.
 func (*PrePull) Descriptor() ([]byte, []int) {
-	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{14}
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *PrePull) GetCmdId() string {
@@ -1237,7 +1328,7 @@ type Drain struct {
 
 func (x *Drain) Reset() {
 	*x = Drain{}
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[15]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1249,7 +1340,7 @@ func (x *Drain) String() string {
 func (*Drain) ProtoMessage() {}
 
 func (x *Drain) ProtoReflect() protoreflect.Message {
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[15]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1262,7 +1353,7 @@ func (x *Drain) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Drain.ProtoReflect.Descriptor instead.
 func (*Drain) Descriptor() ([]byte, []int) {
-	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{15}
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *Drain) GetCmdId() string {
@@ -1291,7 +1382,7 @@ type UpgradeAgent struct {
 
 func (x *UpgradeAgent) Reset() {
 	*x = UpgradeAgent{}
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[16]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1303,7 +1394,7 @@ func (x *UpgradeAgent) String() string {
 func (*UpgradeAgent) ProtoMessage() {}
 
 func (x *UpgradeAgent) ProtoReflect() protoreflect.Message {
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[16]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1316,7 +1407,7 @@ func (x *UpgradeAgent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpgradeAgent.ProtoReflect.Descriptor instead.
 func (*UpgradeAgent) Descriptor() ([]byte, []int) {
-	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{16}
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *UpgradeAgent) GetCmdId() string {
@@ -1358,7 +1449,7 @@ type TailLogs struct {
 
 func (x *TailLogs) Reset() {
 	*x = TailLogs{}
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[17]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1370,7 +1461,7 @@ func (x *TailLogs) String() string {
 func (*TailLogs) ProtoMessage() {}
 
 func (x *TailLogs) ProtoReflect() protoreflect.Message {
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[17]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1383,7 +1474,7 @@ func (x *TailLogs) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TailLogs.ProtoReflect.Descriptor instead.
 func (*TailLogs) Descriptor() ([]byte, []int) {
-	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{17}
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *TailLogs) GetCmdId() string {
@@ -1465,7 +1556,7 @@ const file_agentlink_v1_agentlink_proto_rawDesc = "" +
 	"\x06status\x18\x03 \x01(\tR\x06status\x12\x16\n" +
 	"\x06detail\x18\x04 \x01(\tR\x06detail\"\x1c\n" +
 	"\x03Ack\x12\x15\n" +
-	"\x06cmd_id\x18\x01 \x01(\tR\x05cmdId\"\x9e\x03\n" +
+	"\x06cmd_id\x18\x01 \x01(\tR\x05cmdId\"\xde\x03\n" +
 	"\tMasterMsg\x121\n" +
 	"\x05start\x18\x01 \x01(\v2\x19.agentlink.v1.StartServerH\x00R\x05start\x12.\n" +
 	"\x04stop\x18\x02 \x01(\v2\x18.agentlink.v1.StopServerH\x00R\x04stop\x121\n" +
@@ -1474,8 +1565,15 @@ const file_agentlink_v1_agentlink_proto_rawDesc = "" +
 	"\aupgrade\x18\x05 \x01(\v2\x1a.agentlink.v1.UpgradeAgentH\x00R\aupgrade\x12,\n" +
 	"\x04tail\x18\x06 \x01(\v2\x16.agentlink.v1.TailLogsH\x00R\x04tail\x12%\n" +
 	"\x03ack\x18\a \x01(\v2\x11.agentlink.v1.AckH\x00R\x03ack\x12:\n" +
-	"\ballocate\x18\b \x01(\v2\x1c.agentlink.v1.AllocateServerH\x00R\ballocateB\x05\n" +
-	"\x03msg\"\x8a\x01\n" +
+	"\ballocate\x18\b \x01(\v2\x1c.agentlink.v1.AllocateServerH\x00R\ballocate\x12>\n" +
+	"\fdrain_server\x18\t \x01(\v2\x19.agentlink.v1.DrainServerH\x00R\vdrainServerB\x05\n" +
+	"\x03msg\"x\n" +
+	"\vDrainServer\x12\x15\n" +
+	"\x06cmd_id\x18\x01 \x01(\tR\x05cmdId\x12\x1b\n" +
+	"\tserver_id\x18\x02 \x01(\tR\bserverId\x12\x1d\n" +
+	"\n" +
+	"deadline_s\x18\x03 \x01(\x05R\tdeadlineS\x12\x16\n" +
+	"\x06reason\x18\x04 \x01(\tR\x06reason\"\x8a\x01\n" +
 	"\x0eAllocateServer\x12\x15\n" +
 	"\x06cmd_id\x18\x01 \x01(\tR\x05cmdId\x12\x1b\n" +
 	"\tserver_id\x18\x02 \x01(\tR\bserverId\x12\x19\n" +
@@ -1530,7 +1628,7 @@ func file_agentlink_v1_agentlink_proto_rawDescGZIP() []byte {
 	return file_agentlink_v1_agentlink_proto_rawDescData
 }
 
-var file_agentlink_v1_agentlink_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
+var file_agentlink_v1_agentlink_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
 var file_agentlink_v1_agentlink_proto_goTypes = []any{
 	(*AgentMsg)(nil),       // 0: agentlink.v1.AgentMsg
 	(*Hello)(nil),          // 1: agentlink.v1.Hello
@@ -1542,15 +1640,16 @@ var file_agentlink_v1_agentlink_proto_goTypes = []any{
 	(*PullReport)(nil),     // 7: agentlink.v1.PullReport
 	(*Ack)(nil),            // 8: agentlink.v1.Ack
 	(*MasterMsg)(nil),      // 9: agentlink.v1.MasterMsg
-	(*AllocateServer)(nil), // 10: agentlink.v1.AllocateServer
-	(*StartServer)(nil),    // 11: agentlink.v1.StartServer
-	(*Limits)(nil),         // 12: agentlink.v1.Limits
-	(*StopServer)(nil),     // 13: agentlink.v1.StopServer
-	(*PrePull)(nil),        // 14: agentlink.v1.PrePull
-	(*Drain)(nil),          // 15: agentlink.v1.Drain
-	(*UpgradeAgent)(nil),   // 16: agentlink.v1.UpgradeAgent
-	(*TailLogs)(nil),       // 17: agentlink.v1.TailLogs
-	nil,                    // 18: agentlink.v1.StartServer.EnvEntry
+	(*DrainServer)(nil),    // 10: agentlink.v1.DrainServer
+	(*AllocateServer)(nil), // 11: agentlink.v1.AllocateServer
+	(*StartServer)(nil),    // 12: agentlink.v1.StartServer
+	(*Limits)(nil),         // 13: agentlink.v1.Limits
+	(*StopServer)(nil),     // 14: agentlink.v1.StopServer
+	(*PrePull)(nil),        // 15: agentlink.v1.PrePull
+	(*Drain)(nil),          // 16: agentlink.v1.Drain
+	(*UpgradeAgent)(nil),   // 17: agentlink.v1.UpgradeAgent
+	(*TailLogs)(nil),       // 18: agentlink.v1.TailLogs
+	nil,                    // 19: agentlink.v1.StartServer.EnvEntry
 }
 var file_agentlink_v1_agentlink_proto_depIdxs = []int32{
 	1,  // 0: agentlink.v1.AgentMsg.hello:type_name -> agentlink.v1.Hello
@@ -1562,23 +1661,24 @@ var file_agentlink_v1_agentlink_proto_depIdxs = []int32{
 	4,  // 6: agentlink.v1.Hello.servers:type_name -> agentlink.v1.ServerState
 	3,  // 7: agentlink.v1.Heartbeat.node:type_name -> agentlink.v1.NodeStats
 	4,  // 8: agentlink.v1.Heartbeat.servers:type_name -> agentlink.v1.ServerState
-	11, // 9: agentlink.v1.MasterMsg.start:type_name -> agentlink.v1.StartServer
-	13, // 10: agentlink.v1.MasterMsg.stop:type_name -> agentlink.v1.StopServer
-	14, // 11: agentlink.v1.MasterMsg.prepull:type_name -> agentlink.v1.PrePull
-	15, // 12: agentlink.v1.MasterMsg.drain:type_name -> agentlink.v1.Drain
-	16, // 13: agentlink.v1.MasterMsg.upgrade:type_name -> agentlink.v1.UpgradeAgent
-	17, // 14: agentlink.v1.MasterMsg.tail:type_name -> agentlink.v1.TailLogs
+	12, // 9: agentlink.v1.MasterMsg.start:type_name -> agentlink.v1.StartServer
+	14, // 10: agentlink.v1.MasterMsg.stop:type_name -> agentlink.v1.StopServer
+	15, // 11: agentlink.v1.MasterMsg.prepull:type_name -> agentlink.v1.PrePull
+	16, // 12: agentlink.v1.MasterMsg.drain:type_name -> agentlink.v1.Drain
+	17, // 13: agentlink.v1.MasterMsg.upgrade:type_name -> agentlink.v1.UpgradeAgent
+	18, // 14: agentlink.v1.MasterMsg.tail:type_name -> agentlink.v1.TailLogs
 	8,  // 15: agentlink.v1.MasterMsg.ack:type_name -> agentlink.v1.Ack
-	10, // 16: agentlink.v1.MasterMsg.allocate:type_name -> agentlink.v1.AllocateServer
-	18, // 17: agentlink.v1.StartServer.env:type_name -> agentlink.v1.StartServer.EnvEntry
-	12, // 18: agentlink.v1.StartServer.limits:type_name -> agentlink.v1.Limits
-	0,  // 19: agentlink.v1.AgentLink.Session:input_type -> agentlink.v1.AgentMsg
-	9,  // 20: agentlink.v1.AgentLink.Session:output_type -> agentlink.v1.MasterMsg
-	20, // [20:21] is the sub-list for method output_type
-	19, // [19:20] is the sub-list for method input_type
-	19, // [19:19] is the sub-list for extension type_name
-	19, // [19:19] is the sub-list for extension extendee
-	0,  // [0:19] is the sub-list for field type_name
+	11, // 16: agentlink.v1.MasterMsg.allocate:type_name -> agentlink.v1.AllocateServer
+	10, // 17: agentlink.v1.MasterMsg.drain_server:type_name -> agentlink.v1.DrainServer
+	19, // 18: agentlink.v1.StartServer.env:type_name -> agentlink.v1.StartServer.EnvEntry
+	13, // 19: agentlink.v1.StartServer.limits:type_name -> agentlink.v1.Limits
+	0,  // 20: agentlink.v1.AgentLink.Session:input_type -> agentlink.v1.AgentMsg
+	9,  // 21: agentlink.v1.AgentLink.Session:output_type -> agentlink.v1.MasterMsg
+	21, // [21:22] is the sub-list for method output_type
+	20, // [20:21] is the sub-list for method input_type
+	20, // [20:20] is the sub-list for extension type_name
+	20, // [20:20] is the sub-list for extension extendee
+	0,  // [0:20] is the sub-list for field type_name
 }
 
 func init() { file_agentlink_v1_agentlink_proto_init() }
@@ -1603,6 +1703,7 @@ func file_agentlink_v1_agentlink_proto_init() {
 		(*MasterMsg_Tail)(nil),
 		(*MasterMsg_Ack)(nil),
 		(*MasterMsg_Allocate)(nil),
+		(*MasterMsg_DrainServer)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -1610,7 +1711,7 @@ func file_agentlink_v1_agentlink_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_agentlink_v1_agentlink_proto_rawDesc), len(file_agentlink_v1_agentlink_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   19,
+			NumMessages:   20,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

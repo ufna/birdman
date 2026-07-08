@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/ufna/birdman/master/internal/deploy"
 	"github.com/ufna/birdman/master/internal/httpapi"
 	"github.com/ufna/birdman/master/internal/matchmaker"
 	"github.com/ufna/birdman/master/internal/metrics"
@@ -30,7 +31,8 @@ func mmServer(t *testing.T, st *store.Store, cfg matchmaker.Config) *httptest.Se
 	}
 	mm := matchmaker.New(st, m, cfg, log)
 	go mm.Run(t.Context())
-	ts := httptest.NewServer(httpapi.New(st, m, mm, log))
+	dep := deploy.New(deploy.Options{Store: st, Sender: &testdb.CommandRecorder{}, Log: log})
+	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, log))
 	t.Cleanup(ts.Close)
 	return ts
 }

@@ -23,6 +23,7 @@ import (
 
 	"github.com/ufna/birdman/master/internal/agentlink"
 	"github.com/ufna/birdman/master/internal/config"
+	"github.com/ufna/birdman/master/internal/deploy"
 	"github.com/ufna/birdman/master/internal/httpapi"
 	"github.com/ufna/birdman/master/internal/matchmaker"
 	"github.com/ufna/birdman/master/internal/metrics"
@@ -101,13 +102,23 @@ func run() error {
 	// Allocations notify the dedik's agent (AllocateServer → liba `allocated`,
 	// итерация 2) — wire the dispatcher before anything can allocate.
 	st.SetCommandSender(hub)
-	agentlinkv1.RegisterAgentLinkServer(grpcServer, agentlink.NewService(st, hub, log))
+
+	m := metrics.New(st, log)
+	// Deploy manager (итерация 3): PrePull fan-out + PullReport-driven flip.
+	dep := deploy.New(deploy.Options{
+		Store: st, Sender: hub, Log: log,
+		ObservePrepull: m.DeployPrepull.Observe,
+	})
+	if err := dep.Resume(ctx); err != nil {
+		return fmt.Errorf("deploy resume: %w", err)
+	}
+
+	agentlinkv1.RegisterAgentLinkServer(grpcServer, agentlink.NewService(st, hub, dep, log))
 	grpcLis, err := net.Listen("tcp", cfg.ListenGRPC)
 	if err != nil {
 		return fmt.Errorf("listen grpc: %w", err)
 	}
 
-	m := metrics.New(st, log)
 	mmCfg, err := matchmakerConfig(cfg, log)
 	if err != nil {
 		return err
@@ -115,7 +126,7 @@ func run() error {
 	mm := matchmaker.New(st, m, mmCfg, log)
 	api := &http.Server{
 		Addr:              cfg.ListenAPI,
-		Handler:           httpapi.New(st, m, mm, log),
+		Handler:           httpapi.New(st, m, mm, dep, log),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -169,13 +180,22 @@ func run() error {
 }
 
 // matchmakerConfig maps the yaml section to matchmaker.Config
-// (docs/specs/master.md §4).
+// (docs/specs/master.md §4; compat.overrides — docs/specs/ops.md §3).
 func matchmakerConfig(cfg config.Config, log *slog.Logger) (matchmaker.Config, error) {
+	overrides := make([]matchmaker.Override, 0, len(cfg.Compat.Overrides))
+	for _, o := range cfg.Compat.Overrides {
+		overrides = append(overrides, matchmaker.Override{Client: o.Client, Servers: o.Servers})
+	}
+	compat, err := matchmaker.NewCompat(overrides)
+	if err != nil {
+		return matchmaker.Config{}, err
+	}
 	mc := matchmaker.Config{
 		Tick:             time.Duration(cfg.Matchmaking.TickMS) * time.Millisecond,
 		WidenAfter:       time.Duration(cfg.Matchmaking.WidenAfterS) * time.Second,
 		TicketTTL:        time.Duration(cfg.Matchmaking.TicketTTLS) * time.Second,
 		DefaultProject:   cfg.Matchmaking.DefaultProject,
+		Compat:           compat,
 		JoinTokenEnabled: cfg.Matchmaking.JoinToken.Enabled,
 	}
 	if !mc.JoinTokenEnabled {

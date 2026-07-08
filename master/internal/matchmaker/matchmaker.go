@@ -65,6 +65,11 @@ type Config struct {
 	TicketTTL      time.Duration // queued longer → expired (default 120s)
 	DefaultProject string        // used when the ticket names no project
 
+	// Compat decides client↔server version compatibility: the default
+	// MAJOR.MINOR rule plus compat.overrides from the master config
+	// (docs/specs/ops.md §3). nil → plain default rule.
+	Compat *Compat
+
 	JoinTokenEnabled bool // off by default (master.md §4: v0 optional)
 	JoinTokenSecret  []byte
 	JoinTokenTTL     time.Duration // default 60s
@@ -82,6 +87,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.JoinTokenTTL <= 0 {
 		c.JoinTokenTTL = 60 * time.Second
+	}
+	if c.Compat == nil {
+		c.Compat = &Compat{} // plain MAJOR.MINOR default rule
 	}
 	return c
 }
@@ -167,13 +175,14 @@ type SubmitParams struct {
 
 // Submit validates and enqueues a ticket. Anti-dup (master.md §4): a new
 // ticket for the same (project, player) cancels the previous queued one.
-// A client version incompatible with every active server version is rejected
-// as update_required right away (the ticket is still stored for GET).
+// A client version incompatible with every live server version (active or
+// deprecated in the multi-version window, per compat rules) is rejected as
+// update_required right away (the ticket is still stored for GET).
 func (mm *Matchmaker) Submit(ctx context.Context, p SubmitParams) (Ticket, error) {
 	if p.PlayerID == "" {
 		return Ticket{}, fmt.Errorf("%w: player_id is required", ErrInvalid)
 	}
-	bucket, err := MajorMinor(p.ClientVersion)
+	bucket, err := mm.cfg.Compat.BucketOf(p.ClientVersion)
 	if err != nil {
 		return Ticket{}, fmt.Errorf("%w: client_version: %v", ErrInvalid, err)
 	}
@@ -204,7 +213,7 @@ func (mm *Matchmaker) Submit(ctx context.Context, p SubmitParams) (Ticket, error
 		return Ticket{}, err
 	}
 	status := StatusQueued
-	if active := candidateBuckets(candidates, mm.log); len(active) > 0 && !active[bucket] {
+	if len(candidates) > 0 && !mm.compatibleWithAny(p.ClientVersion, candidates) {
 		status = StatusUpdateRequired
 	}
 
@@ -344,17 +353,13 @@ func normalizeRegions(in []RegionPing) ([]RegionPing, error) {
 	return out, nil
 }
 
-// candidateBuckets maps candidate versions to their compat buckets (default
-// MAJOR.MINOR rule, ops.md §3). Unparseable server semvers are skipped.
-func candidateBuckets(candidates []store.RegionVersion, log *slog.Logger) map[string]bool {
-	out := make(map[string]bool, len(candidates))
+// compatibleWithAny reports whether the client version may play on at least
+// one candidate (compat rules: default MAJOR.MINOR + overrides, ops.md §3).
+func (mm *Matchmaker) compatibleWithAny(clientVersion string, candidates []store.RegionVersion) bool {
 	for _, c := range candidates {
-		b, err := MajorMinor(c.Semver)
-		if err != nil {
-			log.Warn("mm: server version is not semver, skipped", "semver", c.Semver, "err", err)
-			continue
+		if mm.cfg.Compat.Compatible(clientVersion, c.Semver) {
+			return true
 		}
-		out[b] = true
 	}
-	return out
+	return false
 }

@@ -37,12 +37,28 @@ type Matchmaking struct {
 	JoinToken      JoinToken `yaml:"join_token"`
 }
 
+// CompatOverride is one compat.overrides row (docs/specs/ops.md §3):
+// clients matching Client may ALSO play on servers matching Servers
+// (additive to the default MAJOR.MINOR rule — migration windows).
+type CompatOverride struct {
+	Client  string   `yaml:"client"`  // e.g. "1.4.x"
+	Servers []string `yaml:"servers"` // e.g. ["1.4.x", "1.5.x"]
+}
+
+// Compat is the client↔server version compatibility policy (ops.md §3).
+type Compat struct {
+	// Default rule; only "major.minor" (or empty) is supported.
+	Default   string           `yaml:"default"`
+	Overrides []CompatOverride `yaml:"overrides"`
+}
+
 type Config struct {
 	DSN         string      `yaml:"dsn"`
 	ListenAPI   string      `yaml:"listen_api"`
 	ListenGRPC  string      `yaml:"listen_grpc"`
 	TLS         TLS         `yaml:"tls"`
 	Matchmaking Matchmaking `yaml:"matchmaking"`
+	Compat      Compat      `yaml:"compat"`
 }
 
 func defaults() Config {
@@ -92,6 +108,9 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.DSN == "" {
 		return cfg, fmt.Errorf("dsn is required (config `dsn` or env BIRDMAN_DSN)")
+	}
+	if d := cfg.Compat.Default; d != "" && d != "major.minor" {
+		return cfg, fmt.Errorf("compat.default %q is not supported (only \"major.minor\")", d)
 	}
 	return cfg, nil
 }

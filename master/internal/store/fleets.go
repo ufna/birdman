@@ -8,15 +8,17 @@ import (
 type UpsertFleetParams struct {
 	Project       string
 	Region        string
-	ActiveVersion *string // version id; nil clears the active version
+	ActiveVersion *string // version id; nil → keep current (deploy manager owns flips)
 	BufferReady   *int32  // nil → default 2 on insert / keep on update
 	MaxServers    *int32  // nil → default 50 on insert / keep on update
 	ReapTTLMin    *int32  // nil → default 180 on insert / keep on update
 }
 
 // UpsertFleet sets the desired state for (project, region)
-// (PUT /v1/fleets/{region}). In v0 the deploy manager is not implemented, so
-// active_version is assigned here directly.
+// (PUT /v1/fleets/{region}). active_version is normally flipped by the
+// deploy manager (итерация 3); setting it here directly remains as the
+// bootstrap/ops override. A nil ActiveVersion keeps the current one — a
+// PUT tweaking only buffers must not clear the deployed version.
 func (s *Store) UpsertFleet(ctx context.Context, p UpsertFleetParams) (FleetConfig, error) {
 	if p.Region == "" {
 		return FleetConfig{}, fmt.Errorf("region is required")
@@ -47,7 +49,7 @@ func (s *Store) UpsertFleet(ctx context.Context, p UpsertFleetParams) (FleetConf
 		insert into fleet_configs (project_id, region, active_version, buffer_ready, max_servers, reap_ttl_min)
 		values ($1::uuid, $2, $3::uuid, coalesce($4, 2), coalesce($5, 50), coalesce($6, 180))
 		on conflict (project_id, region) do update set
-			active_version = $3::uuid,
+			active_version = coalesce($3::uuid, fleet_configs.active_version),
 			buffer_ready   = coalesce($4, fleet_configs.buffer_ready),
 			max_servers    = coalesce($5, fleet_configs.max_servers),
 			reap_ttl_min   = coalesce($6, fleet_configs.reap_ttl_min)

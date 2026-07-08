@@ -155,6 +155,8 @@ func stampCmdID(m *agentlinkv1.MasterMsg, cmdID string) {
 		c.Ack.CmdId = cmdID
 	case *agentlinkv1.MasterMsg_Allocate:
 		c.Allocate.CmdId = cmdID
+	case *agentlinkv1.MasterMsg_DrainServer:
+		c.DrainServer.CmdId = cmdID
 	}
 }
 
@@ -176,6 +178,8 @@ func commandID(m *agentlinkv1.MasterMsg) string {
 		return c.Ack.GetCmdId()
 	case *agentlinkv1.MasterMsg_Allocate:
 		return c.Allocate.GetCmdId()
+	case *agentlinkv1.MasterMsg_DrainServer:
+		return c.DrainServer.GetCmdId()
 	}
 	return ""
 }

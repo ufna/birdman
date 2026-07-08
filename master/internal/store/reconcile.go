@@ -22,128 +22,248 @@ type PlannedStop struct {
 	NodeID   string
 }
 
-// PlanFleet performs the DB half of one reconcile pass for a fleet
-// (docs/specs/master.md §2) inside a single transaction guarded by a PG
-// advisory lock (protects against two masters running by mistake):
-//
-//	deficit  = buffer - count(creating+ready of active version)  → insert
-//	           servers(creating) on first-fit nodes (densest packing);
-//	surplus  = ready of active version beyond buffer              → draining;
-//	stale    = ready of non-active versions in the region         → draining.
-//
-// pausedNodes are excluded from placement (crash-loop pairs, §2).
-// The caller sends StartServer/StopServer to agents after commit.
-func (s *Store) PlanFleet(ctx context.Context, f FleetConfig, pausedNodes []string) (starts []PlannedStart, stops []PlannedStop, locked bool, err error) {
-	if f.ActiveVersion == nil {
-		return nil, nil, true, nil
+// PlannedDrain is a per-server DrainServer command produced by a reconcile
+// pass (итерация 3: live matches on versions outside the multi-version
+// window play out and exit — docs/specs/master.md §5 step 5).
+type PlannedDrain struct {
+	ServerID  string
+	NodeID    string
+	DeadlineS int32
+	Reason    string
+}
+
+// DrainDeadlineS is the in-game deadline handed to liba with a reap drain.
+const DrainDeadlineS = 300
+
+// DeprecatedBuffer is the ready buffer kept for the deprecated version in
+// the multi-version window: min(2, buffer_ready) (master.md §5).
+func DeprecatedBuffer(bufferReady int32) int32 {
+	if bufferReady < 2 {
+		return bufferReady
 	}
-	if pausedNodes == nil {
-		pausedNodes = []string{} // nil would become SQL NULL and poison ANY()
+	return 2
+}
+
+// DeprecatedWindowVersion returns the project's deprecated version still in
+// the multi-version window (there is at most one by construction — older
+// ones are disabled on flip), or nil. The window is closed by
+// DisableExpiredDeprecated (reap_ttl_min).
+func (s *Store) DeprecatedWindowVersion(ctx context.Context, projectID string) (*Version, error) {
+	var v Version
+	err := s.Pool.QueryRow(ctx, `
+		select v.id::text, v.project_id::text, v.semver, v.image_ref, v.channel, v.state, v.created_at, v.deprecated_at
+		from versions v
+		where v.project_id = $1::uuid and v.state = 'deprecated'
+		order by v.deprecated_at desc nulls last
+		limit 1`, projectID).
+		Scan(&v.ID, &v.ProjectID, &v.Semver, &v.ImageRef, &v.Channel, &v.State, &v.CreatedAt, &v.DeprecatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
+// PlanFleet performs the DB half of one reconcile pass for a fleet
+// (docs/specs/master.md §2, §5) inside a single transaction guarded by a PG
+// advisory lock (protects against two masters running by mistake).
+//
+// The multi-version window (итерация 3): buffers are kept for the active
+// version (full buffer_ready) AND the deprecated one (min(2, buffer_ready)),
+// per version:
+//
+//	deficit  = target - count(creating+ready of version)  → insert
+//	           servers(creating) on first-fit nodes (densest packing);
+//	surplus  = ready of version beyond target             → draining + stop.
+//
+// Versions outside the window (registered/disabled/older): ready → draining +
+// stop; allocated (live matches) → draining + per-server Drain — the dedik
+// finishes the match and exits on its own (`доигрывают`).
+//
+// dep is the project's deprecated window version (nil — no window open);
+// pausedByVersion excludes crash-looping (version, node) pairs from
+// placement (§2). The caller sends the commands to agents after commit.
+func (s *Store) PlanFleet(ctx context.Context, f FleetConfig, dep *Version, pausedByVersion map[string][]string) (starts []PlannedStart, stops []PlannedStop, drains []PlannedDrain, locked bool, err error) {
+	if f.ActiveVersion == nil {
+		return nil, nil, nil, true, nil
 	}
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, nil, false, err
 	}
 	defer tx.Rollback(ctx)
 
 	if err := tx.QueryRow(ctx,
 		`select pg_try_advisory_xact_lock(hashtextextended($1, 42))`,
 		f.ProjectID+":"+f.Region).Scan(&locked); err != nil {
-		return nil, nil, false, err
+		return nil, nil, nil, false, err
 	}
 	if !locked {
-		return nil, nil, false, nil
+		return nil, nil, nil, false, nil
 	}
 
-	var cur, ready, total int32
-	err = tx.QueryRow(ctx, `
-		select
-			count(*) filter (where s.state in ('creating','ready') and s.version_id = $3::uuid),
-			count(*) filter (where s.state = 'ready' and s.version_id = $3::uuid),
-			count(*) filter (where s.state in ('creating','ready','allocated','draining'))
-		from servers s join nodes n on n.id = s.node_id
-		where s.project_id = $1::uuid and n.region = $2`,
-		f.ProjectID, f.Region, *f.ActiveVersion).Scan(&cur, &ready, &total)
-	if err != nil {
-		return nil, nil, true, err
+	type target struct {
+		versionID string
+		imageRef  string
+		buffer    int32
+	}
+	window := []target{{*f.ActiveVersion, f.ActiveImageRef, f.BufferReady}}
+	windowIDs := []string{*f.ActiveVersion}
+	if dep != nil && dep.ID != *f.ActiveVersion {
+		window = append(window, target{dep.ID, dep.ImageRef, DeprecatedBuffer(f.BufferReady)})
+		windowIDs = append(windowIDs, dep.ID)
 	}
 
-	deficit := f.BufferReady - cur
-	if room := f.MaxServers - total; deficit > room {
-		deficit = room
+	var total int32
+	if err := tx.QueryRow(ctx, `
+		select count(*) from servers s join nodes n on n.id = s.node_id
+		where s.project_id = $1::uuid and n.region = $2
+		  and s.state in ('creating','ready','allocated','draining')`,
+		f.ProjectID, f.Region).Scan(&total); err != nil {
+		return nil, nil, nil, true, err
 	}
-	for range deficit {
-		var nodeID string
-		err := tx.QueryRow(ctx, `
-			select n.id::text
-			from nodes n
-			left join lateral (
-				select count(*)::int as used from servers s
-				where s.node_id = n.id
-				  and s.state in ('creating','ready','allocated','draining')
-			) u on true
-			where n.project_id = $1::uuid and n.region = $2 and n.state = 'active'
-			  and n.last_heartbeat_at > now() - interval '10 seconds'
-			  and u.used < n.capacity_slots
-			  and not (n.id::text = any($3::text[]))
-			order by u.used desc, n.created_at
-			limit 1`,
-			f.ProjectID, f.Region, pausedNodes).Scan(&nodeID)
-		if errors.Is(err, pgx.ErrNoRows) {
-			break // no capacity in the region right now
+
+	for _, w := range window {
+		paused := pausedByVersion[w.versionID]
+		if paused == nil {
+			paused = []string{} // nil would become SQL NULL and poison ANY()
 		}
+		var cur, ready int32
+		err = tx.QueryRow(ctx, `
+			select
+				count(*) filter (where s.state in ('creating','ready')),
+				count(*) filter (where s.state = 'ready')
+			from servers s join nodes n on n.id = s.node_id
+			where s.project_id = $1::uuid and n.region = $2 and s.version_id = $3::uuid`,
+			f.ProjectID, f.Region, w.versionID).Scan(&cur, &ready)
 		if err != nil {
-			return nil, nil, true, err
+			return nil, nil, nil, true, err
 		}
-		var serverID string
-		if err := tx.QueryRow(ctx, `
-			insert into servers (project_id, node_id, version_id, state, port)
-			values ($1::uuid, $2::uuid, $3::uuid, 'creating', 0)
-			returning id::text`,
-			f.ProjectID, nodeID, *f.ActiveVersion).Scan(&serverID); err != nil {
-			return nil, nil, true, err
+
+		deficit := w.buffer - cur
+		if room := f.MaxServers - total; deficit > room {
+			deficit = room
 		}
-		starts = append(starts, PlannedStart{ServerID: serverID, NodeID: nodeID, ImageRef: f.ActiveImageRef})
+		for range deficit {
+			var nodeID string
+			err := tx.QueryRow(ctx, `
+				select n.id::text
+				from nodes n
+				left join lateral (
+					select count(*)::int as used from servers s
+					where s.node_id = n.id
+					  and s.state in ('creating','ready','allocated','draining')
+				) u on true
+				where n.project_id = $1::uuid and n.region = $2 and n.state = 'active'
+				  and n.last_heartbeat_at > now() - interval '10 seconds'
+				  and u.used < n.capacity_slots
+				  and not (n.id::text = any($3::text[]))
+				order by u.used desc, n.created_at
+				limit 1`,
+				f.ProjectID, f.Region, paused).Scan(&nodeID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				break // no capacity in the region right now
+			}
+			if err != nil {
+				return nil, nil, nil, true, err
+			}
+			var serverID string
+			if err := tx.QueryRow(ctx, `
+				insert into servers (project_id, node_id, version_id, state, port)
+				values ($1::uuid, $2::uuid, $3::uuid, 'creating', 0)
+				returning id::text`,
+				f.ProjectID, nodeID, w.versionID).Scan(&serverID); err != nil {
+				return nil, nil, nil, true, err
+			}
+			starts = append(starts, PlannedStart{ServerID: serverID, NodeID: nodeID, ImageRef: w.imageRef})
+			total++
+		}
+
+		if surplus := ready - w.buffer; surplus > 0 {
+			more, err := drainServers(ctx, tx, `
+				update servers set state = 'draining', updated_at = now()
+				where id in (
+					select s.id from servers s join nodes n on n.id = s.node_id
+					where s.project_id = $1::uuid and n.region = $2
+					  and s.version_id = $3::uuid and s.state = 'ready'
+					order by s.created_at
+					limit $4
+				)
+				returning id::text, node_id::text`,
+				f.ProjectID, f.Region, w.versionID, surplus)
+			if err != nil {
+				return nil, nil, nil, true, err
+			}
+			stops = append(stops, more...)
+		}
 	}
 
-	if surplus := ready - f.BufferReady; surplus > 0 {
-		more, err := drainServers(ctx, tx, `
-			update servers set state = 'draining', updated_at = now()
-			where id in (
-				select s.id from servers s join nodes n on n.id = s.node_id
-				where s.project_id = $1::uuid and n.region = $2
-				  and s.version_id = $3::uuid and s.state = 'ready'
-				order by s.created_at
-				limit $4
-			)
-			returning id::text, node_id::text`,
-			f.ProjectID, f.Region, *f.ActiveVersion, surplus)
-		if err != nil {
-			return nil, nil, true, err
-		}
-		stops = append(stops, more...)
-	}
-
-	// Ready servers of non-active versions get reaped (v0: no multi-version
-	// window yet — deploy manager is a later iteration).
+	// Ready servers of versions outside the window get reaped.
 	more, err := drainServers(ctx, tx, `
 		update servers set state = 'draining', updated_at = now()
 		where id in (
 			select s.id from servers s join nodes n on n.id = s.node_id
 			where s.project_id = $1::uuid and n.region = $2
-			  and s.version_id <> $3::uuid and s.state = 'ready'
+			  and not (s.version_id::text = any($3::text[])) and s.state = 'ready'
 		)
 		returning id::text, node_id::text`,
-		f.ProjectID, f.Region, *f.ActiveVersion)
+		f.ProjectID, f.Region, windowIDs)
 	if err != nil {
-		return nil, nil, true, err
+		return nil, nil, nil, true, err
 	}
 	stops = append(stops, more...)
 
-	if err := tx.Commit(ctx); err != nil {
-		return nil, nil, true, err
+	// Live matches on versions outside the window: per-server drain — liba
+	// gets `drain{deadline_s}`, the match plays out, the dedik exits itself
+	// (master.md §5: «по reap_ttl_min — Drain с дедлайном»). The
+	// allocated→draining mark makes this fire exactly once per server.
+	rows, err := tx.Query(ctx, `
+		update servers s set state = 'draining', updated_at = now()
+		from nodes n, versions v
+		where n.id = s.node_id and v.id = s.version_id
+		  and s.project_id = $1::uuid and n.region = $2
+		  and not (s.version_id::text = any($3::text[])) and s.state = 'allocated'
+		returning s.id::text, s.node_id::text, s.version_id::text, s.match_id::text, v.semver`,
+		f.ProjectID, f.Region, windowIDs)
+	if err != nil {
+		return nil, nil, nil, true, err
 	}
-	return starts, stops, true, nil
+	type drained struct {
+		id, node, version, semver string
+		matchID                   *string
+	}
+	var ds []drained
+	for rows.Next() {
+		var d drained
+		if err := rows.Scan(&d.id, &d.node, &d.version, &d.matchID, &d.semver); err != nil {
+			rows.Close()
+			return nil, nil, nil, true, err
+		}
+		ds = append(ds, d)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, nil, nil, true, err
+	}
+	for _, d := range ds {
+		reason := fmt.Sprintf("version %s reaped (reap_ttl)", d.semver)
+		drains = append(drains, PlannedDrain{
+			ServerID: d.id, NodeID: d.node, DeadlineS: DrainDeadlineS, Reason: reason,
+		})
+		id, node, version := d.id, d.node, d.version
+		if err := insertEvent(ctx, tx, EventServerDrain,
+			EventRef{ServerID: &id, NodeID: &node, VersionID: &version, MatchID: d.matchID},
+			map[string]any{"reason": reason, "deadline_s": DrainDeadlineS}); err != nil {
+			return nil, nil, nil, true, err
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, nil, nil, true, err
+	}
+	return starts, stops, drains, true, nil
 }
 
 func drainServers(ctx context.Context, tx pgx.Tx, sql string, args ...any) ([]PlannedStop, error) {
