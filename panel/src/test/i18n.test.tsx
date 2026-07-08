@@ -2,7 +2,13 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { en } from '../lib/locales/en';
 import { ru } from '../lib/locales/ru';
+import { EVENT_KINDS } from '../components/Badge';
 import { I18nProvider, LANG_STORAGE_KEY, detectLang, resolveInitialLang, storedLang, useT } from '../lib/i18n';
+
+/** Множество {placeholder}-токенов в шаблоне ('{a} {b}' → {a, b}). */
+function placeholders(tpl: string): Set<string> {
+  return new Set([...tpl.matchAll(/\{(\w+)\}/g)].map((m) => m[1]));
+}
 
 describe('detectLang', () => {
   it('ru-локаль → ru', () => {
@@ -54,9 +60,26 @@ describe('каталоги en/ru — паритет ключей (нет вис�
     expect(extraInRu).toEqual([]);
     expect(ruKeys).toEqual(enKeys);
   });
-  it('нет пустых переводов', () => {
-    for (const [k, v] of Object.entries(ru)) expect(v, `ru[${k}]`).not.toBe('');
-    for (const [k, v] of Object.entries(en)) expect(v, `en[${k}]`).not.toBe('');
+  it('нет пустых переводов (в т.ч. из одних пробелов)', () => {
+    for (const [k, v] of Object.entries(ru)) expect(v.trim(), `ru[${k}]`).not.toBe('');
+    for (const [k, v] of Object.entries(en)) expect(v.trim(), `en[${k}]`).not.toBe('');
+  });
+  it('плейсхолдеры {x} совпадают между en и ru (перевод не теряет параметры)', () => {
+    const mismatched = Object.keys(en).filter((k) => {
+      const a = placeholders(en[k as keyof typeof en]);
+      const b = placeholders((ru as Record<string, string>)[k]);
+      return a.size !== b.size || [...a].some((p) => !b.has(p));
+    });
+    expect(mismatched, `ключи с рассинхроном плейсхолдеров: ${mismatched.join(', ')}`).toEqual([]);
+  });
+  it('у каждого вида события есть подпись event.<kind> в обоих каталогах', () => {
+    const missing: string[] = [];
+    for (const kind of EVENT_KINDS) {
+      const key = `event.${kind}`;
+      if (!(key in en)) missing.push(`en:${key}`);
+      if (!(key in ru)) missing.push(`ru:${key}`);
+    }
+    expect(missing, `нет подписей для видов событий: ${missing.join(', ')}`).toEqual([]);
   });
 });
 

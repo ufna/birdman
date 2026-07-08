@@ -38,12 +38,12 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
 
 export function useServerDrawer(): OpenById {
   const ctx = useContext(ServerDrawerContext);
-  if (ctx === null) throw new Error('useServerDrawer вне DrawerProvider');
+  if (ctx === null) throw new Error('useServerDrawer must be used within a DrawerProvider');
   return ctx;
 }
 
 export function useMatchDrawer(): OpenById {
   const ctx = useContext(MatchDrawerContext);
-  if (ctx === null) throw new Error('useMatchDrawer вне DrawerProvider');
+  if (ctx === null) throw new Error('useMatchDrawer must be used within a DrawerProvider');
   return ctx;
 }

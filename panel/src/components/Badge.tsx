@@ -8,9 +8,28 @@ import type { MessageKey } from '../lib/i18n';
 
 export type Tone = 'good' | 'warn' | 'dead' | 'accent' | 'neutral';
 
-/** Домены человекочитаемых подписей состояний (коды остаются в API). Событийные
- *  kind'ы — технические токены, их не переводим (badge без domain = сырой код). */
-export type StateDomain = 'node' | 'server' | 'match' | 'version';
+/** Домены человекочитаемых подписей (коды остаются в API). Каждый домен — свой
+ *  префикс ключа в каталоге; неизвестный код → фолбэк на сам код (badge без
+ *  domain тоже показывает сырой код). */
+export type StateDomain = 'node' | 'server' | 'match' | 'version' | 'event';
+
+const KEY_PREFIX: Record<StateDomain, string> = {
+  node: 'state.node.',
+  server: 'state.server.',
+  match: 'state.match.',
+  version: 'state.version.',
+  event: 'event.',
+};
+
+/** Все виды событий ленты (константы EventXxx в master store/*.go). Единый
+ *  источник для дропдауна фильтра, подписей event.<kind> и guard-теста. */
+export const EVENT_KINDS = [
+  'node_created', 'node_quarantine', 'node_recovered', 'node_drain', 'node_undrain',
+  'server_failed', 'server_recovered', 'server_drain', 'crash_loop', 'allocation_failed',
+  'version_registered', 'version_disabled', 'fleet_updated', 'deploy_started',
+  'deploy_node_pulled', 'deploy_activated', 'deploy_failed', 'deploy_rolled_back',
+  'agent_upgrade', 'agent_upgrade_succeeded', 'agent_upgrade_failed',
+] as const;
 
 export function toneOfNodeState(state: string): Tone {
   switch (state) {
@@ -124,13 +143,13 @@ const toneClasses: Record<Tone, string> = {
 };
 
 /**
- * Бейдж состояния. С `domain` показывает переведённую подпись
- * (`state.<domain>.<code>`, фолбэк — сырой код для незнакомых значений); без
- * `domain` — сырой код (событийные kind'ы).
+ * Бейдж состояния/события. С `domain` показывает переведённую подпись
+ * (ключ `<prefix><code>`, фолбэк — сырой код для незнакомых значений) и держит
+ * сырой код в `title`; без `domain` — сырой код.
  */
 export function StateBadge({ state, tone, domain }: { state: string; tone: Tone; domain?: StateDomain }) {
   const { t, has } = useT();
-  const key = domain !== undefined ? `state.${domain}.${state}` : undefined;
+  const key = domain !== undefined ? `${KEY_PREFIX[domain]}${state}` : undefined;
   const label = key !== undefined && has(key) ? t(key as MessageKey) : state;
   return (
     <span
