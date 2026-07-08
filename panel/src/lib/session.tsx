@@ -63,7 +63,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
 export function useSession(): SessionContextValue {
   const ctx = useContext(SessionContext);
-  if (ctx === null) throw new Error('useSession вне SessionProvider');
+  if (ctx === null) throw new Error('useSession must be used within a SessionProvider');
   return ctx;
 }
 

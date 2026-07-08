@@ -60,7 +60,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
 
 export function useLive(): LiveContextValue {
   const ctx = useContext(LiveContext);
-  if (ctx === null) throw new Error('useLive вне LiveProvider');
+  if (ctx === null) throw new Error('useLive must be used within a LiveProvider');
   return ctx;
 }
 

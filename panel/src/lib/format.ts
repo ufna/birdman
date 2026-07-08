@@ -10,15 +10,16 @@ export function shortId(id: string): string {
   return id.length > 8 ? id.slice(0, 8) : id;
 }
 
-// Подписи единиц длительности по языку.
+// Подписи единиц длительности по языку. Это сам locale-слой форматтера (как
+// locales/), поэтому кириллица здесь легитимна — помечено i18n-allow для guard.
 const DURATION_UNITS: Record<Lang, { d: string; h: string; m: string; s: string }> = {
-  ru: { d: 'д', h: 'ч', m: 'м', s: 'с' },
+  ru: { d: 'д', h: 'ч', m: 'м', s: 'с' }, // i18n-allow: locale duration units
   en: { d: 'd', h: 'h', m: 'm', s: 's' },
 };
 
 // Обёртка «… назад» / «… ago» вокруг длительности.
 const AGO: Record<Lang, (d: string) => string> = {
-  ru: (d) => `${d} назад`,
+  ru: (d) => `${d} назад`, // i18n-allow: locale relative-time suffix
   en: (d) => `${d} ago`,
 };
 
