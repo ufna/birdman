@@ -331,6 +331,14 @@ export const ru: Record<MessageKey, string> = {
   'alertstate.firing': 'Горит',
   'alertstate.resolved': 'Погас',
 
+  // — Статистика: селектор окна (задача 4, «Статистика v1») —
+  'stats.range.aria': 'Окно времени',
+  'stats.range.12h': '12 ч',
+  'stats.range.24h': '24 ч',
+  'stats.range.3d': '3 д',
+  'stats.range.7d': '7 д',
+  'stats.range.30d': '30 д',
+
   // — экран «Статистика» —
   'stats.utc': 'UTC',
   'stats.periodAria': 'Период, дней',

@@ -347,6 +347,14 @@ export const en = {
   'alertstate.firing': 'Firing',
   'alertstate.resolved': 'Resolved',
 
+  // — Statistics: range selector (Task 4, "Статистика v1") —
+  'stats.range.aria': 'Time window',
+  'stats.range.12h': '12 h',
+  'stats.range.24h': '24 h',
+  'stats.range.3d': '3 d',
+  'stats.range.7d': '7 d',
+  'stats.range.30d': '30 d',
+
   // — Statistics screen —
   'stats.utc': 'UTC',
   'stats.periodAria': 'Period, days',
