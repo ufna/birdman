@@ -11,7 +11,15 @@ export type Tone = 'good' | 'warn' | 'dead' | 'accent' | 'neutral';
 /** Домены человекочитаемых подписей (коды остаются в API). Каждый домен — свой
  *  префикс ключа в каталоге; неизвестный код → фолбэк на сам код (badge без
  *  domain тоже показывает сырой код). */
-export type StateDomain = 'node' | 'server' | 'match' | 'version' | 'event';
+export type StateDomain =
+  | 'node'
+  | 'server'
+  | 'match'
+  | 'version'
+  | 'event'
+  | 'severity'
+  | 'keystatus'
+  | 'alertstate';
 
 const KEY_PREFIX: Record<StateDomain, string> = {
   node: 'state.node.',
@@ -19,6 +27,9 @@ const KEY_PREFIX: Record<StateDomain, string> = {
   match: 'state.match.',
   version: 'state.version.',
   event: 'event.',
+  severity: 'severity.',
+  keystatus: 'keystatus.',
+  alertstate: 'alertstate.',
 };
 
 /** Все виды событий ленты (константы EventXxx в master store/*.go). Единый
@@ -99,6 +110,32 @@ export function toneOfVersionState(state: string): Tone {
     default:
       return 'neutral';
   }
+}
+
+/**
+ * Тон severity алерта (vmalert labels.severity, ops.md §1): critical → dead,
+ * warning → warn, всё прочее (info и т.п.) — neutral. Цвет не единственный
+ * носитель: у бейджа всегда есть подпись severity.<code>.
+ */
+export function toneOfSeverity(severity: string): Tone {
+  switch (severity) {
+    case 'critical':
+      return 'dead';
+    case 'warning':
+      return 'warn';
+    default:
+      return 'neutral';
+  }
+}
+
+/** Тон статуса API-ключа: активен → good, отозван → neutral (прошлое). */
+export function toneOfKeyStatus(revoked: boolean): Tone {
+  return revoked ? 'neutral' : 'good';
+}
+
+/** Тон состояния алерта из истории: горит (active) → dead, погас → neutral. */
+export function toneOfAlertActive(active: boolean): Tone {
+  return active ? 'dead' : 'neutral';
 }
 
 /** Тон события ленты по kind (models.go master). */

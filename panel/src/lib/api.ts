@@ -97,6 +97,137 @@ export interface ApiEvent {
   payload: Record<string, unknown>;
 }
 
+// --- П2: статистика / cost (GET /v1/stats/*, master httpapi/stats.go) ---
+// Все ряды UTC, побито по дням и зеро-филлено (пустые дни = 0, не пропуски);
+// у каждого ряда явный unit.
+
+/** Точка простого ряда {дата, значение}. */
+export interface StatPoint {
+  date: string; // YYYY-MM-DD, UTC
+  value: number;
+}
+
+export interface SimpleSeries {
+  unit: string;
+  points: StatPoint[];
+}
+
+/** День стек-ряда: total + разбивка по ключам (все ключи присутствуют, 0-filled). */
+export interface StackedPoint {
+  date: string;
+  total: number;
+  values: Record<string, number>;
+}
+
+export interface StackedSeries {
+  unit: string;
+  keys: string[]; // ключи стека (регионы/версии), отсортированы
+  points: StackedPoint[];
+}
+
+export interface VersionShare {
+  version: string;
+  matches: number;
+  share: number; // 0..1
+}
+
+/** Fill-rate: перцентили time-to-match. Источник/note приходят с бэка. */
+export interface TimeToMatch {
+  p50_seconds: number | null;
+  p95_seconds: number | null;
+  samples: number;
+  source: string;
+  note: string;
+}
+
+export interface StatsOverview {
+  days: number;
+  timezone: string;
+  generated_at: string;
+  matches_per_day: StackedSeries;
+  players_per_day: StackedSeries;
+  peak_ccu_per_day: SimpleSeries;
+  peak_ccu: number;
+  avg_match_duration_seconds: number | null;
+  avg_match_duration_per_day: SimpleSeries;
+  version_distribution: VersionShare[];
+  time_to_match: TimeToMatch;
+}
+
+/** Снапшот утилизации региона (allocated/ready/draining vs ёмкость активных тачек). */
+export interface RegionUtil {
+  region: string;
+  capacity_slots: number;
+  allocated: number;
+  ready: number;
+  draining: number;
+}
+
+export interface StatsCost {
+  days: number;
+  timezone: string;
+  generated_at: string;
+  slot_hours_per_day_by_region: StackedSeries;
+  slot_hours_per_day_by_version: StackedSeries;
+  slot_hours_total: number;
+  utilization: RegionUtil[];
+  utilization_note: string;
+}
+
+// --- П2: алерты (GET /v1/alerts/*, master проксирует vmalert + лог-синк) ---
+
+/** Правило vmalert: имя, severity, выражение, «for», состояние, описание (как есть). */
+export interface AlertRule {
+  name: string;
+  group: string;
+  severity: string;
+  expr: string;
+  for: string;
+  state: string; // inactive|pending|firing
+  description: string;
+}
+
+/** Активный (firing) алерт из vmalert. */
+export interface ActiveAlert {
+  name: string;
+  severity: string;
+  region: string;
+  node: string;
+  state: string;
+  active_at: string;
+  value: string;
+  description: string;
+}
+
+/** Срабатывание из истории (alerts.log). active — ещё ли горит (по endsAt). */
+export interface AlertEvent {
+  name: string;
+  severity: string;
+  region: string;
+  node: string;
+  startsAt: string;
+  endsAt: string;
+  description: string;
+  active: boolean;
+  received_at?: string;
+}
+
+// --- П2: API-ключи (GET/POST/DELETE /v1/apikeys, admin-only) ---
+
+export interface ApiKey {
+  id: string;
+  name: string;
+  scopes: Scope[];
+  created_at: string;
+  revoked_at: string | null;
+}
+
+/** Ответ POST /v1/apikeys: ключ + секрет (показывается РОВНО один раз). */
+export interface CreatedApiKey {
+  key: ApiKey;
+  secret: string;
+}
+
 export class ApiError extends Error {
   constructor(
     public readonly status: number,
@@ -187,6 +318,32 @@ export const api = {
     request<{ node: NodeInfo }>('POST', `/v1/nodes/${encodeURIComponent(id)}/drain`).then((r) => r.node),
   undrainNode: (id: string) =>
     request<{ node: NodeInfo }>('POST', `/v1/nodes/${encodeURIComponent(id)}/undrain`).then((r) => r.node),
+
+  // --- П2: статистика / cost (скоуп readonly) ---
+
+  /** Агрегаты обзора за N дней (matches/players/CCU/версии/fill-rate). */
+  statsOverview: (days: number) =>
+    request<StatsOverview>('GET', `/v1/stats/overview${qs({ days })}`),
+  /** Слото-часы per регион/версия + утилизация за N дней. */
+  statsCost: (days: number) => request<StatsCost>('GET', `/v1/stats/cost${qs({ days })}`),
+
+  // --- П2: алерты (скоуп readonly; master проксирует vmalert) ---
+
+  alertRules: () => request<{ rules: AlertRule[] }>('GET', '/v1/alerts/rules').then((r) => r.rules),
+  alertsActive: () =>
+    request<{ alerts: ActiveAlert[] }>('GET', '/v1/alerts/active').then((r) => r.alerts),
+  alertHistory: (limit: number) =>
+    request<{ alerts: AlertEvent[] }>('GET', `/v1/alerts/history${qs({ limit })}`).then((r) => r.alerts),
+
+  // --- П2: API-ключи (admin-only) ---
+
+  listApiKeys: () => request<{ apikeys: ApiKey[] }>('GET', '/v1/apikeys').then((r) => r.apikeys),
+  /** Создаёт ключ; секрет в ответе показывается ровно один раз. */
+  createApiKey: (name: string, scopes: Scope[]) =>
+    request<CreatedApiKey>('POST', '/v1/apikeys', { name, scopes }),
+  /** Отзыв ключа (409 last_admin_key — нельзя отозвать последний admin). */
+  revokeApiKey: (id: string) =>
+    request<{ key: ApiKey }>('DELETE', `/v1/apikeys/${encodeURIComponent(id)}`).then((r) => r.key),
 };
 
 /**
