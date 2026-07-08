@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import { I18nProvider } from '../lib/i18n';
@@ -106,6 +106,30 @@ function stubJSON(body: unknown) {
   );
 }
 
+function json(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+}
+
+/**
+ * VM (metrics-proxy, /v1/metrics/*) здорова и отвечает пустыми сериями;
+ * /v1/stats/overview (product-агрегаты) падает 500 на КАЖДЫЙ вызов. Для
+ * регресс-теста Critical bug: live-режим не должен зависеть от здоровья
+ * product-API.
+ */
+function stubVmUpOverviewDown() {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((url: string) => {
+      const u = String(url);
+      if (u.includes('/v1/metrics/')) return Promise.resolve(json({ status: 'success', data: { result: [] } }));
+      if (u.includes('/v1/stats/overview')) {
+        return Promise.resolve(json({ error: 'internal', detail: 'db unavailable' }, 500));
+      }
+      return Promise.resolve(json({}));
+    }),
+  );
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -154,6 +178,41 @@ describe('Stats — режимы live/product (Task 5, "Статистика v1"
     expect(await screen.findByText('Matches per day')).toBeTruthy();
     expect(screen.getByText('queue → match')).toBeTruthy();
     expect(screen.getByText('allocation → start')).toBeTruthy();
+  });
+});
+
+// Critical bug regression (Stats v1, Task 3-6 review): дефолт экрана — 24h/live.
+// Live-панели (MetricChart/UtilizationChart) читаются напрямую из VM и не
+// зависят от продуктового /v1/stats/overview — тот в live-режиме используется
+// только вторичной строкой fill-rate-карточки (allocation→start прокси).
+// Раньше единый ранний return по `ov.error !== undefined && ov.data === undefined`
+// гасил ВСЮ страницу (только Header + ErrorNote) при живой VM, если у
+// /v1/stats/overview падал первый запрос — это сводило на нет независимость
+// live-режима от product-API на дефолтном посадочном пути.
+describe('Stats — Critical: ошибка /v1/stats/overview не блокирует live-режим', () => {
+  it('дефолт 24h/live, VM здорова, /v1/stats/overview падает 500 — live-панели рендерятся, полноэкранной ошибки нет', async () => {
+    stubVmUpOverviewDown();
+    renderEn(<Stats />);
+    // Живая VM-панель на месте сразу (структурно не зависит от product-API).
+    expect(screen.getByText('Players online')).toBeTruthy();
+
+    // Даём цепочке fetch(500) → request() (throw ApiError) → useLiveAsync.catch
+    // → setState → React re-render полностью осесть (реальный таймер вместо
+    // счёта микрозадач — устойчивее к числу await-хопов внутри request()).
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // (a) живая VM-панель осталась смонтированной и ПОСЛЕ отказа product-API.
+    expect(screen.getByText('Players online')).toBeTruthy();
+    // (b) страница НЕ ушла в полноэкранную ошибку — ErrorNote/Retry отсутствуют.
+    expect(screen.queryByText(/Couldn't load data/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+    // Бонус: истинная строка (VM-гистограмма) продолжает работать, а прокси-
+    // строка деградирует с пометкой вместо исчезновения (не только не падает
+    // страница, но и fill-rate-карточка ведёт себя как задумано).
+    expect(screen.getByText('queue → match')).toBeTruthy();
+    expect(screen.getByText('Overview data unavailable — allocation→start proxy is hidden.')).toBeTruthy();
   });
 });
 

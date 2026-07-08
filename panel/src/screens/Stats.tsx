@@ -63,7 +63,14 @@ export function Stats() {
   // загрузка или смена периода/режима) — скелетон под финальную раскладку.
   const ready = ov.data !== undefined && ov.data.days === days;
 
-  if (ov.error !== undefined && ov.data === undefined) {
+  // Полноэкранная ошибка — ТОЛЬКО в product-режиме: там /v1/stats/overview и
+  // есть страница. В live-режиме VM-панели (MetricChart/UtilizationChart) и
+  // истинный TTM читаются напрямую из metrics-proxy и не зависят от product-
+  // API — гейтить их ошибкой overview нельзя (Critical bug: раньше падение
+  // /v1/stats/overview гасило ВСЮ страницу даже при здоровой VM в дефолтном
+  // 24h/live виде). Деградацию своей (alloc→start) строки live обрабатывает
+  // сам FillRateCard — см. LiveBody.
+  if (range.mode === 'product' && ov.error !== undefined && ov.data === undefined) {
     return (
       <div className="flex flex-col gap-4">
         <Header rangeKey={rangeKey} setRangeKey={setRangeKey} />
@@ -75,7 +82,7 @@ export function Stats() {
     <div className="flex flex-col gap-4">
       <Header rangeKey={rangeKey} setRangeKey={setRangeKey} />
       {range.mode === 'live' ? (
-        <LiveBody range={range} ov={ready ? ov.data : undefined} />
+        <LiveBody range={range} days={days} ov={ov} />
       ) : ready && ov.data !== undefined ? (
         <StatsBody ov={ov.data} />
       ) : (
@@ -105,10 +112,18 @@ function Header({ rangeKey, setRangeKey }: { rangeKey: string; setRangeKey: (k: 
  * плюс ряд занятости по состояниям (как в Cost) и fill-rate-карточка (общая с
  * product-режимом, см. ambiguity resolution #3: TTM-окно ≤30д всегда в
  * пределах ретеншена VM). Деградацию VM даёт сам MetricChart/UtilizationChart.
+ *
+ * `ov` — состояние /v1/stats/overview (для вторичной alloc→start строки
+ * fill-rate-карточки), НЕ гейт: пока он ещё грузится (нет ни данных, ни
+ * ошибки) — показываем FillRateSkeleton, как и раньше; если он осел с ошибкой
+ * (или данные за другой период) — FillRateCard всё равно монтируется, просто
+ * его alloc-строка деградирует (Critical bug fix: раньше это было «навечно
+ * скелетон», а VM-панели выше вообще не зависят от ov и всегда рендерятся).
  */
-function LiveBody({ range, ov }: { range: StatsRange; ov: StatsOverview | undefined }) {
+function LiveBody({ range, days, ov }: { range: StatsRange; days: number; ov: OverviewState }) {
   const { t } = useT();
   const windowMs = range.windowMs ?? 24 * 60 * 60_000;
+  const readyOv = ov.data !== undefined && ov.data.days === days ? ov.data : undefined;
   return (
     <div className="flex flex-col gap-4">
       <div className="grid gap-3 sm:grid-cols-2">
@@ -124,13 +139,21 @@ function LiveBody({ range, ov }: { range: StatsRange; ov: StatsOverview | undefi
         />
         <UtilizationChart windowMs={windowMs} />
       </Card>
-      {ov !== undefined ? (
-        <FillRateCard ttm={ov.time_to_match} days={effectiveDays(range)} refetchKey={ov.generated_at} />
+      {readyOv !== undefined ? (
+        <FillRateCard ttm={readyOv.time_to_match} days={days} refetchKey={readyOv.generated_at} />
+      ) : ov.error !== undefined ? (
+        <FillRateCard ttm={undefined} days={days} refetchKey={`live-err-${String(days)}`} />
       ) : (
         <FillRateSkeleton />
       )}
     </div>
   );
+}
+
+/** Состояние /v1/stats/overview, нужное LiveBody (подмножество useLiveAsync). */
+interface OverviewState {
+  data?: StatsOverview;
+  error?: Error;
 }
 
 /** Скелетон fill-rate карточки (live-режим, пока не готов ov для alloc→start прокси). */
@@ -273,8 +296,12 @@ function StatsBody({ ov }: { ov: StatsOverview }) {
  * Fill-rate из двух источников: истинное queue→match (гистограмма time-to-match
  * через metrics-proxy) и прокси allocation→start (из matches). Гистограмма
  * пуста/недоступна → деградируем на прокси с пометкой (dev: данных мало).
+ * `ttm` может отсутствовать (live-режим, /v1/stats/overview ещё грузится или
+ * осел с ошибкой) — тогда alloc-строка сама деградирует с пометкой
+ * недоступности, а не блокирует всю карточку (истинная queue→match строка не
+ * зависит от `ttm` вовсе и продолжает работать через metrics-proxy).
  */
-function FillRateCard({ ttm, days, refetchKey }: { ttm: TimeToMatch; days: number; refetchKey: string }) {
+function FillRateCard({ ttm, days, refetchKey }: { ttm: TimeToMatch | undefined; days: number; refetchKey: string }) {
   const { t } = useT();
   const fmt = useFormat();
   const dur = (sec: number | null | undefined) => (sec == null ? '—' : fmt.age(sec * 1000));
@@ -295,8 +322,15 @@ function FillRateCard({ ttm, days, refetchKey }: { ttm: TimeToMatch; days: numbe
             <PercentileRow p50={dur(trueTtm.p50)} p95={dur(trueTtm.p95)} />
           )}
         </TtmSource>
-        <TtmSource label={t('stats.ttm.srcAlloc')} note={t('stats.ttm.note', { count: ttm.samples })}>
-          <PercentileRow p50={dur(ttm.p50_seconds)} p95={dur(ttm.p95_seconds)} />
+        <TtmSource
+          label={t('stats.ttm.srcAlloc')}
+          note={ttm !== undefined ? t('stats.ttm.note', { count: ttm.samples }) : undefined}
+        >
+          {ttm === undefined ? (
+            <SourceNote>{t('stats.ttm.allocUnavailable')}</SourceNote>
+          ) : (
+            <PercentileRow p50={dur(ttm.p50_seconds)} p95={dur(ttm.p95_seconds)} />
+          )}
         </TtmSource>
       </div>
     </Card>
@@ -325,12 +359,12 @@ function combineStatus(a: MetricStatus, b: MetricStatus): MetricStatus {
   return 'ok';
 }
 
-function TtmSource({ label, note, children }: { label: string; note: string; children: ReactNode }) {
+function TtmSource({ label, note, children }: { label: string; note?: string; children: ReactNode }) {
   return (
     <div>
       <div className="mb-1.5 font-mono text-xs font-medium text-ink">{label}</div>
       {children}
-      <p className="mt-1.5 text-xs text-muted">{note}</p>
+      {note !== undefined && <p className="mt-1.5 text-xs text-muted">{note}</p>}
     </div>
   );
 }

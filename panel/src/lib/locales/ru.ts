@@ -380,6 +380,7 @@ export const ru: Record<MessageKey, string> = {
   'stats.ttm.trueDegraded': 'Мало данных матчмейкера за период — показываем прокси аллокация→старт.',
   'stats.ttm.trueUnavailable': 'Metrics-proxy недоступен — гистограммный time-to-match скрыт.',
   'stats.ttm.trueLoading': 'Загрузка гистограммы…',
+  'stats.ttm.allocUnavailable': 'Данные обзора недоступны — прокси аллокация→старт скрыт.',
 
   // — метр утилизации (Cost) —
   'stats.util.allocated': 'в игре',

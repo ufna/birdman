@@ -396,6 +396,7 @@ export const en = {
   'stats.ttm.trueDegraded': 'Too few matchmaker samples in this period — using the allocation→start proxy.',
   'stats.ttm.trueUnavailable': 'Metrics proxy unavailable — histogram time-to-match is hidden.',
   'stats.ttm.trueLoading': 'Loading histogram…',
+  'stats.ttm.allocUnavailable': 'Overview data unavailable — allocation→start proxy is hidden.',
 
   // — utilization meter (Cost) —
   'stats.util.allocated': 'allocated',
