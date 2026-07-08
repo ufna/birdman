@@ -11,16 +11,27 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/ufna/birdman/master/internal/store"
 )
 
 // Alerts endpoints for the panel П2 Alerts screen (docs/specs/panel.md §3,
 // ops.md §1). master proxies the vmalert stack on the box: rules and live
 // firing state come from the vmalert HTTP API, history from the alert sink log
-// (/var/log/birdman/alerts.log). v0 is read-only; mute/edit is a TODO (it is
-// vmalert config, not master state). Alert descriptions are passed through
-// verbatim (they are currently Russian, from the vmalert rules — bilingual
-// alerts are a vmalert-config concern, out of master's scope; noted in ops.md).
+// (/var/log/birdman/alerts.log). Alert descriptions are passed through verbatim
+// (they are currently Russian, from the vmalert rules — bilingual alerts are a
+// vmalert-config concern, out of master's scope; noted in ops.md).
+//
+// Mutes (POST/GET/DELETE /v1/alerts/mutes) are master state, not a vmalert
+// silence: a mute is an annotation master stores and reflects as muted:true on
+// matching alerts in /v1/alerts/{active,history} so the panel can dim/hide them
+// and an audit trail exists. It does NOT stop vmalert firing or the Discord/log
+// delivery — a real silence needs the alertmanager silence API (ops.md §1 TODO).
+// Mute state lives in store/alerts.go (table alert_mutes).
 
 const alertsUpstreamTimeout = 15 * time.Second
 
@@ -109,6 +120,7 @@ type activeAlert struct {
 	ActiveAt    time.Time `json:"active_at"`
 	Value       string    `json:"value"`
 	Description string    `json:"description"`
+	Muted       bool      `json:"muted"` // an active master mute covers this alertname+region
 }
 
 func (s *Server) handleAlertsActive(w http.ResponseWriter, r *http.Request) {
@@ -141,6 +153,14 @@ func (s *Server) handleAlertsActive(w http.ResponseWriter, r *http.Request) {
 			Value:       a.Value,
 			Description: annotation(a.Annotations),
 		})
+	}
+	mutes, err := s.st.ListAlertMutes(r.Context(), false)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	for i := range out {
+		out[i].Muted = anyMuteMatches(mutes, out[i].Name, out[i].Region)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"alerts": out})
 }
@@ -206,6 +226,7 @@ type alertEvent struct {
 	Description string `json:"description"`
 	Active      bool   `json:"active"`
 	ReceivedAt  string `json:"received_at,omitempty"`
+	Muted       bool   `json:"muted"` // an active master mute covers this alertname+region
 }
 
 // amAlert is one alert in the alertmanager-v2 webhook shape written to the log.
@@ -246,7 +267,16 @@ func (s *Server) handleAlertHistory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"alerts": parseAlertsLog(data, time.Now(), limit)})
+	events := parseAlertsLog(data, time.Now(), limit)
+	mutes, err := s.st.ListAlertMutes(r.Context(), false)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	for i := range events {
+		events[i].Muted = anyMuteMatches(mutes, events[i].Name, events[i].Region)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"alerts": events})
 }
 
 // parseAlertsLog parses newline-delimited JSON deliveries into a normalized,
@@ -335,4 +365,119 @@ func alertSortTime(a alertEvent) time.Time {
 		}
 	}
 	return time.Time{}
+}
+
+// anyMuteMatches reports whether any of the (active) mutes covers the alert.
+func anyMuteMatches(mutes []store.AlertMute, name, region string) bool {
+	for _, m := range mutes {
+		if m.Matches(name, region) {
+			return true
+		}
+	}
+	return false
+}
+
+// --- mute rules (master-level suppression annotations) ---
+//
+// Contract (docs/specs/master.md §6): POST needs admin, GET needs readonly,
+// DELETE needs admin. A mute is master state; it makes matching alerts report
+// muted:true (handleAlertsActive/handleAlertHistory) but does not silence
+// vmalert/Discord — that is the alertmanager silence API (ops.md §1 TODO).
+
+type createMuteRequest struct {
+	Alertname string  `json:"alertname"`
+	Region    *string `json:"region"`     // absent/empty → all regions
+	Note      string  `json:"note"`       // optional, defaults to ""
+	ExpiresAt *string `json:"expires_at"` // absent/empty → never; else RFC3339 in the future
+}
+
+// handleCreateAlertMute is POST /v1/alerts/mutes (admin). It is an idempotent
+// upsert: muting an alertname+region that already has an active mute updates
+// that mute's note/expires_at in place (store.UpsertAlertMute) rather than
+// stacking duplicates — so a repeat POST doubles as "extend/edit" and still
+// returns 201 with the resulting mute.
+func (s *Server) handleCreateAlertMute(w http.ResponseWriter, r *http.Request) {
+	var req createMuteRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Alertname) == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "alertname is required")
+		return
+	}
+	var expiresAt *time.Time
+	if req.ExpiresAt != nil && strings.TrimSpace(*req.ExpiresAt) != "" {
+		t, err := time.Parse(time.RFC3339, strings.TrimSpace(*req.ExpiresAt))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", "expires_at must be an RFC3339 timestamp")
+			return
+		}
+		if !t.After(time.Now()) {
+			writeError(w, http.StatusBadRequest, "bad_request", "expires_at must be in the future")
+			return
+		}
+		expiresAt = &t
+	}
+	createdBy := ""
+	if key, ok := keyFromContext(r.Context()); ok {
+		createdBy = key.Name
+	}
+	mute, err := s.st.UpsertAlertMute(r.Context(), store.CreateAlertMuteParams{
+		Alertname: req.Alertname,
+		Region:    req.Region,
+		Note:      req.Note,
+		ExpiresAt: expiresAt,
+		CreatedBy: createdBy,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	// Audit — payload carries no secrets (region/expires_at may be null).
+	if err := s.st.InsertEvent(r.Context(), store.EventAlertMuted, store.EventRef{}, map[string]any{
+		"mute_id": mute.ID, "alertname": mute.Alertname, "region": mute.Region,
+		"expires_at": mute.ExpiresAt, "created_by": mute.CreatedBy,
+	}); err != nil {
+		s.log.Error("alert mute: create event write failed", "mute_id", mute.ID, "err", err)
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"mute": mute})
+}
+
+// handleListAlertMutes is GET /v1/alerts/mutes (readonly): active mutes
+// newest-first; ?all=1 also returns expired ones.
+func (s *Server) handleListAlertMutes(w http.ResponseWriter, r *http.Request) {
+	mutes, err := s.st.ListAlertMutes(r.Context(), r.URL.Query().Get("all") == "1")
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"mutes": emptyNotNull(mutes)})
+}
+
+// handleDeleteAlertMute is DELETE /v1/alerts/mutes/{id} (admin). 204 on a real
+// removal (emits alert_unmuted), 404 for an unknown/already-removed id, 400 for
+// a non-uuid id. DELETE is idempotent in effect (end state: not muted); the
+// 404 lets the caller tell a real unmute from a no-op and avoids a duplicate
+// audit event.
+func (s *Server) handleDeleteAlertMute(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := uuid.Parse(id); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "mute id must be a uuid")
+		return
+	}
+	mute, deleted, err := s.st.DeleteAlertMute(r.Context(), id)
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	if !deleted {
+		writeError(w, http.StatusNotFound, "not_found", "no such mute")
+		return
+	}
+	if err := s.st.InsertEvent(r.Context(), store.EventAlertUnmuted, store.EventRef{}, map[string]any{
+		"mute_id": mute.ID, "alertname": mute.Alertname, "region": mute.Region,
+	}); err != nil {
+		s.log.Error("alert mute: delete event write failed", "mute_id", mute.ID, "err", err)
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

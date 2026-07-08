@@ -85,6 +85,9 @@ func New(st *store.Store, m *metrics.Metrics, mm *matchmaker.Matchmaker, dep *de
 	s.mux.HandleFunc("GET /v1/alerts/rules", s.requireScope(ScopeReadonly, s.handleAlertRules))
 	s.mux.HandleFunc("GET /v1/alerts/history", s.requireScope(ScopeReadonly, s.handleAlertHistory))
 	s.mux.HandleFunc("GET /v1/alerts/active", s.requireScope(ScopeReadonly, s.handleAlertsActive))
+	s.mux.HandleFunc("POST /v1/alerts/mutes", s.requireScope(ScopeAdmin, s.handleCreateAlertMute))
+	s.mux.HandleFunc("GET /v1/alerts/mutes", s.requireScope(ScopeReadonly, s.handleListAlertMutes))
+	s.mux.HandleFunc("DELETE /v1/alerts/mutes/{id}", s.requireScope(ScopeAdmin, s.handleDeleteAlertMute))
 
 	s.mux.HandleFunc("POST /v1/matchmaking/tickets", s.requireScope(ScopeMatchmaking, s.handleCreateTicket))
 	s.mux.HandleFunc("GET /v1/matchmaking/tickets/{id}", s.requireScope(ScopeMatchmaking, s.handleGetTicket))
