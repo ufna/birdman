@@ -1,7 +1,8 @@
 // Мелкие строительные блоки: карточка, заголовок, пустые/ошибочные
 // состояния, метка «идёт загрузка».
 
-import type { ReactNode } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 import { ApiError } from '../lib/api';
 import { useT } from '../lib/i18n';
 
@@ -43,6 +44,28 @@ export function EmptyState({ children }: { children: ReactNode }) {
   return <div className="px-4 py-10 text-center text-sm text-muted">{children}</div>;
 }
 
+/**
+ * Живое число: короткая вспышка тона при изменении значения (обновление по SSE
+ * заметно без «прыжка» — ширина стабильна за счёт tabular-nums у StatCard).
+ * Только для примитивов (число/строка): сравнение по значению. Первый рендер не
+ * вспыхивает. Пересборкой ключа перезапускаем CSS-анимацию.
+ */
+export function LiveValue({ value }: { value: string | number }) {
+  const [gen, setGen] = useState(0);
+  const prev = useRef<string | number>(value);
+  useEffect(() => {
+    if (!Object.is(prev.current, value)) {
+      prev.current = value;
+      setGen((g) => g + 1);
+    }
+  }, [value]);
+  return (
+    <span key={gen} className={gen > 0 ? 'value-flash' : undefined}>
+      {value}
+    </span>
+  );
+}
+
 export function ErrorNote({ error, retry }: { error: Error; retry?: () => void }) {
   const { t } = useT();
   const detail =
@@ -66,6 +89,58 @@ export function ErrorNote({ error, retry }: { error: Error; retry?: () => void }
 export function LoadingRow({ label }: { label?: string }) {
   const { t } = useT();
   return <div className="px-4 py-10 text-center text-sm text-muted">{label ?? t('common.loading')}</div>;
+}
+
+/**
+ * Плейсхолдер-шиммер на время первой загрузки / смены периода — держит
+ * раскладку, чтобы контент не «прыгал» при появлении. Декоративен (aria-hidden);
+ * доступную подпись «идёт загрузка» несёт контейнер (role=status).
+ */
+export function Skeleton({
+  className = '',
+  rounded = 'rounded-md',
+  style,
+}: {
+  className?: string;
+  rounded?: string;
+  style?: CSSProperties;
+}) {
+  return <div aria-hidden style={style} className={`skeleton ${rounded} ${className}`} />;
+}
+
+/** Карточка-скелетон под StatCard: подпись + крупное число + деталь. */
+export function StatCardSkeleton() {
+  return (
+    <Card className="px-4 py-3">
+      <Skeleton className="h-3 w-20" />
+      <Skeleton className="mt-2 h-7 w-16" />
+      <Skeleton className="mt-2 h-3 w-24" />
+    </Card>
+  );
+}
+
+/** Скелетон графика в карточке (заголовок + область построения). */
+export function ChartSkeleton({ title, height = 172 }: { title?: string; height?: number }) {
+  return (
+    <Card className="p-4">
+      {title !== undefined ? (
+        <div className="mb-3 text-sm font-semibold">{title}</div>
+      ) : (
+        <Skeleton className="mb-3 h-4 w-40" />
+      )}
+      <Skeleton rounded="rounded-lg" className="w-full" style={{ height }} />
+    </Card>
+  );
+}
+
+/** Обёртка, помечающая зону скелетонов для скринридера (role=status + label). */
+export function SkeletonRegion({ children }: { children: ReactNode }) {
+  const { t } = useT();
+  return (
+    <div role="status" aria-label={t('common.loading')} aria-busy="true">
+      {children}
+    </div>
+  );
 }
 
 /** Логотип: две «птичьи» галки + моно-словомарка. */

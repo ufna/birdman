@@ -1,22 +1,41 @@
 // Статистика (П2): обзорные агрегаты за 7/30/90 дней (GET /v1/stats/overview).
 // Матчи/день и игроки/день — стек по регионам; пик CCU и средняя длительность —
-// одиночные ряды; распределение по версиям — доли; fill-rate матчмейкера
-// (time-to-match p50/p95). Все ряды UTC и зеро-филлены на бэке.
+// одиночные ряды; распределение по версиям — доли (единый цвет версии); fill-rate
+// матчмейкера показан из ДВУХ источников: истинное queue→match из гистограммы
+// birdman_mm_time_to_match_seconds (metrics-proxy) и прокси allocation→start (из
+// matches). Ряды UTC и зеро-филлены на бэке. Живое обновление: refetch по SSE с
+// дебансом (useLiveAsync) — новый матч подтягивает свежие числа/графики.
 
 import { useMemo, useState } from 'react';
+import type { ReactNode } from 'react';
 import { api } from '../lib/api';
-import type { StatsOverview } from '../lib/api';
-import { useAsync } from '../lib/useAsync';
+import type { StatsOverview, TimeToMatch } from '../lib/api';
+import { useLiveAsync } from '../lib/live';
 import { useT, useFormat } from '../lib/i18n';
 import { toSimpleColumns, toStackModel, versionShareModel } from '../lib/stats';
-import { Card, CardHeader, ErrorNote, LoadingRow, StatCard } from '../components/ui';
+import { timeToMatchQuantileQuery } from '../lib/metrics';
+import { useInstantQuery } from '../lib/useMetrics';
+import type { MetricStatus } from '../lib/useMetrics';
+import {
+  Card,
+  CardHeader,
+  ChartSkeleton,
+  ErrorNote,
+  Skeleton,
+  SkeletonRegion,
+  StatCard,
+  StatCardSkeleton,
+} from '../components/ui';
 import { BarChart, ChartHeading, PeriodSelect, ShareBars } from '../components/charts';
 
 const PERIODS = [7, 30, 90];
 
 export function Stats() {
   const [days, setDays] = useState(7);
-  const ov = useAsync(() => api.statsOverview(days), [days]);
+  const ov = useLiveAsync(() => api.statsOverview(days), [days]);
+  // Показываем данные, только если они за ЗАПРОШЕННЫЙ период; иначе (первая
+  // загрузка или смена периода) — скелетон под финальную раскладку.
+  const ready = ov.data !== undefined && ov.data.days === days;
 
   if (ov.error !== undefined && ov.data === undefined) {
     return (
@@ -29,7 +48,7 @@ export function Stats() {
   return (
     <div className="flex flex-col gap-4">
       <Header days={days} setDays={setDays} />
-      {ov.data === undefined ? <LoadingRow /> : <StatsBody ov={ov.data} />}
+      {ready && ov.data !== undefined ? <StatsBody ov={ov.data} /> : <StatsSkeleton />}
     </div>
   );
 }
@@ -44,6 +63,34 @@ function Header({ days, setDays }: { days: number; setDays: (d: number) => void 
       </div>
       <PeriodSelect value={days} onChange={setDays} options={PERIODS} />
     </div>
+  );
+}
+
+/** Скелетон Stats: 4 карточки + 4 графика + распределение/fill-rate. */
+function StatsSkeleton() {
+  return (
+    <SkeletonRegion>
+      <div className="flex flex-col gap-4">
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+          {[0, 1, 2, 3].map((i) => (
+            <StatCardSkeleton key={i} />
+          ))}
+        </div>
+        <div className="grid gap-4 lg:grid-cols-2">
+          {[0, 1, 2, 3].map((i) => (
+            <ChartSkeleton key={i} />
+          ))}
+        </div>
+        <div className="grid gap-4 lg:grid-cols-2">
+          {[0, 1].map((i) => (
+            <Card key={i} className="p-4">
+              <Skeleton className="mb-3 h-4 w-40" />
+              <Skeleton className="h-24 w-full" rounded="rounded-lg" />
+            </Card>
+          ))}
+        </div>
+      </div>
+    </SkeletonRegion>
   );
 }
 
@@ -137,18 +184,88 @@ function StatsBody({ ov }: { ov: StatsOverview }) {
             <ShareBars rows={versions} sharePct={sharePct} />
           </div>
         </Card>
-        <Card>
-          <CardHeader title={t('stats.fillRate')} />
-          <div className="flex flex-col gap-3 p-4">
-            <div className="grid grid-cols-2 gap-3">
-              <Metric label={t('stats.ttm.p50')} value={dur(ttm.p50_seconds)} />
-              <Metric label={t('stats.ttm.p95')} value={dur(ttm.p95_seconds)} />
-            </div>
-            <p className="text-xs text-muted">{t('stats.ttm.note', { count: ttm.samples })}</p>
-            <p className="font-mono text-[11px] text-muted">{t('stats.ttm.source')}: {ttm.source}</p>
-          </div>
-        </Card>
+        <FillRateCard ttm={ttm} days={ov.days} refetchKey={ov.generated_at} />
       </div>
+    </div>
+  );
+}
+
+/**
+ * Fill-rate из двух источников: истинное queue→match (гистограмма time-to-match
+ * через metrics-proxy) и прокси allocation→start (из matches). Гистограмма
+ * пуста/недоступна → деградируем на прокси с пометкой (dev: данных мало).
+ */
+function FillRateCard({ ttm, days, refetchKey }: { ttm: TimeToMatch; days: number; refetchKey: string }) {
+  const { t } = useT();
+  const fmt = useFormat();
+  const dur = (sec: number | null | undefined) => (sec == null ? '—' : fmt.age(sec * 1000));
+  const trueTtm = useTrueTimeToMatch(days, refetchKey);
+
+  return (
+    <Card>
+      <CardHeader title={t('stats.fillRate')} />
+      <div className="flex flex-col gap-3 p-4">
+        <TtmSource label={t('stats.ttm.srcQueue')} note={t('stats.ttm.srcQueueNote')}>
+          {trueTtm.status === 'loading' ? (
+            <SourceNote>{t('stats.ttm.trueLoading')}</SourceNote>
+          ) : trueTtm.status !== 'ok' ? (
+            <SourceNote>{t('stats.ttm.trueUnavailable')}</SourceNote>
+          ) : trueTtm.p50 === null && trueTtm.p95 === null ? (
+            <SourceNote>{t('stats.ttm.trueDegraded')}</SourceNote>
+          ) : (
+            <PercentileRow p50={dur(trueTtm.p50)} p95={dur(trueTtm.p95)} />
+          )}
+        </TtmSource>
+        <TtmSource label={t('stats.ttm.srcAlloc')} note={t('stats.ttm.note', { count: ttm.samples })}>
+          <PercentileRow p50={dur(ttm.p50_seconds)} p95={dur(ttm.p95_seconds)} />
+        </TtmSource>
+      </div>
+    </Card>
+  );
+}
+
+interface TrueTtm {
+  status: MetricStatus;
+  p50: number | null;
+  p95: number | null;
+}
+
+/** Истинные p50/p95 time-to-match за период из гистограммы (два instant-запроса). */
+function useTrueTimeToMatch(days: number, refetchKey: string): TrueTtm {
+  const p50 = useInstantQuery({ query: timeToMatchQuantileQuery(0.5, days), refetchKey });
+  const p95 = useInstantQuery({ query: timeToMatchQuantileQuery(0.95, days), refetchKey });
+  const status = combineStatus(p50.status, p95.status);
+  return { status, p50: p50.vector?.[0]?.value ?? null, p95: p95.vector?.[0]?.value ?? null };
+}
+
+/** Один общий статус двух запросов: незавершённый/недоступный «побеждает» ok. */
+function combineStatus(a: MetricStatus, b: MetricStatus): MetricStatus {
+  if (a === 'loading' || b === 'loading') return 'loading';
+  if (a !== 'ok') return a;
+  if (b !== 'ok') return b;
+  return 'ok';
+}
+
+function TtmSource({ label, note, children }: { label: string; note: string; children: ReactNode }) {
+  return (
+    <div>
+      <div className="mb-1.5 font-mono text-xs font-medium text-ink">{label}</div>
+      {children}
+      <p className="mt-1.5 text-xs text-muted">{note}</p>
+    </div>
+  );
+}
+
+function SourceNote({ children }: { children: ReactNode }) {
+  return <div className="rounded-lg border border-dashed border-line px-3 py-2 text-xs text-muted">{children}</div>;
+}
+
+function PercentileRow({ p50, p95 }: { p50: string; p95: string }) {
+  const { t } = useT();
+  return (
+    <div className="grid grid-cols-2 gap-3">
+      <Metric label={t('stats.ttm.p50')} value={p50} />
+      <Metric label={t('stats.ttm.p95')} value={p95} />
     </div>
   );
 }

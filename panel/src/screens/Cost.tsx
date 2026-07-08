@@ -8,9 +8,23 @@ import { api } from '../lib/api';
 import type { StatsCost } from '../lib/api';
 import { useAsync } from '../lib/useAsync';
 import { useT } from '../lib/i18n';
-import { toStackModel, utilizationModel } from '../lib/stats';
-import { Card, CardHeader, EmptyState, ErrorNote, LoadingRow, StatCard } from '../components/ui';
+import { toStackModel, utilizationModel, versionColor } from '../lib/stats';
+import {
+  Card,
+  CardHeader,
+  ChartSkeleton,
+  EmptyState,
+  ErrorNote,
+  Skeleton,
+  SkeletonRegion,
+  StatCard,
+  StatCardSkeleton,
+} from '../components/ui';
 import { BarChart, ChartHeading, PeriodSelect, UtilBar } from '../components/charts';
+import { UtilizationChart } from '../components/UtilizationChart';
+
+/** Окно графика утилизации во времени, часов (совпадает с UtilizationChart). */
+const UTIL_WINDOW_HOURS = 6;
 
 const PERIODS = [7, 30, 90];
 
@@ -24,6 +38,9 @@ function fmtHours(v: number): string {
 export function Cost() {
   const [days, setDays] = useState(7);
   const cost = useAsync(() => api.statsCost(days), [days]);
+  // Данные показываем, только если они за ЗАПРОШЕННЫЙ период; иначе (первая
+  // загрузка или смена периода) — скелетон: раскладка держится, без «прыжка».
+  const ready = cost.data !== undefined && cost.data.days === days;
 
   if (cost.error !== undefined && cost.data === undefined) {
     return (
@@ -36,8 +53,29 @@ export function Cost() {
   return (
     <div className="flex flex-col gap-4">
       <Header days={days} setDays={setDays} />
-      {cost.data === undefined ? <LoadingRow /> : <CostBody cost={cost.data} />}
+      {ready && cost.data !== undefined ? <CostBody cost={cost.data} /> : <CostSkeleton />}
     </div>
+  );
+}
+
+/** Скелетон Cost: карточка итога + два графика + утилизация — под финальную раскладку. */
+function CostSkeleton() {
+  return (
+    <SkeletonRegion>
+      <div className="flex flex-col gap-4">
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+          <StatCardSkeleton />
+        </div>
+        <div className="grid gap-4 lg:grid-cols-2">
+          <ChartSkeleton />
+          <ChartSkeleton />
+        </div>
+        <Card className="p-4">
+          <Skeleton className="mb-3 h-4 w-40" />
+          <Skeleton rounded="rounded-lg" className="h-40 w-full" />
+        </Card>
+      </div>
+    </SkeletonRegion>
   );
 }
 
@@ -57,7 +95,12 @@ function Header({ days, setDays }: { days: number; setDays: (d: number) => void 
 function CostBody({ cost }: { cost: StatsCost }) {
   const { t } = useT();
   const byRegion = useMemo(() => toStackModel(cost.slot_hours_per_day_by_region), [cost.slot_hours_per_day_by_region]);
-  const byVersion = useMemo(() => toStackModel(cost.slot_hours_per_day_by_version), [cost.slot_hours_per_day_by_version]);
+  // Стек по версиям красим ЕДИНЫМ цветом версии (хэш semver), чтобы совпадал
+  // с распределением версий на Stats и с версиями в Matches.
+  const byVersion = useMemo(
+    () => toStackModel(cost.slot_hours_per_day_by_version, (k) => versionColor(k)),
+    [cost.slot_hours_per_day_by_version],
+  );
   const util = useMemo(() => utilizationModel(cost.utilization), [cost.utilization]);
 
   return (
@@ -97,19 +140,28 @@ function CostBody({ cost }: { cost: StatsCost }) {
         </Card>
       </div>
 
-      <Card>
-        <CardHeader title={t('cost.utilization')} aside={<span className="font-mono text-xs text-muted">{t('cost.utilSnapshot')}</span>} />
-        {util.length === 0 ? (
-          <EmptyState>{t('cost.noUtil')}</EmptyState>
-        ) : (
-          <div className="flex flex-col gap-4 p-4">
-            {util.map((u) => (
-              <UtilBar key={u.region} row={u} />
-            ))}
-            <p className="text-xs text-muted">{t('cost.utilNote')}</p>
-          </div>
-        )}
-      </Card>
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Card>
+          <CardHeader title={t('cost.utilization')} aside={<span className="font-mono text-xs text-muted">{t('cost.utilSnapshot')}</span>} />
+          {util.length === 0 ? (
+            <EmptyState>{t('cost.noUtil')}</EmptyState>
+          ) : (
+            <div className="flex flex-col gap-4 p-4">
+              {util.map((u) => (
+                <UtilBar key={u.region} row={u} />
+              ))}
+              <p className="text-xs text-muted">{t('cost.utilNote')}</p>
+            </div>
+          )}
+        </Card>
+        <Card>
+          <CardHeader
+            title={t('cost.utilOverTime')}
+            aside={<span className="font-mono text-xs text-muted">{t('cost.utilOverTimeNote', { hours: UTIL_WINDOW_HOURS })}</span>}
+          />
+          <UtilizationChart windowMs={UTIL_WINDOW_HOURS * 60 * 60_000} />
+        </Card>
+      </div>
     </div>
   );
 }

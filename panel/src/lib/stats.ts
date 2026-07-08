@@ -19,6 +19,25 @@ export function seriesColor(index: number): string {
   return `var(--cat-${String(index + 1)})`;
 }
 
+/**
+ * ЕДИНЫЙ цвет версии между экранами: детерминированный хэш semver → слот
+ * категориальной палитры (--cat-1..8). Одна и та же версия окрашивается
+ * одинаково везде (Stats version_distribution, Cost by_version, Matches/дровер)
+ * — независимо от того, сколько версий сейчас на экране и в каком порядке.
+ * Хэш — FNV-1a (32-bit), стабилен для одной строки во всех рантаймах.
+ */
+export function versionColor(version: string): string {
+  let h = 0x811c9dc5; // FNV offset basis
+  for (let i = 0; i < version.length; i++) {
+    h ^= version.charCodeAt(i);
+    h = Math.imul(h, 0x01000193); // FNV prime
+  }
+  return `var(--cat-${String(((h >>> 0) % CATEGORICAL_SLOTS) + 1)})`;
+}
+
+/** Назначение цвета серии по её ключу и индексу (для toStackModel). */
+export type ColorFor = (key: string, index: number) => string;
+
 /** Один сегмент колонки: ключ (регион/версия), значение, цвет серии. */
 export interface StackSegment {
   key: string;
@@ -52,9 +71,14 @@ export function niceCeil(v: number): number {
   return Number((step * pow).toPrecision(2));
 }
 
-/** StackedSeries (ответ master) → модель для BarChart. Цвет — по индексу ключа. */
-export function toStackModel(series: StackedSeries): StackModel {
-  const colorByKey = new Map(series.keys.map((k, i) => [k, seriesColor(i)]));
+/**
+ * StackedSeries (ответ master) → модель для BarChart. Цвет серии по умолчанию —
+ * по индексу ключа (регионы), но вызывающий может передать своё назначение —
+ * например `versionColor` для стека по версиям, чтобы цвет версии совпадал с
+ * другими экранами.
+ */
+export function toStackModel(series: StackedSeries, colorFor: ColorFor = (_k, i) => seriesColor(i)): StackModel {
+  const colorByKey = new Map(series.keys.map((k, i) => [k, colorFor(k, i)]));
   const columns: BarColumn[] = series.points.map((p) => ({
     date: p.date,
     total: p.total,
@@ -93,7 +117,8 @@ export interface VersionShareRow {
 }
 
 export function versionShareModel(dist: VersionShare[]): VersionShareRow[] {
-  return dist.map((d, i) => ({ version: d.version, matches: d.matches, share: d.share, color: seriesColor(i) }));
+  // Цвет — по хэшу версии (единый со Stats/Cost/Matches), не по рангу в списке.
+  return dist.map((d) => ({ version: d.version, matches: d.matches, share: d.share, color: versionColor(d.version) }));
 }
 
 /** Утилизация региона: занятость слотов по состояниям + свободный остаток. */

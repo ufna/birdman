@@ -3,6 +3,7 @@ import { render, screen } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import { I18nProvider } from '../lib/i18n';
 import { MetricChart } from '../components/MetricChart';
+import { UtilizationChart } from '../components/UtilizationChart';
 import { LogViewer } from '../components/LogViewer';
 
 // Грациозная деградация фичи 2: у старых матчей метрики/логи могли истечь —
@@ -28,6 +29,36 @@ describe('MetricChart — пустое окно метрик матча', () => 
     // Статичное окно матча (range с end) — один запрос, без поллинга.
     renderEn(<MetricChart query='birdman_server_players{server_id="gone"}' title="Players" range={{ start: 100, end: 200 }} />);
     expect(await screen.findByText('No data for the selected period.')).toBeTruthy();
+  });
+});
+
+describe('UtilizationChart — утилизация во времени, мягкая деградация', () => {
+  it('пустая matrix (метрик по состояниям нет) → «No data», без падения', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ status: 'success', data: { resultType: 'matrix', result: [] } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    );
+    renderEn(<UtilizationChart />);
+    expect(await screen.findByText('No data for the selected period.')).toBeTruthy();
+  });
+
+  it('VM не настроена (503) → подпись «метрики не настроены», не спиннер', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ error: 'metrics_unconfigured' }), {
+          status: 503,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    );
+    renderEn(<UtilizationChart />);
+    expect(await screen.findByText(/Metrics aren't configured/)).toBeTruthy();
   });
 });
 

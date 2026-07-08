@@ -68,6 +68,54 @@ body {
   }
 }
 
+/* Скелетон-плейсхолдер: мягкий бегущий блик поверх нейтральной подложки.
+ * Держит раскладку на первой загрузке / смене периода — контент не «прыгает». */
+@keyframes skeleton-shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
+}
+
+.skeleton {
+  background-color: var(--line);
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--card) 55%, transparent) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  background-repeat: no-repeat;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+/* Живой счётчик (Overview): короткая вспышка тона при изменении значения по SSE
+ * — глаз ловит обновление без «прыжка» (ширина стабильна за счёт tabular-nums). */
+@keyframes value-flash {
+  0% {
+    color: var(--accent);
+  }
+  100% {
+    color: inherit;
+  }
+}
+
+.value-flash {
+  animation: value-flash 0.7s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton {
+    animation: none;
+  }
+  .value-flash {
+    animation: none;
+  }
+}
+
 /* uPlot под токены: сетка и курсор не спорят с темой. */
 .uplot,
 .uplot * {

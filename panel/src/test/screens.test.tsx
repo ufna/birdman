@@ -107,6 +107,9 @@ describe('Stats — полная композиция', () => {
     expect(screen.getByRole('img', { name: 'Matches per day' })).toBeTruthy();
     expect(screen.getByRole('img', { name: 'Peak CCU per day' })).toBeTruthy();
     expect(screen.getByText('0.1.0')).toBeTruthy(); // версия в распределении
+    // fill-rate из двух источников подписан (истинный queue→match и прокси).
+    expect(screen.getByText('queue → match')).toBeTruthy();
+    expect(screen.getByText('allocation → start')).toBeTruthy();
   });
 });
 
@@ -118,5 +121,6 @@ describe('Cost — полная композиция', () => {
     expect(screen.getByRole('img', { name: 'Slot-hours per day · by region' })).toBeTruthy();
     expect(screen.getByText('Node utilization')).toBeTruthy();
     expect(screen.getByText('2/8 slots')).toBeTruthy(); // утилизация региона dev
+    expect(screen.getByText('Utilization over time')).toBeTruthy(); // новый график
   });
 });

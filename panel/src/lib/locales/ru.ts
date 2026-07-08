@@ -250,6 +250,9 @@ export const ru: Record<MessageKey, string> = {
   'ov.matchesHour': 'Матчи за час',
   'ov.recentEvents': 'Последние события',
   'ov.sparkAria': 'Матчи за последний час, по минутам',
+  'ov.updated': 'обновлено {ago}',
+  'ov.updatedNow': 'обновлено только что',
+  'ov.liveAria': 'Живой счётчик, обновляется по стриму событий',
 
   // — экран «События» —
   'events.feedUnavailable': 'Лента событий недоступна.',
@@ -348,11 +351,18 @@ export const ru: Record<MessageKey, string> = {
   'stats.ttm.p95': 'p95',
   'stats.ttm.note': 'Аллокация → старт матча (готовность сервера), прокси fill-rate. Размер выборки: {count}.',
   'stats.ttm.source': 'источник',
+  'stats.ttm.srcQueue': 'очередь → матч',
+  'stats.ttm.srcAlloc': 'аллокация → старт',
+  'stats.ttm.srcQueueNote': 'Истинное ожидание из гистограммы birdman_mm_time_to_match_seconds за период.',
+  'stats.ttm.trueDegraded': 'Мало данных матчмейкера за период — показываем прокси аллокация→старт.',
+  'stats.ttm.trueUnavailable': 'Metrics-proxy недоступен — гистограммный time-to-match скрыт.',
+  'stats.ttm.trueLoading': 'Загрузка гистограммы…',
 
   // — метр утилизации (Cost) —
   'stats.util.allocated': 'в игре',
   'stats.util.ready': 'готовы',
   'stats.util.draining': 'опустошаются',
+  'stats.util.creating': 'создаются',
   'stats.util.free': 'свободно',
   'stats.util.aria': 'Утилизация слотов региона {region}',
   'stats.util.slots.one': '{used}/{capacity} слот',
@@ -370,7 +380,9 @@ export const ru: Record<MessageKey, string> = {
   'cost.utilSnapshot': 'текущий снапшот',
   'cost.noUtil': 'Нет активных тачек для утилизации.',
   'cost.utilNote':
-    'Снапшот allocated/ready/draining против ёмкости активных нод. Утилизация во времени — через metrics-proxy.',
+    'Снапшот allocated/ready/draining против ёмкости активных нод. Утилизация во времени — на графике ниже.',
+  'cost.utilOverTime': 'Утилизация во времени',
+  'cost.utilOverTimeNote': 'живые дедики по состоянию · окно {hours}ч',
 
   // — экран «Алерты» (описания приходят из vmalert как есть; переводим только обвязку) —
   'alerts.readonly': 'только чтение · mute/edit — конфиг vmalert (TODO)',

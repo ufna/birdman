@@ -3,13 +3,15 @@
 // времени, легендой последнего значения и аккуратными состояниями «метрики не
 // настроены» (VM off) / «нет данных» / ошибка — панель не падает, а объясняет.
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import uPlot from 'uplot';
 import 'uplot/dist/uPlot.min.css';
 import { cssVar, useTheme } from '../lib/theme';
 import { useT } from '../lib/i18n';
-import { queryRange, toAlignedData, formatMetric } from '../lib/metrics';
+import { toAlignedData, formatMetric } from '../lib/metrics';
 import type { MetricRange, MetricSeries, Unit } from '../lib/metrics';
+import { useQueryRange } from '../lib/useMetrics';
+import { MetricMessage } from './MetricMessage';
 
 interface MetricChartProps {
   query: string;
@@ -24,8 +26,6 @@ interface MetricChartProps {
   refreshMs?: number;
 }
 
-type Status = 'loading' | 'ok' | 'unconfigured' | 'unreachable' | 'error';
-
 export function MetricChart({
   query,
   title,
@@ -35,56 +35,7 @@ export function MetricChart({
   height = 150,
   refreshMs = 15_000,
 }: MetricChartProps) {
-  const [status, setStatus] = useState<Status>('loading');
-  const [series, setSeries] = useState<MetricSeries[] | null>(null);
-  const [errorMsg, setErrorMsg] = useState('');
-
-  // Статичное окно (история матча) — только один запрос, без поллинга.
-  const rangeStart = range?.start;
-  const rangeEnd = range?.end;
-  const isStatic = rangeStart !== undefined && rangeEnd !== undefined;
-
-  useEffect(() => {
-    let active = true;
-    let ctrl: AbortController | null = null;
-    const load = () => {
-      ctrl?.abort();
-      ctrl = new AbortController();
-      const end = rangeEnd ?? Math.floor(Date.now() / 1000);
-      const start = rangeStart ?? end - Math.floor(windowMs / 1000);
-      const step = Math.max(15, Math.round((end - start) / 150));
-      queryRange({ query, start, end, step, signal: ctrl.signal })
-        .then((res) => {
-          if (!active) return;
-          if (res.kind === 'unavailable') {
-            setStatus(res.reason === 'unconfigured' ? 'unconfigured' : 'unreachable');
-            return;
-          }
-          setSeries(res.series);
-          setStatus('ok');
-        })
-        .catch((e: unknown) => {
-          if (!active || ctrl?.signal.aborted) return;
-          // Прошлые данные не сбрасываем — держим график, покажем ошибку
-          // только если данных ещё не было (как страховочный поллинг useData).
-          setSeries((prev) => {
-            if (prev === null) {
-              setErrorMsg(e instanceof Error ? e.message : String(e));
-              setStatus('error');
-            }
-            return prev;
-          });
-        });
-    };
-    load();
-    // История матча не тикает — не поллим; живое/скользящее окно дозапрашиваем.
-    const timer = isStatic ? null : setInterval(load, refreshMs);
-    return () => {
-      active = false;
-      ctrl?.abort();
-      if (timer !== null) clearInterval(timer);
-    };
-  }, [query, windowMs, refreshMs, rangeStart, rangeEnd, isStatic]);
+  const { status, series, error: errorMsg } = useQueryRange({ query, windowMs, range, refreshMs });
 
   const aligned = useMemo(() => toAlignedData(series ?? []), [series]);
   const hasData = aligned.x.length > 0;
@@ -102,43 +53,9 @@ export function MetricChart({
         {status === 'ok' && hasData ? (
           <Plot aligned={aligned} unit={unit} height={height} />
         ) : (
-          <ChartMessage status={status} hasData={hasData} error={errorMsg} height={height} />
+          <MetricMessage status={status} hasData={hasData} error={errorMsg} height={height} />
         )}
       </div>
-    </div>
-  );
-}
-
-function ChartMessage({
-  status,
-  hasData,
-  error,
-  height,
-}: {
-  status: Status;
-  hasData: boolean;
-  error: string;
-  height: number;
-}) {
-  const { t } = useT();
-  const text =
-    status === 'loading'
-      ? t('metric.loading')
-      : status === 'unconfigured'
-        ? t('metric.unconfigured')
-        : status === 'unreachable'
-          ? t('metric.unreachable')
-          : status === 'error'
-            ? t('metric.error', { error })
-            : !hasData
-              ? t('metric.noData')
-              : '';
-  return (
-    <div
-      className="flex items-center justify-center px-3 text-center text-xs text-muted"
-      style={{ height }}
-    >
-      {text}
     </div>
   );
 }
