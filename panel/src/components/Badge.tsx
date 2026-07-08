@@ -53,20 +53,55 @@ export function toneOfMatchState(state: string): Tone {
   }
 }
 
+/**
+ * Тон состояния версии (store/deploy.go: registered → prepulling → active →
+ * deprecated → disabled). active — good; prepulling — warn (идёт прогрев);
+ * deprecated — accent (ещё в окне мультиверсий, доигрывает); registered/
+ * disabled — neutral.
+ */
+export function toneOfVersionState(state: string): Tone {
+  switch (state) {
+    case 'active':
+      return 'good';
+    case 'prepulling':
+      return 'warn';
+    case 'deprecated':
+      return 'accent';
+    case 'registered':
+    case 'disabled':
+      return 'neutral';
+    default:
+      return 'neutral';
+  }
+}
+
 /** Тон события ленты по kind (models.go master). */
 export function toneOfEventKind(kind: string): Tone {
   switch (kind) {
     case 'node_quarantine':
     case 'server_failed':
     case 'crash_loop':
+    case 'deploy_failed':
+    case 'agent_upgrade_failed':
       return 'dead';
     case 'allocation_failed':
+    case 'node_drain':
+    case 'version_disabled':
+    case 'server_drain':
       return 'warn';
     case 'node_recovered':
+    case 'server_recovered':
+    case 'node_undrain':
+    case 'deploy_activated':
+    case 'agent_upgrade_succeeded':
       return 'good';
     case 'node_created':
     case 'version_registered':
     case 'fleet_updated':
+    case 'deploy_started':
+    case 'deploy_node_pulled':
+    case 'deploy_rolled_back':
+    case 'agent_upgrade':
       return 'accent';
     default:
       return 'neutral';
