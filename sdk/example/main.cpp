@@ -1,20 +1,22 @@
-// birdman SDK example "game": a UDP chat-lite server wired to the full
-// birdman lifecycle through sdk/core — the C++ twin of examples/stub-server.
-// Without BIRDMAN_SOCKET it runs standalone (SDK no-op mode): same binary,
-// no agent, zero errors.
+// birdman SDK example "game": a UDP chat server wired to the full birdman
+// lifecycle through sdk/core — the C++ twin of examples/stub-server. Without
+// BIRDMAN_SOCKET it runs standalone (SDK no-op mode): same binary, no agent,
+// zero errors.
 //
 // UDP protocol (text, one datagram = one command):
-//   PING          -> PONG server=<id> players=<n> state=<ready|allocated|match|draining>
-//   JOIN <name>   -> WELCOME <name> players=<n>
-//   LEAVE         -> BYE <name>
-//   anything else -> ECHO <input>
+//   PING          -> PONG server=<id> players=<n> state=<ready|allocated|match|draining> ver=<v>
+//   JOIN <name>   -> WELCOME <name> players=<n>   (+ broadcast JOINED <name>)
+//   SAY <text>    -> broadcast MSG <name>: <text>
+//   LEAVE         -> BYE <name>                    (+ broadcast LEFT <name>)
+//   anything else -> ERR unknown command
 //
 // Lifecycle (docs/specs/sdk.md §2): NotifyReady after the port is bound;
 // match starts when a match is allocated AND a player is in; match ends when
 // the last player leaves -> NotifyMatchEnd -> exit 0 (one-shot dedicated
 // server). Drain: finish the current match within the deadline, never start
-// a new one. Uses CallbackMode::kPoll: events are handled on the main loop,
-// so this file needs no locks at all.
+// a new one. Idle players (no packet for 60s) time out, matching the stub.
+// Uses CallbackMode::kPoll: events are handled on the main loop, so this file
+// needs no locks at all.
 //
 // `--client <port>` is a tiny smoke-test client (JOIN -> WELCOME -> LEAVE ->
 // BYE) used by sdk/scripts/smoke.sh.
@@ -32,9 +34,26 @@
 
 #include "birdman/birdman.h"
 
+// App (game) version, distinct from the frozen SDK wire version. Baked in at
+// build time (-DBIRDMAN_EXAMPLE_VERSION, wired to the image tag in the
+// Dockerfile) so a UDP PING reveals which build answered — used to prove a
+// soft deploy actually switched versions.
+#ifndef BIRDMAN_EXAMPLE_VERSION
+#define BIRDMAN_EXAMPLE_VERSION "dev"
+#endif
+
 namespace {
 
 using Clock = std::chrono::steady_clock;
+
+constexpr auto kPlayerTimeout = std::chrono::seconds(60);  // idle player drop (stub parity)
+constexpr auto kSweepEvery = std::chrono::seconds(5);
+
+struct Player {
+  std::string name;
+  sockaddr_in addr{};
+  Clock::time_point seen{};
+};
 
 struct Game {
   birdman::ServerLink link;
@@ -43,7 +62,7 @@ struct Game {
   bool match_live = false;
   bool draining = false;
   Clock::time_point drain_deadline{};
-  std::map<std::string, std::string> players;  // "ip:port" -> name
+  std::map<std::string, Player> players;  // "ip:port" -> player
 
   const char* State() const {
     if (draining) return "draining";
@@ -64,32 +83,69 @@ void Reply(int fd, const sockaddr_in& to, const std::string& msg) {
   sendto(fd, line.data(), line.size(), 0, reinterpret_cast<const sockaddr*>(&to), sizeof(to));
 }
 
+void Broadcast(int fd, const Game& g, const std::string& msg) {
+  for (const auto& kv : g.players) Reply(fd, kv.second.addr, msg);
+}
+
 void HandlePacket(Game* g, int fd, const sockaddr_in& from, std::string msg) {
   while (!msg.empty() && (msg.back() == '\n' || msg.back() == '\r')) msg.pop_back();
   const std::string key = PeerKey(from);
+  const auto now = Clock::now();
+  if (auto it = g->players.find(key); it != g->players.end()) it->second.seen = now;
+
   if (msg.rfind("PING", 0) == 0) {
     Reply(fd, from,
           "PONG server=" + g->link.ServerId() + " players=" + std::to_string(g->players.size()) +
-              " state=" + g->State());
+              " state=" + g->State() + " ver=" BIRDMAN_EXAMPLE_VERSION);
   } else if (msg.rfind("JOIN", 0) == 0) {
     if (g->draining) {
       Reply(fd, from, "ERR draining, no new players");
       return;
     }
     std::string name = msg.size() > 5 ? msg.substr(5) : "anon";
-    g->players[key] = name;
+    g->players[key] = Player{name, from, now};
     g->link.SetPlayerCount(static_cast<int>(g->players.size()));
     Reply(fd, from, "WELCOME " + name + " players=" + std::to_string(g->players.size()));
+    Broadcast(fd, *g, "JOINED " + name);
+  } else if (msg.rfind("SAY", 0) == 0) {
+    auto it = g->players.find(key);
+    if (it == g->players.end()) {
+      Reply(fd, from, "ERR join first");
+      return;
+    }
+    std::string text = msg.size() > 4 ? msg.substr(4) : "";
+    Broadcast(fd, *g, "MSG " + it->second.name + ": " + text);
   } else if (msg.rfind("LEAVE", 0) == 0) {
     auto it = g->players.find(key);
     if (it != g->players.end()) {
-      Reply(fd, from, "BYE " + it->second);
+      const std::string name = it->second.name;
+      Reply(fd, from, "BYE " + name);
       g->players.erase(it);
+      Broadcast(fd, *g, "LEFT " + name);
       g->link.SetPlayerCount(static_cast<int>(g->players.size()));
     }
   } else {
-    Reply(fd, from, "ECHO " + msg);
+    Reply(fd, from, "ERR unknown command (PING|JOIN <name>|SAY <text>|LEAVE)");
   }
+}
+
+// Drop players we have not heard from in kPlayerTimeout; a real game does this
+// so a crashed client does not pin a match open forever. Returns true if any
+// were removed (so the caller refreshes the player count).
+bool SweepIdle(Game* g, int fd, Clock::time_point now) {
+  bool changed = false;
+  for (auto it = g->players.begin(); it != g->players.end();) {
+    if (now - it->second.seen > kPlayerTimeout) {
+      const std::string name = it->second.name;
+      it = g->players.erase(it);
+      Broadcast(fd, *g, "LEFT " + name + " (timeout)");
+      changed = true;
+    } else {
+      ++it;
+    }
+  }
+  if (changed) g->link.SetPlayerCount(static_cast<int>(g->players.size()));
+  return changed;
 }
 
 int RunServer() {
@@ -124,12 +180,13 @@ int RunServer() {
     std::perror("bind");
     return 1;
   }
-  std::printf("[example] server_id=%s udp=:%d managed=%s\n", g.link.ServerId().c_str(), port,
-              g.managed ? "yes" : "no (standalone)");
+  std::printf("[example] server_id=%s udp=:%d version=%s managed=%s\n", g.link.ServerId().c_str(),
+              port, BIRDMAN_EXAMPLE_VERSION, g.managed ? "yes" : "no (standalone)");
 
   g.link.NotifyReady();  // port bound, "map loaded" — ready for a match
 
-  auto next_metric = Clock::now() + std::chrono::seconds(5);
+  auto next_metric = Clock::now() + kSweepEvery;
+  auto next_sweep = Clock::now() + kSweepEvery;
   while (true) {
     g.link.PollCallbacks();  // on_allocated / on_drain_requested run here
 
@@ -154,9 +211,14 @@ int RunServer() {
       g.link.NotifyMatchEnd(birdman::MatchResult::kAborted);
       break;
     }
-    if (Clock::now() >= next_metric) {
+    const auto now = Clock::now();
+    if (now >= next_sweep) {
+      SweepIdle(&g, fd, now);
+      next_sweep = now + kSweepEvery;
+    }
+    if (now >= next_metric) {
       g.link.ReportMetric("tick_ms", 16.6);  // a real game reports its frame time
-      next_metric = Clock::now() + std::chrono::seconds(5);
+      next_metric = now + kSweepEvery;
     }
 
     pollfd pfd{fd, POLLIN, 0};
@@ -175,7 +237,9 @@ int RunServer() {
   return 0;
 }
 
-// Minimal smoke-test client: JOIN -> WELCOME, LEAVE -> BYE.
+// Minimal smoke-test client: JOIN -> WELCOME, LEAVE -> BYE. Tolerates the
+// server's unsolicited broadcasts (JOINED/LEFT) by scanning replies for the
+// expected prefix.
 int RunClient(int port) {
   int fd = socket(AF_INET, SOCK_DGRAM, 0);
   sockaddr_in to{};
@@ -186,14 +250,16 @@ int RunClient(int port) {
   auto rpc = [&](const std::string& cmd, const char* want) -> bool {
     for (int attempt = 0; attempt < 20; ++attempt) {  // UDP: retry politely
       sendto(fd, cmd.data(), cmd.size(), 0, reinterpret_cast<sockaddr*>(&to), sizeof(to));
-      pollfd pfd{fd, POLLIN, 0};
-      if (poll(&pfd, 1, 500) <= 0) continue;
-      char buf[2048];
-      ssize_t n = recv(fd, buf, sizeof(buf) - 1, 0);
-      if (n <= 0) continue;
-      buf[n] = '\0';
-      std::printf("[client] %s -> %s", cmd.c_str(), buf);
-      if (std::strncmp(buf, want, std::strlen(want)) == 0) return true;
+      for (int drain = 0; drain < 8; ++drain) {  // skip broadcasts, find the reply
+        pollfd pfd{fd, POLLIN, 0};
+        if (poll(&pfd, 1, 500) <= 0) break;
+        char buf[2048];
+        ssize_t n = recv(fd, buf, sizeof(buf) - 1, 0);
+        if (n <= 0) break;
+        buf[n] = '\0';
+        std::printf("[client] %s -> %s", cmd.c_str(), buf);
+        if (std::strncmp(buf, want, std::strlen(want)) == 0) return true;
+      }
     }
     std::fprintf(stderr, "[client] no %s reply for %s\n", want, cmd.c_str());
     return false;

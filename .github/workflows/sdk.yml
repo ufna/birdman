@@ -10,6 +10,17 @@ on:
     paths:
       - 'sdk/**'
       - '.github/workflows/sdk.yml'
+  # Ручной выпуск образа SDK-примера (де-риск замороженного C++ контракта на
+  # реальном агенте): собрать и запушить ghcr.io/<owner>/birdman-sdk-example с
+  # явным semver-тегом — им кормится POST /v1/versions / /v1/deploy master'а.
+  # Тот же приём, что у stub-server.yml (итерация 3). Пуш — встроенным
+  # GITHUB_TOKEN, PAT нигде.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'semver-тег образа (например 0.9.0)'
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -56,3 +67,41 @@ jobs:
 
       - name: Test (TSAN)
         run: ctest --test-dir sdk/build-tsan --output-on-failure
+
+  # Собрать sdk/core+example в один статический бинарь (musl) и запушить как
+  # distroless-образ. Только по workflow_dispatch, после зелёных юнит/smoke
+  # тестов. Образ = игровой сервер на C++ SDK, ведёт себя как стаб.
+  image:
+    if: github.event_name == 'workflow_dispatch'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate tag
+        run: |
+          echo "${{ inputs.tag }}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$' \
+            || { echo "tag '${{ inputs.tag }}' is not semver"; exit 1; }
+
+      # Пуш в GHCR — встроенным GITHUB_TOKEN (packages: write). PAT нигде.
+      - name: Login GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Контекст — sdk/ (Dockerfile тянет core+example+CMakeLists); APP_VERSION
+      # = тег, вшивается в бинарь и виден в PING/PONG (проверка смены версии).
+      - name: Build & push
+        uses: docker/build-push-action@v6
+        with:
+          context: sdk
+          file: sdk/example/Dockerfile
+          build-args: |
+            APP_VERSION=${{ inputs.tag }}
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/birdman-sdk-example:${{ inputs.tag }}
