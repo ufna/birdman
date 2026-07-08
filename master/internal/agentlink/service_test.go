@@ -26,7 +26,7 @@ func startServer(t *testing.T, st *store.Store) (*agentlink.Hub, agentlinkv1.Age
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	hub := agentlink.NewHub(log)
-	svc := agentlink.NewService(st, hub, log)
+	svc := agentlink.NewService(st, hub, nil, log)
 
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()

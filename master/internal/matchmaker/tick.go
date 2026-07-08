@@ -17,6 +17,7 @@ type qt struct {
 	id      string
 	player  string
 	bucket  string
+	version string // client_version (compat checks against candidates)
 	created time.Time
 	regions []RegionPing
 }
@@ -42,7 +43,7 @@ func (mm *Matchmaker) RunOnce(ctx context.Context) error {
 		case t.status == StatusQueued:
 			queued[t.project] = append(queued[t.project], qt{
 				id: t.id, player: t.playerID, bucket: t.bucket,
-				created: t.createdAt, regions: t.regions,
+				version: t.clientVersion, created: t.createdAt, regions: t.regions,
 			})
 			depth[t.regions[0].Region]++ // depth by the player's best region
 		case now.Sub(t.terminalAt) > mm.retention():
@@ -71,8 +72,6 @@ func (mm *Matchmaker) RunOnce(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-type regionBucket struct{ region, bucket string }
-
 func (mm *Matchmaker) matchProject(ctx context.Context, project string, tks []qt, now time.Time) error {
 	proj, err := mm.st.GetProject(ctx, project)
 	if err != nil {
@@ -87,27 +86,15 @@ func (mm *Matchmaker) matchProject(ctx context.Context, project string, tks []qt
 		return err
 	}
 
-	// (region, bucket) → preferred version; candidates come preference-ordered
-	// (fleet-active first, newest first), the first hit wins.
-	verFor := map[regionBucket]store.RegionVersion{}
-	for _, c := range candidates {
-		b, err := MajorMinor(c.Semver)
-		if err != nil {
-			continue // logged at submit time
-		}
-		if _, ok := verFor[regionBucket{c.Region, b}]; !ok {
-			verFor[regionBucket{c.Region, b}] = c
-		}
-	}
-	globalBuckets := candidateBuckets(candidates, mm.log)
-
-	// A queued ticket whose bucket no longer matches any active version →
-	// update_required (active version changed under it, ops.md §3). With no
-	// candidates at all the fleet is not set up yet — keep waiting (TTL).
+	// A queued ticket compatible with NO live candidate → update_required
+	// (active version changed under it / the window closed, ops.md §3). With
+	// no candidates at all the fleet is not set up yet — keep waiting (TTL).
+	// Compatibility is identical inside a bucket (BucketOf), so it is
+	// resolved once per bucket.
 	byBucket := map[string][]qt{}
 	var stale []string
 	for _, t := range tks {
-		if len(globalBuckets) > 0 && !globalBuckets[t.bucket] {
+		if len(candidates) > 0 && !mm.compatibleWithAny(t.version, candidates) {
 			stale = append(stale, t.id)
 			continue
 		}
@@ -123,15 +110,28 @@ func (mm *Matchmaker) matchProject(ctx context.Context, project string, tks []qt
 		mm.mu.Unlock()
 	}
 
-	for bucket, list := range byBucket {
-		mm.matchBucket(ctx, project, bucket, size, list, verFor, now)
+	for _, list := range byBucket {
+		// region → preferred version FOR THIS BUCKET: candidates come
+		// preference-ordered (fleet-active, active, deprecated window; newest
+		// first within a rank) — the first compatible hit wins, so a client
+		// covered by an active version never lands on a deprecated one.
+		verFor := map[string]store.RegionVersion{}
+		for _, c := range candidates {
+			if _, ok := verFor[c.Region]; ok {
+				continue
+			}
+			if mm.cfg.Compat.Compatible(list[0].version, c.Semver) {
+				verFor[c.Region] = c
+			}
+		}
+		mm.matchBucket(ctx, project, size, list, verFor, now)
 	}
 	return nil
 }
 
 // matchBucket forms and allocates matches inside one (project, compat-bucket).
-func (mm *Matchmaker) matchBucket(ctx context.Context, project, bucket string, size int,
-	list []qt, verFor map[regionBucket]store.RegionVersion, now time.Time) {
+func (mm *Matchmaker) matchBucket(ctx context.Context, project string, size int,
+	list []qt, verFor map[string]store.RegionVersion, now time.Time) {
 
 	pool := make(map[string]qt, len(list))
 	for _, t := range list {
@@ -140,11 +140,11 @@ func (mm *Matchmaker) matchBucket(ctx context.Context, project, bucket string, s
 	exhausted := map[string]bool{} // regions that answered no_capacity this tick
 
 	for {
-		region, group := mm.bestGroup(pool, bucket, size, verFor, exhausted, now)
+		region, group := mm.bestGroup(pool, size, verFor, exhausted, now)
 		if region == "" {
 			return
 		}
-		ver := verFor[regionBucket{region, bucket}]
+		ver := verFor[region]
 		matchID := uuid.NewString()
 		alloc, err := mm.st.Allocate(ctx, project, region, &ver.VersionID, matchID, int32(len(group)))
 		if errors.Is(err, store.ErrNoCapacity) {
@@ -166,25 +166,21 @@ func (mm *Matchmaker) matchBucket(ctx context.Context, project, bucket string, s
 			delete(pool, t.id)
 		}
 		mm.log.Info("mm: match formed", "project", project, "region", region,
-			"match_id", matchID, "server_id", alloc.ServerID, "players", len(group))
+			"match_id", matchID, "server_id", alloc.ServerID, "version", ver.Semver, "players", len(group))
 	}
 }
 
 // bestGroup picks the region with the lowest median group rtt that can field
 // a full group of the oldest eligible tickets (master.md §4).
-func (mm *Matchmaker) bestGroup(pool map[string]qt, bucket string, size int,
-	verFor map[regionBucket]store.RegionVersion, exhausted map[string]bool, now time.Time) (string, []qt) {
+func (mm *Matchmaker) bestGroup(pool map[string]qt, size int,
+	verFor map[string]store.RegionVersion, exhausted map[string]bool, now time.Time) (string, []qt) {
 
 	// Deterministic region order for stable tie-breaks.
-	regionSet := map[string]bool{}
-	for rb := range verFor {
-		if rb.bucket == bucket && !exhausted[rb.region] {
-			regionSet[rb.region] = true
+	regions := make([]string, 0, len(verFor))
+	for r := range verFor {
+		if !exhausted[r] {
+			regions = append(regions, r)
 		}
-	}
-	regions := make([]string, 0, len(regionSet))
-	for r := range regionSet {
-		regions = append(regions, r)
 	}
 	sort.Strings(regions)
 

@@ -22,3 +22,10 @@ matchmaking:
   join_token:
     enabled: false      # HMAC join_token в matched-ответе (master.md §4)
     secret: ""          # НЕ класть секрет в файл — env BIRDMAN_MM_JOIN_SECRET
+
+# Совместимость клиент↔сервер (docs/specs/ops.md §3).
+compat:
+  default: "major.minor"  # единственное поддерживаемое правило (можно опустить)
+  overrides: []           # окна миграции, аддитивно к default:
+  # - client: "1.4.x"             # клиенты 1.4.* могут играть ещё и на...
+  #   servers: ["1.4.x", "1.5.x"] # ...серверах 1.4.* и 1.5.*

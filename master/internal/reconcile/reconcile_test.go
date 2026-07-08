@@ -516,6 +516,208 @@ func TestCleanMatchCycleDoesNotFeedCrashLoop(t *testing.T) {
 	}
 }
 
+// --- multi-version window (итерация 3, master.md §5) ---
+
+// flipActive deploys v2 through the real store flip: v2 → prepulling →
+// active, the old active version → deprecated (deprecated_at = now).
+func flipActive(t *testing.T, st *store.Store, versionID string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := st.Pool.Exec(ctx,
+		`update versions set state = 'prepulling' where id = $1::uuid`, versionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.ActivateVersion(ctx, versionID, "prepulling", store.EventDeployActivated, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// In the window both buffers are kept: full buffer_ready for the active
+// version, min(2, buffer_ready) for the deprecated one.
+func TestWindowKeepsBothBuffers(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 20)
+	f.UpsertFleet(t, 3, 50) // active 1.0.0, buffer 3
+	v2 := f.AddVersion(t, "1.1.0")
+	flipActive(t, st, v2) // 1.0.0 → deprecated
+	r, sender := newReconciler(st)
+
+	if err := r.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	byImage := map[string]int{}
+	for _, c := range sender.take() {
+		if s := c.Msg.GetStart(); s != nil {
+			byImage[s.GetImageRef()]++
+		}
+	}
+	if byImage["ghcr.io/example/game-server:1.1.0"] != 3 {
+		t.Fatalf("active buffer: want 3 starts of 1.1.0, got %+v", byImage)
+	}
+	if byImage["ghcr.io/example/game-server:1.0.0"] != 2 {
+		t.Fatalf("deprecated buffer: want min(2,3)=2 starts of 1.0.0, got %+v", byImage)
+	}
+
+	// Steady state stays quiet.
+	if err := r.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if cmds := sender.take(); len(cmds) != 0 {
+		t.Fatalf("window steady state must be quiet, got %d commands", len(cmds))
+	}
+}
+
+// Deprecated ready servers beyond min(2, buffer) are stopped (oldest first);
+// allocated ones keep playing.
+func TestWindowDeprecatedSurplusStopped(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 20)
+	buffer := int32(0)
+	if _, err := st.UpsertFleet(context.Background(), store.UpsertFleetParams{
+		Project: f.Project, Region: f.Region, ActiveVersion: &f.VersionID, BufferReady: &buffer,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	v2 := f.AddVersion(t, "1.1.0")
+	flipActive(t, st, v2)
+
+	// buffer_ready 0 → deprecated target min(2,0)=0: every ready v1 goes.
+	oldest := f.InsertServer(t, f.NodeID, f.VersionID, "ready", 20001, 2*time.Hour)
+	f.InsertServer(t, f.NodeID, f.VersionID, "ready", 20002, time.Hour)
+	alive := f.InsertServer(t, f.NodeID, f.VersionID, "allocated", 20003, 2*time.Hour)
+	r, sender := newReconciler(st)
+
+	if err := r.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	stopped := map[string]bool{}
+	for _, c := range sender.take() {
+		if s := c.Msg.GetStop(); s != nil {
+			stopped[s.GetServerId()] = true
+		}
+		if d := c.Msg.GetDrainServer(); d != nil {
+			t.Fatalf("in-window deprecated allocated server must not be drained: %+v", d)
+		}
+	}
+	if len(stopped) != 2 || !stopped[oldest] {
+		t.Fatalf("want both ready v1 stopped (incl. oldest), got %v", stopped)
+	}
+	sv, err := st.GetServer(context.Background(), alive)
+	if err != nil || sv.State != "allocated" {
+		t.Fatalf("allocated deprecated server must keep playing: %+v %v", sv, err)
+	}
+}
+
+// reap_ttl_min closes the window: the deprecated version goes disabled, its
+// ready buffer is reaped and its LIVE match gets a per-server drain (exactly
+// once); the dedik plays out and exits itself.
+func TestWindowReapTTLDrainsLiveMatch(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 20)
+	buffer, maxServers, reapTTL := int32(1), int32(50), int32(30)
+	if _, err := st.UpsertFleet(context.Background(), store.UpsertFleetParams{
+		Project: f.Project, Region: f.Region, ActiveVersion: &f.VersionID,
+		BufferReady: &buffer, MaxServers: &maxServers, ReapTTLMin: &reapTTL,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	v2 := f.AddVersion(t, "1.1.0")
+	flipActive(t, st, v2)
+	ctx := context.Background()
+
+	// v1 (deprecated): one ready + one live match; v2: a live match too.
+	v1ready := f.InsertServer(t, f.NodeID, f.VersionID, "ready", 20001, 0)
+	v1match := f.InsertServer(t, f.NodeID, f.VersionID, "allocated", 20002, 0)
+	v2match := f.InsertServer(t, f.NodeID, v2, "allocated", 20003, 0)
+	r, sender := newReconciler(st)
+
+	// Window still open (fresh deprecated_at): nothing v1-related is touched.
+	if err := r.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	sender.take()
+	if got := versionState(t, st, f.VersionID); got != "deprecated" {
+		t.Fatalf("window must be open, got %s", got)
+	}
+
+	// Fast-forward past the TTL → the window closes on the next pass.
+	if err := st.SetVersionDeprecatedAt(ctx, f.VersionID,
+		time.Now().Add(-time.Duration(reapTTL+1)*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := versionState(t, st, f.VersionID); got != "disabled" {
+		t.Fatalf("expired deprecated version: want disabled, got %s", got)
+	}
+	if n, _ := st.CountEvents(ctx, store.EventVersionDisabled); n != 1 {
+		t.Fatalf("want 1 version_disabled event, got %d", n)
+	}
+
+	var drains, stops int
+	for _, c := range sender.take() {
+		if d := c.Msg.GetDrainServer(); d != nil {
+			drains++
+			if d.GetServerId() != v1match {
+				t.Fatalf("drained wrong server: %s (want %s)", d.GetServerId(), v1match)
+			}
+			if d.GetDeadlineS() != store.DrainDeadlineS || d.GetReason() == "" {
+				t.Fatalf("drain command: %+v", d)
+			}
+		}
+		if s := c.Msg.GetStop(); s != nil {
+			stops++
+			if s.GetServerId() != v1ready {
+				t.Fatalf("stopped wrong server: %s (want %s)", s.GetServerId(), v1ready)
+			}
+		}
+	}
+	if drains != 1 || stops != 1 {
+		t.Fatalf("want 1 drain + 1 stop, got %d/%d", drains, stops)
+	}
+	if n, _ := st.CountEvents(ctx, store.EventServerDrain); n != 1 {
+		t.Fatalf("want 1 server_drain event, got %d", n)
+	}
+	sv, err := st.GetServer(ctx, v1match)
+	if err != nil || sv.State != "draining" {
+		t.Fatalf("drained server state: %+v %v", sv, err)
+	}
+	if sv, _ := st.GetServer(ctx, v2match); sv.State != "allocated" {
+		t.Fatalf("active-version match must be untouched, got %s", sv.State)
+	}
+
+	// The drain fires exactly once: the next pass is quiet about v1match.
+	if err := r.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range sender.take() {
+		if d := c.Msg.GetDrainServer(); d != nil {
+			t.Fatalf("duplicate drain: %+v", d)
+		}
+	}
+
+	// The dedik finishes and exits: stopped report → reaped, match closed by
+	// its own match_end as usual (agent side covered in agent tests).
+	if err := st.ApplyHeartbeat(ctx, f.NodeID, []store.ServerReport{
+		{ServerID: v1match, State: "stopped"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if sv, _ := st.GetServer(ctx, v1match); sv.State != "reaped" {
+		t.Fatalf("drained server after exit: want reaped, got %s", sv.State)
+	}
+}
+
+func versionState(t *testing.T, st *store.Store, id string) string {
+	t.Helper()
+	v, err := st.GetVersion(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v.State
+}
+
 // --- helpers ---
 
 func readyReports(t *testing.T, f *testdb.Fixture) []store.ServerReport {

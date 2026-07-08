@@ -23,6 +23,9 @@ type Metrics struct {
 	MMQueueDepth  *prometheus.GaugeVec   // {region} queued tickets by best region
 	MMTimeToMatch prometheus.Histogram   // seconds from ticket submit to matched
 	MMTickets     *prometheus.CounterVec // {result} matched|cancelled|update_required|expired
+
+	// Deploy manager (итерация 3, docs/specs/master.md §5).
+	DeployPrepull prometheus.Histogram // seconds from deploy start to all nodes pulled
 }
 
 func New(st *store.Store, log *slog.Logger) *Metrics {
@@ -51,8 +54,13 @@ func New(st *store.Store, log *slog.Logger) *Metrics {
 			Name: "birdman_mm_tickets_total",
 			Help: "Finished matchmaking tickets by result (matched, cancelled, update_required, expired).",
 		}, []string{"result"}),
+		DeployPrepull: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "birdman_deploy_prepull_seconds",
+			Help:    "Time from POST /v1/deploy to every fleet node reporting the image pulled.",
+			Buckets: []float64{1, 2, 5, 10, 30, 60, 120, 300, 600, 900},
+		}),
 	}
-	reg.MustRegister(m.AllocDuration, m.AllocFailures, m.MMQueueDepth, m.MMTimeToMatch, m.MMTickets)
+	reg.MustRegister(m.AllocDuration, m.AllocFailures, m.MMQueueDepth, m.MMTimeToMatch, m.MMTickets, m.DeployPrepull)
 	reg.MustRegister(&dbCollector{st: st, log: log})
 	reg.MustRegister(collectors.NewGoCollector())
 	reg.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
@@ -68,6 +76,10 @@ var (
 		"birdman_node_heartbeat_age_seconds",
 		"Seconds since the last agent heartbeat, per node.",
 		[]string{"node", "region"}, nil)
+	versionsDesc = prometheus.NewDesc(
+		"birdman_versions",
+		"Registered version counts by project and state (registered, prepulling, active, deprecated, disabled).",
+		[]string{"project", "state"}, nil)
 )
 
 // dbCollector derives gauge metrics from Postgres on scrape.
@@ -79,6 +91,7 @@ type dbCollector struct {
 func (c *dbCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- serversDesc
 	ch <- heartbeatAgeDesc
+	ch <- versionsDesc
 }
 
 func (c *dbCollector) Collect(ch chan<- prometheus.Metric) {
@@ -124,5 +137,17 @@ func (c *dbCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 		ch <- prometheus.MustNewConstMetric(heartbeatAgeDesc, prometheus.GaugeValue,
 			age, hostname, region)
+	}
+
+	counts, err := c.st.VersionStateCounts(ctx)
+	if err != nil {
+		c.log.Error("metrics: versions query failed", "err", err)
+		return
+	}
+	for project, states := range counts {
+		for state, n := range states {
+			ch <- prometheus.MustNewConstMetric(versionsDesc, prometheus.GaugeValue,
+				float64(n), project, state)
+		}
 	}
 }

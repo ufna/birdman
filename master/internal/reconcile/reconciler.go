@@ -67,6 +67,18 @@ func (r *Reconciler) Run(ctx context.Context, interval time.Duration) {
 
 // RunOnce performs a single reconcile pass over all fleets.
 func (r *Reconciler) RunOnce(ctx context.Context) error {
+	// Close expired multi-version windows first (итерация 3, master.md §5):
+	// deprecated versions past reap_ttl_min go disabled, so this very pass
+	// reaps their buffers and drains their live matches below.
+	if disabled, err := r.st.DisableExpiredDeprecated(ctx); err != nil {
+		return err
+	} else {
+		for _, v := range disabled {
+			r.log.Info("reconcile: deprecated version disabled by reap_ttl",
+				"version_id", v.ID, "semver", v.Semver)
+		}
+	}
+
 	if n, err := r.st.FailStuckCreating(ctx, stuckCreatingTimeout); err != nil {
 		return err
 	} else if n > 0 {
@@ -90,11 +102,19 @@ func (r *Reconciler) RunOnce(ctx context.Context) error {
 }
 
 func (r *Reconciler) reconcileFleet(ctx context.Context, f store.FleetConfig) error {
-	paused, err := r.pausedNodes(ctx, f)
+	dep, err := r.st.DeprecatedWindowVersion(ctx, f.ProjectID)
 	if err != nil {
 		return err
 	}
-	starts, stops, locked, err := r.st.PlanFleet(ctx, f, paused)
+	paused := map[string][]string{}
+	for _, vid := range windowVersionIDs(f, dep) {
+		p, err := r.pausedNodes(ctx, vid, f)
+		if err != nil {
+			return err
+		}
+		paused[vid] = p
+	}
+	starts, stops, drains, locked, err := r.st.PlanFleet(ctx, f, dep, paused)
 	if err != nil {
 		return err
 	}
@@ -122,13 +142,32 @@ func (r *Reconciler) reconcileFleet(ctx context.Context, f store.FleetConfig) er
 		r.log.Info("reconcile: stop server (surplus/stale)",
 			"server_id", p.ServerID, "node_id", p.NodeID, "cmd_id", cmdID)
 	}
+	for _, p := range drains {
+		cmdID := r.sender.Send(p.NodeID, &agentlinkv1.MasterMsg{
+			Msg: &agentlinkv1.MasterMsg_DrainServer{DrainServer: &agentlinkv1.DrainServer{
+				ServerId:  p.ServerID,
+				DeadlineS: p.DeadlineS,
+				Reason:    p.Reason,
+			}},
+		})
+		r.log.Info("reconcile: drain server (live match plays out)",
+			"server_id", p.ServerID, "node_id", p.NodeID, "reason", p.Reason, "cmd_id", cmdID)
+	}
 	return nil
+}
+
+func windowVersionIDs(f store.FleetConfig, dep *store.Version) []string {
+	ids := []string{*f.ActiveVersion}
+	if dep != nil && dep.ID != *f.ActiveVersion {
+		ids = append(ids, dep.ID)
+	}
+	return ids
 }
 
 // pausedNodes derives crash-looping (version,node) pairs from recent
 // failures. Restart-safe: input is the servers table, not process memory.
-func (r *Reconciler) pausedNodes(ctx context.Context, f store.FleetConfig) ([]string, error) {
-	failures, err := r.st.RecentFailedTimes(ctx, *f.ActiveVersion, f.Region, crashLoopWindow+crashLoopPause)
+func (r *Reconciler) pausedNodes(ctx context.Context, versionID string, f store.FleetConfig) ([]string, error) {
+	failures, err := r.st.RecentFailedTimes(ctx, versionID, f.Region, crashLoopWindow+crashLoopPause)
 	if err != nil {
 		return nil, err
 	}
@@ -140,10 +179,10 @@ func (r *Reconciler) pausedNodes(ctx context.Context, f store.FleetConfig) ([]st
 			continue
 		}
 		paused = append(paused, nodeID)
-		key := pairKey{*f.ActiveVersion, nodeID}
+		key := pairKey{versionID, nodeID}
 		if prev, ok := r.reported[key]; !ok || now.After(prev) {
 			r.reported[key] = until
-			nid, vid := nodeID, *f.ActiveVersion
+			nid, vid := nodeID, versionID
 			if err := r.st.InsertEvent(ctx, store.EventCrashLoop,
 				store.EventRef{NodeID: &nid, VersionID: &vid},
 				map[string]any{"project": f.Project, "region": f.Region,
@@ -151,7 +190,7 @@ func (r *Reconciler) pausedNodes(ctx context.Context, f store.FleetConfig) ([]st
 				return nil, err
 			}
 			r.log.Warn("reconcile: crash loop detected, pausing (version,node) pair",
-				"node_id", nodeID, "version_id", *f.ActiveVersion, "paused_until", until)
+				"node_id", nodeID, "version_id", versionID, "paused_until", until)
 		}
 	}
 	return paused, nil

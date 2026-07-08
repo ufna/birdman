@@ -2,7 +2,7 @@
 // (docs/specs/master.md §6, v0 subset). The panel and CLI are plain clients
 // of this API — no private side doors (ADR-9).
 //
-// TODO(v0): deploy/rollback, node drain, logs proxy — later iterations (3+).
+// TODO(v0): node drain, logs proxy — later iterations (4+).
 package httpapi
 
 import (
@@ -15,6 +15,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/ufna/birdman/master/internal/deploy"
 	"github.com/ufna/birdman/master/internal/matchmaker"
 	"github.com/ufna/birdman/master/internal/metrics"
 	"github.com/ufna/birdman/master/internal/panelui"
@@ -29,15 +30,16 @@ type Server struct {
 	st      *store.Store
 	m       *metrics.Metrics
 	mm      *matchmaker.Matchmaker
+	dep     *deploy.Manager
 	mmLimit *rateLimiter
 	auth    *authenticator
 	log     *slog.Logger
 	mux     *http.ServeMux
 }
 
-func New(st *store.Store, m *metrics.Metrics, mm *matchmaker.Matchmaker, log *slog.Logger) *Server {
+func New(st *store.Store, m *metrics.Metrics, mm *matchmaker.Matchmaker, dep *deploy.Manager, log *slog.Logger) *Server {
 	s := &Server{
-		st: st, m: m, mm: mm,
+		st: st, m: m, mm: mm, dep: dep,
 		mmLimit: newRateLimiter(mmRateLimit, mmRateLimit),
 		auth:    newAuthenticator(st), log: log, mux: http.NewServeMux(),
 	}
@@ -50,6 +52,8 @@ func New(st *store.Store, m *metrics.Metrics, mm *matchmaker.Matchmaker, log *sl
 	s.mux.HandleFunc("GET /v1/servers", s.requireScope(ScopeReadonly, s.handleListServers))
 	s.mux.HandleFunc("POST /v1/versions", s.requireScope(ScopeDeploy, s.handleCreateVersion))
 	s.mux.HandleFunc("GET /v1/versions", s.requireScope(ScopeReadonly, s.handleListVersions))
+	s.mux.HandleFunc("POST /v1/deploy", s.requireScope(ScopeDeploy, s.handleDeploy))
+	s.mux.HandleFunc("POST /v1/rollback", s.requireScope(ScopeDeploy, s.handleRollback))
 	s.mux.HandleFunc("PUT /v1/fleets/{region}", s.requireScope(ScopeAdmin, s.handleUpsertFleet))
 	s.mux.HandleFunc("PUT /v1/projects/{slug}", s.requireScope(ScopeAdmin, s.handleUpsertProject))
 	s.mux.HandleFunc("GET /v1/events", s.requireScope(ScopeReadonly, s.handleListEvents))

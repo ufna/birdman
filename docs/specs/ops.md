@@ -54,6 +54,8 @@ tag vX.Y.Z:         build → push :X.Y.Z → POST /v1/versions {channel: prod} 
 
 Секреты: `BIRDMAN_DEPLOY_KEY` (API-ключ со скоупом deploy) в GH environment secrets. Rollback — кнопкой в панели или `POST /v1/rollback`, CI не нужен.
 
+> **(Уточнено в v0, итерация 3.)** Реализована механика версий без деплой-хука: `stub-server.yml` умеет `workflow_dispatch` с input `tag` (semver) → build+push `ghcr.io/<org>/birdman-stub-server:<tag>`; регистрация (`POST /v1/versions`) и `POST /v1/deploy` выполняются оператором/скриптом рядом с master. **Автовызов master API из GitHub Actions (`POST /v1/versions` → `/v1/deploy` прямо из workflow) — TODO прод-фазы: master не в интернете** (dev-бокс слушает только localhost); понадобится публичный HTTPS-ингресс master или self-hosted runner в его сети.
+
 ### Пайплайн платформы
 
 lint (golangci-lint) + unit → integration (docker-compose: PG + master + agent + mockliba, сценарии: allocate, карантин, deploy) → build бинарей (linux/amd64) → GH Release. Агенты обновляет master командой UpgradeAgent (URL релиза + sha256), master — ansible-плейбуком.
@@ -73,7 +75,7 @@ compat:
 - Мягкий деплой (master §5): в окне мультиверсий старые клиенты матчатся на deprecated-версию, пока она в compat; вышла из compat → `update_required`.
 - Конвенцию утвердить с командой игры **до итерации 3** (чек-пункт).
 
-> **(Уточнено в v0.)** Матчмейкер реализует правило по умолчанию (равные MAJOR.MINOR, pre-release/build-суффиксы игнорируются); `compat.overrides` из конфига — вместе с deploy-менеджером (итерация 3). «Активные prod-версии» до появления deploy-менеджера: `fleet_configs.active_version` региона (то, что флит реально гоняет, любой канал) + versions со state=`active`, channel=`prod`. Несовместимость проверяется на submit тикета и на каждом тике; клиент, чей `client_version` не парсится как semver, получает `400`.
+> **(Уточнено в v0; итерация 3 — реализовано целиком.)** Матчмейкер реализует правило по умолчанию (равные MAJOR.MINOR, pre-release/build-суффиксы игнорируются) **и `compat.overrides` из конфига master**: паттерны `MAJOR[.MINOR[.PATCH]]` с wildcard `x`/`*` (например `1.4.x`), overrides аддитивны к default-правилу (окно миграции расширяет, а не сужает совместимость); клиенты с разными наборами подходящих overrides не смешиваются в один матч (override-set входит в ключ очереди). Кандидаты региона, в порядке предпочтения: `fleet_configs.active_version` → versions(state=`active`, channel=`prod`) → versions(state=`deprecated`) — окно мультиверсий (`master.md` §5): старые клиенты матчатся на deprecated, пока она не `disabled`; клиент, совместимый с active, на deprecated не попадает; `update_required` — только когда клиент не совместим ни с одной живой версией. Несовместимость проверяется на submit тикета и на каждом тике; клиент, чей `client_version` не парсится как semver, получает `400`.
 
 ## 4. Ansible (`infra/`)
 

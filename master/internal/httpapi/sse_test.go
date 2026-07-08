@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ufna/birdman/master/internal/deploy"
 	"github.com/ufna/birdman/master/internal/httpapi"
 	"github.com/ufna/birdman/master/internal/matchmaker"
 	"github.com/ufna/birdman/master/internal/metrics"
@@ -22,13 +23,21 @@ import (
 
 // apiServer spins the REST API without a running matchmaker loop.
 func apiServer(t *testing.T, st *store.Store) *httptest.Server {
+	ts, _ := apiServerRec(t, st)
+	return ts
+}
+
+// apiServerRec is apiServer + the recorder behind the deploy manager.
+func apiServerRec(t *testing.T, st *store.Store) (*httptest.Server, *testdb.CommandRecorder) {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	m := metrics.New(st, log)
 	mm := matchmaker.New(st, m, matchmaker.Config{}, log)
-	ts := httptest.NewServer(httpapi.New(st, m, mm, log))
+	rec := &testdb.CommandRecorder{}
+	dep := deploy.New(deploy.Options{Store: st, Sender: rec, Log: log})
+	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, log))
 	t.Cleanup(ts.Close)
-	return ts
+	return ts, rec
 }
 
 func scopedKey(t *testing.T, st *store.Store, name string, scopes ...string) string {
