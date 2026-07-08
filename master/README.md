@@ -56,11 +56,22 @@
   `birdman_allocation_duration_seconds`,
   `birdman_allocation_failures_total{reason}`,
   `birdman_node_heartbeat_age_seconds`, `birdman_mm_queue_depth{region}`,
-  `birdman_mm_time_to_match_seconds`, `birdman_mm_tickets_total{result}`.
+  `birdman_mm_time_to_match_seconds`, `birdman_mm_tickets_total{result}`;
+- **SSE** `GET /v1/events/stream` (readonly+): новые строки `events` как
+  `id:`/`event: <kind>`/`data: <json>` (курсор по id, poll ~1с), keepalive
+  каждые 15с, реконнект без потерь через `?after_id=` / `Last-Event-ID`;
+- **матчи для панели**: `GET /v1/matches` (фильтры `state|region|project`,
+  `limit/offset`, свежие первыми; в ответе semver, host:port и живые
+  `server_players`) и `GET /v1/matches/{id}`;
+- **cookie-сессии панели**: `POST /v1/session {api_key}` → HttpOnly Secure
+  SameSite=Lax cookie (in-memory, TTL 24ч, скоупы ключа), `GET /v1/session`,
+  `DELETE /v1/session`; Bearer работает как раньше; для не-GET по cookie
+  обязателен заголовок `X-Birdman-Csrf: 1`;
+- **встроенная админ-панель** (`/`, П0 read-only) — см. раздел «Панель».
 
 Отложено (TODO, спеки помечены): обмен node_token → клиентский mTLS-серт,
-SSE `/v1/events/stream`, проверка join_token на дедике (liba),
-compat-overrides, deploy/rollback, drain ноды, logs-proxy.
+проверка join_token на дедике (liba), compat-overrides, deploy/rollback,
+drain ноды, logs-proxy.
 
 ## Конфиг
 
@@ -110,6 +121,31 @@ curl -s -X PUT localhost:8100/v1/projects/game -H "Authorization: Bearer $KEY" \
 Проекты создаются неявно при первом упоминании slug'а в `POST /v1/nodes` /
 `POST /v1/versions` / `PUT /v1/projects/{slug}` (уточнено в v0).
 
+## Панель
+
+Админ-панель (П0, read-only: Overview / Флот / Матчи, обе темы, live через
+SSE) — SPA из `panel/`, **встроенная в бинарь**: `panel/build.sh` собирает
+её (npm ci + tsc + vite build) и кладёт в `master/internal/panelui/static`,
+а `internal/panelui` отдаёт этот каталог через `go:embed` с `/` и
+`/assets/*` (SPA-fallback на `index.html`, `/v1/*` остаётся JSON-API).
+
+Как это не ломает сборку без node:
+
+- в git закоммичен только якорь `static/.gitkeep` (сам каталог в
+  `.gitignore`) — `go build` и `master/test.sh` работают на машине без
+  node: бинарь без панели отдаёт placeholder-страницу с подсказкой;
+- `panel/build.sh` использует локальный node ≥20, а если его нет —
+  `docker node:22`;
+- `./master/build.sh` собирает панель автоматически; `SKIP_PANEL=1
+  ./master/build.sh` — пропустить.
+
+Вход в панель: API-ключ со скоупом `readonly` или `admin` (форма логина →
+`POST /v1/session` → HttpOnly-cookie на 24ч; сессии в памяти master и не
+переживают его рестарт — панель просто вернёт на логин). Дев-режим фронта:
+`cd panel && npm run dev` (vite dev server проксирует `/v1` на
+`localhost:8100`); тесты панели: `npm test` (vitest) + `npm run check`
+(tsc), CI — `.github/workflows/panel.yml`.
+
 ## Матчмейкинг: mmcli
 
 `mmcli` — клиент матчмейкинга для acceptance-прогонов и отладки (второй
@@ -146,8 +182,12 @@ env (так работают test.sh и CI c service-контейнером) →
 ## Сборка
 
 ```sh
-./master/build.sh   # → master/dist/{birdman-master,mmcli} (linux/amd64, static, CGO off)
+./master/build.sh                # панель + master/dist/{birdman-master,mmcli}
+SKIP_PANEL=1 ./master/build.sh   # только бинари (в них будет placeholder)
 ```
+
+Бинари — linux/amd64, static, CGO off; панель встраивается в
+`birdman-master` (см. раздел «Панель»).
 
 ## Генерация proto
 

@@ -1,0 +1,80 @@
+/*
+ * Дизайн-токены панели birdman.
+ * Палитра — бренд из docs/birdman-report.html (единый источник):
+ * акцент D9541A (light) / F0713A (dark), тёмный фон 151B23, карточки 1C242E.
+ * Статусные цвета зарезервированы за состояниями (good/warn/dead) и не
+ * используются как «ещё один цвет серии».
+ *
+ * Механика тем: системная по умолчанию (prefers-color-scheme), явный выбор —
+ * data-theme на <html> (ставится до первого рендера, см. index.html).
+ */
+
+:root {
+  --paper: #f7f8fa; /* фон страницы */
+  --card: #ffffff; /* поверхности: карточки, таблицы */
+  --ink: #1d2733; /* основной текст */
+  --muted: #5b6b7c; /* вторичный текст */
+  --line: #dde3e9; /* границы, разделители */
+  --accent: #d9541a; /* бренд-акцент: действия, live, спарклайн */
+  --accent-ink: #b04413; /* акцентный текст на светлых плашках */
+  --good: #2e7d5b;
+  --good-bg: #e3f1ea;
+  --warn: #9a6a10;
+  --warn-bg: #f6ecd8;
+  --dead: #b3402e;
+  --dead-bg: #f7e4e0;
+  --mark: #fff3ec; /* акцентная подложка (active nav, allocated) */
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #151b23;
+    --card: #1c242e;
+    --ink: #e8ecf0;
+    --muted: #97a5b4;
+    --line: #2c3743;
+    --accent: #f0713a;
+    --accent-ink: #f58b5c;
+    --good: #6cc29a;
+    --good-bg: #1e3229;
+    --warn: #d9ae5f;
+    --warn-bg: #33290f;
+    --dead: #e58270;
+    --dead-bg: #3a211c;
+    --mark: #33231a;
+  }
+}
+
+:root[data-theme='light'] {
+  --paper: #f7f8fa;
+  --card: #ffffff;
+  --ink: #1d2733;
+  --muted: #5b6b7c;
+  --line: #dde3e9;
+  --accent: #d9541a;
+  --accent-ink: #b04413;
+  --good: #2e7d5b;
+  --good-bg: #e3f1ea;
+  --warn: #9a6a10;
+  --warn-bg: #f6ecd8;
+  --dead: #b3402e;
+  --dead-bg: #f7e4e0;
+  --mark: #fff3ec;
+}
+
+:root[data-theme='dark'] {
+  --paper: #151b23;
+  --card: #1c242e;
+  --ink: #e8ecf0;
+  --muted: #97a5b4;
+  --line: #2c3743;
+  --accent: #f0713a;
+  --accent-ink: #f58b5c;
+  --good: #6cc29a;
+  --good-bg: #1e3229;
+  --warn: #d9ae5f;
+  --warn-bg: #33290f;
+  --dead: #e58270;
+  --dead-bg: #3a211c;
+  --mark: #33231a;
+}

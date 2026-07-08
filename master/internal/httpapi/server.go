@@ -2,7 +2,6 @@
 // (docs/specs/master.md §6, v0 subset). The panel and CLI are plain clients
 // of this API — no private side doors (ADR-9).
 //
-// TODO(v0): SSE live feed (GET /v1/events/stream) — later iteration.
 // TODO(v0): deploy/rollback, node drain, logs proxy — later iterations (3+).
 package httpapi
 
@@ -18,6 +17,7 @@ import (
 
 	"github.com/ufna/birdman/master/internal/matchmaker"
 	"github.com/ufna/birdman/master/internal/metrics"
+	"github.com/ufna/birdman/master/internal/panelui"
 	"github.com/ufna/birdman/master/internal/store"
 )
 
@@ -53,12 +53,25 @@ func New(st *store.Store, m *metrics.Metrics, mm *matchmaker.Matchmaker, log *sl
 	s.mux.HandleFunc("PUT /v1/fleets/{region}", s.requireScope(ScopeAdmin, s.handleUpsertFleet))
 	s.mux.HandleFunc("PUT /v1/projects/{slug}", s.requireScope(ScopeAdmin, s.handleUpsertProject))
 	s.mux.HandleFunc("GET /v1/events", s.requireScope(ScopeReadonly, s.handleListEvents))
+	s.mux.HandleFunc("GET /v1/events/stream", s.requireScope(ScopeReadonly, s.handleEventsStream))
+	s.mux.HandleFunc("GET /v1/matches", s.requireScope(ScopeReadonly, s.handleListMatches))
+	s.mux.HandleFunc("GET /v1/matches/{id}", s.requireScope(ScopeReadonly, s.handleGetMatch))
 	s.mux.HandleFunc("POST /v1/allocate", s.requireScope(ScopeAllocate, s.handleAllocate))
 
 	s.mux.HandleFunc("POST /v1/matchmaking/tickets", s.requireScope(ScopeMatchmaking, s.handleCreateTicket))
 	s.mux.HandleFunc("GET /v1/matchmaking/tickets/{id}", s.requireScope(ScopeMatchmaking, s.handleGetTicket))
 	s.mux.HandleFunc("DELETE /v1/matchmaking/tickets/{id}", s.requireScope(ScopeMatchmaking, s.handleCancelTicket))
 	s.mux.HandleFunc("GET /v1/qos", s.handleQoS) // public by design (master.md §6)
+
+	// Browser sessions for the panel (session.go); auth is inside the
+	// handlers (login carries the key in the body, logout the cookie).
+	s.mux.HandleFunc("POST /v1/session", s.handleCreateSession)
+	s.mux.HandleFunc("GET /v1/session", s.handleGetSession)
+	s.mux.HandleFunc("DELETE /v1/session", s.handleDeleteSession)
+
+	// Embedded panel SPA: `/`, `/assets/*` and SPA-fallback routes
+	// (panelui). Registered last — "/" catches everything unrouted.
+	s.mux.Handle("/", panelui.Handler())
 
 	return s
 }
