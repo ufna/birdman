@@ -1,0 +1,58 @@
+name: sdk
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'sdk/**'
+      - '.github/workflows/sdk.yml'
+  pull_request:
+    paths:
+      - 'sdk/**'
+      - '.github/workflows/sdk.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  # Полный прогон: юниты + golden wire-тесты + smoke example↔mockagent.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: false
+
+      - name: Vet mockagent
+        working-directory: sdk/mockagent
+        run: go vet ./...
+
+      - name: Configure & build
+        run: |
+          cmake -S sdk -B sdk/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build sdk/build -j
+
+      - name: Test (ctest + smoke)
+        run: ctest --test-dir sdk/build --output-on-failure
+
+  # Те же тесты под TSAN: гонки в транспорте/колбэках.
+  tsan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: false
+
+      - name: Configure & build (TSAN)
+        run: |
+          cmake -S sdk -B sdk/build-tsan -DBIRDMAN_SANITIZE=thread
+          cmake --build sdk/build-tsan -j
+
+      - name: Test (TSAN)
+        run: ctest --test-dir sdk/build-tsan --output-on-failure
