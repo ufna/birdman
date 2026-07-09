@@ -267,9 +267,29 @@ func BuildOverviewFromDaily(dims []DailyDim, peakByDay map[string]int, ttm []sto
 		PeakCCU:                 peakCCU,
 		AvgMatchDurationSeconds: avgPtr(durSumOverall, durCountOverall),
 		AvgDurationPerDay:       avgSecondsSeries(axis, durSumByDay, durCountByDay),
-		VersionDistribution:     versionShareList(versionCounts, totalMatches),
+		VersionDistribution:     versionShareList(dropZeroMatchSemvers(versionCounts), totalMatches),
 		TimeToMatch:             timeToMatchStats(ttm),
 	}
+}
+
+// dropZeroMatchSemvers removes semvers whose SUMMED Matches across all dims
+// is 0, in place, returning the same map. A still-running match that
+// started before the window contributes a slot-only dim (SlotSeconds>0,
+// Matches==0) for every window day it overlaps, carrying its real Semver but
+// zero started-matches; occupancy (peak_ccu/slot_hours) correctly counts
+// that match (see AggregateDaily/BuildCostFromDaily), but version_distribution
+// must not, or a version with zero matches in the window would surface as a
+// phantom {Matches:0, Share:0} entry. Only the FromDaily path needs this: the
+// on-the-fly versionDistribution only increments a semver's count when a
+// match actually started in the window, so every entry it produces already
+// has Matches >= 1.
+func dropZeroMatchSemvers(counts map[string]int) map[string]int {
+	for v, c := range counts {
+		if c == 0 {
+			delete(counts, v)
+		}
+	}
+	return counts
 }
 
 // BuildCostFromDaily builds the same CostResponse as BuildCost, but from

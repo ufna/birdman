@@ -480,3 +480,72 @@ func TestStatsCostRollupBacked(t *testing.T) {
 		}
 	})
 }
+
+// TestStatsOccupancyBoundary pins the product owner's decided occupancy
+// semantics (Task 10 review): a match that STARTED before the selected
+// window but is still occupying a slot DURING the window (still running,
+// ended_at IS NULL) counts toward that window's peak_ccu and slot_hours —
+// slot-hours is "allocated dedik time" and peak_ccu is "max concurrent
+// allocated-players" (docs/specs/master.md §6), not "matches that started in
+// the window". This is intentionally MORE correct than the old on-the-fly
+// handler (which only ever scanned matches with started_at >= since and so
+// under-counted this case) — this test does not compare against that
+// reference (unlike equals_on_the_fly_path above), it pins the decided
+// behavior directly.
+//
+// It also pins the companion bug fix: such a match contributes a Matches=0
+// slot-only dim for the semver it carries on every window day it overlaps
+// (see AggregateDaily), which must not surface as a phantom {matches:0}
+// version_distribution entry (stats.dropZeroMatchSemvers). Without that fix
+// this test fails on the version_distribution assertion below.
+func TestStatsOccupancyBoundary(t *testing.T) {
+	ts, st, f, roSecret := newStatsAPI(t)
+	ctx := t.Context()
+	now := time.Now().UTC()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+
+	// Pre-window boundary match: started 8 days ago — before days=7's
+	// axis0 (today-6) — and still running, so it occupies a slot throughout
+	// the whole window without ever "starting" in it (version 1.0.0, f's
+	// default, region "eu-boundary").
+	srvBoundary := f.InsertServer(t, f.NodeID, f.VersionID, "reaped", 21301, 0)
+	insertStatMatchAt(t, st, srvBoundary, "eu-boundary", 50,
+		today.AddDate(0, 0, -8).Add(time.Hour), today.AddDate(0, 0, -8).Add(time.Hour+5*time.Minute), nil)
+
+	// A normal in-window match on a distinct version, so the window has a
+	// real started-match too (not otherwise empty) without masking the
+	// boundary match's phantom entry above — they must not share a semver.
+	v2 := f.AddVersion(t, "2.0.0")
+	srvNormal := f.InsertServer(t, f.NodeID, v2, "reaped", 21302, 0)
+	insertStatMatchAt(t, st, srvNormal, "eu-boundary", 3,
+		today.Add(58*time.Minute), today.Add(time.Hour), endAt(today.Add(time.Hour+10*time.Minute)))
+
+	job := statsrollup.New(st, time.Hour, opsLog())
+	if err := job.Backfill(ctx); err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+
+	var overview stats.OverviewResponse
+	httpGetJSON(t, ts.URL, "/v1/stats/overview?days=7", roSecret, &overview)
+	var cost stats.CostResponse
+	httpGetJSON(t, ts.URL, "/v1/stats/cost?days=7", roSecret, &cost)
+
+	// Occupancy IS counted: the pre-window still-running match overlaps
+	// every day of the window, so it must contribute to peak_ccu and
+	// slot_hours despite never starting inside it.
+	if overview.PeakCCU < 50 {
+		t.Fatalf("peak_ccu = %d, want >= 50 (the pre-window still-running match occupies the whole window)", overview.PeakCCU)
+	}
+	if cost.SlotHoursTotal <= 0 {
+		t.Fatalf("slot_hours_total = %v, want > 0 (the pre-window still-running match occupies a slot across the window)", cost.SlotHoursTotal)
+	}
+
+	// Phantom bug fixed: the boundary match's semver (1.0.0) never started
+	// in the window (only slot-only dims carry it there), so it must not
+	// appear as a zero-match entry — nor should anything else.
+	for _, vd := range overview.VersionDistribution {
+		if vd.Matches == 0 {
+			t.Fatalf("version_distribution has a phantom zero-match entry: %+v (full: %+v)", vd, overview.VersionDistribution)
+		}
+	}
+}

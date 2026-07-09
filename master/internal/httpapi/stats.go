@@ -31,7 +31,11 @@ import (
 
 const (
 	statsDefaultDays = 7
-	statsMaxDays     = 90
+	// statsMaxDays is a hard 30-day statistics ceiling (product decision:
+	// older data isn't served) that also matches statsrollup's backfill
+	// horizon (backfillDays=30) — days beyond it would silently read
+	// incomplete rollup data for the tail of the range.
+	statsMaxDays = 30
 )
 
 // --- handlers ---
@@ -76,7 +80,7 @@ func (s *Server) handleStatsCost(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, stats.BuildCostFromDaily(dims, util, axis, days, now))
 }
 
-// statsDays parses ?days=N (default 7, 1..90). Writes the 400 itself.
+// statsDays parses ?days=N (default 7, 1..30). Writes the 400 itself.
 func statsDays(w http.ResponseWriter, r *http.Request) (int, bool) {
 	raw := r.URL.Query().Get("days")
 	if raw == "" {
