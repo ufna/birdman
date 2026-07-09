@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ufna/birdman/agent/internal/config"
+	"github.com/ufna/birdman/agent/internal/runtime"
 	agentlinkv1 "github.com/ufna/birdman/proto/agentlink/v1"
 )
 
@@ -87,22 +89,35 @@ func (h *fakeHandle) lastState() string {
 }
 
 type fakeRuntime struct {
-	mu       sync.Mutex
-	started  []StartSpec
-	handles  map[string]*fakeHandle
-	restored []RestoredServer
-	startErr error
-	pulls    []string
-	pullErr  error
+	mu          sync.Mutex
+	started     []StartSpec
+	handles     map[string]*fakeHandle
+	restored    []RestoredServer
+	startErr    error
+	pulls       []string
+	pullLookups []runtime.CredLookup // one per Pull call, same index as pulls
+	pullErr     error
 }
 
 func newFakeRuntime() *fakeRuntime { return &fakeRuntime{handles: map[string]*fakeHandle{}} }
 
-func (r *fakeRuntime) Pull(_ context.Context, ref string) error {
+func (r *fakeRuntime) Pull(_ context.Context, ref string, lookup runtime.CredLookup) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.pulls = append(r.pulls, ref)
+	r.pullLookups = append(r.pullLookups, lookup)
 	return r.pullErr
+}
+
+// lastPullLookup returns the CredLookup passed to the most recent Pull call
+// (PrePull path) — nil if Pull was never called.
+func (r *fakeRuntime) lastPullLookup() runtime.CredLookup {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.pullLookups) == 0 {
+		return nil
+	}
+	return r.pullLookups[len(r.pullLookups)-1]
 }
 
 func (r *fakeRuntime) Start(_ context.Context, spec StartSpec) (Handle, error) {
@@ -345,6 +360,48 @@ func stateIs(m *Manager, id, state string) func() bool {
 		s := snapshotOf(m, id)
 		return s != nil && s.GetState() == state
 	}
+}
+
+// writeToken writes content to a fresh temp file and returns its path — a
+// registry_auth.token_file stand-in.
+func writeToken(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// logCapture records every m.logf call so tests can assert on log content
+// (e.g. "the WARN fired exactly once", "the token never appears").
+type logCapture struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (c *logCapture) Printf(format string, args ...any) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lines = append(c.lines, fmt.Sprintf(format, args...))
+}
+
+func (c *logCapture) all() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return strings.Join(c.lines, "\n")
+}
+
+func (c *logCapture) count(substr string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for _, l := range c.lines {
+		if strings.Contains(l, substr) {
+			n++
+		}
+	}
+	return n
 }
 
 // --- tests ---
@@ -718,4 +775,190 @@ func TestTailLogsReportsNoLogs(t *testing.T) {
 		return strings.Contains(sink.tailText("ghost"), "no logs")
 	})
 	eventually(t, "tail eof", func() bool { return sink.tailSawEOF("ghost") })
+}
+
+// TestSetRegistriesHandlerStoresSnapshot covers the Handler-side of
+// registries v1 (docs/superpowers/specs/2026-07-09-registries-design.md
+// §2/§3): dispatching SetRegistries makes the credential immediately
+// resolvable through the chain, and a second (different) snapshot replaces
+// the first wholesale rather than merging.
+func TestSetRegistriesHandlerStoresSnapshot(t *testing.T) {
+	rt := newFakeRuntime()
+	m, _, _ := testManager(t, rt)
+
+	m.SetRegistries(context.Background(), &agentlinkv1.SetRegistries{
+		CmdId: "sr-1",
+		Registries: []*agentlinkv1.RegistryCred{
+			{Host: "ghcr.io", Username: "u1", Token: "t1"},
+		},
+	})
+	u, tok, source, ok := m.resolveRegistryAuth("ghcr.io")
+	if !ok || source != "master" || u != "u1" || tok != "t1" {
+		t.Fatalf("after first SetRegistries: u=%q tok=%q source=%q ok=%v", u, tok, source, ok)
+	}
+
+	// A second, different snapshot replaces the first: ghcr.io is gone.
+	m.SetRegistries(context.Background(), &agentlinkv1.SetRegistries{
+		CmdId: "sr-2",
+		Registries: []*agentlinkv1.RegistryCred{
+			{Host: "registry.example.com:5000", Username: "u2", Token: "t2"},
+		},
+	})
+	if _, _, _, ok := m.resolveRegistryAuth("ghcr.io"); ok {
+		t.Fatal("second SetRegistries must wipe the first snapshot, not merge with it")
+	}
+	u, tok, source, ok = m.resolveRegistryAuth("registry.example.com:5000")
+	if !ok || source != "master" || u != "u2" || tok != "t2" {
+		t.Fatalf("after second SetRegistries: u=%q tok=%q source=%q ok=%v", u, tok, source, ok)
+	}
+}
+
+// TestRegistryAuthChainPrecedence covers the full pull-auth chain (§3):
+// master snapshot (exact host) beats the legacy agent.yaml file cred; a
+// legacy host mismatch or an empty chain falls through to anonymous.
+func TestRegistryAuthChainPrecedence(t *testing.T) {
+	rt := newFakeRuntime()
+	m, _, _ := testManager(t, rt)
+
+	// Nothing configured anywhere → anonymous.
+	if _, _, source, ok := m.resolveRegistryAuth("ghcr.io"); ok || source != "anonymous" {
+		t.Fatalf("empty chain: ok=%v source=%q, want false/anonymous", ok, source)
+	}
+
+	// Legacy configured for a specific host: a DIFFERENT host still misses.
+	m.cfg.RegistryAuth = &config.RegistryAuth{
+		Username: "legacy-user", TokenFile: writeToken(t, "legacy-tok"), Host: "registry.example.com",
+	}
+	if _, _, source, ok := m.resolveRegistryAuth("ghcr.io"); ok || source != "anonymous" {
+		t.Fatalf("legacy host mismatch: ok=%v source=%q, want false/anonymous", ok, source)
+	}
+	// Legacy host match.
+	u, tok, source, ok := m.resolveRegistryAuth("registry.example.com")
+	if !ok || source != "legacy" || u != "legacy-user" || tok != "legacy-tok" {
+		t.Fatalf("legacy hit: u=%q tok=%q source=%q ok=%v", u, tok, source, ok)
+	}
+
+	// Master snapshot for the SAME host beats the legacy fallback.
+	m.registries.Set([]*agentlinkv1.RegistryCred{
+		{Host: "registry.example.com", Username: "master-user", Token: "master-tok"},
+	})
+	u, tok, source, ok = m.resolveRegistryAuth("registry.example.com")
+	if !ok || source != "master" || u != "master-user" || tok != "master-tok" {
+		t.Fatalf("master beats legacy: u=%q tok=%q source=%q ok=%v", u, tok, source, ok)
+	}
+
+	// Master credential for one host must not leak to an unrelated one that
+	// neither master nor legacy know — still anonymous (the anti-exfiltration
+	// property the whole design closes).
+	if _, _, source, ok := m.resolveRegistryAuth("evil.example.com"); ok || source != "anonymous" {
+		t.Fatalf("unrelated host: ok=%v source=%q, want false/anonymous", ok, source)
+	}
+}
+
+// TestLegacyDefaultHostWarnsOnce covers the legacy registry_auth fallback
+// without an explicit host (§3): it defaults to ghcr.io, and the WARN about
+// that default fires exactly once per process no matter how many pulls
+// consult the chain.
+func TestLegacyDefaultHostWarnsOnce(t *testing.T) {
+	rt := newFakeRuntime()
+	m, _, _ := testManager(t, rt)
+	cap := &logCapture{}
+	m.logf = cap.Printf
+	m.cfg.RegistryAuth = &config.RegistryAuth{Username: "u", TokenFile: writeToken(t, "tok")} // Host left unset
+
+	u, tok, source, ok := m.resolveRegistryAuth("ghcr.io")
+	if !ok || source != "legacy" || u != "u" || tok != "tok" {
+		t.Fatalf("legacy default host hit: u=%q tok=%q source=%q ok=%v", u, tok, source, ok)
+	}
+
+	// Consult the chain repeatedly (a miss and two more hits): the WARN must
+	// not fire again.
+	m.resolveRegistryAuth("evil.example.com")
+	m.resolveRegistryAuth("ghcr.io")
+	m.resolveRegistryAuth("ghcr.io")
+
+	if n := cap.count("registry_auth без host"); n != 1 {
+		t.Fatalf("WARN must fire exactly once per process, fired %d time(s):\n%s", n, cap.all())
+	}
+}
+
+// TestPrePullUsesRegistryAuthChain covers requirement §3/§5: the PrePull path
+// (not just StartServer) must resolve credentials through the very same
+// chain, host-matched.
+func TestPrePullUsesRegistryAuthChain(t *testing.T) {
+	rt := newFakeRuntime()
+	m, _, _ := testManager(t, rt)
+	m.registries.Set([]*agentlinkv1.RegistryCred{
+		{Host: "ghcr.io", Username: "u1", Token: "t1"},
+	})
+
+	m.PrePull(context.Background(), &agentlinkv1.PrePull{CmdId: "p1", ImageRef: "ghcr.io/x/y:1"})
+	eventually(t, "pull recorded", func() bool {
+		rt.mu.Lock()
+		defer rt.mu.Unlock()
+		return len(rt.pulls) == 1
+	})
+
+	lookup := rt.lastPullLookup()
+	if lookup == nil {
+		t.Fatal("PrePull did not pass a CredLookup to Runtime.Pull")
+	}
+	u, tok, ok := lookup("ghcr.io")
+	if !ok || u != "u1" || tok != "t1" {
+		t.Fatalf("PrePull lookup(ghcr.io) = (%q, %q, %v), want (u1, t1, true) — PrePull must use the same chain as StartServer", u, tok, ok)
+	}
+	if _, _, ok := lookup("evil.example.com"); ok {
+		t.Fatal("PrePull lookup must not match an unrelated host")
+	}
+}
+
+// TestStartServerUsesRegistryAuthChain mirrors TestPrePullUsesRegistryAuthChain
+// for the StartServer path (StartSpec.Lookup).
+func TestStartServerUsesRegistryAuthChain(t *testing.T) {
+	rt := newFakeRuntime()
+	m, _, _ := testManager(t, rt)
+	m.registries.Set([]*agentlinkv1.RegistryCred{
+		{Host: "ghcr.io", Username: "u1", Token: "t1"},
+	})
+
+	m.Start(context.Background(), &agentlinkv1.StartServer{ServerId: "s1", ImageRef: "ghcr.io/x/y:1", CmdId: "c1"})
+	eventually(t, "started", func() bool { return rt.startCount() == 1 })
+	rt.mu.Lock()
+	lookup := rt.started[0].Lookup
+	rt.mu.Unlock()
+	if lookup == nil {
+		t.Fatal("StartServer did not pass a Lookup in StartSpec")
+	}
+	u, tok, ok := lookup("ghcr.io")
+	if !ok || u != "u1" || tok != "t1" {
+		t.Fatalf("StartServer lookup(ghcr.io) = (%q, %q, %v), want (u1, t1, true)", u, tok, ok)
+	}
+}
+
+// TestPullLogNeverContainsToken covers the per-pull observability log (§3/§6):
+// host+source are logged, the token never is.
+func TestPullLogNeverContainsToken(t *testing.T) {
+	rt := newFakeRuntime()
+	m, _, _ := testManager(t, rt)
+	cap := &logCapture{}
+	m.logf = cap.Printf
+	const secretToken = "super-secret-token-xyz"
+	m.registries.Set([]*agentlinkv1.RegistryCred{
+		{Host: "ghcr.io", Username: "u1", Token: secretToken},
+	})
+
+	m.PrePull(context.Background(), &agentlinkv1.PrePull{CmdId: "p1", ImageRef: "ghcr.io/x/y:1"})
+	eventually(t, "pull recorded", func() bool {
+		rt.mu.Lock()
+		defer rt.mu.Unlock()
+		return len(rt.pulls) == 1
+	})
+
+	all := cap.all()
+	if !strings.Contains(all, "host=ghcr.io source=master") {
+		t.Fatalf("expected a host=ghcr.io source=master log line, got:\n%s", all)
+	}
+	if strings.Contains(all, secretToken) {
+		t.Fatal("pull log must never contain the token")
+	}
 }

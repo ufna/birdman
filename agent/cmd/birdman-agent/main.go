@@ -101,7 +101,7 @@ func runDaemon(args []string) int {
 	}
 	defer client.Close()
 
-	rt := &daemon.ContainerdRuntime{Client: client, Auth: cfg.RegistryAuth}
+	rt := &daemon.ContainerdRuntime{Client: client}
 	gc := imagegc.New(imagegc.Options{
 		Runtime:   rt,
 		DiskUsage: func() (uint64, uint64) { return stats.DiskUsage(cfg.DataDir) },

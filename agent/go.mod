@@ -8,6 +8,7 @@ replace github.com/ufna/birdman/proto => ../proto
 
 require (
 	github.com/containerd/containerd v1.7.33
+	github.com/distribution/reference v0.6.0
 	github.com/opencontainers/runtime-spec v1.1.0
 	github.com/ufna/birdman/proto v0.0.0-00010101000000-000000000000
 	golang.org/x/sys v0.38.0
@@ -30,7 +31,6 @@ require (
 	github.com/containerd/ttrpc v1.2.7 // indirect
 	github.com/containerd/typeurl/v2 v2.1.1 // indirect
 	github.com/cyphar/filepath-securejoin v0.5.1 // indirect
-	github.com/distribution/reference v0.6.0 // indirect
 	github.com/docker/go-events v0.0.0-20190806004212-e31b211e4f1c // indirect
 	github.com/felixge/httpsnoop v1.0.3 // indirect
 	github.com/go-logr/logr v1.4.2 // indirect

@@ -81,6 +81,48 @@ limits_default: { cpu_millis: 1000, mem_mb: 512 }
 }
 
 // Незнакомые ключи (конфиги будущих агентов) парсятся без ошибок.
+// TestRegistryAuthHostField covers the optional registry_auth.host field
+// (registries v1, docs/superpowers/specs/2026-07-09-registries-design.md
+// §3): present when set, empty (not defaulted here — the daemon.Manager
+// legacy fallback applies the ghcr.io default lazily, with a one-time WARN)
+// when absent.
+func TestRegistryAuthHostField(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "tok")
+	if err := os.WriteFile(tokenFile, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(write(t, `
+region: eu
+limits_default: { cpu_millis: 1000, mem_mb: 512 }
+registry_auth:
+  username: "ufna"
+  token_file: `+tokenFile+`
+  host: "registry.example.com:5000"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RegistryAuth.Host != "registry.example.com:5000" {
+		t.Fatalf("registry_auth.host = %q, want registry.example.com:5000", cfg.RegistryAuth.Host)
+	}
+
+	// Absent host: config.go leaves it empty (no static default) — the
+	// ghcr.io default + one-time WARN is the daemon.Manager's job.
+	cfg2, err := Load(write(t, `
+region: eu
+limits_default: { cpu_millis: 1000, mem_mb: 512 }
+registry_auth:
+  username: "ufna"
+  token_file: `+tokenFile+`
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg2.RegistryAuth.Host != "" {
+		t.Fatalf("registry_auth.host must stay empty when absent, got %q", cfg2.RegistryAuth.Host)
+	}
+}
+
 func TestUnknownKeysIgnored(t *testing.T) {
 	if _, err := Load(write(t, `
 region: eu

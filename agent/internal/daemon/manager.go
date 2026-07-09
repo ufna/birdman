@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -17,11 +18,17 @@ import (
 	"github.com/ufna/birdman/agent/internal/logrot"
 	"github.com/ufna/birdman/agent/internal/metrics"
 	"github.com/ufna/birdman/agent/internal/ports"
+	"github.com/ufna/birdman/agent/internal/runtime"
 	"github.com/ufna/birdman/agent/internal/stats"
 	"github.com/ufna/birdman/agent/internal/uds"
 	"github.com/ufna/birdman/agent/internal/upgrade"
 	agentlinkv1 "github.com/ufna/birdman/proto/agentlink/v1"
 )
+
+// legacyDefaultRegistryHost is the host assumed for a legacy agent.yaml
+// registry_auth block that does not set host (docs/superpowers/specs/2026-07-09-registries-design.md
+// §3): the pre-registries-v1 fallback only ever talked to ghcr.io.
+const legacyDefaultRegistryHost = "ghcr.io"
 
 // DefaultSocketDir hosts the per-server socket dirs (protocol.md §2:
 // {socket_dir}/{server_id}/agent.sock, the dir is bind-mounted ro).
@@ -85,6 +92,15 @@ type Manager struct {
 	// diskFullFrac refuses StartServer above this usage fraction (§6);
 	// 0 disables the guard (configs built without defaults, tests).
 	diskFullFrac float64
+
+	// registries is the in-memory master registry-credential snapshot
+	// (registries v1, §2/§3): SetRegistries replaces it wholesale, never
+	// persisted to disk.
+	registries *registryStore
+	// warnLegacyHostOnce guards the one-time WARN emitted the first time the
+	// legacy registry_auth fallback is consulted without an explicit host
+	// (§3) — logged once per process, not once per pull.
+	warnLegacyHostOnce sync.Once
 
 	// draining is the node-level drain flag (итерация 4): while set, new
 	// StartServer commands are rejected with a failed event. The master's
@@ -166,6 +182,7 @@ func NewManager(ctx context.Context, o Options) (*Manager, error) {
 		applyUpgrade: upgrade.Apply,
 		finalizeLog:  func(string) {},
 		diskUsage:    func() (uint64, uint64) { return stats.DiskUsage(dataDir) },
+		registries:   newRegistryStore(),
 		servers:      map[string]*server{},
 		tails:        map[string]context.CancelFunc{},
 	}, nil
@@ -365,6 +382,16 @@ func (m *Manager) MetricsSample() metrics.Sample {
 
 // --- link.Handler ---
 
+// SetRegistries replaces the in-memory master registry-credential snapshot
+// (registries v1, docs/superpowers/specs/2026-07-09-registries-design.md
+// §2/§3): every delivery is a FULL replace, never a diff. The Ack itself
+// travels through the existing link.Client machinery (recvLoop acks any
+// dispatched cmd_id) — nothing extra to do here beyond storing the set.
+func (m *Manager) SetRegistries(_ context.Context, cmd *agentlinkv1.SetRegistries) {
+	m.registries.Set(cmd.GetRegistries())
+	m.logf("[daemon] set_registries: %d credential(s) in memory", len(cmd.GetRegistries()))
+}
+
 // Start handles StartServer. Idempotent by server_id: a replayed command for
 // a known server (including one restored after an agent restart) is a no-op.
 // A draining node and a full disk reject the start with a failed event
@@ -474,7 +501,7 @@ func (m *Manager) PrePull(_ context.Context, cmd *agentlinkv1.PrePull) {
 	go func() {
 		ref := cmd.GetImageRef()
 		m.sink.PullReport(cmd.GetCmdId(), ref, "pulling", "")
-		if err := m.rt.Pull(m.ctx, ref); err != nil {
+		if err := m.rt.Pull(m.ctx, ref, m.pullLookup(ref)); err != nil {
 			m.logf("[daemon] prepull %s: %v", ref, err)
 			m.sink.PullReport(cmd.GetCmdId(), ref, "failed", err.Error())
 			return
@@ -628,6 +655,79 @@ func (m *Manager) DrainServer(_ context.Context, cmd *agentlinkv1.DrainServer) {
 
 // --- internals ---
 
+// pullLookup builds the CredLookup for one pull attempt (StartServer's
+// launch or PrePull) and logs its predicted host+source ONCE, upfront: `host=
+// … source=master|legacy|anonymous`, never the token — "why was this pull
+// anonymous" is then debuggable from the agent log alone
+// (docs/superpowers/specs/2026-07-09-registries-design.md §3). The returned
+// lookup re-resolves the chain against whatever host containerd's docker
+// authorizer actually calls back with (the resolver-provided host — not
+// necessarily identical to the one predicted here for an unusual ref, but
+// that is the value that actually gates the credential).
+func (m *Manager) pullLookup(imageRef string) runtime.CredLookup {
+	host, _ := runtime.HostFromRef(imageRef) // ok=false → host="" → chain falls through to anonymous
+	_, _, source, _ := m.resolveRegistryAuth(host)
+	m.logf("[daemon] pull %s: host=%s source=%s", imageRef, host, source)
+	return func(cbHost string) (string, string, bool) {
+		u, t, _, ok := m.resolveRegistryAuth(strings.ToLower(cbHost))
+		return u, t, ok
+	}
+}
+
+// resolveRegistryAuth resolves a pull credential for host (normalized
+// lowercase) through the chain: master snapshot (exact host match) → legacy
+// agent.yaml file cred (also host-scoped) → anonymous
+// (docs/superpowers/specs/2026-07-09-registries-design.md §3). source is for
+// the per-pull observability log ONLY — never log username/token alongside
+// it.
+func (m *Manager) resolveRegistryAuth(host string) (username, token, source string, ok bool) {
+	if u, t, found := m.registries.Lookup(host); found {
+		return u, t, "master", true
+	}
+	if u, t, found := m.legacyCred(host); found {
+		return u, t, "legacy", true
+	}
+	return "", "", "anonymous", false
+}
+
+// legacyCred matches host against the legacy agent.yaml registry_auth block
+// (host-scoped fallback, §3): an attacker-controlled image_ref on a foreign
+// host must not receive this credential either. token is read fresh from
+// TokenFile on every call so a rotated file is picked up without a restart
+// (matches the pre-registries-v1 behavior of ContainerdRuntime.creds).
+func (m *Manager) legacyCred(host string) (username, token string, ok bool) {
+	a := m.cfg.RegistryAuth
+	if a == nil {
+		return "", "", false
+	}
+	if m.legacyRegistryHost() != host {
+		return "", "", false
+	}
+	tok, err := a.Token()
+	if err != nil {
+		m.logf("[daemon] legacy registry_auth token: %v", err)
+		return "", "", false
+	}
+	return a.Username, tok, true
+}
+
+// legacyRegistryHost returns the configured registry_auth.host, defaulting
+// to ghcr.io (the only host the pre-registries-v1 fallback ever talked to)
+// when the operator's config predates the field. The default's use is
+// logged exactly once per process (sync.Once), not once per pull — it is a
+// silent behavior change only for the hypothetical non-ghcr legacy config
+// (docs/superpowers/specs/2026-07-09-registries-design.md §3). Callers must
+// only reach this once m.cfg.RegistryAuth is known non-nil.
+func (m *Manager) legacyRegistryHost() string {
+	if h := strings.ToLower(m.cfg.RegistryAuth.Host); h != "" {
+		return h
+	}
+	m.warnLegacyHostOnce.Do(func() {
+		m.logf("[daemon] WARN registry_auth без host — считаю ghcr.io")
+	})
+	return legacyDefaultRegistryHost
+}
+
 func (m *Manager) newServer(id, imageRef string, at lifecycle.State) *server {
 	srv := &server{
 		id:       id,
@@ -745,6 +845,7 @@ func (m *Manager) launch(srv *server, cmd *agentlinkv1.StartServer) {
 		CPUMillis:  cpu,
 		MemMB:      mem,
 		Env:        cmd.GetEnv(),
+		Lookup:     m.pullLookup(srv.imageRef),
 	})
 	if err != nil {
 		sock.Close()

@@ -43,6 +43,12 @@ type Handler interface {
 	Upgrade(ctx context.Context, cmd *agentlinkv1.UpgradeAgent)
 	// TailLogs streams a server log back as LogChunk frames (итерация 4).
 	TailLogs(ctx context.Context, cmd *agentlinkv1.TailLogs)
+	// SetRegistries replaces the in-memory private-registry credential
+	// snapshot used for host-matched pull auth (registries v1,
+	// docs/superpowers/specs/2026-07-09-registries-design.md §2/§3). Sent as
+	// a full snapshot at attach (before pending replay) and on every
+	// registry change; the agent never persists it to disk.
+	SetRegistries(ctx context.Context, cmd *agentlinkv1.SetRegistries)
 }
 
 // Source supplies the current node/server state for Hello and heartbeats.
@@ -295,6 +301,8 @@ func (c *Client) dispatch(ctx context.Context, in *agentlinkv1.MasterMsg) {
 		c.h.Upgrade(ctx, m.Upgrade)
 	case *agentlinkv1.MasterMsg_Tail:
 		c.h.TailLogs(ctx, m.Tail)
+	case *agentlinkv1.MasterMsg_SetRegistries:
+		c.h.SetRegistries(ctx, m.SetRegistries)
 	}
 }
 
@@ -319,6 +327,8 @@ func commandID(m *agentlinkv1.MasterMsg) string {
 		return c.Upgrade.GetCmdId()
 	case *agentlinkv1.MasterMsg_Tail:
 		return c.Tail.GetCmdId()
+	case *agentlinkv1.MasterMsg_SetRegistries:
+		return c.SetRegistries.GetCmdId()
 	}
 	return ""
 }

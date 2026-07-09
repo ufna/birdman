@@ -18,11 +18,21 @@ type Limits struct {
 	MemMB     int `yaml:"mem_mb"`
 }
 
-// RegistryAuth configures pulls from a private registry (GHCR).
+// RegistryAuth configures pulls from a private registry (GHCR by default).
 // The token itself lives only in TokenFile — never in the config or code.
+// This is the legacy (pre-registries-v1) fallback: the primary path is the
+// master's Admin → Registries (agent-side host-match pull auth,
+// docs/superpowers/specs/2026-07-09-registries-design.md §3).
 type RegistryAuth struct {
 	Username  string `yaml:"username"`
 	TokenFile string `yaml:"token_file"`
+	// Host scopes this credential to one registry host (host-matched
+	// against image_ref, same as the master-supplied creds — §3): an
+	// attacker-controlled image_ref on a foreign host must not receive this
+	// token either. Optional; defaults to ghcr.io (with a one-time WARN,
+	// agent/internal/daemon.Manager) for configs written before this field
+	// existed.
+	Host string `yaml:"host"`
 }
 
 // Token reads the registry token from TokenFile. The value must never be
