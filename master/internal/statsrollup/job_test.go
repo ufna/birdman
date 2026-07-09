@@ -11,6 +11,7 @@ import (
 	"github.com/ufna/birdman/master/internal/stats"
 	"github.com/ufna/birdman/master/internal/store"
 	"github.com/ufna/birdman/master/internal/testdb"
+	"github.com/ufna/birdman/master/internal/utctime"
 )
 
 func TestMain(m *testing.M) { os.Exit(testdb.Run(m)) }
@@ -34,8 +35,6 @@ func insertJobMatch(t *testing.T, st *store.Store, serverID, region string, play
 		t.Fatalf("insert match: %v", err)
 	}
 }
-
-func dayKeyOf(t time.Time) string { return t.UTC().Format("2006-01-02") }
 
 func findDim(dims []store.RollupDim, day time.Time, region string) (store.RollupDim, bool) {
 	for _, d := range dims {
@@ -132,8 +131,8 @@ func TestRollupJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("peaks fiveDaysAgo: %v", err)
 	}
-	if fdPeaks[dayKeyOf(fiveDaysAgo)] != 6 {
-		t.Fatalf("fiveDaysAgo peak ccu = %v, want 6", fdPeaks[dayKeyOf(fiveDaysAgo)])
+	if fdPeaks[utctime.DayKey(fiveDaysAgo)] != 6 {
+		t.Fatalf("fiveDaysAgo peak ccu = %v, want 6", fdPeaks[utctime.DayKey(fiveDaysAgo)])
 	}
 
 	// --- tick: recompute the trailing two days [yesterday, today].
@@ -215,14 +214,14 @@ func TestRollupJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("peaks yesterday: %v", err)
 	}
-	if peaksYest[dayKeyOf(yesterday)] != 14 {
-		t.Fatalf("yesterday peak ccu = %v, want 14", peaksYest[dayKeyOf(yesterday)])
+	if peaksYest[utctime.DayKey(yesterday)] != 14 {
+		t.Fatalf("yesterday peak ccu = %v, want 14", peaksYest[utctime.DayKey(yesterday)])
 	}
 	peaksToday, err := st.RollupPeakCCU(ctx, today, today)
 	if err != nil {
 		t.Fatalf("peaks today: %v", err)
 	}
-	if p := peaksToday[dayKeyOf(today)]; p < 10 || p > 16 {
+	if p := peaksToday[utctime.DayKey(today)]; p < 10 || p > 16 {
 		t.Fatalf("today peak ccu = %v, want in [10,16]", p)
 	}
 
@@ -358,10 +357,10 @@ func TestRollupJobBackfillSelfHeals(t *testing.T) {
 	if gotDims[0].Matches != 2 || gotDims[0].PlayersPeakSum != 16 {
 		t.Fatalf("backfilled dim still looks stale: %+v", gotDims[0])
 	}
-	if got, want := gotPeaks[dayKeyOf(d)], wantPeak[dayKeyOf(d)]; got != want {
+	if got, want := gotPeaks[utctime.DayKey(d)], wantPeak[utctime.DayKey(d)]; got != want {
 		t.Fatalf("backfilled peak ccu = %v, want %v (fresh reference; stale 0 was not overwritten)", got, want)
 	}
-	if gotPeaks[dayKeyOf(d)] == 0 {
+	if gotPeaks[utctime.DayKey(d)] == 0 {
 		t.Fatalf("backfilled peak ccu is still the stale 0 -- day was not recomputed")
 	}
 }
