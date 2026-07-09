@@ -1,9 +1,11 @@
-// Деплои: таблица версий, окно мультиверсий (active + deprecated и сколько
-// дедиков каждой ещё живо), прогресс pre-pull по тачкам во время деплоя,
-// кнопки Deploy/Rollback (confirm, только при скоупе deploy/admin).
-// Live — через SSE (deploy_started/activated/failed/rolled_back). Всё на
-// публичном API: GET /v1/versions, /v1/servers, /v1/nodes, POST /v1/deploy,
-// /v1/rollback, /v1/events (seed прогресса).
+// Деплои: карточка-инструкция «Как залить билд» (образ в ghcr → deploy-ключ
+// → регистрация версии и деплой, готовые curl), таблица версий, окно
+// мультиверсий (active + deprecated и сколько дедиков каждой ещё живо),
+// прогресс pre-pull по тачкам во время деплоя, кнопки Deploy/Rollback
+// (confirm, только при скоупе deploy/admin). Live — через SSE
+// (deploy_started/activated/failed/rolled_back). Всё на публичном API:
+// GET /v1/versions, /v1/servers, /v1/nodes, POST /v1/deploy, /v1/rollback,
+// /v1/events (seed прогресса).
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ColumnDef } from '@tanstack/react-table';
@@ -13,8 +15,10 @@ import { useData, useLive } from '../lib/live';
 import { canDeploy, useSession } from '../lib/session';
 import { shortId } from '../lib/format';
 import { useT, useFormat } from '../lib/i18n';
+import { buildHowtoCtx } from '../lib/deployHowto';
 import { useToast } from '../components/Toast';
 import { DataTable } from '../components/DataTable';
+import { DeployHowto } from '../components/DeployHowto';
 import { StateBadge, toneOfVersionState } from '../components/Badge';
 import { ConfirmButton } from '../components/ConfirmDialog';
 import { Card, CardHeader, ErrorNote, LoadingRow } from '../components/ui';
@@ -22,7 +26,7 @@ import { Card, CardHeader, ErrorNote, LoadingRow } from '../components/ui';
 const LIVE_SERVER_STATES = new Set(['creating', 'ready', 'allocated', 'draining']);
 const HEARTBEAT_FRESH_MS = 30_000;
 
-export function Deploys() {
+export function Deploys({ navigate }: { navigate: (path: string) => void }) {
   const { t } = useT();
   const versions = useData(() => api.listVersions(), []);
   const servers = useData(() => api.listServers(), []);
@@ -40,9 +44,13 @@ export function Deploys() {
   if (versions.data === undefined) return <LoadingRow />;
 
   const projects = groupByProject(versions.data);
+  const isEmpty = projects.length === 0;
+  const howtoCtx = buildHowtoCtx(window.location.origin, projects);
 
   return (
     <div className="flex flex-col gap-4">
+      {isEmpty && <p className="text-sm text-muted">{t('deploys.emptyPre')}</p>}
+      <DeployHowto ctx={howtoCtx} navigate={navigate} defaultExpanded={isEmpty} />
       {projects.map(({ project, versions: pv }) => (
         <ProjectDeploys
           key={project}
@@ -59,14 +67,6 @@ export function Deploys() {
           }}
         />
       ))}
-      {projects.length === 0 && (
-        <Card>
-          <CardHeader title={t('nav.deploys')} />
-          <div className="px-4 py-10 text-center text-sm text-muted">
-            {t('deploys.emptyPre')} <span className="font-mono">POST /v1/versions</span>
-          </div>
-        </Card>
-      )}
     </div>
   );
 }

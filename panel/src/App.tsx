@@ -82,7 +82,7 @@ function Routed() {
   ) : path.startsWith('/matches') ? (
     <Matches />
   ) : path.startsWith('/deploys') ? (
-    <Deploys />
+    <Deploys navigate={navigate} />
   ) : path.startsWith('/events') ? (
     <Events />
   ) : path.startsWith('/stats') ? (
