@@ -175,16 +175,15 @@ func BuildCost(matches []store.StatMatch, util []store.RegionUtil, axis []time.T
 
 // --- dimensional daily aggregation (rollup-ready) ---
 
-// DailyDim is one day × region × version of additive aggregates.
-type DailyDim struct {
-	Day            time.Time
-	Region, Semver string
-	Matches        int
-	PlayersPeakSum int64
-	DurSumSeconds  float64
-	DurCount       int
-	SlotSeconds    float64
-}
+// DailyDim is one day × region × version of additive aggregates — a type
+// alias for store.RollupDim (Task 8's match_stats_daily row shape). The
+// canonical definition lives in store, not here: this package already
+// imports store for its raw-row input types (StatMatch, RegionUtil), so
+// store cannot import stats back without a cycle. Declaring the identity
+// here instead keeps the dependency one-way while leaving stats.DailyDim and
+// store.RollupDim fully interchangeable (literally the same type) for every
+// caller on both sides.
+type DailyDim = store.RollupDim
 
 // AggregateDaily turns raw started-matches into daily dimensions + per-day
 // peak CCU. matches/players_peak_sum/duration are attributed to each match's
