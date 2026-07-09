@@ -792,9 +792,9 @@ func TestSetRegistriesHandlerStoresSnapshot(t *testing.T) {
 			{Host: "ghcr.io", Username: "u1", Token: "t1"},
 		},
 	})
-	u, tok, source, ok := m.resolveRegistryAuth("ghcr.io")
-	if !ok || source != "master" || u != "u1" || tok != "t1" {
-		t.Fatalf("after first SetRegistries: u=%q tok=%q source=%q ok=%v", u, tok, source, ok)
+	u, tok, source, err := m.resolveRegistryAuth("ghcr.io")
+	if err != nil || source != "master" || u != "u1" || tok != "t1" {
+		t.Fatalf("after first SetRegistries: u=%q tok=%q source=%q err=%v", u, tok, source, err)
 	}
 
 	// A second, different snapshot replaces the first: ghcr.io is gone.
@@ -804,12 +804,12 @@ func TestSetRegistriesHandlerStoresSnapshot(t *testing.T) {
 			{Host: "registry.example.com:5000", Username: "u2", Token: "t2"},
 		},
 	})
-	if _, _, _, ok := m.resolveRegistryAuth("ghcr.io"); ok {
+	if _, _, source, err := m.resolveRegistryAuth("ghcr.io"); err != nil || source != "anonymous" {
 		t.Fatal("second SetRegistries must wipe the first snapshot, not merge with it")
 	}
-	u, tok, source, ok = m.resolveRegistryAuth("registry.example.com:5000")
-	if !ok || source != "master" || u != "u2" || tok != "t2" {
-		t.Fatalf("after second SetRegistries: u=%q tok=%q source=%q ok=%v", u, tok, source, ok)
+	u, tok, source, err = m.resolveRegistryAuth("registry.example.com:5000")
+	if err != nil || source != "master" || u != "u2" || tok != "t2" {
+		t.Fatalf("after second SetRegistries: u=%q tok=%q source=%q err=%v", u, tok, source, err)
 	}
 }
 
@@ -821,37 +821,37 @@ func TestRegistryAuthChainPrecedence(t *testing.T) {
 	m, _, _ := testManager(t, rt)
 
 	// Nothing configured anywhere → anonymous.
-	if _, _, source, ok := m.resolveRegistryAuth("ghcr.io"); ok || source != "anonymous" {
-		t.Fatalf("empty chain: ok=%v source=%q, want false/anonymous", ok, source)
+	if _, _, source, err := m.resolveRegistryAuth("ghcr.io"); err != nil || source != "anonymous" {
+		t.Fatalf("empty chain: err=%v source=%q, want nil/anonymous", err, source)
 	}
 
 	// Legacy configured for a specific host: a DIFFERENT host still misses.
 	m.cfg.RegistryAuth = &config.RegistryAuth{
 		Username: "legacy-user", TokenFile: writeToken(t, "legacy-tok"), Host: "registry.example.com",
 	}
-	if _, _, source, ok := m.resolveRegistryAuth("ghcr.io"); ok || source != "anonymous" {
-		t.Fatalf("legacy host mismatch: ok=%v source=%q, want false/anonymous", ok, source)
+	if _, _, source, err := m.resolveRegistryAuth("ghcr.io"); err != nil || source != "anonymous" {
+		t.Fatalf("legacy host mismatch: err=%v source=%q, want nil/anonymous", err, source)
 	}
 	// Legacy host match.
-	u, tok, source, ok := m.resolveRegistryAuth("registry.example.com")
-	if !ok || source != "legacy" || u != "legacy-user" || tok != "legacy-tok" {
-		t.Fatalf("legacy hit: u=%q tok=%q source=%q ok=%v", u, tok, source, ok)
+	u, tok, source, err := m.resolveRegistryAuth("registry.example.com")
+	if err != nil || source != "legacy" || u != "legacy-user" || tok != "legacy-tok" {
+		t.Fatalf("legacy hit: u=%q tok=%q source=%q err=%v", u, tok, source, err)
 	}
 
 	// Master snapshot for the SAME host beats the legacy fallback.
 	m.registries.Set([]*agentlinkv1.RegistryCred{
 		{Host: "registry.example.com", Username: "master-user", Token: "master-tok"},
 	})
-	u, tok, source, ok = m.resolveRegistryAuth("registry.example.com")
-	if !ok || source != "master" || u != "master-user" || tok != "master-tok" {
-		t.Fatalf("master beats legacy: u=%q tok=%q source=%q ok=%v", u, tok, source, ok)
+	u, tok, source, err = m.resolveRegistryAuth("registry.example.com")
+	if err != nil || source != "master" || u != "master-user" || tok != "master-tok" {
+		t.Fatalf("master beats legacy: u=%q tok=%q source=%q err=%v", u, tok, source, err)
 	}
 
 	// Master credential for one host must not leak to an unrelated one that
 	// neither master nor legacy know — still anonymous (the anti-exfiltration
 	// property the whole design closes).
-	if _, _, source, ok := m.resolveRegistryAuth("evil.example.com"); ok || source != "anonymous" {
-		t.Fatalf("unrelated host: ok=%v source=%q, want false/anonymous", ok, source)
+	if _, _, source, err := m.resolveRegistryAuth("evil.example.com"); err != nil || source != "anonymous" {
+		t.Fatalf("unrelated host: err=%v source=%q, want nil/anonymous", err, source)
 	}
 }
 
@@ -866,9 +866,9 @@ func TestLegacyDefaultHostWarnsOnce(t *testing.T) {
 	m.logf = cap.Printf
 	m.cfg.RegistryAuth = &config.RegistryAuth{Username: "u", TokenFile: writeToken(t, "tok")} // Host left unset
 
-	u, tok, source, ok := m.resolveRegistryAuth("ghcr.io")
-	if !ok || source != "legacy" || u != "u" || tok != "tok" {
-		t.Fatalf("legacy default host hit: u=%q tok=%q source=%q ok=%v", u, tok, source, ok)
+	u, tok, source, err := m.resolveRegistryAuth("ghcr.io")
+	if err != nil || source != "legacy" || u != "u" || tok != "tok" {
+		t.Fatalf("legacy default host hit: u=%q tok=%q source=%q err=%v", u, tok, source, err)
 	}
 
 	// Consult the chain repeatedly (a miss and two more hits): the WARN must
@@ -903,12 +903,55 @@ func TestPrePullUsesRegistryAuthChain(t *testing.T) {
 	if lookup == nil {
 		t.Fatal("PrePull did not pass a CredLookup to Runtime.Pull")
 	}
-	u, tok, ok := lookup("ghcr.io")
-	if !ok || u != "u1" || tok != "t1" {
-		t.Fatalf("PrePull lookup(ghcr.io) = (%q, %q, %v), want (u1, t1, true) — PrePull must use the same chain as StartServer", u, tok, ok)
+	u, tok, err := lookup("ghcr.io")
+	if err != nil || u != "u1" || tok != "t1" {
+		t.Fatalf("PrePull lookup(ghcr.io) = (%q, %q, %v), want (u1, t1, nil) — PrePull must use the same chain as StartServer", u, tok, err)
 	}
-	if _, _, ok := lookup("evil.example.com"); ok {
+	if u, _, err := lookup("evil.example.com"); err != nil || u != "" {
 		t.Fatal("PrePull lookup must not match an unrelated host")
+	}
+}
+
+// TestLegacyBrokenTokenFileFailsPull is the Fix-1 regression test (task
+// review of the host-match work, registries-v1): a legacy registry_auth host
+// match whose token_file cannot be read must FAIL the pull with that error —
+// never silently degrade to an anonymous pull, which would mask a day-one
+// token_file typo behind a confusing registry 401 later. Master snapshot is
+// left empty so only the legacy path is in play.
+func TestLegacyBrokenTokenFileFailsPull(t *testing.T) {
+	rt := newFakeRuntime()
+	m, _, _ := testManager(t, rt)
+	m.cfg.RegistryAuth = &config.RegistryAuth{
+		Username:  "legacy-user",
+		TokenFile: filepath.Join(t.TempDir(), "missing-token"), // never written — read fails
+		Host:      "ghcr.io",
+	}
+
+	m.PrePull(context.Background(), &agentlinkv1.PrePull{CmdId: "p1", ImageRef: "ghcr.io/x/y:1"})
+	eventually(t, "pull recorded", func() bool {
+		rt.mu.Lock()
+		defer rt.mu.Unlock()
+		return len(rt.pulls) == 1
+	})
+
+	lookup := rt.lastPullLookup()
+	if lookup == nil {
+		t.Fatal("PrePull did not pass a CredLookup to Runtime.Pull")
+	}
+
+	// The legacy host matches — the callback must fail, not go anonymous.
+	u, tok, err := lookup("ghcr.io")
+	if err == nil {
+		t.Fatalf("legacy host match with unreadable token_file: got (%q, %q, nil), want a non-nil error", u, tok)
+	}
+	if !strings.Contains(err.Error(), "read registry token") || !strings.Contains(err.Error(), "no such file or directory") {
+		t.Fatalf("error must carry the actionable file-read cause (surfaces via PullReport/ServerEvent detail), got: %v", err)
+	}
+
+	// Regression: a host that does not match the legacy config at all is
+	// still a clean anonymous pull, not an error.
+	if u, _, err := lookup("evil.example.com"); err != nil || u != "" {
+		t.Fatalf("unrelated host must stay anonymous: u=%q err=%v", u, err)
 	}
 }
 
@@ -929,9 +972,9 @@ func TestStartServerUsesRegistryAuthChain(t *testing.T) {
 	if lookup == nil {
 		t.Fatal("StartServer did not pass a Lookup in StartSpec")
 	}
-	u, tok, ok := lookup("ghcr.io")
-	if !ok || u != "u1" || tok != "t1" {
-		t.Fatalf("StartServer lookup(ghcr.io) = (%q, %q, %v), want (u1, t1, true)", u, tok, ok)
+	u, tok, err := lookup("ghcr.io")
+	if err != nil || u != "u1" || tok != "t1" {
+		t.Fatalf("StartServer lookup(ghcr.io) = (%q, %q, %v), want (u1, t1, nil)", u, tok, err)
 	}
 }
 

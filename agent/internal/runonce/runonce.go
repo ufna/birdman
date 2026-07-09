@@ -144,7 +144,7 @@ func Run(ctx context.Context, opts Options) int {
 			return 1
 		}
 		username := cfg.RegistryAuth.Username
-		lookup = func(string) (string, string, bool) { return username, token, true }
+		lookup = func(string) (string, string, error) { return username, token, nil }
 	}
 
 	diag.Printf("ensuring image %s (pull if not local)", opts.ImageRef)

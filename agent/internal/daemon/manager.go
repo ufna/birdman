@@ -667,10 +667,14 @@ func (m *Manager) DrainServer(_ context.Context, cmd *agentlinkv1.DrainServer) {
 func (m *Manager) pullLookup(imageRef string) runtime.CredLookup {
 	host, _ := runtime.HostFromRef(imageRef) // ok=false → host="" → chain falls through to anonymous
 	_, _, source, _ := m.resolveRegistryAuth(host)
+	// Advisory only: this log reflects HostFromRef's own parse of imageRef
+	// and can diverge from containerd's own resolver parsing on edge refs —
+	// the callback below is what actually enforces the match, against
+	// containerd's own resolver-provided host.
 	m.logf("[daemon] pull %s: host=%s source=%s", imageRef, host, source)
-	return func(cbHost string) (string, string, bool) {
-		u, t, _, ok := m.resolveRegistryAuth(strings.ToLower(cbHost))
-		return u, t, ok
+	return func(cbHost string) (string, string, error) {
+		u, t, _, err := m.resolveRegistryAuth(strings.ToLower(cbHost))
+		return u, t, err
 	}
 }
 
@@ -679,36 +683,46 @@ func (m *Manager) pullLookup(imageRef string) runtime.CredLookup {
 // agent.yaml file cred (also host-scoped) → anonymous
 // (docs/superpowers/specs/2026-07-09-registries-design.md §3). source is for
 // the per-pull observability log ONLY — never log username/token alongside
-// it.
-func (m *Manager) resolveRegistryAuth(host string) (username, token, source string, ok bool) {
+// it. err != nil means host matched the legacy registry_auth block but its
+// token_file could not be read: the caller (the CredLookup closure returned
+// by pullLookup) must fail the pull with err, never silently degrade to
+// anonymous — a broken token_file is a day-one config typo that deserves an
+// actionable error, not a confusing registry 401 down the line.
+func (m *Manager) resolveRegistryAuth(host string) (username, token, source string, err error) {
 	if u, t, found := m.registries.Lookup(host); found {
-		return u, t, "master", true
+		return u, t, "master", nil
 	}
-	if u, t, found := m.legacyCred(host); found {
-		return u, t, "legacy", true
+	u, t, found, lerr := m.legacyCred(host)
+	if lerr != nil {
+		return "", "", "legacy", lerr
 	}
-	return "", "", "anonymous", false
+	if found {
+		return u, t, "legacy", nil
+	}
+	return "", "", "anonymous", nil
 }
 
 // legacyCred matches host against the legacy agent.yaml registry_auth block
 // (host-scoped fallback, §3): an attacker-controlled image_ref on a foreign
 // host must not receive this credential either. token is read fresh from
 // TokenFile on every call so a rotated file is picked up without a restart
-// (matches the pre-registries-v1 behavior of ContainerdRuntime.creds).
-func (m *Manager) legacyCred(host string) (username, token string, ok bool) {
+// (matches the pre-registries-v1 behavior of ContainerdRuntime.creds). A
+// host match whose token_file can't be read returns found=false and a
+// non-nil err — resolveRegistryAuth turns that into a failed pull rather
+// than an anonymous one (see there).
+func (m *Manager) legacyCred(host string) (username, token string, found bool, err error) {
 	a := m.cfg.RegistryAuth
 	if a == nil {
-		return "", "", false
+		return "", "", false, nil
 	}
 	if m.legacyRegistryHost() != host {
-		return "", "", false
+		return "", "", false, nil
 	}
 	tok, err := a.Token()
 	if err != nil {
-		m.logf("[daemon] legacy registry_auth token: %v", err)
-		return "", "", false
+		return "", "", false, err
 	}
-	return a.Username, tok, true
+	return a.Username, tok, true, nil
 }
 
 // legacyRegistryHost returns the configured registry_auth.host, defaulting
