@@ -51,6 +51,35 @@ func (s *Store) StatMatches(ctx context.Context, since time.Time) ([]StatMatch, 
 	return out, rows.Err()
 }
 
+// StatMatchesTTM returns only the columns time-to-match needs — CreatedAt
+// and StartedAt — for started matches with started_at >= since, oldest
+// first; Region/Semver/PlayersPeak/EndedAt are left zero. Reuses the same
+// matches(started_at) index as StatMatches, but skips the versions join
+// those other fields need: the narrow read the rollup-backed
+// /v1/stats/overview handler uses for stats.timeToMatchStats, since
+// percentiles are non-additive and so ttm is always recomputed fresh over
+// the whole window rather than served from the match_stats_daily rollup.
+func (s *Store) StatMatchesTTM(ctx context.Context, since time.Time) ([]StatMatch, error) {
+	rows, err := s.Pool.Query(ctx, `
+		select created_at, started_at
+		from matches
+		where started_at is not null and started_at >= $1
+		order by started_at`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []StatMatch
+	for rows.Next() {
+		var sm StatMatch
+		if err := rows.Scan(&sm.CreatedAt, &sm.StartedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, sm)
+	}
+	return out, rows.Err()
+}
+
 // RegionUtil is a current utilization snapshot for one region: how many slots
 // the fleet has (active nodes' capacity) versus how many servers occupy them.
 type RegionUtil struct {
