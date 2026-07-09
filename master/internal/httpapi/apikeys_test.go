@@ -24,7 +24,7 @@ func newAPIKeyServer(t *testing.T) (*store.Store, *httptest.Server) {
 	m := metrics.New(st, log)
 	mm := matchmaker.New(st, m, matchmaker.Config{}, log)
 	dep := deploy.New(deploy.Options{Store: st, Sender: &testdb.CommandRecorder{}, Log: log})
-	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", log))
+	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", "", log))
 	t.Cleanup(ts.Close)
 	return st, ts
 }

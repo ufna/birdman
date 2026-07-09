@@ -8,3 +8,8 @@
     name: birdman-agent.service
     state: restarted
     daemon_reload: true
+
+- name: Restart birdman-vector
+  ansible.builtin.command:
+    cmd: docker restart birdman-vector
+  changed_when: true

@@ -21,6 +21,20 @@ services:
       - "{{ birdman_bind_addr }}:{{ birdman_vm_port }}:{{ birdman_vm_port }}"
     restart: unless-stopped
 
+  # --- логи: VictoriaLogs single-node, retention {{ birdman_vl_retention }} ---
+  victorialogs:
+    image: {{ birdman_vl_image }}
+    container_name: birdman-victorialogs
+    command:
+      - "-storageDataPath=/victoria-logs-data"
+      - "-retentionPeriod={{ birdman_vl_retention }}"
+      - "-httpListenAddr=:{{ birdman_vl_port }}"
+    volumes:
+      - vldata:/victoria-logs-data
+    ports:
+      - "{{ birdman_bind_addr }}:{{ birdman_vl_port }}:{{ birdman_vl_port }}"
+    restart: unless-stopped
+
   # --- скрейпер: vmagent, host-network (единственный надёжный способ достать
   #     сервисы на 127.0.0.1 самого бокса: agent :9101, master :8100, чужой
   #     node_exporter :4027). Свой HTTP-листенер — строго на 127.0.0.1. ---
@@ -122,5 +136,7 @@ services:
 volumes:
   vmdata:
     name: birdman-vmdata
+  vldata:
+    name: birdman-vldata
   grafana:
     name: birdman-grafana

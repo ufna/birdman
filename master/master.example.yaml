@@ -1,7 +1,7 @@
 # Конфиг birdman-master (см. docs/specs/master.md §7; дев-дефолты v0).
 # Любое поле можно переопределить env-переменными:
 #   BIRDMAN_DSN, BIRDMAN_LISTEN_API, BIRDMAN_LISTEN_GRPC, BIRDMAN_VM_URL,
-#   BIRDMAN_VMALERT_URL.
+#   BIRDMAN_VL_URL, BIRDMAN_VMALERT_URL.
 
 dsn: "postgres://postgres:birdman@localhost:5432/birdman?sslmode=disable"
 
@@ -13,6 +13,9 @@ listen_grpc: ":8444"  # gRPC AgentLink (всегда TLS)
 # /query_range), не ходя в TSDB напрямую. Пусто → эндпоинты отвечают 503.
 metrics:
   victoriametrics_url: "http://127.0.0.1:8428"
+  # Централизованные логи дедиков (Логи v1, GET /v1/logs/query), read-only
+  # прокси в VictoriaLogs. Пусто → эндпоинт отвечает 503 logs_unconfigured.
+  victorialogs_url: "http://127.0.0.1:9428"
 
 # Алерты для панели П2 (panel.md §3, ops.md §1). Правила и активные срабатывания
 # — из vmalert HTTP API; история — из лог-сина алертов на боксе. Read-only в v0.

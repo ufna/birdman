@@ -20,7 +20,7 @@ import { matchDurationMs, matchMetricRange, isMatchOver } from '../lib/match';
 import { matchMetricQueries } from '../lib/metrics';
 import { StateBadge, toneOfMatchState } from './Badge';
 import { MetricChart } from './MetricChart';
-import { LogViewer } from './LogViewer';
+import { LogsPanel } from './LogsPanel';
 import { EmptyState, ErrorNote, LoadingRow } from './ui';
 
 export function MatchDrawer({ matchId, onClose }: { matchId: string | null; onClose: () => void }) {
@@ -142,7 +142,7 @@ function MatchContent({ m }: { m: Match }) {
             {m.server_id === '' ? (
               <EmptyState>{t('match.logs.gone')}</EmptyState>
             ) : (
-              <LogViewer serverId={m.server_id} initialFollow={!isMatchOver(m)} />
+              <LogsPanel serverId={m.server_id} initialFollow={!isMatchOver(m)} />
             )}
           </Tabs.Content>
         </div>

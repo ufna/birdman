@@ -1,0 +1,39 @@
+# {{ ansible_managed }}
+# Шиппер логов дедиков → VictoriaLogs (docs/superpowers/specs/2026-07-09-centralized-logs-design.md §2).
+data_dir: /vector-data-dir
+api:
+  enabled: false
+sources:
+  dedik_logs:
+    type: file
+    include: ["/var/log/birdman/servers/*.log"]
+    # .log.1 не читаем: его содержимое уже прочитано live до ротации
+    exclude: ["/var/log/birdman/servers/*.log.1"]
+    read_from: beginning
+    ignore_older_secs: 172800   # при первом старте не заливать древность
+transforms:
+  enrich:
+    type: remap
+    inputs: [dedik_logs]
+    source: |
+      parsed, err = parse_regex(string!(.file), r'(?P<id>[^/]+)\.log$')
+      .server_id = if err == null { parsed.id } else { "unknown" }
+      .node = "{{ inventory_hostname }}"
+      .region = "{{ birdman_region }}"
+sinks:
+  victorialogs:
+    type: loki
+    inputs: [enrich]
+    endpoint: "{{ birdman_vl_sink_url }}"
+    encoding:
+      codec: text
+{% raw %}
+    labels:
+      server_id: "{{ server_id }}"
+      node: "{{ node }}"
+      region: "{{ region }}"
+{% endraw %}
+    buffer:
+      type: disk
+      max_size: 268435488        # 256MB; переполнение — дропаем новое
+      when_full: drop_newest

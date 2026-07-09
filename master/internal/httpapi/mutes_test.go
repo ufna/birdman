@@ -39,7 +39,7 @@ func muteServer(t *testing.T) (*store.Store, *client, *client) {
 	if err := os.WriteFile(logPath, []byte(logBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", log).
+	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", "", log).
 		WithAlertsSources(vm.URL, logPath))
 	t.Cleanup(ts.Close)
 

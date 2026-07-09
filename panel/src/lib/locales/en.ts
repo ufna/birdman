@@ -228,6 +228,28 @@ export const en = {
   'logs.done': 'done',
   'logs.errorShort': 'error',
 
+  // — logs Live|History segment (Task 5, "Логи v1") —
+  'logs.live': 'Live',
+  'logs.history': 'History',
+  'logs.segmentAria': 'Log view',
+  'logs.range.aria': 'Time window',
+  'logs.range.1h': '1 h',
+  'logs.range.24h': '24 h',
+  'logs.range.7d': '7 d',
+  'logs.range.14d': '14 d',
+  'logs.filterPlaceholder': 'Filter text…',
+  'logs.filterApply': 'Apply',
+  'logs.more': 'Show more',
+  'logs.unconfigured': "Log history isn't configured on this master (victorialogs_url is empty).",
+  'logs.unavailable': 'Log storage is unavailable right now — live tail keeps working.',
+
+  // — Logs screen: fleet-wide search (Task 6, "Логи v1") —
+  'logs.search.textPlaceholder': 'Search log text…',
+  'logs.search.hint': 'Enter a search above and run it to see matching log lines.',
+  'logs.search.submit': 'Search',
+  'logs.search.limitAria': 'Result limit',
+  'logs.search.empty': 'No log lines matched your search.',
+
   // — confirm dialog —
   'confirm.err.forbidden': "You don't have permission for this action.",
   'confirm.err.conflict': 'State conflict — the action is unavailable right now.',
@@ -336,6 +358,7 @@ export const en = {
   'nav.stats': 'Statistics',
   'nav.cost': 'Cost',
   'nav.alerts': 'Alerts',
+  'nav.logs': 'Logs',
   'nav.access': 'Access',
 
   // — severity / key-status / alert-state labels (raw codes stay in the API) —
