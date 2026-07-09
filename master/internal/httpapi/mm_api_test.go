@@ -32,7 +32,7 @@ func mmServer(t *testing.T, st *store.Store, cfg matchmaker.Config) *httptest.Se
 	mm := matchmaker.New(st, m, cfg, log)
 	go mm.Run(t.Context())
 	dep := deploy.New(deploy.Options{Store: st, Sender: &testdb.CommandRecorder{}, Log: log})
-	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", log))
+	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", "", log))
 	t.Cleanup(ts.Close)
 	return ts
 }

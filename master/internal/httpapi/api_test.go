@@ -62,13 +62,34 @@ func (c *client) do(method, path string, body any) (int, map[string]any) {
 	return resp.StatusCode, out
 }
 
+// doRaw is like do but returns the raw response body instead of attempting a
+// JSON-object decode — needed for proxy endpoints whose upstream content type
+// isn't a JSON object (e.g. VictoriaLogs' application/stream+json ndjson).
+func (c *client) doRaw(method, path string) (int, []byte) {
+	c.t.Helper()
+	req, err := http.NewRequest(method, c.base+path, nil)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	if c.key != "" {
+		req.Header.Set("Authorization", "Bearer "+c.key)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, raw
+}
+
 func TestRESTFlow(t *testing.T) {
 	st := testdb.New(t)
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	m := metrics.New(st, log)
 	mm := matchmaker.New(st, m, matchmaker.Config{}, log)
 	dep := deploy.New(deploy.Options{Store: st, Sender: &testdb.CommandRecorder{}, Log: log})
-	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", log))
+	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", "", log))
 	t.Cleanup(ts.Close)
 	ctx := t.Context()
 

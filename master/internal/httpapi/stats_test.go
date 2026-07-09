@@ -45,7 +45,7 @@ func TestStatsEndpoints(t *testing.T) {
 	m := metrics.New(st, log)
 	mm := matchmaker.New(st, m, matchmaker.Config{}, log)
 	dep := deploy.New(deploy.Options{Store: st, Sender: &testdb.CommandRecorder{}, Log: log})
-	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", log))
+	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", "", log))
 	t.Cleanup(ts.Close)
 	ctx := t.Context()
 
@@ -124,7 +124,7 @@ func TestStatsEmpty(t *testing.T) {
 	m := metrics.New(st, log)
 	mm := matchmaker.New(st, m, matchmaker.Config{}, log)
 	dep := deploy.New(deploy.Options{Store: st, Sender: &testdb.CommandRecorder{}, Log: log})
-	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", log))
+	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", "", log))
 	t.Cleanup(ts.Close)
 	ctx := t.Context()
 	_, roSecret, _ := st.CreateAPIKey(ctx, "ro", []string{httpapi.ScopeReadonly})
@@ -176,7 +176,7 @@ func newStatsAPI(t *testing.T) (ts *httptest.Server, st *store.Store, f *testdb.
 	m := metrics.New(st, log)
 	mm := matchmaker.New(st, m, matchmaker.Config{}, log)
 	dep := deploy.New(deploy.Options{Store: st, Sender: &testdb.CommandRecorder{}, Log: log})
-	ts = httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", log))
+	ts = httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", "", log))
 	t.Cleanup(ts.Close)
 	_, roSecret, err := st.CreateAPIKey(t.Context(), "ro", []string{httpapi.ScopeReadonly})
 	if err != nil {

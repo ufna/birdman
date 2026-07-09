@@ -60,6 +60,9 @@ type Metrics struct {
 	// VictoriaMetricsURL is the base URL of the VictoriaMetrics HTTP API
 	// (e.g. http://127.0.0.1:8428); empty → the query proxy returns 503.
 	VictoriaMetricsURL string `yaml:"victoriametrics_url"`
+	// VictoriaLogsURL is the base URL of the VictoriaLogs HTTP API
+	// (e.g. http://127.0.0.1:9428); empty → the logs proxy returns 503.
+	VictoriaLogsURL string `yaml:"victorialogs_url"`
 }
 
 // Alerts configures the panel П2 Alerts endpoints (docs/specs/panel.md §3,
@@ -96,9 +99,10 @@ func defaults() Config {
 		ListenAPI:  ":8100",
 		ListenGRPC: ":8444",
 		TLS:        TLS{AutoCertDir: "certs"},
-		// VictoriaMetrics of the same box (ops.md §1 recommended stack); the
-		// metrics proxy returns 502 if it is not running, 503 only when unset.
-		Metrics: Metrics{VictoriaMetricsURL: "http://127.0.0.1:8428"},
+		// VictoriaMetrics/VictoriaLogs of the same box (ops.md §1 recommended
+		// stack); the proxies return 502 if the upstream is not running, 503
+		// only when the URL is unset.
+		Metrics: Metrics{VictoriaMetricsURL: "http://127.0.0.1:8428", VictoriaLogsURL: "http://127.0.0.1:9428"},
 		// vmalert + alert sink on the same box (ops.md §1); the alerts
 		// endpoints degrade gracefully (503 unset / 502 unreachable / [] no log).
 		Alerts: Alerts{
@@ -142,6 +146,9 @@ func Load(path string) (Config, error) {
 	}
 	if v := os.Getenv("BIRDMAN_VM_URL"); v != "" {
 		cfg.Metrics.VictoriaMetricsURL = v
+	}
+	if v := os.Getenv("BIRDMAN_VL_URL"); v != "" {
+		cfg.Metrics.VictoriaLogsURL = v
 	}
 	if v := os.Getenv("BIRDMAN_VMALERT_URL"); v != "" {
 		cfg.Alerts.VmalertURL = v

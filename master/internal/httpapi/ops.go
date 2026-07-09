@@ -291,6 +291,51 @@ func (s *Server) proxyVictoria(w http.ResponseWriter, r *http.Request, path stri
 	_, _ = io.Copy(w, resp.Body)
 }
 
+// --- logs query proxy (Логи v1, docs/superpowers/specs/2026-07-09-centralized-logs-design.md §3) ---
+
+// handleLogsQuery proxies a LogsQL query to VictoriaLogs (history/search for
+// the panel). Mirrors the metrics proxy: 503 logs_unconfigured without a
+// configured URL, 502 upstream if VictoriaLogs is unreachable. limit is
+// clamped on master (default 1000, max 10000) so the panel can't accidentally
+// pull unbounded result sets through the proxy.
+func (s *Server) handleLogsQuery(w http.ResponseWriter, r *http.Request) {
+	if s.vlURL == "" {
+		writeError(w, http.StatusServiceUnavailable, "logs_unconfigured",
+			"victorialogs_url is not set on this master")
+		return
+	}
+	q := r.URL.Query()
+	limit := 1000
+	if raw := q.Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			writeError(w, http.StatusBadRequest, "bad_request", "limit must be a positive integer")
+			return
+		}
+		limit = min(n, 10000)
+	}
+	q.Set("limit", strconv.Itoa(limit))
+	target := strings.TrimRight(s.vlURL, "/") + "/select/logsql/query?" + q.Encode()
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "upstream", err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
+}
+
 func isTrue(v string) bool {
 	switch strings.ToLower(v) {
 	case "1", "true", "yes", "on":

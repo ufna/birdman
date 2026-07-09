@@ -23,7 +23,7 @@ func deployServer(t *testing.T, st *store.Store) (*httptest.Server, *deploy.Mana
 	mm := matchmaker.New(st, m, matchmaker.Config{}, log)
 	rec := &testdb.CommandRecorder{}
 	dep := deploy.New(deploy.Options{Store: st, Sender: rec, Log: log})
-	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", log))
+	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", "", log))
 	t.Cleanup(ts.Close)
 	return ts, dep, rec
 }

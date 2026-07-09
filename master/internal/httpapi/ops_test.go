@@ -5,7 +5,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -36,7 +38,7 @@ func TestNodeDrainUndrainAPI(t *testing.T) {
 	mm := matchmaker.New(st, m, matchmaker.Config{}, log)
 	dep := deploy.New(deploy.Options{Store: st, Sender: &testdb.CommandRecorder{}, Log: log})
 	rec := &testdb.CommandRecorder{}
-	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, rec, nil, "", log))
+	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, rec, nil, "", "", log))
 	t.Cleanup(ts.Close)
 	ctx := t.Context()
 
@@ -95,7 +97,7 @@ func TestAgentUpgradeAPI(t *testing.T) {
 	mm := matchmaker.New(st, m, matchmaker.Config{}, log)
 	dep := deploy.New(deploy.Options{Store: st, Sender: &testdb.CommandRecorder{}, Log: log})
 	rec := &testdb.CommandRecorder{}
-	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, rec, nil, "", log))
+	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, rec, nil, "", "", log))
 	t.Cleanup(ts.Close)
 	ctx := t.Context()
 
@@ -142,7 +144,7 @@ func TestMetricsQueryProxy(t *testing.T) {
 	}))
 	t.Cleanup(vm.Close)
 
-	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, vm.URL, log))
+	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, vm.URL, "", log))
 	t.Cleanup(ts.Close)
 	ctx := t.Context()
 	_, roKey, _ := st.CreateAPIKey(ctx, "ro", []string{httpapi.ScopeReadonly})
@@ -165,11 +167,101 @@ func TestMetricsQueryProxy(t *testing.T) {
 	}
 
 	// Unconfigured master → 503.
-	ts2 := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", log))
+	ts2 := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", "", log))
 	t.Cleanup(ts2.Close)
 	ro2 := &client{t: t, base: ts2.URL, key: roKey}
 	if code, _ := ro2.do("GET", "/v1/metrics/query?query=up", nil); code != 503 {
 		t.Fatalf("unconfigured proxy: want 503, got %d", code)
+	}
+}
+
+// TestLogsQueryProxy covers the read-only VictoriaLogs proxy: passthrough of
+// query/start/end, limit default/clamp/validation, and the
+// logs_unconfigured/upstream error contract the panel (Task 4) depends on.
+func TestLogsQueryProxy(t *testing.T) {
+	st := testdb.New(t)
+	log := opsLog()
+	m := metrics.New(st, log)
+	mm := matchmaker.New(st, m, matchmaker.Config{}, log)
+	dep := deploy.New(deploy.Options{Store: st, Sender: &testdb.CommandRecorder{}, Log: log})
+
+	// Fake VictoriaLogs upstream: records path/query, answers one ndjson line.
+	var calls int
+	var gotPath string
+	var gotQuery url.Values
+	vl := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		gotPath, gotQuery = r.URL.Path, r.URL.Query()
+		w.Header().Set("Content-Type", "application/stream+json")
+		_, _ = w.Write([]byte(`{"_time":"2026-07-09T10:00:00Z","_msg":"hello","server_id":"s1"}` + "\n"))
+	}))
+	t.Cleanup(vl.Close)
+
+	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", vl.URL, log))
+	t.Cleanup(ts.Close)
+	ctx := t.Context()
+	_, roKey, _ := st.CreateAPIKey(ctx, "ro", []string{httpapi.ScopeReadonly})
+	ro := &client{t: t, base: ts.URL, key: roKey}
+
+	// 1) passthrough + default limit.
+	code, body := ro.doRaw("GET", `/v1/logs/query?query={server_id="s1"}&start=0&end=10`)
+	if code != 200 {
+		t.Fatalf("passthrough: want 200, got %d (%s)", code, body)
+	}
+	if gotPath != "/select/logsql/query" {
+		t.Fatalf("upstream path = %q, want /select/logsql/query", gotPath)
+	}
+	if got := gotQuery.Get("query"); got != `{server_id="s1"}` {
+		t.Fatalf("upstream query = %q", got)
+	}
+	if gotQuery.Get("start") != "0" || gotQuery.Get("end") != "10" {
+		t.Fatalf("upstream start/end = %q/%q, want 0/10", gotQuery.Get("start"), gotQuery.Get("end"))
+	}
+	if gotQuery.Get("limit") != "1000" {
+		t.Fatalf("upstream limit = %q, want default 1000", gotQuery.Get("limit"))
+	}
+
+	// 2) clamp: limit=50000 → upstream sees limit=10000.
+	if code, body := ro.doRaw("GET", "/v1/logs/query?query=x&limit=50000"); code != 200 {
+		t.Fatalf("clamp: want 200, got %d (%s)", code, body)
+	}
+	if gotQuery.Get("limit") != "10000" {
+		t.Fatalf("clamp: upstream limit = %q, want 10000", gotQuery.Get("limit"))
+	}
+
+	// 3) bad limit → 400 bad_request, upstream not called.
+	before := calls
+	code, body = ro.doRaw("GET", "/v1/logs/query?query=x&limit=abc")
+	if code != 400 {
+		t.Fatalf("bad limit: want 400, got %d (%s)", code, body)
+	}
+	if !strings.Contains(string(body), "bad_request") {
+		t.Fatalf("bad limit: body = %s, want error bad_request", body)
+	}
+	if calls != before {
+		t.Fatalf("bad limit: upstream was called (calls %d -> %d)", before, calls)
+	}
+
+	// 4) unconfigured master → 503 logs_unconfigured.
+	ts2log := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", "", log))
+	t.Cleanup(ts2log.Close)
+	ro2log := &client{t: t, base: ts2log.URL, key: roKey}
+	code, body = ro2log.doRaw("GET", "/v1/logs/query?query=x")
+	if code != 503 {
+		t.Fatalf("unconfigured: want 503, got %d (%s)", code, body)
+	}
+	if !strings.Contains(string(body), "logs_unconfigured") {
+		t.Fatalf("unconfigured: body = %s, want logs_unconfigured", body)
+	}
+
+	// 5) dead upstream → 502 upstream.
+	vl.Close()
+	code, body = ro.doRaw("GET", "/v1/logs/query?query=x")
+	if code != 502 {
+		t.Fatalf("dead upstream: want 502, got %d (%s)", code, body)
+	}
+	if !strings.Contains(string(body), "upstream") {
+		t.Fatalf("dead upstream: body = %s, want upstream", body)
 	}
 }
 
@@ -217,7 +309,7 @@ func TestServerLogsProxy(t *testing.T) {
 	dep := deploy.New(deploy.Options{Store: st, Sender: &testdb.CommandRecorder{}, Log: log})
 	router := agentlink.NewLogRouter()
 	sender := &logSender{router: router, canceled: map[string]bool{}}
-	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, sender, router, "", log))
+	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, sender, router, "", "", log))
 	t.Cleanup(ts.Close)
 	ctx := t.Context()
 	_, roKey, _ := st.CreateAPIKey(ctx, "ro", []string{httpapi.ScopeReadonly})

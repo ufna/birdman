@@ -62,7 +62,7 @@ func TestAlertsEndpoints(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", log).
+	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", "", log).
 		WithAlertsSources(vm.URL, logPath))
 	t.Cleanup(ts.Close)
 	ro := &client{t: t, base: ts.URL, key: roSecret}
@@ -126,7 +126,7 @@ func TestAlertsUnconfigured(t *testing.T) {
 	_, roSecret, _ := st.CreateAPIKey(ctx, "ro", []string{httpapi.ScopeReadonly})
 
 	// vmalert URL empty, log path points at a nonexistent file.
-	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", log).
+	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", "", log).
 		WithAlertsSources("", filepath.Join(t.TempDir(), "does-not-exist.log")))
 	t.Cleanup(ts.Close)
 	ro := &client{t: t, base: ts.URL, key: roSecret}

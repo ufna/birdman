@@ -36,6 +36,7 @@ type Server struct {
 	sender        CommandSender        // agent command dispatch (agentlink.Hub)
 	logs          *agentlink.LogRouter // TailLogs chunk router
 	vmURL         string               // VictoriaMetrics base URL for the metrics proxy
+	vlURL         string               // VictoriaLogs base URL for the logs query proxy
 	vmalertURL    string               // vmalert base URL for the alerts endpoints
 	alertsLogPath string               // alert sink log for GET /v1/alerts/history
 	mmLimit       *rateLimiter
@@ -44,9 +45,9 @@ type Server struct {
 	mux           *http.ServeMux
 }
 
-func New(st *store.Store, m *metrics.Metrics, mm *matchmaker.Matchmaker, dep *deploy.Manager, sender CommandSender, logs *agentlink.LogRouter, vmURL string, log *slog.Logger) *Server {
+func New(st *store.Store, m *metrics.Metrics, mm *matchmaker.Matchmaker, dep *deploy.Manager, sender CommandSender, logs *agentlink.LogRouter, vmURL, vlURL string, log *slog.Logger) *Server {
 	s := &Server{
-		st: st, m: m, mm: mm, dep: dep, sender: sender, logs: logs, vmURL: vmURL,
+		st: st, m: m, mm: mm, dep: dep, sender: sender, logs: logs, vmURL: vmURL, vlURL: vlURL,
 		mmLimit: newRateLimiter(mmRateLimit, mmRateLimit),
 		auth:    newAuthenticator(st), log: log, mux: http.NewServeMux(),
 	}
@@ -63,6 +64,7 @@ func New(st *store.Store, m *metrics.Metrics, mm *matchmaker.Matchmaker, dep *de
 	s.mux.HandleFunc("POST /v1/agent-upgrade", s.requireScope(ScopeAdmin, s.handleAgentUpgrade))
 	s.mux.HandleFunc("GET /v1/metrics/query", s.requireScope(ScopeReadonly, s.handleMetricsQuery))
 	s.mux.HandleFunc("GET /v1/metrics/query_range", s.requireScope(ScopeReadonly, s.handleMetricsQueryRange))
+	s.mux.HandleFunc("GET /v1/logs/query", s.requireScope(ScopeReadonly, s.handleLogsQuery))
 	s.mux.HandleFunc("POST /v1/versions", s.requireScope(ScopeDeploy, s.handleCreateVersion))
 	s.mux.HandleFunc("GET /v1/versions", s.requireScope(ScopeReadonly, s.handleListVersions))
 	s.mux.HandleFunc("POST /v1/deploy", s.requireScope(ScopeDeploy, s.handleDeploy))
