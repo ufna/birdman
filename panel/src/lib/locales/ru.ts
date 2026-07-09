@@ -212,6 +212,21 @@ export const ru: Record<MessageKey, string> = {
   'logs.done': 'готово',
   'logs.errorShort': 'ошибка',
 
+  // — сегмент Live|История логов (задача 5, «Логи v1») —
+  'logs.live': 'Live',
+  'logs.history': 'История',
+  'logs.segmentAria': 'Режим просмотра логов',
+  'logs.range.aria': 'Окно времени',
+  'logs.range.1h': '1 ч',
+  'logs.range.24h': '24 ч',
+  'logs.range.7d': '7 д',
+  'logs.range.14d': '14 д',
+  'logs.filterPlaceholder': 'Текст фильтра…',
+  'logs.filterApply': 'Применить',
+  'logs.more': 'Показать ещё',
+  'logs.unconfigured': 'История логов не настроена на этом master (victorialogs_url пуст).',
+  'logs.unavailable': 'Хранилище логов сейчас недоступно — live-tail продолжает работать.',
+
   // — диалог подтверждения —
   'confirm.err.forbidden': 'Недостаточно прав для этого действия.',
   'confirm.err.conflict': 'Конфликт состояния — действие сейчас недоступно.',

@@ -17,7 +17,7 @@ import { shortId, summarizePayload } from '../lib/format';
 import { useT, useFormat } from '../lib/i18n';
 import { StateBadge, toneOfEventKind, toneOfServerState } from './Badge';
 import { MetricChart } from './MetricChart';
-import { LogViewer } from './LogViewer';
+import { LogsPanel } from './LogsPanel';
 import { EmptyState, LoadingRow } from './ui';
 
 export function ServerDrawer({ serverId, onClose }: { serverId: string | null; onClose: () => void }) {
@@ -114,7 +114,7 @@ function DrawerBody({ serverId }: { serverId: string }) {
             <ServerTimeline serverId={serverId} />
           </Tabs.Content>
           <Tabs.Content value="logs">
-            <LogViewer serverId={serverId} />
+            <LogsPanel serverId={serverId} />
           </Tabs.Content>
           <Tabs.Content value="metrics">
             <p className="mb-3 text-xs text-muted">{t('server.metricsNote')}</p>
