@@ -28,6 +28,7 @@ import (
 	"github.com/ufna/birdman/master/internal/matchmaker"
 	"github.com/ufna/birdman/master/internal/metrics"
 	"github.com/ufna/birdman/master/internal/reconcile"
+	"github.com/ufna/birdman/master/internal/statsrollup"
 	"github.com/ufna/birdman/master/internal/store"
 	"github.com/ufna/birdman/master/internal/tlsutil"
 	agentlinkv1 "github.com/ufna/birdman/proto/agentlink/v1"
@@ -135,12 +136,14 @@ func run() error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	// Background loops: reconcile (1s), lease checker (1s), matchmaker (500ms).
+	// Background loops: reconcile (1s), lease checker (1s), matchmaker (500ms),
+	// stats rollup (backfill once + tail recompute every StatsRollupInterval).
 	loopCtx, cancelLoops := context.WithCancel(context.Background())
 	defer cancelLoops()
 	go reconcile.New(st, hub, log).Run(loopCtx, time.Second)
 	go reconcile.NewLeaseChecker(st, log).Run(loopCtx, time.Second)
 	go mm.Run(loopCtx)
+	go statsrollup.New(st, cfg.StatsRollupInterval, log).Run(loopCtx)
 
 	errCh := make(chan error, 2)
 	go func() {

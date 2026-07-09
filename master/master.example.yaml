@@ -29,6 +29,8 @@ tls:
   key_file: ""
   auto_cert_dir: "certs"
 
+stats_rollup_interval: 2m  # период пересчёта хвоста match_stats_daily/ccu_daily (панель П2 Statistics)
+
 matchmaking:
   tick_ms: 500          # период тика очередей
   widen_after_s: 30     # расширение на следующий по rtt регион игрока
