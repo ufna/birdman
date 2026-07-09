@@ -347,6 +347,22 @@ export const en = {
   'alertstate.firing': 'Firing',
   'alertstate.resolved': 'Resolved',
 
+  // — Statistics: range selector (Task 4, "Статистика v1") —
+  'stats.range.aria': 'Time window',
+  'stats.range.12h': '12 h',
+  'stats.range.24h': '24 h',
+  'stats.range.3d': '3 d',
+  'stats.range.7d': '7 d',
+  'stats.range.30d': '30 d',
+
+  // — Statistics: live panels for granular windows (Task 5, "Статистика v1") —
+  'stats.live.online': 'Players online',
+  'stats.live.matchesRunning': 'Matches running',
+  'stats.live.queue': 'Matchmaker queue depth',
+  'stats.live.util': 'Slot utilization',
+  'stats.live.utilOverTime': 'Dedics by state over time',
+  'stats.live.utilOverTimeNote': 'live dedics by state',
+
   // — Statistics screen —
   'stats.utc': 'UTC',
   'stats.periodAria': 'Period, days',
@@ -380,6 +396,7 @@ export const en = {
   'stats.ttm.trueDegraded': 'Too few matchmaker samples in this period — using the allocation→start proxy.',
   'stats.ttm.trueUnavailable': 'Metrics proxy unavailable — histogram time-to-match is hidden.',
   'stats.ttm.trueLoading': 'Loading histogram…',
+  'stats.ttm.allocUnavailable': 'Overview data unavailable — allocation→start proxy is hidden.',
 
   // — utilization meter (Cost) —
   'stats.util.allocated': 'allocated',

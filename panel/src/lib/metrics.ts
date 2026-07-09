@@ -261,6 +261,37 @@ export function timeToMatchQuantileQuery(quantile: number, days: number): string
   return `histogram_quantile(${quantile}, sum by (le) (increase(birdman_mm_time_to_match_seconds_bucket[${days}d])))`;
 }
 
+/**
+ * PromQL-билдеры гранулярных live-панелей (Task 3, "Статистика v1", окна
+ * 12ч/24ч/3д): читаются через metrics-proxy (query_range), в отличие от
+ * продуктовых агрегатов /v1/stats/* выше.
+ */
+
+/** Общее число игроков онлайн (сумма по агентам делается на стороне экспортёра). */
+export function playersOnlineQuery(): string {
+  return 'birdman_players_online';
+}
+
+/** Общее число матчей в игре (running). */
+export function matchesRunningQuery(): string {
+  return 'birdman_matches_running';
+}
+
+/** Глубина очереди матчмейкера, по региону. */
+export function queueDepthQuery(): string {
+  return 'sum by (region)(birdman_mm_queue_depth)';
+}
+
+/**
+ * Доля занятых слотов: allocated / ёмкость активных нод, значение 0..1.
+ * clamp_min защищает от деления на 0, пока нет активных нод (capacity=0).
+ * Строка PromQL долю не умножает — в проценты форматируется на отображении
+ * (см. Unit='percent' в formatMetric ниже).
+ */
+export function utilizationRatioQuery(): string {
+  return 'sum(birdman_servers{state="allocated"}) / clamp_min(sum(birdman_node_capacity_slots), 1)';
+}
+
 /** «Живые» состояния дедиков в стабильном порядке стека утилизации (низ→верх). */
 export const UTIL_STATES = ['allocated', 'ready', 'draining', 'creating'] as const;
 export type UtilStateName = (typeof UTIL_STATES)[number];
@@ -310,7 +341,7 @@ export function utilizationSeriesModel(series: MetricSeries[]): StateSeries[] {
   return out;
 }
 
-export type Unit = 'int' | 'ms' | 'cores' | 'bytes';
+export type Unit = 'int' | 'ms' | 'cores' | 'bytes' | 'percent';
 
 /** Формат значения по единице измерения (для оси и легенды графика). */
 export function formatMetric(v: number | null, unit: Unit): string {
@@ -322,6 +353,10 @@ export function formatMetric(v: number | null, unit: Unit): string {
       return v.toFixed(2);
     case 'ms':
       return v >= 100 ? v.toFixed(0) : v.toFixed(1);
+    // Доля 0..1 → проценты (ambiguity resolution #1, Task 3): PromQL отдаёт
+    // ratio как есть, умножение только на отображении.
+    case 'percent':
+      return `${(v * 100).toFixed(0)}%`;
     default:
       return Number.isInteger(v) ? String(v) : v.toFixed(1);
   }

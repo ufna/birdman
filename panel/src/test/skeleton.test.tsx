@@ -52,8 +52,14 @@ function json(body: unknown) {
   return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
 }
 
-/** fetch: первый запрос агрегата отвечает данными, второй «висит» — видно скелетон. */
-function stagedFetch(dataPath: string, first: (days: number) => unknown) {
+/**
+ * fetch: первые `resolveCalls` запросов агрегата отвечают данными (за каждым
+ * стоит days из URL — эхо реального бэка), остальные «висят» — видно
+ * скелетон. По умолчанию 1 (было раньше). Stats (Task 5) теперь всегда
+ * фетчит /v1/stats/overview даже в live-режиме (для fill-rate карточки),
+ * поэтому его тест смены периода резолвит первые 2 вызова.
+ */
+function stagedFetch(dataPath: string, first: (days: number) => unknown, resolveCalls = 1) {
   let dataCalls = 0;
   return vi.fn((url: string) => {
     const u = String(url);
@@ -62,8 +68,8 @@ function stagedFetch(dataPath: string, first: (days: number) => unknown) {
     if (u.includes(dataPath)) {
       dataCalls += 1;
       const days = Number(new URL(u, 'http://x').searchParams.get('days'));
-      if (dataCalls === 1) return Promise.resolve(json(first(days)));
-      return new Promise(() => {}); // второй период — не резолвим: наблюдаем скелетон
+      if (dataCalls <= resolveCalls) return Promise.resolve(json(first(days)));
+      return new Promise(() => {}); // сверх лимита — не резолвим: наблюдаем скелетон
     }
     return Promise.resolve(json({}));
   });
@@ -82,13 +88,20 @@ describe('Stats — скелетон первой загрузки и смены
   });
 
   it('смена периода → снова скелетон, пока новые данные не пришли', async () => {
-    vi.stubGlobal('fetch', stagedFetch('/v1/stats/overview', mkOverview));
+    // Дефолт экрана — live-окно 24ч (Task 5): даже в live-режиме Stats
+    // фетчит /v1/stats/overview для fill-rate карточки (days=1) — резолвим и
+    // его, и следующий (клик на продуктовое 7д); третий (30д) «висит».
+    vi.stubGlobal('fetch', stagedFetch('/v1/stats/overview', mkOverview, 2));
     renderEn(<Stats />);
-    // Первый период загрузился — тело на месте, скелетона нет.
+    // Live-режим загрузился — fill-rate карточка на месте, скелетона нет.
+    expect(await screen.findByText('queue → match')).toBeTruthy();
+    expect(screen.queryByRole('status')).toBeNull();
+    // Переключаемся на продуктовое окно 7д — второй резолвящийся вызов.
+    fireEvent.click(screen.getByRole('button', { name: '7 d' }));
     expect(await screen.findByText('Peak CCU')).toBeTruthy();
     expect(screen.queryByRole('status')).toBeNull();
-    // Переключаем период на 90: данные за 90 «висят» → показываем скелетон.
-    fireEvent.click(screen.getByRole('button', { name: '90' }));
+    // Переключаем на 30д: данные «висят» (сверх лимита resolveCalls) → скелетон.
+    fireEvent.click(screen.getByRole('button', { name: '30 d' }));
     expect(await screen.findByRole('status')).toBeTruthy();
   });
 });

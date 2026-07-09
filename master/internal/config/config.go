@@ -5,6 +5,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -82,6 +83,12 @@ type Config struct {
 	Compat      Compat      `yaml:"compat"`
 	Metrics     Metrics     `yaml:"metrics"`
 	Alerts      Alerts      `yaml:"alerts"`
+	// StatsRollupInterval is how often the rollup-maintenance job
+	// (internal/statsrollup, «Статистика v1» T9) recomputes the trailing
+	// two UTC days of match_stats_daily/match_ccu_daily. A human-readable
+	// duration string (e.g. "2m", "30s") — yaml.v3 parses time.Duration via
+	// time.ParseDuration natively.
+	StatsRollupInterval time.Duration `yaml:"stats_rollup_interval"`
 }
 
 func defaults() Config {
@@ -103,6 +110,7 @@ func defaults() Config {
 			WidenAfterS: 30,
 			TicketTTLS:  120,
 		},
+		StatsRollupInterval: 2 * time.Minute,
 	}
 }
 

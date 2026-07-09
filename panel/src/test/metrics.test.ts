@@ -2,14 +2,18 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../lib/api';
 import {
   formatMetric,
+  matchesRunningQuery,
   parseMatrix,
   parseVector,
+  playersOnlineQuery,
   queryInstant,
   queryRange,
+  queueDepthQuery,
   serverMetricQueries,
   serversByStateQuery,
   timeToMatchQuantileQuery,
   toAlignedData,
+  utilizationRatioQuery,
   utilizationSeriesModel,
 } from '../lib/metrics';
 import type { MetricSeries } from '../lib/metrics';
@@ -107,6 +111,25 @@ describe('query builders (утилизация / истинный time-to-match)
   });
 });
 
+describe('live query builders (Task 3, "Статистика v1" — гранулярные окна 12ч/24ч/3д)', () => {
+  it('playersOnlineQuery — общий счётчик игроков онлайн', () => {
+    expect(playersOnlineQuery()).toBe('birdman_players_online');
+  });
+  it('matchesRunningQuery — общий счётчик матчей в игре', () => {
+    expect(matchesRunningQuery()).toBe('birdman_matches_running');
+  });
+  it('queueDepthQuery суммирует по региону', () => {
+    expect(queueDepthQuery()).toBe('sum by (region)(birdman_mm_queue_depth)');
+  });
+  it('utilizationRatioQuery делит allocated на capacity с защитой от нуля', () => {
+    expect(utilizationRatioQuery()).toContain('birdman_node_capacity_slots');
+    expect(utilizationRatioQuery()).toContain('clamp_min');
+    expect(utilizationRatioQuery()).toBe(
+      'sum(birdman_servers{state="allocated"}) / clamp_min(sum(birdman_node_capacity_slots), 1)',
+    );
+  });
+});
+
 describe('utilizationSeriesModel (query_range matrix → ряды утилизации)', () => {
   const mk = (state: string, pts: [number, number | null][]): MetricSeries => ({ labels: { state }, name: '', points: pts });
 
@@ -162,6 +185,12 @@ describe('formatMetric', () => {
     expect(formatMetric(0.5, 'cores')).toBe('0.50');
     expect(formatMetric(16.5, 'ms')).toBe('16.5');
     expect(formatMetric(120, 'ms')).toBe('120');
+  });
+  it('percent (Task 3, ambiguity resolution #1) — доля 0..1 в проценты, округление до целого', () => {
+    expect(formatMetric(0.5, 'percent')).toBe('50%');
+    expect(formatMetric(0.333, 'percent')).toBe('33%');
+    expect(formatMetric(1, 'percent')).toBe('100%');
+    expect(formatMetric(null, 'percent')).toBe('—');
   });
 });
 

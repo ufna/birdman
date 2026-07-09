@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import { I18nProvider } from '../lib/i18n';
-import { axisTickIndices, BarChart, ShareBars, UtilBar } from '../components/charts';
+import { axisTickIndices, BarChart, RangeSelect, ShareBars, UtilBar } from '../components/charts';
 import { toStackModel } from '../lib/stats';
 import type { StackedSeries } from '../lib/api';
 
@@ -95,5 +95,37 @@ describe('UtilBar', () => {
     expect(screen.getByText('dev')).toBeTruthy();
     expect(screen.getByText('2/8 slots')).toBeTruthy();
     expect(screen.getByText('free')).toBeTruthy();
+  });
+});
+
+describe('RangeSelect (Task 4, "Статистика v1" — сегментированный переключатель окна с лейбл-опциями)', () => {
+  const options = [
+    { value: '12h', label: '12 h' },
+    { value: '24h', label: '24 h' },
+    { value: '7d', label: '7 d' },
+  ];
+
+  it('рендерит лейбл-опции, помечает активную aria-pressed', () => {
+    renderEn(<RangeSelect value="24h" onChange={() => {}} options={options} ariaLabel="Time window" />);
+    expect(screen.getByRole('group', { name: 'Time window' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '24 h' }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByRole('button', { name: '12 h' }).getAttribute('aria-pressed')).toBe('false');
+    expect(screen.getByRole('button', { name: '7 d' }).getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('клик по опции вызывает onChange с её value', () => {
+    let picked = '';
+    renderEn(
+      <RangeSelect
+        value="24h"
+        onChange={(v) => {
+          picked = v;
+        }}
+        options={options}
+        ariaLabel="Time window"
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: '7 d' }));
+    expect(picked).toBe('7d');
   });
 });

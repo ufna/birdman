@@ -331,6 +331,22 @@ export const ru: Record<MessageKey, string> = {
   'alertstate.firing': 'Горит',
   'alertstate.resolved': 'Погас',
 
+  // — Статистика: селектор окна (задача 4, «Статистика v1») —
+  'stats.range.aria': 'Окно времени',
+  'stats.range.12h': '12 ч',
+  'stats.range.24h': '24 ч',
+  'stats.range.3d': '3 д',
+  'stats.range.7d': '7 д',
+  'stats.range.30d': '30 д',
+
+  // — Статистика: live-панели гранулярных окон (задача 5, «Статистика v1») —
+  'stats.live.online': 'Игроки онлайн',
+  'stats.live.matchesRunning': 'Матчи в игре',
+  'stats.live.queue': 'Глубина очереди матчмейкера',
+  'stats.live.util': 'Утилизация слотов',
+  'stats.live.utilOverTime': 'Дедики по состояниям во времени',
+  'stats.live.utilOverTimeNote': 'живые дедики по состоянию',
+
   // — экран «Статистика» —
   'stats.utc': 'UTC',
   'stats.periodAria': 'Период, дней',
@@ -364,6 +380,7 @@ export const ru: Record<MessageKey, string> = {
   'stats.ttm.trueDegraded': 'Мало данных матчмейкера за период — показываем прокси аллокация→старт.',
   'stats.ttm.trueUnavailable': 'Metrics-proxy недоступен — гистограммный time-to-match скрыт.',
   'stats.ttm.trueLoading': 'Загрузка гистограммы…',
+  'stats.ttm.allocUnavailable': 'Данные обзора недоступны — прокси аллокация→старт скрыт.',
 
   // — метр утилизации (Cost) —
   'stats.util.allocated': 'в игре',

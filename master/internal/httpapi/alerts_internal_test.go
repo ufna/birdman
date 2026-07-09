@@ -6,6 +6,16 @@ import (
 	"time"
 )
 
+// ts parses an RFC3339 UTC timestamp, panicking on a malformed literal — a
+// test-only convenience so cases can write times as plain strings.
+func ts(s string) time.Time {
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		panic(err)
+	}
+	return t.UTC()
+}
+
 func TestParseAlertsLog(t *testing.T) {
 	now := ts("2026-07-08T12:00:00Z")
 	lines := []string{

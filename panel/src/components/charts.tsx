@@ -269,6 +269,52 @@ export function PeriodSelect({ value, onChange, options }: { value: number; onCh
   );
 }
 
+/** Одна опция RangeSelect: значение + готовая (уже переведённая) подпись. */
+export interface RangeOption {
+  value: string;
+  label: string;
+}
+
+/**
+ * Сегментированный переключатель окна с лейбл-опциями (Task 4, "Статистика
+ * v1"): в отличие от PeriodSelect (подпись — само число дней + общий суффикс),
+ * каждая опция несёт свою готовую подпись — нужно для смешанных live/product
+ * окон ("12 h"/"24 h"/"3 d"/"7 d"/"30 d"). Сиблинг PeriodSelect: тот же
+ * визуальный стиль, PeriodSelect и его текущие вызовы (Cost) не трогаем.
+ */
+export function RangeSelect({
+  value,
+  onChange,
+  options,
+  ariaLabel,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: RangeOption[];
+  ariaLabel: string;
+}) {
+  return (
+    <div role="group" aria-label={ariaLabel} className="inline-flex overflow-hidden rounded-lg border border-line text-xs">
+      {options.map((o) => {
+        const active = o.value === value;
+        return (
+          <button
+            key={o.value}
+            type="button"
+            onClick={() => {
+              onChange(o.value);
+            }}
+            aria-pressed={active}
+            className={`px-2.5 py-1 font-mono font-medium transition-colors ${active ? 'bg-mark text-accent-ink' : 'text-muted hover:text-ink'}`}
+          >
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 /** Заголовок секции внутри карточки статистики (подпись + опц. правый элемент). */
 export function ChartHeading({ title, note, aside }: { title: string; note?: string; aside?: ReactNode }) {
   const labelId = useId();

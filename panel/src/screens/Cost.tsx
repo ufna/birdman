@@ -26,7 +26,10 @@ import { UtilizationChart } from '../components/UtilizationChart';
 /** Окно графика утилизации во времени, часов (совпадает с UtilizationChart). */
 const UTIL_WINDOW_HOURS = 6;
 
-const PERIODS = [7, 30, 90];
+// Потолок — 30 дней (Task 6, "Статистика v1"): 90д снят. Совпадает с
+// горизонтом роллапов master (match_stats_daily, ≤30д) и ретеншеном VM —
+// /v1/stats/cost на этих окнах читает роллапы, не сканирует сырые matches.
+const PERIODS = [7, 30];
 
 /** Слото-часы: 2 знака для мелких, 1 для десятков, целое для сотен+. */
 function fmtHours(v: number): string {

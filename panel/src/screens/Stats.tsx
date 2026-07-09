@@ -1,10 +1,14 @@
-// Статистика (П2): обзорные агрегаты за 7/30/90 дней (GET /v1/stats/overview).
-// Матчи/день и игроки/день — стек по регионам; пик CCU и средняя длительность —
-// одиночные ряды; распределение по версиям — доли (единый цвет версии); fill-rate
-// матчмейкера показан из ДВУХ источников: истинное queue→match из гистограммы
-// birdman_mm_time_to_match_seconds (metrics-proxy) и прокси allocation→start (из
-// matches). Ряды UTC и зеро-филлены на бэке. Живое обновление: refetch по SSE с
-// дебансом (useLiveAsync) — новый матч подтягивает свежие числа/графики.
+// Статистика (П2 + П1 "Статистика v1"): выбор окна решает режим. 12ч/24ч/3д —
+// live-режим, операционные ряды напрямую из VictoriaMetrics (metrics-proxy);
+// 7д/30д — product-режим, обзорные агрегаты (GET /v1/stats/overview), как и
+// раньше. В product-режиме: матчи/день и игроки/день — стек по регионам; пик
+// CCU и средняя длительность — одиночные ряды; распределение по версиям —
+// доли (единый цвет версии). Fill-rate матчмейкера показан из ДВУХ источников
+// в ОБОИХ режимах: истинное queue→match из гистограммы
+// birdman_mm_time_to_match_seconds (metrics-proxy) и прокси allocation→start
+// (из matches, /v1/stats/overview). Ряды UTC и зеро-филлены на бэке. Живое
+// обновление: refetch по SSE с дебансом (useLiveAsync) — новый матч
+// подтягивает свежие числа/графики.
 
 import { useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
@@ -13,9 +17,17 @@ import type { StatsOverview, TimeToMatch } from '../lib/api';
 import { useLiveAsync } from '../lib/live';
 import { useT, useFormat } from '../lib/i18n';
 import { toSimpleColumns, toStackModel, versionShareModel } from '../lib/stats';
-import { timeToMatchQuantileQuery } from '../lib/metrics';
+import {
+  matchesRunningQuery,
+  playersOnlineQuery,
+  queueDepthQuery,
+  timeToMatchQuantileQuery,
+  utilizationRatioQuery,
+} from '../lib/metrics';
 import { useInstantQuery } from '../lib/useMetrics';
 import type { MetricStatus } from '../lib/useMetrics';
+import { DEFAULT_RANGE_KEY, STATS_RANGES, rangeByKey } from '../lib/statsRange';
+import type { StatsRange } from '../lib/statsRange';
 import {
   Card,
   CardHeader,
@@ -26,43 +38,133 @@ import {
   StatCard,
   StatCardSkeleton,
 } from '../components/ui';
-import { BarChart, ChartHeading, PeriodSelect, ShareBars } from '../components/charts';
+import { BarChart, ChartHeading, RangeSelect, ShareBars } from '../components/charts';
+import { MetricChart } from '../components/MetricChart';
+import { UtilizationChart } from '../components/UtilizationChart';
 
-const PERIODS = [7, 30, 90];
+/**
+ * Дни-эквивалент периода для api.statsOverview()/гистограммы TTM в ОБОИХ
+ * режимах: product — как задан диапазоном; live — окно в днях, округлённое
+ * вверх, не меньше 1 (12ч/24ч → 1д, 3д → 3д). Простое, единое место: и запрос
+ * "истинного" TTM (histogram_quantile), и alloc→start прокси из /v1/stats/
+ * overview используют один и тот же days для live-окна.
+ */
+function effectiveDays(range: StatsRange): number {
+  if (range.mode === 'product') return range.days ?? 30;
+  return Math.max(1, Math.ceil((range.windowMs ?? 0) / 86_400_000));
+}
 
 export function Stats() {
-  const [days, setDays] = useState(7);
+  const [rangeKey, setRangeKey] = useState(DEFAULT_RANGE_KEY);
+  const range = rangeByKey(rangeKey);
+  const days = effectiveDays(range);
   const ov = useLiveAsync(() => api.statsOverview(days), [days]);
   // Показываем данные, только если они за ЗАПРОШЕННЫЙ период; иначе (первая
-  // загрузка или смена периода) — скелетон под финальную раскладку.
+  // загрузка или смена периода/режима) — скелетон под финальную раскладку.
   const ready = ov.data !== undefined && ov.data.days === days;
 
-  if (ov.error !== undefined && ov.data === undefined) {
+  // Полноэкранная ошибка — ТОЛЬКО в product-режиме: там /v1/stats/overview и
+  // есть страница. В live-режиме VM-панели (MetricChart/UtilizationChart) и
+  // истинный TTM читаются напрямую из metrics-proxy и не зависят от product-
+  // API — гейтить их ошибкой overview нельзя (Critical bug: раньше падение
+  // /v1/stats/overview гасило ВСЮ страницу даже при здоровой VM в дефолтном
+  // 24h/live виде). Деградацию своей (alloc→start) строки live обрабатывает
+  // сам FillRateCard — см. LiveBody.
+  if (range.mode === 'product' && ov.error !== undefined && ov.data === undefined) {
     return (
       <div className="flex flex-col gap-4">
-        <Header days={days} setDays={setDays} />
+        <Header rangeKey={rangeKey} setRangeKey={setRangeKey} />
         <ErrorNote error={ov.error} retry={ov.reload} />
       </div>
     );
   }
   return (
     <div className="flex flex-col gap-4">
-      <Header days={days} setDays={setDays} />
-      {ready && ov.data !== undefined ? <StatsBody ov={ov.data} /> : <StatsSkeleton />}
+      <Header rangeKey={rangeKey} setRangeKey={setRangeKey} />
+      {range.mode === 'live' ? (
+        <LiveBody range={range} days={days} ov={ov} />
+      ) : ready && ov.data !== undefined ? (
+        <StatsBody ov={ov.data} />
+      ) : (
+        <StatsSkeleton />
+      )}
     </div>
   );
 }
 
-function Header({ days, setDays }: { days: number; setDays: (d: number) => void }) {
+function Header({ rangeKey, setRangeKey }: { rangeKey: string; setRangeKey: (k: string) => void }) {
   const { t } = useT();
+  const options = STATS_RANGES.map((r) => ({ value: r.key, label: t(r.labelKey) }));
   return (
     <div className="flex flex-wrap items-center justify-between gap-3">
       <div className="flex items-center gap-2">
         <h1 className="text-lg font-semibold">{t('nav.stats')}</h1>
         <span className="rounded border border-line px-1.5 py-0.5 font-mono text-[10px] text-muted">{t('stats.utc')}</span>
       </div>
-      <PeriodSelect value={days} onChange={setDays} options={PERIODS} />
+      <RangeSelect value={rangeKey} onChange={setRangeKey} options={options} ariaLabel={t('stats.range.aria')} />
     </div>
+  );
+}
+
+/**
+ * Live-режим (12ч/24ч/3д): гранулярные операционные гейджи через
+ * VictoriaMetrics (metrics-proxy) — онлайн/матчи в игре/очередь/утилизация —
+ * плюс ряд занятости по состояниям (как в Cost) и fill-rate-карточка (общая с
+ * product-режимом, см. ambiguity resolution #3: TTM-окно ≤30д всегда в
+ * пределах ретеншена VM). Деградацию VM даёт сам MetricChart/UtilizationChart.
+ *
+ * `ov` — состояние /v1/stats/overview (для вторичной alloc→start строки
+ * fill-rate-карточки), НЕ гейт: пока он ещё грузится (нет ни данных, ни
+ * ошибки) — показываем FillRateSkeleton, как и раньше; если он осел с ошибкой
+ * (или данные за другой период) — FillRateCard всё равно монтируется, просто
+ * его alloc-строка деградирует (Critical bug fix: раньше это было «навечно
+ * скелетон», а VM-панели выше вообще не зависят от ov и всегда рендерятся).
+ */
+function LiveBody({ range, days, ov }: { range: StatsRange; days: number; ov: OverviewState }) {
+  const { t } = useT();
+  const windowMs = range.windowMs ?? 24 * 60 * 60_000;
+  const readyOv = ov.data !== undefined && ov.data.days === days ? ov.data : undefined;
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="grid gap-3 sm:grid-cols-2">
+        <MetricChart query={playersOnlineQuery()} title={t('stats.live.online')} unit="int" windowMs={windowMs} />
+        <MetricChart query={matchesRunningQuery()} title={t('stats.live.matchesRunning')} unit="int" windowMs={windowMs} />
+        <MetricChart query={queueDepthQuery()} title={t('stats.live.queue')} unit="int" windowMs={windowMs} />
+        <MetricChart query={utilizationRatioQuery()} title={t('stats.live.util')} unit="percent" windowMs={windowMs} />
+      </div>
+      <Card>
+        <CardHeader
+          title={t('stats.live.utilOverTime')}
+          aside={<span className="font-mono text-xs text-muted">{t('stats.live.utilOverTimeNote')}</span>}
+        />
+        <UtilizationChart windowMs={windowMs} />
+      </Card>
+      {readyOv !== undefined ? (
+        <FillRateCard ttm={readyOv.time_to_match} days={days} refetchKey={readyOv.generated_at} />
+      ) : ov.error !== undefined ? (
+        <FillRateCard ttm={undefined} days={days} refetchKey={`live-err-${String(days)}`} />
+      ) : (
+        <FillRateSkeleton />
+      )}
+    </div>
+  );
+}
+
+/** Состояние /v1/stats/overview, нужное LiveBody (подмножество useLiveAsync). */
+interface OverviewState {
+  data?: StatsOverview;
+  error?: Error;
+}
+
+/** Скелетон fill-rate карточки (live-режим, пока не готов ov для alloc→start прокси). */
+function FillRateSkeleton() {
+  return (
+    <SkeletonRegion>
+      <Card className="p-4">
+        <Skeleton className="mb-3 h-4 w-40" />
+        <Skeleton className="h-24 w-full" rounded="rounded-lg" />
+      </Card>
+    </SkeletonRegion>
   );
 }
 
@@ -194,8 +296,12 @@ function StatsBody({ ov }: { ov: StatsOverview }) {
  * Fill-rate из двух источников: истинное queue→match (гистограмма time-to-match
  * через metrics-proxy) и прокси allocation→start (из matches). Гистограмма
  * пуста/недоступна → деградируем на прокси с пометкой (dev: данных мало).
+ * `ttm` может отсутствовать (live-режим, /v1/stats/overview ещё грузится или
+ * осел с ошибкой) — тогда alloc-строка сама деградирует с пометкой
+ * недоступности, а не блокирует всю карточку (истинная queue→match строка не
+ * зависит от `ttm` вовсе и продолжает работать через metrics-proxy).
  */
-function FillRateCard({ ttm, days, refetchKey }: { ttm: TimeToMatch; days: number; refetchKey: string }) {
+function FillRateCard({ ttm, days, refetchKey }: { ttm: TimeToMatch | undefined; days: number; refetchKey: string }) {
   const { t } = useT();
   const fmt = useFormat();
   const dur = (sec: number | null | undefined) => (sec == null ? '—' : fmt.age(sec * 1000));
@@ -216,8 +322,15 @@ function FillRateCard({ ttm, days, refetchKey }: { ttm: TimeToMatch; days: numbe
             <PercentileRow p50={dur(trueTtm.p50)} p95={dur(trueTtm.p95)} />
           )}
         </TtmSource>
-        <TtmSource label={t('stats.ttm.srcAlloc')} note={t('stats.ttm.note', { count: ttm.samples })}>
-          <PercentileRow p50={dur(ttm.p50_seconds)} p95={dur(ttm.p95_seconds)} />
+        <TtmSource
+          label={t('stats.ttm.srcAlloc')}
+          note={ttm !== undefined ? t('stats.ttm.note', { count: ttm.samples }) : undefined}
+        >
+          {ttm === undefined ? (
+            <SourceNote>{t('stats.ttm.allocUnavailable')}</SourceNote>
+          ) : (
+            <PercentileRow p50={dur(ttm.p50_seconds)} p95={dur(ttm.p95_seconds)} />
+          )}
         </TtmSource>
       </div>
     </Card>
@@ -246,12 +359,12 @@ function combineStatus(a: MetricStatus, b: MetricStatus): MetricStatus {
   return 'ok';
 }
 
-function TtmSource({ label, note, children }: { label: string; note: string; children: ReactNode }) {
+function TtmSource({ label, note, children }: { label: string; note?: string; children: ReactNode }) {
   return (
     <div>
       <div className="mb-1.5 font-mono text-xs font-medium text-ink">{label}</div>
       {children}
-      <p className="mt-1.5 text-xs text-muted">{note}</p>
+      {note !== undefined && <p className="mt-1.5 text-xs text-muted">{note}</p>}
     </div>
   );
 }
