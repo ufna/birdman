@@ -38,7 +38,7 @@
 
 - stdout/stderr контейнера → `/var/log/birdman/servers/{server_id}.log`; ротация 100MB × 2 файла на дедик; после stop — gzip; ретенция **7 дней** (конфиг).
 - `TailLogs{server_id, follow}` от master → стрим строк (для панели/CLI `GET /v1/servers/{id}/logs`).
-- Опционально (ит. 4+): vector на тачке шипует в центральное хранилище; v1 — логи живут на тачке, доступ через master-proxy.
+- (Уточнено в v0, Логи v1 — реализовано, ветка `logs-v1`.) `vector` (контейнер, роль `birdman_agent_dev`, host-network) шипует эти же файлы в центральный VictoriaLogs (loki-push). **Агент не менялся** — vector лишь читает `/var/log/birdman/servers/*.log`, то же самое, что и live-tail; node-local ротация/ретенция (выше) — независимая ручка от ретенции VL. История/поиск по флоту — `GET /v1/logs/query` через master (`master.md` §6, `ops.md` §1), панель.
 
 ## 6. Image GC и диск
 

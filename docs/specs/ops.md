@@ -42,7 +42,9 @@ MasterDown обязан приходить **не** через master (внеш�
 
 ### Логи
 
-Дедики — на тачках с tail/скачиванием через master (см. `agent.md` §5). master — journald (JSON). Централизованное хранилище логов (Loki/Victoria Logs) — только если руками станет тесно; не в v1.
+Дедики — на тачках с tail/скачиванием через master (см. `agent.md` §5). master — journald (JSON). Централизованное хранилище логов дедиков — **реализовано** (Логи v1): VictoriaLogs + vector на нодах + read-only прокси через master.
+
+> **(Уточнено в v0, Логи v1 — реализовано, ветка `logs-v1`.)** `birdman-victorialogs` (`victoriametrics/victoria-logs:v1.51.0`) в роли `birdman_monitoring_dev`: слушает **127.0.0.1:9428** (наружу ничего, как и весь стек), `-retentionPeriod` **14 дней** (`birdman_vl_retention`), volume `birdman-vldata`. На каждой ноде — `birdman-vector` (роль `birdman_agent_dev`, `timberio/vector`, host-network, свой API выключен): читает те же файлы `{log_dir}/servers/*.log`, что и live-tail (`.log.1` игнорирует — уже прочитан до ротации), лейблы `server_id`/`node`/`region`, loki-push в VL (`birdman_vl_sink_url`, дев-деф. `http://127.0.0.1:9428/insert`), диск-буфер 256MB `drop_newest` — доставка best-effort, нода никогда не блокируется на логах. Панель ходит только через master-прокси `GET /v1/logs/query` (`master.md` §6), напрямую в VL не лезет. **Агент не менялся вообще** — vector лишь читает уже существующие файлы; node-local ротация/ретенция (7д, `agent.md` §5) остаются независимой ручкой от ретенции VL. Live-tail (`/v1/servers/{id}/logs`) не тронут и от VL не зависит. **Прод-транспорт логов между регионами (итерация 5) — private overlay** (WireGuard/nebula): vector будет слать на приватный адрес центрального VL, без публичного порта наружу. Rollout на дев-бокс (VL → vector → master → приёмка) — по отдельной команде владельца, см. `STATUS.md`.
 
 ## 2. CI/CD (GitHub Actions)
 
