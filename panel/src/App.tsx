@@ -16,6 +16,7 @@ import { Events } from './screens/Events';
 import { Stats } from './screens/Stats';
 import { Cost } from './screens/Cost';
 import { Alerts } from './screens/Alerts';
+import { Logs } from './screens/Logs';
 import { Access } from './screens/Access';
 
 export default function App() {
@@ -90,6 +91,8 @@ function Routed() {
     <Cost />
   ) : path.startsWith('/alerts') ? (
     <Alerts />
+  ) : path.startsWith('/logs') ? (
+    <Logs />
   ) : path.startsWith('/access') ? (
     // Доступ — admin-only: не-admin по прямому URL уводим на Обзор (в нав его нет).
     mayAdmin ? <Access /> : <Overview />

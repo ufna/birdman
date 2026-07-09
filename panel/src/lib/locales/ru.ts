@@ -227,6 +227,13 @@ export const ru: Record<MessageKey, string> = {
   'logs.unconfigured': 'История логов не настроена на этом master (victorialogs_url пуст).',
   'logs.unavailable': 'Хранилище логов сейчас недоступно — live-tail продолжает работать.',
 
+  // — экран «Логи»: флит-поиск (задача 6, «Логи v1») —
+  'logs.search.textPlaceholder': 'Поиск по тексту логов…',
+  'logs.search.hint': 'Введите запрос выше и запустите поиск, чтобы увидеть совпавшие строки логов.',
+  'logs.search.submit': 'Искать',
+  'logs.search.limitAria': 'Лимит результатов',
+  'logs.search.empty': 'По этому запросу строк не нашлось.',
+
   // — диалог подтверждения —
   'confirm.err.forbidden': 'Недостаточно прав для этого действия.',
   'confirm.err.conflict': 'Конфликт состояния — действие сейчас недоступно.',
@@ -335,6 +342,7 @@ export const ru: Record<MessageKey, string> = {
   'nav.stats': 'Статистика',
   'nav.cost': 'Стоимость',
   'nav.alerts': 'Алерты',
+  'nav.logs': 'Логи',
   'nav.access': 'Доступ',
 
   // — severity / статус ключа / состояние алерта (коды остаются в API) —
