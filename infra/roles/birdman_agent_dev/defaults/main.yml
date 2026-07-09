@@ -31,3 +31,10 @@ birdman_master_admin_key_file: /etc/birdman/master-admin.key
 birdman_node_token_file: /etc/birdman/node.token
 birdman_project: game
 birdman_public_ip: "{{ ansible_host }}"
+
+# --- vector: шиппер логов дедиков в центральный VictoriaLogs (спека логи v1) ---
+birdman_vector_image: timberio/vector:0.56.0-alpine
+birdman_vector_dir: /opt/birdman/vector             # compose.yml (аналог birdman_master_dir у master-роли)
+# /insert — база; loki-sink vector сам допишет /loki/api/v1/push
+birdman_vl_sink_url: "http://127.0.0.1:9428/insert"
+birdman_vector_data_dir: /var/lib/birdman/vector   # checkpoint + disk-буфер

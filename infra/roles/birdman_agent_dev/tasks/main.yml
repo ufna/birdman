@@ -141,3 +141,42 @@
 
 - name: Apply tmpfiles and pending restarts
   ansible.builtin.meta: flush_handlers
+
+# --- vector: шиппер логов дедиков в VictoriaLogs (спека логи v1) ---
+
+- name: Create vector directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ birdman_vector_dir }}"
+    - "{{ birdman_vector_data_dir }}"
+
+- name: Install vector config /etc/birdman/vector.yaml
+  ansible.builtin.template:
+    src: vector.yaml.j2
+    dest: /etc/birdman/vector.yaml
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart birdman-vector
+
+- name: Install vector docker compose file
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: "{{ birdman_vector_dir }}/compose.yml"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Start birdman-vector (docker compose, idempotent)
+  ansible.builtin.command:
+    cmd: docker compose -f {{ birdman_vector_dir }}/compose.yml up -d --wait
+  register: birdman_vector_compose_up
+  changed_when: "'Started' in birdman_vector_compose_up.stderr or 'Created' in birdman_vector_compose_up.stderr"
+
+- name: Apply pending vector restart
+  ansible.builtin.meta: flush_handlers

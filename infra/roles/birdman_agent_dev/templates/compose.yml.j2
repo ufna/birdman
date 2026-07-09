@@ -1,0 +1,17 @@
+# {{ ansible_managed }}
+# Vector — шиппер логов дедиков в центральный VictoriaLogs (агент здесь НЕ
+# контейнер — статический бинарь под systemd, см. роль birdman_agent_dev).
+# host-network: ничего не слушает (api.enabled: false), только читает
+# локальные файлы логов и шлёт наружу loki-push.
+name: birdman-vector
+
+services:
+  vector:
+    image: {{ birdman_vector_image }}
+    container_name: birdman-vector
+    network_mode: host
+    volumes:
+      - /etc/birdman/vector.yaml:/etc/vector/vector.yaml:ro
+      - "{{ birdman_log_dir }}/servers:{{ birdman_log_dir }}/servers:ro"
+      - "{{ birdman_vector_data_dir }}:/vector-data-dir"
+    restart: unless-stopped
