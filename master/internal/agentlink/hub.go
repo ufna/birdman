@@ -50,13 +50,21 @@ func (h *Hub) queue(nodeID string) *nodeQueue {
 }
 
 // Send stamps a fresh cmd_id into the command, queues it for the node and
-// pushes it to the live session, if any. Returns the cmd_id.
+// pushes it to the live session, if any. A SetRegistries command coalesces
+// with (replaces) any older unacked SetRegistries already pending for the
+// node — Hub never holds more than one, so a chatty stream of registry
+// changes (or a node that never acks) cannot grow the queue unbounded
+// (docs/superpowers/specs/2026-07-09-registries-design.md §2). Other command
+// kinds are unaffected. Returns the cmd_id.
 func (h *Hub) Send(nodeID string, msg *agentlinkv1.MasterMsg) string {
 	cmdID := uuid.NewString()
 	stampCmdID(msg, cmdID)
 
 	h.mu.Lock()
 	q := h.queue(nodeID)
+	if isSetRegistries(msg) {
+		q.pending = removeSetRegistries(q.pending)
+	}
 	q.pending = append(q.pending, msg)
 	sess := q.sess
 	h.mu.Unlock()
@@ -94,8 +102,18 @@ func (h *Hub) PendingCount(nodeID string) int {
 }
 
 // attach registers a new session for the node, replacing (and terminating)
-// any previous one, and replays all pending commands into it.
-func (h *Hub) attach(nodeID string) *session {
+// any previous one, and replays all pending commands into it. If preface is
+// non-nil (built by the caller from a fresh store.ListRegistryCreds read) it
+// is stamped with its own cmd_id and inserted at the FRONT of the pending
+// queue — coalesced with (replacing) any older unacked SetRegistries the
+// same way Send does — so a (re)connecting agent always sees the current
+// registries snapshot before any replayed command that might reference a
+// private image, e.g. a StartServer (design doc §2). Routing the preface
+// through the ordinary pending queue like any other command means the usual
+// ack/re-send machinery covers it too: if delivery is lost (the session dies
+// mid-replay before the agent acks) it simply stays pending and goes out
+// again — still first — on the next attach.
+func (h *Hub) attach(nodeID string, preface *agentlinkv1.MasterMsg) *session {
 	s := &session{
 		out:  make(chan *agentlinkv1.MasterMsg, 256),
 		done: make(chan struct{}),
@@ -106,6 +124,10 @@ func (h *Hub) attach(nodeID string) *session {
 		close(q.sess.done)
 	}
 	q.sess = s
+	if preface != nil {
+		stampCmdID(preface, uuid.NewString())
+		q.pending = append([]*agentlinkv1.MasterMsg{preface}, removeSetRegistries(q.pending)...)
+	}
 	replay := make([]*agentlinkv1.MasterMsg, len(q.pending))
 	copy(replay, q.pending)
 	h.mu.Unlock()
@@ -114,6 +136,21 @@ func (h *Hub) attach(nodeID string) *session {
 		s.push(h.log, nodeID, m)
 	}
 	return s
+}
+
+// ConnectedNodes returns the ids of nodes with a live session — used by
+// Service.BroadcastRegistries to fan a fresh snapshot out to every agent
+// currently online (design doc §2).
+func (h *Hub) ConnectedNodes() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]string, 0, len(h.queues))
+	for nodeID, q := range h.queues {
+		if q.sess != nil {
+			out = append(out, nodeID)
+		}
+	}
+	return out
 }
 
 // detach removes the session if it is still the current one.
@@ -159,6 +196,8 @@ func stampCmdID(m *agentlinkv1.MasterMsg, cmdID string) {
 		c.Allocate.CmdId = cmdID
 	case *agentlinkv1.MasterMsg_DrainServer:
 		c.DrainServer.CmdId = cmdID
+	case *agentlinkv1.MasterMsg_SetRegistries:
+		c.SetRegistries.CmdId = cmdID
 	}
 }
 
@@ -184,6 +223,27 @@ func commandID(m *agentlinkv1.MasterMsg) string {
 		return c.Allocate.GetCmdId()
 	case *agentlinkv1.MasterMsg_DrainServer:
 		return c.DrainServer.GetCmdId()
+	case *agentlinkv1.MasterMsg_SetRegistries:
+		return c.SetRegistries.GetCmdId()
 	}
 	return ""
+}
+
+// isSetRegistries reports whether m carries a SetRegistries command.
+func isSetRegistries(m *agentlinkv1.MasterMsg) bool {
+	_, ok := m.GetMsg().(*agentlinkv1.MasterMsg_SetRegistries)
+	return ok
+}
+
+// removeSetRegistries returns pending with any SetRegistries command
+// filtered out — the coalescing step shared by Send and attach's preface
+// insertion (design doc §2: at most one pending SetRegistries per node).
+func removeSetRegistries(pending []*agentlinkv1.MasterMsg) []*agentlinkv1.MasterMsg {
+	out := make([]*agentlinkv1.MasterMsg, 0, len(pending))
+	for _, m := range pending {
+		if !isSetRegistries(m) {
+			out = append(out, m)
+		}
+	}
+	return out
 }

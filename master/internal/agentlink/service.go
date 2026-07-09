@@ -66,7 +66,10 @@ func (s *Service) Session(stream agentlinkv1.AgentLink_SessionServer) error {
 	s.log.Info("agentlink: node connected",
 		"node_id", node.ID, "hostname", hello.GetHostname(), "agent_version", hello.GetAgentVersion())
 
-	sess := s.hub.attach(node.ID)
+	// Attach prefaces the stream with a fresh registries snapshot, computed
+	// here BEFORE attach so it lands ahead of any replayed pending command
+	// (docs/superpowers/specs/2026-07-09-registries-design.md §2).
+	sess := s.hub.attach(node.ID, s.registriesSnapshot(ctx, node.ID))
 	defer s.hub.detach(node.ID, sess)
 
 	recvErr := make(chan error, 1)
@@ -137,6 +140,59 @@ func (s *Service) readLoop(ctx context.Context, stream agentlinkv1.AgentLink_Ses
 		case *agentlinkv1.AgentMsg_Hello:
 			s.log.Warn("agentlink: duplicate Hello ignored", "node_id", nodeID)
 		}
+	}
+}
+
+// registriesSnapshot builds a fresh SetRegistries command from the current
+// database contents — used both as the attach preface (a newly (re)connected
+// node must see the current credential set before any replayed command,
+// design doc §2) and, via registryCredsToProto, by BroadcastRegistries.
+// cmd_id is left blank: the caller (Hub.attach/Send) stamps a fresh one.
+// Returns nil on a DB error (logged, without ever formatting the creds
+// themselves) rather than failing the attach — the next Hello retries.
+func (s *Service) registriesSnapshot(ctx context.Context, nodeID string) *agentlinkv1.MasterMsg {
+	creds, err := s.st.ListRegistryCreds(ctx)
+	if err != nil {
+		s.log.Error("agentlink: registries snapshot failed", "node_id", nodeID, "err", err)
+		return nil
+	}
+	return &agentlinkv1.MasterMsg{Msg: &agentlinkv1.MasterMsg_SetRegistries{
+		SetRegistries: &agentlinkv1.SetRegistries{Registries: registryCredsToProto(creds)},
+	}}
+}
+
+// registryCredsToProto converts store creds (which carry the plaintext
+// token) into wire structs. Never log the result or format it with %v/%+v.
+func registryCredsToProto(creds []store.RegistryCred) []*agentlinkv1.RegistryCred {
+	out := make([]*agentlinkv1.RegistryCred, 0, len(creds))
+	for _, c := range creds {
+		out = append(out, &agentlinkv1.RegistryCred{Host: c.Host, Username: c.Username, Token: c.Token})
+	}
+	return out
+}
+
+// BroadcastRegistries rebuilds the registries snapshot from the database
+// once and Sends a fresh copy (its own cmd_id per node — Hub.Send stamps it)
+// to every currently connected node. Wired as the httpapi
+// onRegistriesChanged hook (main.go) so a successful POST/DELETE
+// /v1/registries immediately refreshes every connected agent (design doc
+// §2). It runs synchronously on the HTTP request path by design: Hub.Send
+// only touches an in-memory queue and a buffered channel with a
+// non-blocking push (hub.go, session.push) — it never waits on network I/O —
+// so the only latency this adds is the single ListRegistryCreds query,
+// which is no heavier than the insert+event-write the caller already made
+// earlier in the same request.
+func (s *Service) BroadcastRegistries(ctx context.Context) {
+	creds, err := s.st.ListRegistryCreds(ctx)
+	if err != nil {
+		s.log.Error("agentlink: registries broadcast failed", "err", err)
+		return
+	}
+	regs := registryCredsToProto(creds)
+	for _, nodeID := range s.hub.ConnectedNodes() {
+		s.hub.Send(nodeID, &agentlinkv1.MasterMsg{Msg: &agentlinkv1.MasterMsg_SetRegistries{
+			SetRegistries: &agentlinkv1.SetRegistries{Registries: regs},
+		}})
 	}
 }
 
