@@ -21,7 +21,9 @@ function ndjson(lines: string[]): string {
  * onQuery на каждый вызов СВОИМ Response — общий экземпляр Response нельзя
  * переиспользовать между вызовами, тело читается один раз).
  */
-function mockFetch(onQuery: (callIndex: number) => Response) {
+/** onQuery может вернуть Response синхронно ЛИБО отдать «зависший» промис
+ *  (для тестов гонки stale-ответа — вызов должен разрешиться позже, вручную). */
+function mockFetch(onQuery: (callIndex: number) => Response | Promise<Response>) {
   let n = 0;
   return vi.fn().mockImplementation((url: string) => {
     if (!String(url).includes('/v1/logs/query')) return new Promise(() => {});
@@ -33,6 +35,11 @@ function mockFetch(onQuery: (callIndex: number) => Response) {
 /** Вызовы именно к /v1/logs/query, в порядке — отфильтровывает игнорируемый live-tail. */
 function queryCalls(fetchMock: ReturnType<typeof vi.fn>): string[] {
   return fetchMock.mock.calls.map((c) => String(c[0])).filter((u) => u.includes('/v1/logs/query'));
+}
+
+/** Значение одного query-параметра из (возможно percent-encoded) URL вызова. */
+function paramValue(url: string, key: string): string | null {
+  return new URLSearchParams(url.split('?')[1] ?? '').get(key);
 }
 
 afterEach(() => {
@@ -89,8 +96,14 @@ describe('LogsPanel — сегмент Live | История', () => {
   });
 
   it('«показать ещё» → второй вызов несёт end (первый — нет), дозапись вниз списка', async () => {
+    // Самая старая строка страницы 1 — с ДРОБНОЙ секундой: end следующего
+    // запроса должен быть ровно её getTime()/1000 (без floor, без −1) — см.
+    // Fix 1 финального ревью: VictoriaLogs' end эксклюзивен ([start, end)),
+    // floor+(-1) на границе страницы молча топит строки (до ~2с при частом
+    // потоке — например, крэш-вывод).
+    const oldestTime = '2026-07-09T10:00:05.789Z';
     const page1 = Array.from({ length: 500 }, (_, i) =>
-      ndjsonLine(new Date(2026, 6, 9, 10, 0, 500 - i).toISOString(), `line-${String(i)}`),
+      ndjsonLine(i === 499 ? oldestTime : new Date(2026, 6, 9, 10, 0, 500 - i).toISOString(), `line-${String(i)}`),
     );
     const fetchMock = mockFetch((n) =>
       n === 1
@@ -112,8 +125,47 @@ describe('LogsPanel — сегмент Live | История', () => {
     const [firstUrl, secondUrl] = queryCalls(fetchMock);
     expect(firstUrl).not.toContain('end=');
     expect(secondUrl).toContain('end=');
+    // Точное значение: дробные секунды оригинального времени самой старой
+    // строки — НЕ floor, НЕ минус одна секунда.
+    const expectedEnd = new Date(oldestTime).getTime() / 1000;
+    expect(paramValue(secondUrl, 'end')).toBe(String(expectedEnd));
     // кнопка исчезает — вторая страница короче limit (500).
     expect(screen.queryByRole('button', { name: 'Show more' })).toBeNull();
+  });
+
+  it('«показать ещё» устарело (диапазон сменился, пока запрос летел) → устаревшая страница НЕ дописывается', async () => {
+    let resolveStale!: (r: Response) => void;
+    const stale = new Promise<Response>((resolve) => {
+      resolveStale = resolve;
+    });
+    const page1 = Array.from({ length: 500 }, (_, i) =>
+      ndjsonLine(new Date(2026, 6, 9, 10, 0, 500 - i).toISOString(), `line-${String(i)}`),
+    );
+    const fetchMock = mockFetch((n) => {
+      if (n === 1) return new Response(ndjson(page1), { status: 200 });
+      if (n === 2) return stale; // «показать ещё» — зависает, разрешим вручную позже
+      return new Response(ndjson([ndjsonLine('2026-07-09T11:00:00Z', 'fresh-after-range-change')]), { status: 200 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderEn(<LogsPanel serverId="srv-1" />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'History' }));
+    expect(await screen.findByText('line-0')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show more' })); // call #2 — зависает
+    await waitFor(() => {
+      expect(queryCalls(fetchMock).length).toBe(2);
+    });
+
+    // Диапазон меняется, пока «показать ещё» ещё в полёте — свежая загрузка (call #3).
+    fireEvent.click(screen.getByRole('button', { name: '1 h' }));
+    expect(await screen.findByText('fresh-after-range-change')).toBeTruthy();
+
+    // Устаревший «показать ещё» долетает ПОСЛЕДНИМ — его страница не должна примешаться к новому состоянию.
+    resolveStale(new Response(ndjson([ndjsonLine('2026-07-09T08:00:00Z', 'stale-should-not-appear')]), { status: 200 }));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.queryByText('stale-should-not-appear')).toBeNull();
+    expect(screen.getByText('fresh-after-range-change')).toBeTruthy();
   });
 
   it('текстовый фильтр применяется по Enter (submit формы), не на каждую букву', async () => {

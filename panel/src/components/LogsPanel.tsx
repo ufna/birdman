@@ -5,7 +5,7 @@
 // дедика — нужна только serverId-строка, тогда как Live для таких дедиков
 // покажет `gone` (как и раньше, см. LogViewer/lib/logs.ts).
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { serverHistoryQuery, LOG_RANGE_PRESETS } from '../lib/logsql';
 import { queryLogs } from '../lib/logsHistory';
 import type { LogLine } from '../lib/logsHistory';
@@ -74,13 +74,20 @@ function LogsHistory({ serverId }: { serverId: string }) {
   const [state, setState] = useState<HistoryState>({ status: 'loading' });
   const [loadingMore, setLoadingMore] = useState(false);
 
+  // Guard от гонки устаревшего ответа (тот же idiom, что screens/Logs.tsx):
+  // монотонный счётчик поколений, ОБЩИЙ для основной загрузки истории и
+  // loadMore — не просто булев `active` на замыкание одного эффекта, потому
+  // что loadMore должен уметь узнать, что «его» поколение уже протухло, пока
+  // основной эффект перезапустился (смена диапазона/фильтра/сервера).
+  const seqRef = useRef(0);
+
   useEffect(() => {
-    let active = true;
+    const seq = ++seqRef.current;
     setState({ status: 'loading' });
     const start = Math.floor(Date.now() / 1000) - rangeSec;
     queryLogs({ query: serverHistoryQuery(serverId, appliedText), start, limit: HISTORY_LIMIT })
       .then((res) => {
-        if (!active) return;
+        if (seq !== seqRef.current) return; // ответ на устаревший запрос — игнорируем
         if (res.kind === 'unavailable') {
           setState({ status: 'soft', reason: res.reason });
           return;
@@ -88,24 +95,27 @@ function LogsHistory({ serverId }: { serverId: string }) {
         setState({ status: 'ok', lines: res.lines, hasMore: res.lines.length >= HISTORY_LIMIT });
       })
       .catch((e: unknown) => {
-        if (!active) return;
+        if (seq !== seqRef.current) return;
         setState({ status: 'error', error: e instanceof Error ? e : new Error(String(e)) });
       });
-    return () => {
-      active = false;
-    };
   }, [serverId, rangeSec, appliedText, reloadKey]);
 
   const loadMore = () => {
     if (state.status !== 'ok') return;
     const oldest = state.lines.at(-1);
     if (oldest === undefined) return;
+    const seq = seqRef.current; // поколение ДО await — если основной эффект перезапустится, эта страница протухнет
     const start = Math.floor(Date.now() / 1000) - rangeSec;
-    const end = Math.floor(new Date(oldest.time).getTime() / 1000) - 1;
+    // VictoriaLogs' end ЭКСКЛЮЗИВЕН ([start, end)) — дробные секунды
+    // собственного времени самой старой строки, БЕЗ floor и БЕЗ −1: «строго
+    // старше последней показанной строки», без пропуска и дублей на границе
+    // страницы (floor+(-1) молча топил строки между границей и oldest).
+    const end = new Date(oldest.time).getTime() / 1000;
     setLoadingMore(true);
     queryLogs({ query: serverHistoryQuery(serverId, appliedText), start, end, limit: HISTORY_LIMIT })
       .then((res) => {
         setLoadingMore(false);
+        if (seq !== seqRef.current) return; // диапазон/фильтр сменился, пока «показать ещё» летело — страница устарела
         if (res.kind === 'unavailable') return; // держим уже показанные строки как есть
         setState((prev) =>
           prev.status === 'ok'
