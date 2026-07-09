@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ufna/birdman/master/internal/stats"
 	"github.com/ufna/birdman/master/internal/store"
 	"github.com/ufna/birdman/master/internal/testdb"
 )
@@ -92,20 +93,25 @@ func TestRollupJob(t *testing.T) {
 		t.Fatalf("backfill: %v", err)
 	}
 
+	// Presence is read via RollupPeakCCU's map (every processed day gets a
+	// match_ccu_daily row, even an empty/zero-peak one -- see
+	// UpsertRollupDay's doc comment), since RolledUpDays was removed once
+	// Backfill stopped needing a which-days-are-missing scan (Fix 1: it now
+	// recomputes every day unconditionally, see TestRollupJobBackfillSelfHeals below).
 	backfillFrom, backfillTo := today.AddDate(0, 0, -29), today.AddDate(0, 0, -2)
-	rolledBackfill, err := st.RolledUpDays(ctx, backfillFrom, backfillTo)
+	peaksBackfill, err := st.RollupPeakCCU(ctx, backfillFrom, backfillTo)
 	if err != nil {
-		t.Fatalf("rolled up days (backfill range): %v", err)
+		t.Fatalf("peak ccu (backfill range): %v", err)
 	}
-	if len(rolledBackfill) != 28 {
-		t.Fatalf("backfill: want 28 rolled-up days in [today-29,today-2], got %d: %+v", len(rolledBackfill), rolledBackfill)
+	if len(peaksBackfill) != 28 {
+		t.Fatalf("backfill: want 28 rolled-up days in [today-29,today-2], got %d: %+v", len(peaksBackfill), peaksBackfill)
 	}
-	rolledTail, err := st.RolledUpDays(ctx, yesterday, today)
+	peaksTail, err := st.RollupPeakCCU(ctx, yesterday, today)
 	if err != nil {
-		t.Fatalf("rolled up days (tail range): %v", err)
+		t.Fatalf("peak ccu (tail range): %v", err)
 	}
-	if len(rolledTail) != 0 {
-		t.Fatalf("backfill must not touch [today-1,today], got: %+v", rolledTail)
+	if len(peaksTail) != 0 {
+		t.Fatalf("backfill must not touch [today-1,today], got: %+v", peaksTail)
 	}
 
 	// fiveDaysAgo is the long-running match's true start day: Backfill
@@ -258,6 +264,105 @@ func TestRollupJob(t *testing.T) {
 		if !sameDim(d1, d2) {
 			t.Fatalf("second tick changed today dim %s: %+v -> %+v", d1.Region, d1, d2)
 		}
+	}
+}
+
+// TestRollupJobBackfillSelfHeals is the Fix-1 regression test for the
+// CRITICAL bug: a day inside Backfill's range that already carries a rollup
+// row -- however wrong -- must be OVERWRITTEN by the next Backfill, not
+// skipped.
+//
+// This reproduces the real outage scenario: a tick finalizes a day D while D
+// is still "yesterday" within its own trailing window; normally that's the
+// day's one and only rollup write, since D then ages out of the tick's
+// [today-1,today] range forever. But if the tick instead wrote a partial
+// snapshot (e.g. a match on D was still running at tick time) and the
+// master then goes down for the entirety of the following day, D rolls out
+// of the tail and into Backfill's immutable range still carrying that
+// partial row -- nothing ever revisits it under the pre-fix "skip days
+// already present" logic, silently under-counting D forever. Simulating
+// this directly at the store level (rather than via wall-clock timing,
+// which Job's Backfill/tick can't be given a fake clock for) makes the
+// scenario deterministic: seed D's real matches, then use UpsertRollupDay
+// to plant an empty/zero rollup for D exactly as a partial tick snapshot
+// would leave behind, and confirm Backfill corrects it.
+//
+// Before Fix 1 (RolledUpDays-gated skip in Backfill) this fails: D is
+// already "present" in match_ccu_daily, so Backfill silently leaves the
+// stale empty/zero row in place instead of recomputing it.
+func TestRollupJobBackfillSelfHeals(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10)
+	ctx := context.Background()
+	srv := f.InsertServer(t, f.NodeID, f.VersionID, "reaped", 20001, 0)
+
+	now := time.Now().UTC()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	// 10 days ago: comfortably inside [today-29, today-2] regardless of
+	// where in the current day "now" falls.
+	d := today.AddDate(0, 0, -10)
+
+	// Two finished matches, fully within D (no midnight-spanning, no
+	// still-running clamp-to-now involved -- both fully settled, so the
+	// reference computed below cannot itself be time-of-test-run-dependent).
+	insertJobMatch(t, st, srv, "eu", 10, d.Add(1*time.Hour), tPtr(d.Add(1*time.Hour+30*time.Minute)))
+	insertJobMatch(t, st, srv, "eu", 6, d.Add(5*time.Hour), tPtr(d.Add(5*time.Hour+45*time.Minute)))
+
+	// Plant a stale PARTIAL rollup for D: empty dims, zero peak -- exactly
+	// what a tick's UpsertRollupDay call would leave behind if it ran while
+	// D's matches hadn't happened yet (or, in the real outage, while a
+	// match on D was still running and got dropped by the day-filter). This
+	// also marks D "present" in match_ccu_daily, which is what the old
+	// RolledUpDays-gated skip kept it from ever fixing.
+	if err := st.UpsertRollupDay(ctx, d, nil, 0); err != nil {
+		t.Fatalf("seed stale partial rollup for d: %v", err)
+	}
+
+	job := New(st, time.Minute, testLog())
+	if err := job.Backfill(ctx); err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+
+	// Reference: what D's rollup should be, computed directly and
+	// independently of the job (mirrors recomputeDay's own recipe, but
+	// spelled out here rather than calling it, so this test doesn't just
+	// check "did recomputeDay run" via itself).
+	matches, err := st.StatMatchesOverlapping(ctx, d, d.AddDate(0, 0, 1))
+	if err != nil {
+		t.Fatalf("overlap: %v", err)
+	}
+	wantDims, wantPeak := stats.AggregateDaily(matches, []time.Time{d}, now)
+	wantDim, ok := findDim(wantDims, d, "eu")
+	if !ok {
+		t.Fatalf("reference computation produced no eu dim on d: %+v", wantDims)
+	}
+
+	gotDims, err := st.RollupDims(ctx, d, d)
+	if err != nil {
+		t.Fatalf("rollup dims: %v", err)
+	}
+	gotPeaks, err := st.RollupPeakCCU(ctx, d, d)
+	if err != nil {
+		t.Fatalf("rollup peak ccu: %v", err)
+	}
+
+	if len(gotDims) != 1 {
+		t.Fatalf("backfill did not overwrite the stale partial rollup: want 1 dim on d, got %d: %+v", len(gotDims), gotDims)
+	}
+	if !sameDim(gotDims[0], wantDim) {
+		t.Fatalf("backfilled dim doesn't match the freshly-computed reference (stale row survived):\ngot=%+v\nwant=%+v", gotDims[0], wantDim)
+	}
+	// Belt-and-suspenders literal check, independent of the reference
+	// computation above, so this isn't just testing AggregateDaily against
+	// itself: two matches (10+6 players), not the stale empty/zero row.
+	if gotDims[0].Matches != 2 || gotDims[0].PlayersPeakSum != 16 {
+		t.Fatalf("backfilled dim still looks stale: %+v", gotDims[0])
+	}
+	if got, want := gotPeaks[dayKeyOf(d)], wantPeak[dayKeyOf(d)]; got != want {
+		t.Fatalf("backfilled peak ccu = %v, want %v (fresh reference; stale 0 was not overwritten)", got, want)
+	}
+	if gotPeaks[dayKeyOf(d)] == 0 {
+		t.Fatalf("backfilled peak ccu is still the stale 0 -- day was not recomputed")
 	}
 }
 

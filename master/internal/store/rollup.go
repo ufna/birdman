@@ -48,7 +48,9 @@ func rollupDayKey(t time.Time) string { return t.UTC().Format("2006-01-02") }
 // (day, normalized): inside one transaction, it deletes any existing
 // match_stats_daily/match_ccu_daily rows for that day, inserts dims, and
 // ALWAYS inserts one match_ccu_daily row (day, peakCCU) — even when dims is
-// empty and peakCCU is 0 — so the day is marked processed (RolledUpDays).
+// empty and peakCCU is 0 — so the day is marked processed: present (with an
+// ok-map lookup) in RollupPeakCCU's result, distinguishing a legitimate
+// empty day (peak 0, but present) from one never rolled up at all (absent).
 // Every written row uses the `day` parameter (not each dim's own Day field)
 // as its day column, so the single-day replace stays correct even if a
 // caller's dims aren't perfectly pre-filtered.
@@ -129,29 +131,6 @@ func (s *Store) RollupPeakCCU(ctx context.Context, from, to time.Time) (map[stri
 			return nil, err
 		}
 		out[rollupDayKey(day)] = peak
-	}
-	return out, rows.Err()
-}
-
-// RolledUpDays returns the set of dayKey already present in match_ccu_daily
-// for days in [from,to] (inclusive, by UTC date) — the backfill's
-// which-days-are-missing scan (a day is "rolled up" the instant its
-// match_ccu_daily row exists, regardless of whether it had any matches).
-func (s *Store) RolledUpDays(ctx context.Context, from, to time.Time) (map[string]bool, error) {
-	f, t := normalizeRollupDay(from), normalizeRollupDay(to)
-	rows, err := s.Pool.Query(ctx,
-		`select day from match_ccu_daily where day between $1 and $2`, f, t)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := map[string]bool{}
-	for rows.Next() {
-		var day time.Time
-		if err := rows.Scan(&day); err != nil {
-			return nil, err
-		}
-		out[rollupDayKey(day)] = true
 	}
 	return out, rows.Err()
 }

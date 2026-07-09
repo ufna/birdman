@@ -14,9 +14,15 @@ import (
 // from the match_stats_daily/match_ccu_daily rollups (internal/store's
 // rollup.go; maintained by internal/statsrollup) for every axis day up to
 // today-2, and recomputed live from raw matches for the trailing two days
-// (yesterday+today, the only days whose matches can still change) on every
-// request — so the response is always current even if the rollup-maintenance
-// job hasn't ticked recently («Статистика v1» T10). The pure aggregation
+// (yesterday+today) on every request — so the response reflects raw data for
+// those two days immediately, without waiting on the rollup-maintenance
+// job's next tick («Статистика v1» T10). This live recompute is also where
+// matches are assumed to still be able to change (settle/finish) before
+// their day is handed off to the immutable rollup range — true so long as a
+// match settles within ≤2 days of starting, which holds for this platform's
+// session-based dedik matches (minutes-long); see
+// internal/statsrollup/job.go's package doc for what happens on the
+// (currently untriggered) assumption violation. The pure aggregation
 // (series shapes, day bucketing, sweep-line CCU, percentiles) lives in
 // internal/stats — no DB/HTTP dependencies there, so it's unit-testable and
 // shared between the on-the-fly path (BuildOverview/BuildCost — still the
@@ -27,7 +33,7 @@ import (
 // contract (URL, ?days= semantics, JSON shape) is unchanged by this split —
 // see TestStatsOverviewRollupBacked/TestStatsCostRollupBacked in
 // stats_test.go, which prove the rollup-backed response equals the
-// on-the-fly one.
+// on-the-fly one (both under the same settle-within-tail assumption above).
 
 const (
 	statsDefaultDays = 7
@@ -101,12 +107,17 @@ func statsDays(w http.ResponseWriter, r *http.Request) (int, bool) {
 // (oldest day first, ending "today" — stats.DayAxisUTC's shape): the
 // immutable portion, every axis day up to and including today-2, is read
 // from the match_stats_daily/match_ccu_daily rollups (RollupDims/
-// RollupPeakCCU); the mutable tail, yesterday and today — the only days
-// whose matches can still change — is recomputed live from raw matches every
-// call (StatMatchesOverlapping + stats.AggregateDaily), so the result is
-// current even if the rollup-maintenance job (internal/statsrollup) hasn't
-// ticked recently. When axis is entirely within the tail (days<=2), the
-// immutable range is empty and is skipped rather than queried.
+// RollupPeakCCU); the mutable tail, yesterday and today, is recomputed live
+// from raw matches every call (StatMatchesOverlapping + stats.AggregateDaily),
+// so the result reflects the latest raw data for those two days regardless
+// of when the rollup-maintenance job (internal/statsrollup) last ticked.
+// This live tail is where matches are assumed to still be able to change
+// (settle/finish) — an assumption that holds so long as a match settles
+// within ≤2 days of starting, true for this platform's session-based dedik
+// matches (minutes-long); see internal/statsrollup/job.go's package doc for
+// what happens on the (currently untriggered) assumption violation. When
+// axis is entirely within the tail (days<=2), the immutable range is empty
+// and is skipped rather than queried.
 //
 // AggregateDaily can emit a dim for a match's start day even when that day
 // falls before the live window (e.g. a match that started five days ago and

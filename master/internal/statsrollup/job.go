@@ -3,22 +3,39 @@
 // statistics windows don't need to rescan raw matches (internal/stats, T7).
 // Two passes share one recompute primitive (recomputeDay):
 //
-//   - Backfill (run once, at startup): fills any day in [today-29, today-2]
-//     that has no rollup yet (store.RolledUpDays) — immutable history,
-//     computed once and never touched again.
+//   - Backfill (run once, at startup): unconditionally recomputes every day
+//     in [today-29, today-2] from raw matches, replacing any rollup already
+//     there. Raw matches are never pruned in v1, so any day in this
+//     immutable range can always be correctly re-derived, which makes every
+//     restart self-correcting: if the master was down for the entirety of
+//     some day D+1, the tick below never got a chance to finalize D while D
+//     was still in its own trailing window, and D would otherwise carry a
+//     stale/partial rollup forever once it aged out of that window into
+//     Backfill's range — recomputing unconditionally (not just days
+//     missing a rollup) means the next restart overwrites it from scratch
+//     instead of skipping it as "already done".
 //   - the tick (every Interval): recomputes the trailing two UTC days
-//     [today-1, today] unconditionally — the only days whose matches can
-//     still change (a match started yesterday may still be running with no
-//     ended_at yet; today is still open by definition).
+//     [today-1, today] unconditionally. This is where matches are assumed
+//     to still be able to change (settle/finish) — true so long as a match
+//     settles within ≤2 days of starting, which holds for this platform's
+//     session-based dedik matches (minutes-long). A match still running
+//     when its start day rolls out of this tail and into Backfill's range
+//     freezes that day's avg_match_duration/players_peak (understated)
+//     until a later Backfill re-derives it — self-correcting on the
+//     master's next restart per above, but not before.
 //
-// recomputeDay(D) mirrors AggregateDaily's on-the-fly semantics exactly by
-// re-deriving D's rollup from raw matches every time, so recomputing a day
-// twice is idempotent (store.UpsertRollupDay deletes D's existing rows
-// before inserting — replace, not append).
+// recomputeDay(D) re-derives D's rollup from raw matches every time, so
+// recomputing a day twice is idempotent (store.UpsertRollupDay deletes D's
+// existing rows before inserting — replace, not append). Backfill logs and
+// continues past a single day's error rather than aborting the rest of the
+// range — mirrors dbCollector.Collect's query-and-continue pattern
+// (internal/metrics/metrics.go).
 package statsrollup
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -32,6 +49,12 @@ const (
 	// tailDays is how many trailing UTC days (today and the ones before it)
 	// the tick always recomputes; today-tailDays is Backfill's upper bound.
 	tailDays = 2
+	// defaultInterval is the tick period used when New is given a
+	// non-positive interval — matches config.defaults()'s
+	// StatsRollupInterval (master/internal/config/config.go) so a
+	// zero-value/misconfigured interval still behaves like the documented
+	// default instead of panicking.
+	defaultInterval = 2 * time.Minute
 )
 
 type Job struct {
@@ -40,8 +63,16 @@ type Job struct {
 	log      *slog.Logger
 }
 
-// New builds a rollup-maintenance job. Call Run in its own goroutine.
+// New builds a rollup-maintenance job. Call Run in its own goroutine. A
+// non-positive interval is clamped to defaultInterval: time.NewTicker
+// (used by Run) panics when given a non-positive duration, and Run executes
+// in a background goroutine where an uncaught panic would crash the whole
+// process — mirrors matchmaker.Config.withDefaults' identical guard on Tick
+// (master/internal/matchmaker/matchmaker.go).
 func New(st *store.Store, interval time.Duration, log *slog.Logger) *Job {
+	if interval <= 0 {
+		interval = defaultInterval
+	}
 	return &Job{st: st, interval: interval, log: log}
 }
 
@@ -66,31 +97,39 @@ func (j *Job) Run(ctx context.Context) {
 	}
 }
 
-// Backfill computes and persists the rollup for any day in
-// [today-(backfillDays-1), today-tailDays] not already present
-// (store.RolledUpDays) — immutable history that, once rolled up, never
-// needs recomputing again. Days newer than that (the mutable tail) are left
-// to tick.
+// Backfill unconditionally recomputes every day in
+// [today-(backfillDays-1), today-tailDays] from raw matches, replacing any
+// rollup already there for that day — see the package doc for why
+// unconditional (not just missing days) is what makes this self-correcting
+// after an outage. Raw matches are never pruned in v1, so re-deriving every
+// day in this immutable range is always sound, and cheap enough for a
+// one-time pass at process start (index-backed per-day queries; the
+// per-request read path, which only reads rollups, is unaffected). Days
+// newer than this range (the mutable tail) are left to tick.
+//
+// A day's recomputeDay error is logged (with the day) and does not abort
+// the remaining, newer days — mirrors dbCollector.Collect's
+// query-and-continue pattern (internal/metrics/metrics.go), so one bad day
+// doesn't freeze backfilling for every day after it. The returned error is
+// nil iff every day succeeded; Run logs a non-nil result and proceeds to
+// the tick loop regardless (the next restart's Backfill, or tick once a
+// day enters its range, gets another chance at a day that failed here).
 func (j *Job) Backfill(ctx context.Context) error {
 	now := time.Now().UTC()
 	today := startOfDayUTC(now)
 	from := today.AddDate(0, 0, -(backfillDays - 1))
 	to := today.AddDate(0, 0, -tailDays)
 
-	rolled, err := j.st.RolledUpDays(ctx, from, to)
-	if err != nil {
-		return err
-	}
+	var errs []error
 	for d := from; !d.After(to); d = d.AddDate(0, 0, 1) {
-		if rolled[dayKey(d)] {
-			continue
-		}
 		if err := j.recomputeDay(ctx, d, now); err != nil {
-			return err
+			j.log.Error("statsrollup: backfill day failed", "day", dayKey(d), "err", err)
+			errs = append(errs, fmt.Errorf("backfill day %s: %w", dayKey(d), err))
+			continue
 		}
 		j.log.Info("statsrollup: backfilled day", "day", dayKey(d))
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // tick recomputes the mutable tail: today and yesterday (UTC). Idempotent —

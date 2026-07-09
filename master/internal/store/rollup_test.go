@@ -44,10 +44,11 @@ func insertRollupMatch(t *testing.T, st *store.Store, serverID, region string, p
 // TestRollupStore covers the store-level CRUD surface for the rollup tables
 // (match_stats_daily/match_ccu_daily): recompute+persist two days via
 // AggregateDaily -> UpsertRollupDay, read them back via RollupDims/
-// RollupPeakCCU/RolledUpDays, verify re-upserting a day doesn't duplicate
-// rows, verify an empty day still marks itself processed, and verify
-// StatMatchesOverlapping's window semantics (incl. a still-running match
-// that started before the window).
+// RollupPeakCCU, verify re-upserting a day doesn't duplicate rows, verify an
+// empty day still marks itself processed (RollupPeakCCU reports it present,
+// via the map's ok-return, with peak 0 -- match_ccu_daily's row is always
+// inserted), and verify StatMatchesOverlapping's window semantics (incl. a
+// still-running match that started before the window).
 func TestRollupStore(t *testing.T) {
 	st := testdb.New(t)
 	f := testdb.Seed(t, st, "eu", 10)
@@ -124,16 +125,11 @@ func TestRollupStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rollup peak ccu: %v", err)
 	}
+	// Exact-value checks below also double as presence checks: a day absent
+	// from the map indexes as the int zero value, which would fail these
+	// (non-zero) equality checks just as surely as a wrong value would.
 	if peaks[dk(day1)] != 10 || peaks[dk(day2)] != 4 {
 		t.Fatalf("peaks: %+v", peaks)
-	}
-
-	rolled, err := st.RolledUpDays(ctx, day1, day2)
-	if err != nil {
-		t.Fatalf("rolled up days: %v", err)
-	}
-	if !rolled[dk(day1)] || !rolled[dk(day2)] {
-		t.Fatalf("rolled up days: %+v", rolled)
 	}
 
 	// Re-upsert day1 with the same data must not duplicate rows (delete+insert).
@@ -149,17 +145,19 @@ func TestRollupStore(t *testing.T) {
 	}
 
 	// An empty day (no dims, zero peak) still marks itself processed via the
-	// always-inserted match_ccu_daily row.
+	// always-inserted match_ccu_daily row -- distinguished from a day never
+	// rolled up at all via the map's ok-return (plain indexing can't tell
+	// "absent" from "present with the legitimate value 0" apart).
 	day0 := day1.AddDate(0, 0, -1)
 	if err := st.UpsertRollupDay(ctx, day0, nil, 0); err != nil {
 		t.Fatalf("upsert empty day: %v", err)
 	}
-	rolled0, err := st.RolledUpDays(ctx, day0, day0)
+	peaks0, err := st.RollupPeakCCU(ctx, day0, day0)
 	if err != nil {
-		t.Fatalf("rolled up empty day: %v", err)
+		t.Fatalf("rollup peak ccu (empty day): %v", err)
 	}
-	if !rolled0[dk(day0)] {
-		t.Fatalf("empty day should be marked rolled up: %+v", rolled0)
+	if v, ok := peaks0[dk(day0)]; !ok || v != 0 {
+		t.Fatalf("empty day should be marked processed with peak 0: ok=%v peak=%v", ok, v)
 	}
 	dims0, err := st.RollupDims(ctx, day0, day0)
 	if err != nil {

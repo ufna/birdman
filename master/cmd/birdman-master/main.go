@@ -143,6 +143,10 @@ func run() error {
 	go reconcile.New(st, hub, log).Run(loopCtx, time.Second)
 	go reconcile.NewLeaseChecker(st, log).Run(loopCtx, time.Second)
 	go mm.Run(loopCtx)
+	// statsrollup's startup Backfill runs inside this goroutine and
+	// deliberately does not block API/gRPC serving from starting -- stats
+	// endpoints may read zero/partial rollups for older days until it
+	// completes (allocation/critical-path serving must never wait on stats).
 	go statsrollup.New(st, cfg.StatsRollupInterval, log).Run(loopCtx)
 
 	errCh := make(chan error, 2)
