@@ -22,17 +22,24 @@ func testLog() *slog.Logger {
 // 8+8), birdman_node_capacity_slots{region="eu"} must report the summed
 // capacity — the panel's utilization-over-time chart (Statistics v1) reads
 // this per region on top of the existing point-in-time
-// store.RegionUtilization snapshot.
+// store.RegionUtilization snapshot. A third, non-active (draining) node must
+// NOT count: the gauge is the denominator of true utilization, so it follows
+// the same active-nodes-only rule as store.RegionUtilization's capacity CTE.
 func TestNodeCapacityMetric(t *testing.T) {
 	st := testdb.New(t)
 	f := testdb.Seed(t, st, "eu", 8)
 	f.AddNode(t, "node-2", "203.0.113.11", 8)
+	draining := f.AddNode(t, "node-3", "203.0.113.12", 100)
+	if _, err := st.Pool.Exec(t.Context(),
+		`update nodes set state = 'draining' where id = $1::uuid`, draining); err != nil {
+		t.Fatalf("drain node-3: %v", err)
+	}
 
 	m := metrics.New(st, testLog())
 
 	got := findGauge(t, m.Registry, "birdman_node_capacity_slots", map[string]string{"region": "eu"})
 	if got != 16 {
-		t.Fatalf("capacity eu = %v, want 16", got)
+		t.Fatalf("capacity eu = %v, want 16 (active nodes only; draining node-3's 100 slots must not count)", got)
 	}
 }
 

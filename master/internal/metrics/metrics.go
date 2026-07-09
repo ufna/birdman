@@ -149,7 +149,7 @@ func (c *dbCollector) Collect(ch chan<- prometheus.Metric) {
 	} else {
 		ch <- prometheus.MustNewConstMetric(playersOnlineDesc, prometheus.GaugeValue, players)
 	}
-	if crows, err := c.st.Pool.Query(ctx, `select region, sum(capacity_slots)::int from nodes where state='active' group by region`); err != nil {
+	if crows, err := c.st.Pool.Query(ctx, `select region, sum(capacity_slots)::int from nodes where state = 'active' group by region`); err != nil {
 		c.log.Error("metrics: capacity query failed", "err", err)
 	} else {
 		for crows.Next() {
