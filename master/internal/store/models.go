@@ -118,4 +118,11 @@ const (
 	// (ops.md §1 TODO). Payload carries mute_id/alertname/region — no secrets.
 	EventAlertMuted   = "alert_muted"   // POST /v1/alerts/mutes
 	EventAlertUnmuted = "alert_unmuted" // DELETE /v1/alerts/mutes/{id}
+
+	// Private registry credentials (registries v1, admin panel "Реестры",
+	// docs/superpowers/specs/2026-07-09-registries-design.md §1). Payload
+	// carries host/username — NEVER the token: it is write-only and must
+	// never land in an audit event, a log line, or a GET response.
+	EventRegistryUpserted = "registry_upserted" // POST /v1/registries (create or replace-by-host)
+	EventRegistryRemoved  = "registry_removed"  // DELETE /v1/registries/{id}
 )
