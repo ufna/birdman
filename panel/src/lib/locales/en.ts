@@ -354,6 +354,31 @@ export const en = {
   'deploys.toast.deployed': 'Deploy of {semver} started',
   'deploys.toast.rolledBack': 'Rolled back to {semver}',
 
+  // — Deploys screen: «How to deploy a build» card —
+  'deploys.howto.title': 'How to deploy a build',
+  'deploys.howto.expand': 'Show steps',
+  'deploys.howto.collapse': 'Hide steps',
+  'deploys.howto.step1.title': '1. Build & push the server image',
+  'deploys.howto.step1.desc':
+    'Build your game server image and push it to ghcr (or any OCI registry the nodes can reach). Example image_ref:',
+  'deploys.howto.step1.stubNote':
+    'No build of your own yet? The stub workflow publishes a placeholder image — run it manually (workflow_dispatch) with a semver `tag` input:',
+  'deploys.howto.step1.pullNote': 'Pull access to ghcr is already configured on the node — nothing else to set up there.',
+  'deploys.howto.step2.title': '2. Get a deploy-scoped API key',
+  'deploys.howto.step2.desc': 'The commands below authenticate with a key that has the `deploy` scope.',
+  'deploys.howto.step2.adminLink': 'Create one on the Access screen',
+  'deploys.howto.step2.readonlyHint': 'A key is created by an admin on the Access screen.',
+  'deploys.howto.step2.secretNote': 'The secret is shown once, right after creation — save it somewhere safe.',
+  'deploys.howto.step3.title': '3. Register the version and deploy',
+  'deploys.howto.step3.registerLabel': 'Register a new version (channel prod here — use staging for a staging build):',
+  'deploys.howto.step3.deployLabel': 'Deploy a registered version:',
+  'deploys.howto.step3.localNote':
+    "master only listens on the node's localhost — run these from the node itself or through an SSH tunnel (this panel's address is already a tunnel).",
+  'deploys.howto.step3.tableNote': 'Once registered, the version appears in the table below — deploy it with the Deploy button.',
+  'deploys.howto.copyRegister': 'Copy register command',
+  'deploys.howto.copyDeploy': 'Copy deploy command',
+  'deploys.howto.copied': 'Copied',
+
   // — navigation (П2) —
   'nav.stats': 'Statistics',
   'nav.cost': 'Cost',

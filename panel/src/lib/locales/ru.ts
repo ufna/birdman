@@ -338,6 +338,31 @@ export const ru: Record<MessageKey, string> = {
   'deploys.toast.deployed': 'Деплой {semver} запущен',
   'deploys.toast.rolledBack': 'Откат до {semver} выполнен',
 
+  // — экран «Деплои»: карточка «Как залить билд» —
+  'deploys.howto.title': 'Как залить билд',
+  'deploys.howto.expand': 'Показать шаги',
+  'deploys.howto.collapse': 'Скрыть шаги',
+  'deploys.howto.step1.title': '1. Собери и запушь образ сервера',
+  'deploys.howto.step1.desc':
+    'Собери образ сервера игры и запушь его в ghcr (или любой OCI-registry, доступный тачкам). Пример image_ref:',
+  'deploys.howto.step1.stubNote':
+    'Своего билда пока нет? Стаб-workflow публикует образ-заглушку — запусти вручную (workflow_dispatch) с semver-инпутом tag:',
+  'deploys.howto.step1.pullNote': 'Pull-доступ к ghcr на тачке уже настроен — дополнительно ничего делать не нужно.',
+  'deploys.howto.step2.title': '2. Получи API-ключ со скоупом deploy',
+  'deploys.howto.step2.desc': 'Команды ниже аутентифицируются ключом со скоупом deploy.',
+  'deploys.howto.step2.adminLink': 'Создать на экране «Доступ»',
+  'deploys.howto.step2.readonlyHint': 'Ключ создаёт админ на экране «Доступ».',
+  'deploys.howto.step2.secretNote': 'Секрет показывается один раз сразу после создания — сохрани его в надёжном месте.',
+  'deploys.howto.step3.title': '3. Зарегистрируй версию и задеплой',
+  'deploys.howto.step3.registerLabel': 'Регистрация новой версии (тут channel prod — для стейджинга используй staging):',
+  'deploys.howto.step3.deployLabel': 'Деплой зарегистрированной версии:',
+  'deploys.howto.step3.localNote':
+    'master слушает только localhost тачки — выполняй эти команды с самой тачки или через SSH-туннель (адрес этой панели — уже туннель).',
+  'deploys.howto.step3.tableNote': 'После регистрации версия появится в таблице ниже — деплой кнопкой Deploy.',
+  'deploys.howto.copyRegister': 'Копировать команду регистрации',
+  'deploys.howto.copyDeploy': 'Копировать команду деплоя',
+  'deploys.howto.copied': 'Скопировано',
+
   // — навигация (П2) —
   'nav.stats': 'Статистика',
   'nav.cost': 'Стоимость',
