@@ -3,6 +3,13 @@
 // handleLogsQuery). Не знают ни про сеть, ни про React — единственная точка
 // тестирования LogsQL-синтаксиса; lib/logsHistory.ts просто передаёт готовую
 // строку в query= как есть.
+//
+// Сюда же вынесен LOG_RANGE_PRESETS (см. низ файла) — набор диапазонов был
+// байт-в-байт задублирован в screens/Logs.tsx и components/LogsPanel.tsx;
+// MessageKey — просто строковый союз-тип (не React), так что «не знают про
+// React» по-прежнему верно.
+
+import type { MessageKey } from './i18n';
 
 /**
  * Экранирует значение LogsQL-строки/фильтра: `\` → `\\`, `"` → `\"` (именно в
@@ -71,3 +78,14 @@ export function fleetSearchQuery(f: FleetFilter): string {
   }
   return q + SORT_DESC;
 }
+
+/**
+ * Пресеты диапазона времени, общие для экрана «Логи» (флит-поиск) и вкладки
+ * «История» в дровере дедика — раньше были задублированы 1:1 в обоих местах.
+ */
+export const LOG_RANGE_PRESETS: { key: MessageKey; seconds: number }[] = [
+  { key: 'logs.range.1h', seconds: 3600 },
+  { key: 'logs.range.24h', seconds: 86400 },
+  { key: 'logs.range.7d', seconds: 7 * 86400 },
+  { key: 'logs.range.14d', seconds: 14 * 86400 },
+];

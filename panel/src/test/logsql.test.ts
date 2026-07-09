@@ -9,6 +9,12 @@ describe('escapeStreamValue', () => {
   it('обычный текст не меняет', () => {
     expect(escapeStreamValue('srv-1')).toBe('srv-1');
   });
+  it('только двойная кавычка', () => {
+    expect(escapeStreamValue('"')).toBe('\\"');
+  });
+  it('только обратный слэш', () => {
+    expect(escapeStreamValue('\\')).toBe('\\\\');
+  });
 });
 
 describe('serverHistoryQuery', () => {
@@ -41,8 +47,16 @@ describe('fleetSearchQuery', () => {
   it('часть стрим-полей + текст → фильтр, затем фраза', () => {
     expect(fleetSearchQuery({ region: 'eu', text: 'boom' })).toBe('{region="eu"} "boom" | sort by (_time) desc');
   });
+  it('только serverId → стрим-фильтр без остальных полей', () => {
+    expect(fleetSearchQuery({ serverId: 'srv-9' })).toBe('{server_id="srv-9"} | sort by (_time) desc');
+  });
   it('экранирует значения полей и текст', () => {
     expect(fleetSearchQuery({ region: 'a"b', text: 'x\\y' })).toBe('{region="a\\"b"} "x\\\\y" | sort by (_time) desc');
+  });
+  it('экранирует node и serverId (кавычка и слэш в каждом)', () => {
+    expect(fleetSearchQuery({ node: 'n"1\\2', serverId: 's"3\\4' })).toBe(
+      '{node="n\\"1\\\\2",server_id="s\\"3\\\\4"} | sort by (_time) desc',
+    );
   });
   it('пустые/из пробелов поля игнорируются, как незаданные', () => {
     expect(fleetSearchQuery({ region: '', node: '  ', text: '' })).toBe('* | sort by (_time) desc');

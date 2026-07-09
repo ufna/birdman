@@ -6,11 +6,10 @@
 // покажет `gone` (как и раньше, см. LogViewer/lib/logs.ts).
 
 import { useEffect, useState } from 'react';
-import { serverHistoryQuery } from '../lib/logsql';
+import { serverHistoryQuery, LOG_RANGE_PRESETS } from '../lib/logsql';
 import { queryLogs } from '../lib/logsHistory';
 import type { LogLine } from '../lib/logsHistory';
 import { useT, useFormat } from '../lib/i18n';
-import type { MessageKey } from '../lib/i18n';
 import { LogViewer } from './LogViewer';
 import { EmptyState, ErrorNote, Skeleton, SkeletonRegion } from './ui';
 
@@ -19,13 +18,6 @@ type Segment = 'live' | 'history';
 /** Сколько строк тянуть за страницу (и первую, и «показать ещё»). Кнопка
  *  «показать ещё» прячется, когда страница короче лимита. */
 const HISTORY_LIMIT = 500;
-
-const RANGE_PRESETS: { key: MessageKey; seconds: number }[] = [
-  { key: 'logs.range.1h', seconds: 3600 },
-  { key: 'logs.range.24h', seconds: 86400 },
-  { key: 'logs.range.7d', seconds: 7 * 86400 },
-  { key: 'logs.range.14d', seconds: 14 * 86400 },
-];
 
 /** initialFollow пробрасывается в Live-режим как есть (MatchDrawer хочет
  *  не-автослежение у завершённых матчей) — дефолт true совпадает с прежним
@@ -131,7 +123,7 @@ function LogsHistory({ serverId }: { serverId: string }) {
     <div className="flex flex-col gap-2">
       <div className="flex flex-wrap items-center gap-2">
         <div role="group" aria-label={t('logs.range.aria')} className="inline-flex overflow-hidden rounded-lg border border-line text-xs">
-          {RANGE_PRESETS.map((p) => (
+          {LOG_RANGE_PRESETS.map((p) => (
             <button
               key={p.key}
               type="button"

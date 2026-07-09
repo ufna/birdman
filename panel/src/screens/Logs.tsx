@@ -7,23 +7,16 @@
 // LogsPanel с Live|История, что и в дроверах Флота/Матчей — этот экран для
 // быстрого поиска ПО ВСЕМУ флоту, а не по одному дедику).
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
-import { fleetSearchQuery } from '../lib/logsql';
+import { fleetSearchQuery, LOG_RANGE_PRESETS } from '../lib/logsql';
 import { queryLogs } from '../lib/logsHistory';
 import type { LogLine } from '../lib/logsHistory';
 import { useServerDrawer } from '../lib/drawer';
 import { useT, useFormat } from '../lib/i18n';
-import type { MessageKey } from '../lib/i18n';
 import { shortId } from '../lib/format';
 import { Card, CardHeader, EmptyState, ErrorNote, Skeleton, SkeletonRegion } from '../components/ui';
 
-const RANGE_PRESETS: { key: MessageKey; seconds: number }[] = [
-  { key: 'logs.range.1h', seconds: 3600 },
-  { key: 'logs.range.24h', seconds: 86400 },
-  { key: 'logs.range.7d', seconds: 7 * 86400 },
-  { key: 'logs.range.14d', seconds: 14 * 86400 },
-];
 const LIMITS = [100, 500, 1000];
 
 type SearchState =
@@ -46,13 +39,30 @@ export function Logs() {
   // (который мог измениться уже после того, как результаты пришли).
   const [appliedText, setAppliedText] = useState('');
 
+  // Guard от гонки устаревшего ответа: пользователь мог отправить поиск A, а
+  // затем (не дожидаясь ответа) поиск B — если ответ на A прилетит ПОСЛЕ
+  // ответа на B, без guard'а он молча перезапишет уже показанный результат B
+  // результатом устаревшего запроса. Тот же idiom, что useData/LogsHistory
+  // (там — булев `active` на замыкание одного эффекта); здесь run() вызывается
+  // императивно и не привязан к эффекту, поэтому монотонный счётчик поколений.
+  // AbortController — доп. подстраховка: реальный fetch устаревшего запроса
+  // обрывается, а не просто игнорируется по приходу.
+  const seqRef = useRef(0);
+  const controllerRef = useRef<AbortController | null>(null);
+
   const run = () => {
+    controllerRef.current?.abort();
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    const seq = ++seqRef.current;
+
     setState({ status: 'loading' });
     const t0 = text.trim();
     setAppliedText(t0);
     const start = Math.floor(Date.now() / 1000) - rangeSec;
-    queryLogs({ query: fleetSearchQuery({ text, region, node, serverId }), start, limit })
+    queryLogs({ query: fleetSearchQuery({ text, region, node, serverId }), start, limit, signal: controller.signal })
       .then((res) => {
+        if (seq !== seqRef.current) return; // ответ на устаревший запрос — игнорируем
         if (res.kind === 'unavailable') {
           setState({ status: 'soft', reason: res.reason });
           return;
@@ -60,6 +70,7 @@ export function Logs() {
         setState({ status: 'ok', lines: res.lines });
       })
       .catch((e: unknown) => {
+        if (seq !== seqRef.current) return;
         setState({ status: 'error', error: e instanceof Error ? e : new Error(String(e)) });
       });
   };
@@ -116,7 +127,7 @@ export function Logs() {
             />
 
             <div role="group" aria-label={t('logs.range.aria')} className="inline-flex overflow-hidden rounded-lg border border-line text-xs">
-              {RANGE_PRESETS.map((p) => (
+              {LOG_RANGE_PRESETS.map((p) => (
                 <button
                   key={p.key}
                   type="button"

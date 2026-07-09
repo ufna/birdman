@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import { I18nProvider } from '../lib/i18n';
 
@@ -13,8 +13,21 @@ vi.mock('../lib/drawer', () => ({
   useServerDrawer: () => ({ open: openSpy }),
 }));
 
-// Импорт ПОСЛЕ vi.mock, чтобы экран подхватил замоканный lib/drawer.
+// lib/logsHistory оборачиваем в вызывающий-настоящую-реализацию мок: по
+// умолчанию queryLogs ведёт себя как обычно (через глобальный fetch, как во
+// всех остальных тестах этого файла), но для теста на stale-response race
+// нужно детерминированно управлять ПОРЯДКОМ резолва двух конкретных вызовов —
+// с сырым mockFetch это невозможно (тело Response читается асинхронно и
+// порядок resolve нельзя развести без гонки внутри самого мока).
+vi.mock('../lib/logsHistory', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../lib/logsHistory')>();
+  return { ...actual, queryLogs: vi.fn(actual.queryLogs) };
+});
+
+// Импорт ПОСЛЕ vi.mock, чтобы экран подхватил замоканные lib/drawer и lib/logsHistory.
 import { Logs } from '../screens/Logs';
+import { queryLogs } from '../lib/logsHistory';
+import type { LogsResult } from '../lib/logsHistory';
 
 const renderEn = (ui: ReactElement) => render(<I18nProvider initialLang="en">{ui}</I18nProvider>);
 
@@ -30,6 +43,7 @@ function mockFetch(respond: () => Response) {
 afterEach(() => {
   vi.unstubAllGlobals();
   openSpy.mockClear();
+  vi.mocked(queryLogs).mockClear();
 });
 
 describe('Logs — экран флит-поиска', () => {
@@ -115,5 +129,48 @@ describe('Logs — экран флит-поиска', () => {
     });
     const url = decodeURIComponent((fetchMock.mock.calls[0] as [string])[0]);
     expect(url).toContain('{region="eu",node="n1"}');
+  });
+
+  it('гонка stale-ответа: поздний ответ на устаревший поиск A не переписывает уже применённый результат более нового B', async () => {
+    // Тексты поиска и сообщений НЕ пересекаются подстрокой — иначе highlight()
+    // разбивает сообщение на несколько DOM-узлов (span + mark) и getByText с
+    // точным текстом ложно не находит узел ещё ДО того, как проверяется сама
+    // гонка (см. RED-прогон при первой версии этого теста: непересекающиеся
+    // 'a'/'line-b' всё равно совпали подстрокой «b», и findByText упал не на
+    // той стадии).
+    let resolveA!: (res: LogsResult) => void;
+    const pendingA = new Promise<LogsResult>((resolve) => {
+      resolveA = resolve;
+    });
+    const mocked = vi.mocked(queryLogs);
+    mocked.mockImplementationOnce(() => pendingA); // A — «висит» (резолвим вручную ниже)
+    mocked.mockImplementationOnce(() =>
+      Promise.resolve({
+        kind: 'ok',
+        lines: [{ time: '2026-07-09T10:00:01Z', msg: 'result-beta', fields: {} }],
+      }),
+    ); // B — резолвится сразу же
+
+    renderEn(<Logs />);
+    const input = screen.getByPlaceholderText('Search log text…');
+    const form = input.closest('form') as HTMLFormElement;
+
+    fireEvent.change(input, { target: { value: 'search-a' } });
+    fireEvent.submit(form); // запрос A улетел и «висит»
+
+    fireEvent.change(input, { target: { value: 'search-b' } });
+    fireEvent.submit(form); // запрос B улетел следом, резолвится немедленно
+
+    expect(await screen.findByText('result-beta')).toBeTruthy();
+
+    // Более старый запрос A резолвится ПОСЛЕДНИМ — без staleness-guard'а он
+    // перезапишет уже показанный результат B результатом устаревшего поиска.
+    await act(async () => {
+      resolveA({ kind: 'ok', lines: [{ time: '2026-07-09T10:00:00Z', msg: 'result-alpha', fields: {} }] });
+      await pendingA;
+    });
+
+    expect(screen.queryByText('result-alpha')).toBeNull();
+    expect(screen.getByText('result-beta')).toBeTruthy();
   });
 });
