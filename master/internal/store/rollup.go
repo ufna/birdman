@@ -12,10 +12,11 @@ import (
 // / match_ccu_daily hold the precomputed dimensional aggregation
 // (stats.AggregateDaily, T7) so long windows don't need to rescan raw
 // matches; the rollup-maintenance job (internal/statsrollup, T9) is the sole
-// writer, recomputing and replacing one UTC day at a time. The read path
-// switching over to these tables is a later task (T10) — today's
-// /v1/stats/* handlers still read raw matches (see stats.go in this
-// package).
+// writer, recomputing and replacing one UTC day at a time. The /v1/stats/*
+// handlers read these tables for every axis day up to today-2 and recompute
+// only the trailing two days live from raw matches (T10 — see
+// httpapi/stats.go's statsDims); StatMatchesOverlapping below is that
+// raw-match input, shared by the job and the live tail.
 
 // RollupDim is the persisted shape of one match_stats_daily row: a
 // day×region×version bucket of additive aggregates. It mirrors

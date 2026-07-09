@@ -3,17 +3,19 @@
 // §6). It has no DB/HTTP dependencies: inputs are the raw rows the store
 // layer already fetched (store.StatMatch, store.RegionUtil); outputs are the
 // exact response shapes the panel consumes. Keeping this pure makes it
-// unit-testable without a DB and shareable with the future rollup job.
+// unit-testable without a DB and shareable between the request path and the
+// rollup job (internal/statsrollup).
 //
 // Two aggregation paths exist and must agree byte-for-byte (proven by
 // golden_test.go):
 //   - the on-the-fly path (BuildOverview/BuildCost) walks raw matches for the
-//     whole window — v0's only path, computed fresh on every request.
+//     whole window — v0's only path, kept as the golden reference.
 //   - the dimensional path (AggregateDaily → BuildOverviewFromDaily/
 //     BuildCostFromDaily) pre-aggregates matches into one row per
-//     day×region×semver (DailyDim) plus a per-day peak CCU — the shape a
-//     rollup table/job (later tasks) can precompute and persist, so long
-//     windows don't need to rescan raw matches.
+//     day×region×semver (DailyDim) plus a per-day peak CCU — the shape the
+//     match_stats_daily/match_ccu_daily rollups persist (store/rollup.go,
+//     maintained by internal/statsrollup) and the /v1/stats/* handlers now
+//     serve, so long windows don't rescan raw matches.
 //
 // Every series is UTC, day-bucketed, and zero-filled (empty periods are 0,
 // never gaps) so the panel can plot it directly. All series carry an

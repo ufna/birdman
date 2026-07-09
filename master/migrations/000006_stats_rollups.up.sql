@@ -18,7 +18,8 @@ create table match_stats_daily (
 
 -- Одна строка на UTC-день, ВСЕГДА присутствует после того, как день посчитан
 -- (даже с peak_ccu = 0) — само наличие строки помечает день обработанным
--- (store.RolledUpDays / скан «каких дней не хватает» в бэкфилле).
+-- (присутствие ключа в map store.RollupPeakCCU отличает «пустой день» от
+-- «день ещё не посчитан»).
 create table match_ccu_daily (
   day date not null primary key,
   peak_ccu int not null default 0

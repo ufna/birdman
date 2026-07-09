@@ -6,11 +6,13 @@ import (
 )
 
 // Statistics reads for the panel П2 Statistics/Cost-view screens
-// (docs/specs/panel.md §3, docs/specs/master.md §6). v0: aggregation is done
-// on-the-fly over matches/servers/nodes — no materialized rollups yet (fine at
-// our volume; a rollup job comes later). The store returns raw rows; the shape
-// the charts consume (day buckets, stacks, percentiles) is built in the httpapi
-// layer so it stays pure and unit-testable.
+// (docs/specs/panel.md §3, docs/specs/master.md §6). The store returns raw
+// rows; the shape the charts consume (day buckets, stacks, percentiles) is
+// built in internal/stats so it stays pure and unit-testable. Since
+// «Статистика v1» the /v1/stats/* read path is rollup-backed (rollup.go in
+// this package): StatMatches now feeds golden/reference tests, and
+// StatMatchesTTM is the one narrow raw read the overview handler still does
+// per request (percentiles are non-additive).
 
 // StatMatch is one started match, the atom of the Statistics/Cost aggregates.
 // Only matches that actually ran (started_at is not null) are returned: pending
