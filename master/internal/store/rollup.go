@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"time"
+
+	"github.com/ufna/birdman/master/internal/utctime"
 )
 
 // Rollup persistence for the panel Statistics/Cost-view screens
@@ -32,18 +34,6 @@ type RollupDim struct {
 	SlotSeconds    float64
 }
 
-// normalizeRollupDay truncates t to its UTC calendar date (midnight UTC) —
-// the granularity every rollup table/method operates at.
-func normalizeRollupDay(t time.Time) time.Time {
-	t = t.UTC()
-	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
-}
-
-// rollupDayKey is dayKey in the same "2006-01-02" UTC format the stats
-// package uses, so map keys agree between the two packages without either
-// importing the other's private helper.
-func rollupDayKey(t time.Time) string { return t.UTC().Format("2006-01-02") }
-
 // UpsertRollupDay replaces the stored rollup for exactly one UTC day
 // (day, normalized): inside one transaction, it deletes any existing
 // match_stats_daily/match_ccu_daily rows for that day, inserts dims, and
@@ -55,7 +45,7 @@ func rollupDayKey(t time.Time) string { return t.UTC().Format("2006-01-02") }
 // as its day column, so the single-day replace stays correct even if a
 // caller's dims aren't perfectly pre-filtered.
 func (s *Store) UpsertRollupDay(ctx context.Context, day time.Time, dims []RollupDim, peakCCU int) error {
-	d := normalizeRollupDay(day)
+	d := utctime.StartOfDay(day)
 
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
@@ -91,7 +81,7 @@ func (s *Store) UpsertRollupDay(ctx context.Context, day time.Time, dims []Rollu
 // RollupDims returns the stored dims for days in [from,to] (inclusive, by
 // UTC date), oldest first (then region, semver).
 func (s *Store) RollupDims(ctx context.Context, from, to time.Time) ([]RollupDim, error) {
-	f, t := normalizeRollupDay(from), normalizeRollupDay(to)
+	f, t := utctime.StartOfDay(from), utctime.StartOfDay(to)
 	rows, err := s.Pool.Query(ctx, `
 		select day, region, semver, matches, players_peak_sum, dur_sum_seconds, dur_count, slot_seconds
 		from match_stats_daily
@@ -113,10 +103,10 @@ func (s *Store) RollupDims(ctx context.Context, from, to time.Time) ([]RollupDim
 	return out, rows.Err()
 }
 
-// RollupPeakCCU returns dayKey("2006-01-02")->peak_ccu for days in [from,to]
-// (inclusive, by UTC date).
+// RollupPeakCCU returns utctime.DayKey ("2006-01-02") -> peak_ccu for days in
+// [from,to] (inclusive, by UTC date).
 func (s *Store) RollupPeakCCU(ctx context.Context, from, to time.Time) (map[string]int, error) {
-	f, t := normalizeRollupDay(from), normalizeRollupDay(to)
+	f, t := utctime.StartOfDay(from), utctime.StartOfDay(to)
 	rows, err := s.Pool.Query(ctx,
 		`select day, peak_ccu from match_ccu_daily where day between $1 and $2`, f, t)
 	if err != nil {
@@ -130,7 +120,7 @@ func (s *Store) RollupPeakCCU(ctx context.Context, from, to time.Time) (map[stri
 		if err := rows.Scan(&day, &peak); err != nil {
 			return nil, err
 		}
-		out[rollupDayKey(day)] = peak
+		out[utctime.DayKey(day)] = peak
 	}
 	return out, rows.Err()
 }

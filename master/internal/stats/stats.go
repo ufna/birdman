@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/ufna/birdman/master/internal/store"
+	"github.com/ufna/birdman/master/internal/utctime"
 )
 
 // unit labels, shared between the on-the-fly and dimensional paths so they
@@ -155,7 +156,7 @@ func BuildCost(matches []store.StatMatch, util []store.RegionUtil, axis []time.T
 				continue
 			}
 			hours := secs / 3600
-			dk := dayKey(day)
+			dk := utctime.DayKey(day)
 			byRegion.add(dk, m.Region, hours)
 			byVersion.add(dk, m.Semver, hours)
 			total += hours
@@ -201,13 +202,13 @@ func AggregateDaily(matches []store.StatMatch, axis []time.Time, now time.Time) 
 	type key struct{ day, region, semver string }
 	idx := map[key]int{}
 	dimIndex := func(day time.Time, region, semver string) int {
-		k := key{dayKey(day), region, semver}
+		k := key{utctime.DayKey(day), region, semver}
 		if i, ok := idx[k]; ok {
 			return i
 		}
 		i := len(dims)
 		idx[k] = i
-		dims = append(dims, DailyDim{Day: startOfDayUTC(day), Region: region, Semver: semver})
+		dims = append(dims, DailyDim{Day: utctime.StartOfDay(day), Region: region, Semver: semver})
 		return i
 	}
 
@@ -250,7 +251,7 @@ func BuildOverviewFromDaily(dims []DailyDim, peakByDay map[string]int, ttm []sto
 		totalMatches += d.Matches
 		durSumOverall += d.DurSumSeconds
 		durCountOverall += d.DurCount
-		dk := dayKey(d.Day)
+		dk := utctime.DayKey(d.Day)
 		durSumByDay[dk] += d.DurSumSeconds
 		durCountByDay[dk] += d.DurCount
 	}
@@ -304,7 +305,7 @@ func BuildCostFromDaily(dims []DailyDim, util []store.RegionUtil, axis []time.Ti
 			continue // mirrors BuildCost's overlapSeconds<=0 guard: no phantom keys
 		}
 		hours := d.SlotSeconds / 3600
-		dk := dayKey(d.Day)
+		dk := utctime.DayKey(d.Day)
 		byRegion.add(dk, d.Region, hours)
 		byVersion.add(dk, d.Semver, hours)
 		total += hours
@@ -326,20 +327,13 @@ func BuildCostFromDaily(dims []DailyDim, util []store.RegionUtil, axis []time.Ti
 // DayAxisUTC returns the last `days` UTC calendar days ending today
 // (inclusive), oldest first — the x-axis every series is zero-filled onto.
 func DayAxisUTC(now time.Time, days int) []time.Time {
-	today := startOfDayUTC(now)
+	today := utctime.StartOfDay(now)
 	axis := make([]time.Time, days)
 	for i := 0; i < days; i++ {
 		axis[i] = today.AddDate(0, 0, -(days - 1 - i))
 	}
 	return axis
 }
-
-func startOfDayUTC(t time.Time) time.Time {
-	t = t.UTC()
-	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
-}
-
-func dayKey(t time.Time) string { return t.UTC().Format("2006-01-02") }
 
 // matchEnd is a match's effective end: ended_at, or now for a running match.
 func matchEnd(m store.StatMatch, now time.Time) time.Time {
@@ -353,7 +347,7 @@ func matchEnd(m store.StatMatch, now time.Time) time.Time {
 func stackByRegionDay(matches []store.StatMatch, axis []time.Time, unit string, val func(store.StatMatch) float64) stackedSeries {
 	acc := newStackAccum()
 	for _, m := range matches {
-		acc.add(dayKey(m.StartedAt), m.Region, val(m))
+		acc.add(utctime.DayKey(m.StartedAt), m.Region, val(m))
 	}
 	return acc.series(unit, axis)
 }
@@ -363,7 +357,7 @@ func stackByRegionDay(matches []store.StatMatch, axis []time.Time, unit string, 
 func stackFromDims(dims []DailyDim, axis []time.Time, unit string, val func(DailyDim) float64) stackedSeries {
 	acc := newStackAccum()
 	for _, d := range dims {
-		acc.add(dayKey(d.Day), d.Region, val(d))
+		acc.add(utctime.DayKey(d.Day), d.Region, val(d))
 	}
 	return acc.series(unit, axis)
 }
@@ -377,7 +371,7 @@ func peakCCUPerDay(matches []store.StatMatch, axis []time.Time, now time.Time) (
 	return simpleSeriesFromCounts(unitPeakCCU, axis, peakCCUByDay(matches, axis, now))
 }
 
-// peakCCUByDay is the sweep-line itself: dayKey → peak concurrent players for
+// peakCCUByDay is the sweep-line itself: utctime.DayKey → peak concurrent players for
 // matches overlapping that day. Shared by peakCCUPerDay (on-the-fly path) and
 // AggregateDaily (dims path) so they can never disagree.
 func peakCCUByDay(matches []store.StatMatch, axis []time.Time, now time.Time) map[string]int {
@@ -421,7 +415,7 @@ func peakCCUByDay(matches []store.StatMatch, axis []time.Time, now time.Time) ma
 				peak = cur
 			}
 		}
-		out[dayKey(day)] = peak
+		out[utctime.DayKey(day)] = peak
 	}
 	return out
 }
@@ -432,7 +426,7 @@ func simpleSeriesFromCounts(unit string, axis []time.Time, counts map[string]int
 	overall := 0
 	points := make([]simplePoint, len(axis))
 	for i, day := range axis {
-		dk := dayKey(day)
+		dk := utctime.DayKey(day)
 		v := counts[dk]
 		points[i] = simplePoint{Date: dk, Value: float64(v)}
 		if v > overall {
@@ -476,7 +470,7 @@ func avgDurationPerDay(matches []store.StatMatch, axis []time.Time) simpleSeries
 		if m.EndedAt == nil {
 			continue
 		}
-		k := dayKey(m.StartedAt)
+		k := utctime.DayKey(m.StartedAt)
 		sum[k] += m.EndedAt.UTC().Sub(m.StartedAt.UTC()).Seconds()
 		cnt[k]++
 	}
@@ -488,7 +482,7 @@ func avgDurationPerDay(matches []store.StatMatch, axis []time.Time) simpleSeries
 func avgSecondsSeries(axis []time.Time, sum map[string]float64, cnt map[string]int) simpleSeries {
 	points := make([]simplePoint, len(axis))
 	for i, day := range axis {
-		k := dayKey(day)
+		k := utctime.DayKey(day)
 		v := 0.0
 		if cnt[k] > 0 {
 			v = round2(sum[k] / float64(cnt[k]))
@@ -620,7 +614,7 @@ func (a *stackAccum) series(unit string, axis []time.Time) stackedSeries {
 	sort.Strings(keys)
 	points := make([]stackedPoint, len(axis))
 	for i, day := range axis {
-		dk := dayKey(day)
+		dk := utctime.DayKey(day)
 		values := make(map[string]float64, len(keys))
 		total := 0.0
 		for _, k := range keys {

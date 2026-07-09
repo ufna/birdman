@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/ufna/birdman/master/internal/store"
+	"github.com/ufna/birdman/master/internal/utctime"
 )
 
 func ts(s string) time.Time {
@@ -46,7 +47,7 @@ func TestBuildOverview(t *testing.T) {
 	now := ts("2026-07-08T12:00:00Z")
 	days := 3
 	axis := DayAxisUTC(now, days) // 07-06, 07-07, 07-08
-	if got := dayKey(axis[0]); got != "2026-07-06" {
+	if got := utctime.DayKey(axis[0]); got != "2026-07-06" {
 		t.Fatalf("axis[0] = %s, want 2026-07-06", got)
 	}
 	// Durations are round (start+30m, +30m, +20m) so avg = 1600s exactly;

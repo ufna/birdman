@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ufna/birdman/master/internal/stats"
+	"github.com/ufna/birdman/master/internal/utctime"
 )
 
 // Statistics/Cost-view endpoints for the panel П2 screens
@@ -128,7 +129,7 @@ func statsDays(w http.ResponseWriter, r *http.Request) (int, bool) {
 // for the same reason.
 func (s *Server) statsDims(ctx context.Context, axis []time.Time, now time.Time) ([]stats.DailyDim, map[string]int, error) {
 	axis0 := axis[0]
-	today := startOfDayUTC(now)
+	today := utctime.StartOfDay(now)
 	liveStart := today.AddDate(0, 0, -1)        // 00:00 UTC yesterday
 	immutableEnd := liveStart.AddDate(0, 0, -1) // today-2: immutable range's last day
 
@@ -189,13 +190,4 @@ func filterDimsFrom(dims []stats.DailyDim, from time.Time) []stats.DailyDim {
 		}
 	}
 	return out
-}
-
-// startOfDayUTC truncates t to its UTC calendar date (midnight UTC). A local
-// copy of stats' unexported helper of the same name — kept here too rather
-// than exporting it just for this call site, matching the small-copy pattern
-// stats.go itself uses for emptyNotNull.
-func startOfDayUTC(t time.Time) time.Time {
-	t = t.UTC()
-	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
 }

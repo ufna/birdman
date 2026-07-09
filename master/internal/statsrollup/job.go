@@ -41,6 +41,7 @@ import (
 
 	"github.com/ufna/birdman/master/internal/stats"
 	"github.com/ufna/birdman/master/internal/store"
+	"github.com/ufna/birdman/master/internal/utctime"
 )
 
 const (
@@ -116,18 +117,18 @@ func (j *Job) Run(ctx context.Context) {
 // day enters its range, gets another chance at a day that failed here).
 func (j *Job) Backfill(ctx context.Context) error {
 	now := time.Now().UTC()
-	today := startOfDayUTC(now)
+	today := utctime.StartOfDay(now)
 	from := today.AddDate(0, 0, -(backfillDays - 1))
 	to := today.AddDate(0, 0, -tailDays)
 
 	var errs []error
 	for d := from; !d.After(to); d = d.AddDate(0, 0, 1) {
 		if err := j.recomputeDay(ctx, d, now); err != nil {
-			j.log.Error("statsrollup: backfill day failed", "day", dayKey(d), "err", err)
-			errs = append(errs, fmt.Errorf("backfill day %s: %w", dayKey(d), err))
+			j.log.Error("statsrollup: backfill day failed", "day", utctime.DayKey(d), "err", err)
+			errs = append(errs, fmt.Errorf("backfill day %s: %w", utctime.DayKey(d), err))
 			continue
 		}
-		j.log.Info("statsrollup: backfilled day", "day", dayKey(d))
+		j.log.Info("statsrollup: backfilled day", "day", utctime.DayKey(d))
 	}
 	return errors.Join(errs...)
 }
@@ -136,7 +137,7 @@ func (j *Job) Backfill(ctx context.Context) error {
 // safe to call repeatedly (store.UpsertRollupDay replaces, never appends).
 func (j *Job) tick(ctx context.Context) error {
 	now := time.Now().UTC()
-	today := startOfDayUTC(now)
+	today := utctime.StartOfDay(now)
 	yesterday := today.AddDate(0, 0, -1)
 	if err := j.recomputeDay(ctx, yesterday, now); err != nil {
 		return err
@@ -152,7 +153,7 @@ func (j *Job) tick(ctx context.Context) error {
 // or an earlier, already-immutable day would be double-counted every time D
 // is recomputed.
 func (j *Job) recomputeDay(ctx context.Context, d, now time.Time) error {
-	dStart := startOfDayUTC(d)
+	dStart := utctime.StartOfDay(d)
 	dEnd := dStart.AddDate(0, 0, 1)
 
 	matches, err := j.st.StatMatchesOverlapping(ctx, dStart, dEnd)
@@ -167,12 +168,5 @@ func (j *Job) recomputeDay(ctx context.Context, d, now time.Time) error {
 			filtered = append(filtered, dim)
 		}
 	}
-	return j.st.UpsertRollupDay(ctx, dStart, filtered, peakByDay[dayKey(dStart)])
+	return j.st.UpsertRollupDay(ctx, dStart, filtered, peakByDay[utctime.DayKey(dStart)])
 }
-
-func startOfDayUTC(t time.Time) time.Time {
-	t = t.UTC()
-	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
-}
-
-func dayKey(t time.Time) string { return t.UTC().Format("2006-01-02") }
