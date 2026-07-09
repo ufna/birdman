@@ -101,7 +101,34 @@ message MasterMsg {
     AllocateServer allocate = 8; // iteration 2: deliver a match to the dedik
     DrainServer drain_server = 9; // iteration 3: per-server drain (deploy reap)
     Undrain undrain = 10; // iteration 4: lift the node-level drain
+    SetRegistries set_registries = 11; // registries v1: private-registry credential snapshot for image pulls
   }
+}
+
+// SetRegistries carries the full set of private-registry credentials the
+// agent should use for image pulls (docs/superpowers/specs/2026-07-09-registries-design.md
+// §2; master admin API POST/DELETE /v1/registries). This is a full snapshot,
+// not a diff: every delivery replaces the agent's in-memory credential set
+// entirely. Master sends it to a newly-attached agent BEFORE replaying any
+// pending commands (so a replayed StartServer/PrePull for a private image
+// never races ahead of the credentials and falls back to an anonymous pull),
+// and broadcasts it to every connected agent whenever the registry set
+// changes. The agent keeps the set only in memory — never written to disk —
+// and the token is never logged, never placed in an audit event payload, and
+// never returned by a GET.
+message SetRegistries {
+  string cmd_id = 1; // required: all ack/re-send machinery keys off cmd_id
+  repeated RegistryCred registries = 2; // full snapshot (replace, not diff)
+}
+
+// RegistryCred is one private-registry credential, host-matched by the agent
+// against the host parsed out of image_ref (docs/superpowers/specs/2026-07-09-registries-design.md
+// §3). token is plaintext over agentlink's TLS transport and in the agent's
+// memory — it must never be logged.
+message RegistryCred {
+  string host = 1; // normalized: lowercase, no scheme, no path/slash (master store.NormalizeRegistryHost)
+  string username = 2;
+  string token = 3; // never logged
 }
 
 // Undrain lifts a node-level Drain (iteration 4, POST /v1/nodes/{id}/undrain):
