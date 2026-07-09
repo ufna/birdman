@@ -52,6 +52,11 @@ birdman_scrape_jobs:
 # vmagent host-network → пишет в опубликованный на хосте порт VM.
 birdman_vm_remote_write_url: "http://127.0.0.1:8428/api/v1/write"
 
+# --- VictoriaLogs (логи дедиков; спека 2026-07-09-centralized-logs-design.md) ---
+birdman_vl_image: victoriametrics/victoria-logs:v1.51.0
+birdman_vl_port: 9428
+birdman_vl_retention: 14d        # решение владельца 09.07.2026
+
 # --- Grafana ---
 # Пароль admin ГЕНЕРИТСЯ ansible'ом в 0600-файл на тачке (не хардкодим, не
 # коммитим). Отсюда же он попадает в 0600 grafana.env (env_file для контейнера).
