@@ -1,4 +1,4 @@
-package httpapi
+package stats
 
 import (
 	"testing"
@@ -45,7 +45,7 @@ func simplePointVal(t *testing.T, s simpleSeries, date string) float64 {
 func TestBuildOverview(t *testing.T) {
 	now := ts("2026-07-08T12:00:00Z")
 	days := 3
-	axis := dayAxisUTC(now, days) // 07-06, 07-07, 07-08
+	axis := DayAxisUTC(now, days) // 07-06, 07-07, 07-08
 	if got := dayKey(axis[0]); got != "2026-07-06" {
 		t.Fatalf("axis[0] = %s, want 2026-07-06", got)
 	}
@@ -59,7 +59,7 @@ func TestBuildOverview(t *testing.T) {
 		{Region: "us", Semver: "1.1.0", PlayersPeak: 4,
 			CreatedAt: ts("2026-07-07T09:00:00Z"), StartedAt: ts("2026-07-07T09:00:10Z"), EndedAt: tp("2026-07-07T09:20:10Z")},
 	}
-	ov := buildOverview(matches, axis, days, now)
+	ov := BuildOverview(matches, axis, days, now)
 
 	if ov.Days != 3 || ov.Timezone != "UTC" {
 		t.Fatalf("meta: %+v", ov)
@@ -107,7 +107,7 @@ func TestBuildOverview(t *testing.T) {
 // TestBuildOverviewEmpty: no matches → zero-filled series, nil scalars, no panic.
 func TestBuildOverviewEmpty(t *testing.T) {
 	now := ts("2026-07-08T12:00:00Z")
-	ov := buildOverview(nil, dayAxisUTC(now, 7), 7, now)
+	ov := BuildOverview(nil, DayAxisUTC(now, 7), 7, now)
 	if len(ov.MatchesPerDay.Points) != 7 {
 		t.Fatalf("want 7 points, got %d", len(ov.MatchesPerDay.Points))
 	}
@@ -127,7 +127,7 @@ func TestBuildOverviewEmpty(t *testing.T) {
 // TestPeakCCURunningMatch: a running match (EndedAt nil) is clamped to now.
 func TestPeakCCURunningMatch(t *testing.T) {
 	now := ts("2026-07-08T12:00:00Z")
-	axis := dayAxisUTC(now, 1)
+	axis := DayAxisUTC(now, 1)
 	matches := []store.StatMatch{
 		{Region: "eu", Semver: "1.0.0", PlayersPeak: 7,
 			CreatedAt: ts("2026-07-08T11:00:00Z"), StartedAt: ts("2026-07-08T11:00:00Z"), EndedAt: nil},
@@ -142,12 +142,12 @@ func TestPeakCCURunningMatch(t *testing.T) {
 // both UTC days (20 min each → 0.33h each).
 func TestBuildCostDaySplit(t *testing.T) {
 	now := ts("2026-07-08T12:00:00Z")
-	axis := dayAxisUTC(now, 3)
+	axis := DayAxisUTC(now, 3)
 	matches := []store.StatMatch{
 		{Region: "eu", Semver: "1.0.0", PlayersPeak: 2,
 			CreatedAt: ts("2026-07-07T23:39:00Z"), StartedAt: ts("2026-07-07T23:40:00Z"), EndedAt: tp("2026-07-08T00:20:00Z")},
 	}
-	cost := buildCost(matches, nil, axis, 3, now)
+	cost := BuildCost(matches, nil, axis, 3, now)
 	d7 := stackPoint(t, cost.SlotHoursPerDayByRegion, "2026-07-07")
 	d8 := stackPoint(t, cost.SlotHoursPerDayByRegion, "2026-07-08")
 	if d7.Values["eu"] != 0.33 || d8.Values["eu"] != 0.33 {
