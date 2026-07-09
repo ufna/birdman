@@ -453,6 +453,91 @@ func TestAttachSendsEmptyRegistriesSnapshotWhenNoneConfigured(t *testing.T) {
 	}
 }
 
+// TestAttachRegistriesSnapshotDBErrorFallsBackToNoPreface: when the fresh
+// snapshot read (store.ListRegistryCreds, inside registriesSnapshot) fails,
+// registriesSnapshot logs the error and returns nil rather than failing the
+// attach — Hub.attach treats a nil preface as "nothing to prepend" and falls
+// back to plain replay, same as the pre-T3 code path. The next Hello
+// naturally retries the snapshot. This was flagged as an untested gap in the
+// original T3 report (task review, Fix 2): exercise it by breaking the
+// registries table for the duration of one attach and asserting the session
+// is otherwise fully functional — attach succeeds, no SetRegistries preface
+// arrives, pending commands still replay/ack, and heartbeats still flow.
+func TestAttachRegistriesSnapshotDBErrorFallsBackToNoPreface(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10)
+	ctx := context.Background()
+
+	if _, err := st.Pool.Exec(ctx, `alter table registries rename to registries_broken`); err != nil {
+		t.Fatalf("break registries table: %v", err)
+	}
+	defer func() {
+		if _, err := st.Pool.Exec(context.Background(), `alter table registries_broken rename to registries`); err != nil {
+			t.Fatalf("restore registries table: %v", err)
+		}
+	}()
+
+	hub, _, client := startServer(t, st)
+
+	// Queue a command before the node ever connects, the same way
+	// TestAttachSendsRegistriesSnapshotBeforePendingReplay does for the
+	// healthy path — here it doubles as the "no preface" probe: on a healthy
+	// attach this would be the SECOND message (after the snapshot); with the
+	// snapshot read broken it must be the FIRST and ONLY one.
+	serverID := f.InsertServer(t, f.NodeID, f.VersionID, "creating", 0, 0)
+	startCmdID := hub.Send(f.NodeID, &agentlinkv1.MasterMsg{
+		Msg: &agentlinkv1.MasterMsg_Start{Start: &agentlinkv1.StartServer{
+			ServerId: serverID, ImageRef: "ghcr.io/example/game-server:1.0.0",
+		}},
+	})
+
+	ctxS, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	stream, err := client.Session(ctxS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Send(hello(f.NodeToken)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Attach succeeds despite the broken snapshot read: the first message is
+	// the replayed StartServer, not a SetRegistries preface.
+	in, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("attach must still succeed with the registries table broken: %v", err)
+	}
+	if in.GetSetRegistries() != nil {
+		t.Fatalf("want NO SetRegistries preface when the snapshot DB read fails, got %+v", in)
+	}
+	if in.GetStart().GetCmdId() != startCmdID {
+		t.Fatalf("want the replayed StartServer %s as the first message (no preface), got %+v", startCmdID, in)
+	}
+
+	// Pending commands still replay/ack normally.
+	if err := stream.Send(&agentlinkv1.AgentMsg{Msg: &agentlinkv1.AgentMsg_Ack{
+		Ack: &agentlinkv1.Ack{CmdId: startCmdID},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "start acked despite the snapshot DB error", func() bool { return hub.PendingCount(f.NodeID) == 0 })
+
+	// Heartbeats still flow: the attach-preface failure doesn't touch
+	// readLoop/ApplyHeartbeat at all.
+	if err := stream.Send(&agentlinkv1.AgentMsg{Msg: &agentlinkv1.AgentMsg_Heartbeat{
+		Heartbeat: &agentlinkv1.Heartbeat{
+			TsUnixMs: time.Now().UnixMilli(),
+			Servers:  []*agentlinkv1.ServerState{{ServerId: serverID, State: "ready", Port: 22001}},
+		},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "heartbeat applied despite the snapshot DB error", func() bool {
+		sv, err := st.GetServer(context.Background(), serverID)
+		return err == nil && sv.State == "ready" && sv.Port == 22001
+	})
+}
+
 // TestBroadcastRegistriesReachesAllConnectedNodes: BroadcastRegistries
 // rebuilds the snapshot from the store once and Sends a fresh copy (its own
 // cmd_id per node) to every currently connected node. This is what the

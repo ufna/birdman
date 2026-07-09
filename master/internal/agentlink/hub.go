@@ -56,6 +56,16 @@ func (h *Hub) queue(nodeID string) *nodeQueue {
 // changes (or a node that never acks) cannot grow the queue unbounded
 // (docs/superpowers/specs/2026-07-09-registries-design.md §2). Other command
 // kinds are unaffected. Returns the cmd_id.
+//
+// The push happens INSIDE the same critical section as the pending-queue
+// mutation (not after unlocking) so that two goroutines racing Send for the
+// same node's live session can never push out of the order their mutations
+// were serialized in by h.mu — otherwise the LAST command a full-replace
+// consumer (SetRegistries) sees on the wire could be an older one than the
+// last one Hub itself considers current (task review, Fix 1;
+// TestHubSendPushOrderMatchesMutationOrderUnderConcurrency). push is
+// non-blocking (select/default on a buffered channel — hub.go, session.push)
+// so this adds no unbounded lock hold time.
 func (h *Hub) Send(nodeID string, msg *agentlinkv1.MasterMsg) string {
 	cmdID := uuid.NewString()
 	stampCmdID(msg, cmdID)
@@ -66,12 +76,11 @@ func (h *Hub) Send(nodeID string, msg *agentlinkv1.MasterMsg) string {
 		q.pending = removeSetRegistries(q.pending)
 	}
 	q.pending = append(q.pending, msg)
-	sess := q.sess
+	if q.sess != nil {
+		q.sess.push(h.log, nodeID, msg)
+	}
 	h.mu.Unlock()
 
-	if sess != nil {
-		sess.push(h.log, nodeID, msg)
-	}
 	return cmdID
 }
 
@@ -113,6 +122,15 @@ func (h *Hub) PendingCount(nodeID string) int {
 // ack/re-send machinery covers it too: if delivery is lost (the session dies
 // mid-replay before the agent acks) it simply stays pending and goes out
 // again — still first — on the next attach.
+//
+// The replay push happens INSIDE the same critical section that swaps in the
+// new session and mutates pending — not after unlocking — for the same
+// ordering reason as Send (see its doc comment and
+// TestHubSendPushOrderMatchesMutationOrderUnderConcurrency): a concurrent
+// Send racing this attach must not be able to land its push in a way that
+// contradicts h.mu's own serialization order. push is non-blocking, so this
+// adds no unbounded lock hold time — it was already O(len(pending)) here
+// before this change, via the replay copy this replaces.
 func (h *Hub) attach(nodeID string, preface *agentlinkv1.MasterMsg) *session {
 	s := &session{
 		out:  make(chan *agentlinkv1.MasterMsg, 256),
@@ -128,13 +146,11 @@ func (h *Hub) attach(nodeID string, preface *agentlinkv1.MasterMsg) *session {
 		stampCmdID(preface, uuid.NewString())
 		q.pending = append([]*agentlinkv1.MasterMsg{preface}, removeSetRegistries(q.pending)...)
 	}
-	replay := make([]*agentlinkv1.MasterMsg, len(q.pending))
-	copy(replay, q.pending)
-	h.mu.Unlock()
-
-	for _, m := range replay {
+	for _, m := range q.pending {
 		s.push(h.log, nodeID, m)
 	}
+	h.mu.Unlock()
+
 	return s
 }
 
