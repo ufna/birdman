@@ -1,0 +1,64 @@
+---
+- name: Render WireGuard config (peers/port; без секретов, но 0600 — defensive)
+  ansible.builtin.template:
+    src: wg.conf.j2
+    dest: "{{ birdman_overlay_conf_dir }}/wg.conf"
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart birdman-overlay
+
+- name: Allow overlay UDP port in UFW (только хаб, аддитивно)
+  community.general.ufw:
+    rule: allow
+    port: "{{ birdman_overlay_port }}"
+    proto: udp
+    comment: "{{ birdman_ufw_comment }}"
+  when: birdman_overlay_mode == 'hub'
+
+- name: Allow decapsulated control-plane ports on overlay iface (только хаб)
+  community.general.ufw:
+    rule: allow
+    direction: in
+    interface: "{{ birdman_overlay_iface }}"
+    port: "{{ item }}"
+    proto: tcp
+    comment: "{{ birdman_ufw_comment }}"
+  loop: "{{ birdman_overlay_forwards }}"
+  when: birdman_overlay_mode == 'hub'
+
+- name: Render overlay compose project
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: "{{ birdman_overlay_dir }}/compose.yml"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart birdman-overlay
+
+- name: Start birdman-overlay (docker compose, идемпотентно)
+  ansible.builtin.command:
+    cmd: docker compose -f {{ birdman_overlay_dir }}/compose.yml up -d --wait
+  register: birdman_overlay_compose_up
+  changed_when: "'Started' in birdman_overlay_compose_up.stderr or 'Created' in birdman_overlay_compose_up.stderr or 'Recreated' in birdman_overlay_compose_up.stderr"
+
+- name: Apply pending overlay restart (образ/конфиг поменялись)
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for hub forwarders on overlay IP (только хаб)
+  ansible.builtin.wait_for:
+    host: "{{ birdman_overlay_ip }}"
+    port: "{{ item }}"
+    timeout: 30
+  loop: "{{ birdman_overlay_forwards }}"
+  when: birdman_overlay_mode == 'hub'
+
+- name: Assert hub reachable through tunnel (только спок)
+  ansible.builtin.command:
+    cmd: ping -c 1 -W 3 {{ hostvars[birdman_overlay_hub_host].birdman_overlay_ip }}
+  changed_when: false
+  when: birdman_overlay_mode == 'spoke'
+  register: birdman_overlay_ping
+  retries: 5
+  delay: 2
+  until: birdman_overlay_ping.rc == 0

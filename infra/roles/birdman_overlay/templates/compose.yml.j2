@@ -1,0 +1,35 @@
+# {{ ansible_managed }}
+# Оверлей birdman: wireguard-go (userspace) + (хаб) socat-форвардеры.
+# host-network: tun {{ birdman_overlay_iface }} живёт в хостовом netns и
+# умирает вместе с контейнером. NET_ADMIN + /dev/net/tun — минимум для
+# tun; kernel-модуль не нужен и не используется.
+name: birdman-overlay
+
+services:
+  overlay:
+    image: {{ birdman_overlay_image }}
+    container_name: {{ birdman_overlay_container }}
+    network_mode: host
+    cap_add: [NET_ADMIN]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      BIRDMAN_WG_IFACE: "{{ birdman_overlay_iface }}"
+      BIRDMAN_WG_ADDR: "{{ birdman_overlay_ip }}/{{ birdman_overlay_cidr.split('/')[1] }}"
+      BIRDMAN_WG_MODE: "{{ birdman_overlay_mode }}"
+{% if birdman_overlay_mode == 'hub' %}
+      BIRDMAN_WG_FORWARDS: "{{ birdman_overlay_forwards | join(' ') }}"
+{% endif %}
+    volumes:
+      - {{ birdman_overlay_conf_dir }}:/etc/birdman/overlay:ro
+    restart: unless-stopped
+    healthcheck:
+{% if birdman_overlay_mode == 'hub' %}
+      test: ["CMD-SHELL", "wg show {{ birdman_overlay_iface }} > /dev/null && nc -z {{ birdman_overlay_ip }} {{ birdman_overlay_forwards | first }}"]
+{% else %}
+      test: ["CMD-SHELL", "wg show {{ birdman_overlay_iface }} > /dev/null"]
+{% endif %}
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
