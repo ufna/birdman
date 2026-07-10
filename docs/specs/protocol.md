@@ -43,6 +43,8 @@ message MasterMsg {
     Ack          ack = 7;
     AllocateServer allocate = 8;    // (добавлено в итерации 2, аддитивно)
     DrainServer  drain_server = 9;  // (добавлено в итерации 3, аддитивно)
+    Undrain      undrain = 10;      // (добавлено в итерации 4, аддитивно) снятие node-level Drain
+    SetRegistries set_registries = 11; // (Реестры v1, аддитивно) снапшот кредов приватных registry — см. ниже
   }
 }
 message StartServer { string server_id=1; string image_ref=2; map<string,string> env=3;
@@ -73,6 +75,30 @@ message AllocateServer { string cmd_id=1; string server_id=2; string match_id=3;
 // доигрывает матч и выходит сам; deadline_s — внутриигровой дедлайн для liba.
 // Node-level Drain (поле 4) остаётся отдельной командой вывода тачки.
 message DrainServer { string cmd_id=1; string server_id=2; int32 deadline_s=3; string reason=4; }
+
+// (добавлено в итерации 4, аддитивно) снятие node-level Drain: агент снова
+// принимает StartServer. Указано здесь для полноты нумерации — само поле
+// реализовано раньше этой правки спеки (см. agent.md §3/§7).
+message Undrain { string cmd_id=1; }
+
+// (Реестры v1, поле 11, аддитивно) SetRegistries несёт ПОЛНЫЙ набор приватных
+// registry-кредов для image pull — replace, не diff: каждая доставка целиком
+// заменяет кред-сет агента. `cmd_id` ОБЯЗАТЕЛЕН (без него агент дропает
+// сообщение до диспатча — `commandID(in)==""` → continue в
+// `agent/internal/link/client.go` — ack не приходит, pending растёт вечно).
+// Master шлёт снапшот каждому агенту ПРИ ПОДКЛЮЧЕНИИ, ДО реплея
+// pending-команд (`master/internal/agentlink/hub.go`, `attach`: preface
+// вставляется первым в очередь — иначе реплеенный StartServer/PrePull
+// приватного образа обогнал бы креды и словил бы анонимный pull), и
+// broadcast'ом всем подключённым агентам при изменении реестров (`master.md`
+// §6, POST/DELETE `/v1/registries`). Коалесинг в Hub: постановка нового
+// SetRegistries в очередь ноды удаляет из pending старый неподтверждённый
+// SetRegistries — максимум одно висящее сообщение у когда-либо-не-ack'ающей
+// стороны. Агент держит набор ТОЛЬКО в памяти (не пишет на диск —
+// `agent.md` §10); токен никогда не логируется, не попадает в события/GET
+// (`master.md` §6).
+message SetRegistries { string cmd_id=1; repeated RegistryCred registries=2; } // снапшот (replace, не diff)
+message RegistryCred  { string host=1; string username=2; string token=3; } // host нормализован (lowercase, без схемы/пути); token никогда не логируется
 ```
 
 Правила: каждое команда-сообщение несёт `cmd_id`, агент подтверждает `Ack{cmd_id}` (или Event с ошибкой) — master ретраит неподтверждённые при реконнекте, поэтому обработка команд на агенте идемпотентна по `cmd_id` (at-least-once). Поля protobuf только добавляем, номера не переиспользуем (`reserved`). (Уточнено в v0: `Ack` добавлен в `AgentMsg` — именно агент подтверждает команды; `MasterMsg.Ack` зарезервирован под подтверждения master'ом агентских сообщений.)
@@ -82,6 +108,8 @@ message DrainServer { string cmd_id=1; string server_id=2; int32 deadline_s=3; s
 **Auth (bootstrap → mTLS):** ansible кладёт в конфиг одноразовый `node_token` (создан master'ом при `POST /v1/nodes`). Первый коннект — TLS (server-auth) + Hello с токеном → master выдаёт клиентский сертификат (внутренняя CA, TTL 90 дней, авто-ротация за 14 дней до истечения) → дальше строго mTLS. Токен гасится после обмена.
 
 > **(Уточнено в v0 — осознанное отступление, TODO итерации 2.)** master v0 не выдаёт клиентские сертификаты: агент аутентифицируется `node_token`'ом в Hello при **каждом** коннекте поверх TLS (server-auth; в dev — self-signed автогенерация при первом старте). Токен соответственно пока не одноразовый и не гасится; в БД хранится только его bcrypt-хэш (`nodes.token_hash`). Полный обмен «token → клиентский mTLS-серт» с внутренней CA — следующая итерация.
+
+> **(Реестры v1 — гейт итерации 5, ревью владельца.)** Транспорт выше — TLS server-auth + node_token, **НЕ mTLS** — приемлем сегодня только потому, что agentlink живёт 127.0.0.1↔127.0.0.1 на одном боксе (свойство ansible-конфига, не кода: `:8444` в коде биндится на все интерфейсы). **Жёсткий гейт:** `SetRegistries` (§1 выше, поле 11) не отправляется по не-localhost линку, пока агент не верифицирует серт master'а (`tls_ca_file` минимум — `agent.md` §10; цель — mTLS, см. выше) — иначе MITM в мульти-регионе (итерация 5, `ops.md` §4) собирает registry-токены на каждом реконнекте. Это гейт на будущий rollout, не описание текущего кода — сегодня agentlink и так только localhost.
 
 ## 2. liba ↔ agent: NDJSON поверх unix socket
 
