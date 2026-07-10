@@ -133,6 +133,7 @@ export const ru: Record<MessageKey, string> = {
   'event.agent_upgrade_succeeded': 'Агент обновлён',
   'event.agent_upgrade_failed': 'Обновление агента не удалось',
   'event.registry_upserted': 'Реестр сохранён',
+  'event.registry_updated': 'Реестр обновлён',
   'event.registry_removed': 'Реестр удалён',
   'event.apikey_created': 'Ключ создан',
   'event.apikey_revoked': 'Ключ отозван',
@@ -560,32 +561,51 @@ export const ru: Record<MessageKey, string> = {
 
   // — экран «Админка»: раздел «Реестры» (креды приватных registry) —
   'access.registries': 'Реестры',
-  'access.registries.hint': 'Токену нужен только доступ на чтение пакетов (read:packages) — больше ничего.',
+  'access.registries.hint': 'Кредам нужен только доступ на чтение (pull) реестра — больше ничего.',
   'access.registries.empty': 'Реестров пока нет.',
   'access.registries.col.host': 'Host',
+  'access.registries.col.type': 'Тип',
   'access.registries.col.username': 'Логин',
   'access.registries.col.token': 'Токен',
   'access.registries.col.note': 'Заметка',
   'access.registries.col.updated': 'Обновлён',
   'access.registries.tokenMasked': '••••',
+  // Подписи дропдауна типа (сырой код остаётся в API).
+  'access.registries.type.ghcr': 'ghcr',
+  'access.registries.type.gar': 'Google Artifact Registry',
+  'access.registries.type.generic': 'Обычный',
+  // Подсказки под тип — где взять credential.
+  'access.registries.help.ghcr':
+    'Персональный токен (PAT) со scope read:packages — GitHub Settings → Developer settings → Personal access tokens.',
+  'access.registries.help.gar':
+    'JSON-ключ сервис-аккаунта с ролью Artifact Registry Reader — GCP Console → IAM → Service Accounts → Keys. Вставьте весь файл ключа.',
+  'access.registries.help.generic': 'Логин и пароль (или токен) для docker-login в этот реестр.',
   'access.registries.add': 'Добавить реестр',
   'access.registries.create.title': 'Добавить или заменить реестр',
   'access.registries.create.desc':
-    'Host, логин и токен приватного реестра. Повторная отправка с тем же host заменяет его логин, токен и заметку — так меняют токен.',
+    'Выберите тип, затем укажите host и креды приватного реестра. Повторная отправка с тем же host заменяет его креды — так меняют токен.',
   'access.registries.create.host': 'Host',
   'access.registries.create.hostPlaceholder': 'например, ghcr.io',
+  'access.registries.create.hostGarPlaceholder': 'REGION-docker.pkg.dev',
   'access.registries.create.username': 'Логин',
   'access.registries.create.usernamePlaceholder': 'логин в реестре',
   'access.registries.create.token': 'Токен',
   'access.registries.create.tokenPlaceholder': 'персональный токен доступа',
+  'access.registries.create.tokenGarPlaceholder': '{ "type": "service_account", "private_key": "…", … }',
   'access.registries.create.note': 'Заметка',
   'access.registries.create.notePlaceholder': 'необязательная заметка',
   'access.registries.create.submit': 'Сохранить',
   'access.registries.create.err': 'Не удалось сохранить реестр.',
+  'access.registries.edit': 'Изменить',
+  'access.registries.edit.title': 'Изменить реестр {host}',
+  'access.registries.edit.desc':
+    'Host неизменяем — чтобы сменить, удалите и добавьте заново. Оставьте токен пустым, чтобы не менять секрет, или введите новый для ротации.',
+  'access.registries.keepSecret': 'Оставьте пустым — токен не меняется',
   'access.registries.delete': 'Удалить',
   'access.registries.delete.title': 'Удалить реестр {host}?',
   'access.registries.delete.desc':
     'Подключённые тачки сразу теряют этот credential — анонимные pull приватных образов этого host могут начать падать.',
   'access.registries.toast.saved': 'Реестр {host} сохранён',
+  'access.registries.toast.updated': 'Реестр {host} обновлён',
   'access.registries.toast.deleted': 'Реестр {host} удалён',
 };

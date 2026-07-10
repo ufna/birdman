@@ -47,7 +47,8 @@ export const EVENT_KINDS = [
   // registries v1 (docs/superpowers/specs/2026-07-09-registries-design.md
   // §4/§6): apikey_created/apikey_revoked existed in master before this set
   // but had no label here — cheap backfill alongside the three new kinds.
-  'registry_upserted', 'registry_removed', 'apikey_created', 'apikey_revoked', 'apikey_purged',
+  // registry_updated — PATCH-правка записи (registries v2 design §2).
+  'registry_upserted', 'registry_updated', 'registry_removed', 'apikey_created', 'apikey_revoked', 'apikey_purged',
 ] as const;
 
 export function toneOfNodeState(state: string): Tone {
@@ -176,6 +177,7 @@ export function toneOfEventKind(kind: string): Tone {
     case 'deploy_rolled_back':
     case 'agent_upgrade':
     case 'registry_upserted':
+    case 'registry_updated':
     case 'apikey_created':
       return 'accent';
     case 'registry_removed':

@@ -253,15 +253,21 @@ export interface CreatedApiKey {
   secret: string;
 }
 
-// --- Реестры (registries v1, GET/POST/DELETE /v1/registries, admin-only) ---
-// Токен write-only: POST его принимает, но ни GET, ни события никогда его не
+// --- Реестры (registries v2, GET/POST/PATCH/DELETE /v1/registries, admin-only)
+// (docs/superpowers/specs/2026-07-10-registries-v2-design.md §4). Токен
+// write-only: POST/PATCH его принимают, но ни GET, ни события никогда его не
 // возвращают — RegistryInfo структурно не имеет поля token (master/internal/
 // store/registries.go: Registry без Token; RegistryCred с токеном — только
 // внутри master, для agentlink).
 
+/** Тип реестра (v2): определяет форму кредов/валидацию/подсказку в панели.
+ *  Мастер нормализует любой тип в docker-basic-auth (gar → username=_json_key). */
+export type RegistryType = 'ghcr' | 'gar' | 'generic';
+
 export interface RegistryInfo {
   id: string;
   host: string;
+  type: RegistryType;
   username: string;
   note: string;
   created_at: string;
@@ -269,11 +275,23 @@ export interface RegistryInfo {
 }
 
 /** Тело POST /v1/registries: upsert по (нормализованному) host — тот же host
- *  заменяет username/token/note целиком (единственный способ сменить токен). */
+ *  заменяет type/username/token/note целиком. `username` опционален: для gar его
+ *  не шлём (мастер форсит `_json_key`). */
 export interface RegistryInput {
   host: string;
-  username: string;
+  type: RegistryType;
+  username?: string;
   token: string;
+  note?: string;
+}
+
+/** Тело PATCH /v1/registries/{id}: частичное обновление по id. host неизменяем
+ *  (в теле не принимается). token опционален: пустой/отсутствует → секрет не
+ *  меняется; задан → ротация. */
+export interface RegistryPatch {
+  type?: RegistryType;
+  username?: string;
+  token?: string;
   note?: string;
 }
 
@@ -298,7 +316,7 @@ export function qs(params: Record<string, string | number | undefined>): string 
   return parts.length > 0 ? `?${parts.join('&')}` : '';
 }
 
-async function request<T>(method: 'GET' | 'POST' | 'DELETE', path: string, body?: unknown): Promise<T> {
+async function request<T>(method: 'GET' | 'POST' | 'PATCH' | 'DELETE', path: string, body?: unknown): Promise<T> {
   const headers: Record<string, string> = {};
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   // SameSite=Lax + кастомный заголовок — CSRF-защита v0 (master session.go).
@@ -411,9 +429,13 @@ export const api = {
   // --- Реестры (admin-only) ---
 
   listRegistries: () => request<{ registries: RegistryInfo[] }>('GET', '/v1/registries').then((r) => r.registries),
-  /** Создаёт или (тот же host) заменяет username/token/note. */
+  /** Создаёт или (тот же host) заменяет type/username/token/note. */
   upsertRegistry: (body: RegistryInput) =>
     request<{ registry: RegistryInfo }>('POST', '/v1/registries', body).then((r) => r.registry),
+  /** Частичная правка по id: host неизменяем; пустой token → секрет цел, иначе
+   *  ротация (registries v2 design §2). */
+  patchRegistry: (id: string, body: RegistryPatch) =>
+    request<{ registry: RegistryInfo }>('PATCH', `/v1/registries/${encodeURIComponent(id)}`, body).then((r) => r.registry),
   deleteRegistry: (id: string) => request<void>('DELETE', `/v1/registries/${encodeURIComponent(id)}`),
 };
 
