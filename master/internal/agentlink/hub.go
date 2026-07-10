@@ -46,6 +46,14 @@ func (h *Hub) SetRegistriesWithheldCounter(f func()) {
 func (h *Hub) noteRegistriesWithheld(nodeID, point string) {
 	h.log.Warn("agentlink: SetRegistries withheld — session is neither cert-authenticated nor loopback (registries gate, mTLS v1)",
 		"node_id", nodeID, "point", point)
+	h.incRegistriesWithheld()
+}
+
+// incRegistriesWithheld bumps birdman_agentlink_registries_withheld_total when
+// wired. Split out of noteRegistriesWithheld so a call site that already emits
+// its own, more specific WARN (attach's stale-pending strip) still keeps the
+// metric consistent without also logging the generic withheld message.
+func (h *Hub) incRegistriesWithheld() {
 	if f := h.registriesWithheld.Load(); f != nil {
 		(*f)()
 	}
@@ -218,6 +226,11 @@ func (h *Hub) attach(nodeID string, preface *agentlinkv1.MasterMsg, certAuth, lo
 			q.pending = stripped
 			h.log.Warn("agentlink: dropped a stale pending SetRegistries — node reconnected on an untrusted link (registries gate, mTLS v1)",
 				"node_id", nodeID)
+			// The strip is a withhold point too — keep the counter consistent
+			// with the Send/attach-preface skips (T5 review). Its own WARN above
+			// is more specific, so bump the metric directly rather than via
+			// noteRegistriesWithheld.
+			h.incRegistriesWithheld()
 		}
 	}
 	if preface != nil {

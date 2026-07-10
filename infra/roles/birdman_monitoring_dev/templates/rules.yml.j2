@@ -121,14 +121,19 @@ groups:
       #   birdman_node_cert_expiry_timestamp_seconds{node}            — master (БД),
       #   birdman_agent_cert_expiry_timestamp_seconds                 — агент (локально).
       # $value = секунд до истечения (отрицательное → серт уже просрочен). Серии
-      # нет серта не экспортируют (absent → не стреляет). Порог — окно renewal
-      # (14д): алерт горит, только если ротация реально застряла.
+      # без серта не экспортируют (absent → не стреляет). Порог expr — окно
+      # renewal (14д). НО renewal-тикер агента/master — 24ч, поэтому здоровый
+      # серт законно проводит <14д-до-истечения до ~24ч каждый цикл, пока не
+      # ротируется — при коротком for: это давало бы ложный алерт ~каждый цикл.
+      # Отсюда for:25h (порог 14д НЕ трогаем): горит, только если пропущен ЦЕЛЫЙ
+      # цикл renewal (24ч + 1ч запас) → ротация реально застряла; до фактического
+      # истечения тогда ещё ~12.9д.
       - alert: CertExpiry
         expr: >-
           (birdman_tls_cert_expiry_timestamp_seconds - time()) < {{ birdman_cert_expiry_warn_seconds }}
           or (birdman_node_cert_expiry_timestamp_seconds - time()) < {{ birdman_cert_expiry_warn_seconds }}
           or (birdman_agent_cert_expiry_timestamp_seconds - time()) < {{ birdman_cert_expiry_warn_seconds }}
-        for: 1h
+        for: 25h
         labels:
           severity: warning
         annotations:
@@ -144,5 +149,6 @@ groups:
 # ---------------------------------------------------------------------------
 # CertExpiry (таблица ops.md §1) — реализовано выше (mTLS agentlink v1): метрики
 # истечения сертов появились (master DB-derived + локальная у агента), правило
-# горит warning за 14д до истечения. AgentUpgradeFailed — выше (событие
-# agent_upgrade_failed пишет master, итерация 4).
+# горит warning, когда серт <14д до истечения держится >25ч (пропущен цикл
+# renewal). AgentUpgradeFailed — выше (событие agent_upgrade_failed пишет
+# master, итерация 4).

@@ -192,6 +192,12 @@ func (c *Client) Run(ctx context.Context) error {
 				break
 			}
 			if errors.Is(serr, errRenew) {
+				// No sleep before the rebuild — renewal is a fast, expected
+				// event. This can't spin: maybeRenew only returns errRenew when
+				// the NEW leaf is OUTSIDE the renewal window; a leaf issued
+				// still-inside the window is kept without signalling errRenew
+				// (enroll.go misconfig guard), so the on-reconnect check won't
+				// immediately renew again.
 				backoff = c.cfg.BackoffMin
 				rebuild = true
 				break

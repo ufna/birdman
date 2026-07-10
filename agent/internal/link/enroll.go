@@ -267,11 +267,25 @@ func (c *Client) maybeRenew(ctx context.Context, client agentlinkv1.AgentLinkCli
 	if err := c.writeMaterial(keyPEM, resp.GetCertPem(), resp.GetCaBundlePem()); err != nil {
 		return false, err
 	}
+	newNotAfter := time.Unix(resp.GetNotAfterUnix(), 0)
 	if _, leaf, err := c.loadClientLeaf(); err == nil {
+		newNotAfter = leaf.NotAfter
 		c.setCertNotAfter(leaf.NotAfter)
 	}
+	// Misconfig guard: if the master issued a leaf that is ITSELF already inside
+	// the renewal window (TTL ≤ RenewBefore — impossible with the real master's
+	// hard-coded 90d, but a config bug could), do NOT signal a reconnect. Doing
+	// so would loop errRenew→rebuild→on-connect-check→renew with no sleep,
+	// hammering Enroll. Keep the fresh material (it is the newest we have), log
+	// at ERROR, and treat this as success for the cycle — the current cert is
+	// still valid and the daily renew ticker will retry.
+	if time.Until(newNotAfter) < c.cfg.RenewBefore {
+		c.logf("[link] ERROR: renewed cert still within renewal window (not_after=%s, renew_before=%s); master TTL misconfigured? — using it and deferring to the daily ticker",
+			newNotAfter.UTC().Format(time.RFC3339), c.cfg.RenewBefore)
+		return false, nil
+	}
 	c.logf("[link] client certificate renewed (not_after=%s) — reconnecting",
-		time.Unix(resp.GetNotAfterUnix(), 0).UTC().Format(time.RFC3339))
+		newNotAfter.UTC().Format(time.RFC3339))
 	return true, nil
 }
 

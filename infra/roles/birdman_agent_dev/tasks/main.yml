@@ -47,6 +47,45 @@
     mode: "0755"
   notify: Restart birdman-agent
 
+# --- доставка публичного CA-серта master'а на ноду (mTLS agentlink v1, §6) ---
+# Тянем на каждом прогоне (идемпотентно): покрывает и новую ноду, и ротацию CA.
+# Серт ПУБЛИЧНЫЙ (ключ CA живёт только в PG master'а) → файл 0644. Тот же
+# admin-ключ и механизм, что и у регистрации ноды (POST /v1/nodes ниже);
+# /v1/ca — readonly-скоуп.
+# ВАЖНО (порядок): CA кладём ДО шаблона agent.yaml — тот убирает tls_insecure и
+# включает tls_ca_file, поэтому без master-ca.pem агент не соберёт trust pool.
+# Если прогон прервётся здесь (напр. GET /v1/ca 404 против старого master'а),
+# на диске остаётся старый рабочий agent.yaml (ещё с tls_insecure), и нода не
+# уходит в офлайн при следующем рестарте агента. Нужен только /etc/birdman
+# (создан выше), admin-ключ и доступность master API — всё уже есть.
+- name: Deliver master CA cert to node (GET /v1/ca)
+  block:
+    - name: Read master admin key for CA fetch
+      ansible.builtin.slurp:
+        src: "{{ birdman_master_admin_key_file }}"
+      register: birdman_admin_key_ca_slurp
+      no_log: true
+
+    - name: Fetch active CA cert bundle (text/plain PEM)
+      ansible.builtin.uri:
+        url: "{{ birdman_master_api }}/v1/ca"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ birdman_admin_key_ca_slurp.content | b64decode | trim }}"
+        return_content: true
+        status_code: 200
+      register: birdman_ca_fetch
+      no_log: true
+
+    - name: Write master CA cert (0644, публичный серт — не секрет)
+      ansible.builtin.copy:
+        content: "{{ birdman_ca_fetch.content }}"
+        dest: "{{ birdman_master_ca_file }}"
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart birdman-agent
+
 - name: Install agent config /etc/birdman/agent.yaml
   ansible.builtin.template:
     src: agent.yaml.j2
@@ -121,38 +160,6 @@
         group: root
         mode: "0600"
       no_log: true
-      notify: Restart birdman-agent
-
-# --- доставка публичного CA-серта master'а на ноду (mTLS agentlink v1, §6) ---
-# Тянем на каждом прогоне (идемпотентно): покрывает и новую ноду, и ротацию CA.
-# Серт ПУБЛИЧНЫЙ (ключ CA живёт только в PG master'а) → файл 0644. Тот же
-# admin-ключ и механизм, что POST /v1/nodes выше; /v1/ca — readonly-скоуп.
-- name: Deliver master CA cert to node (GET /v1/ca)
-  block:
-    - name: Read master admin key for CA fetch
-      ansible.builtin.slurp:
-        src: "{{ birdman_master_admin_key_file }}"
-      register: birdman_admin_key_ca_slurp
-      no_log: true
-
-    - name: Fetch active CA cert bundle (text/plain PEM)
-      ansible.builtin.uri:
-        url: "{{ birdman_master_api }}/v1/ca"
-        method: GET
-        headers:
-          Authorization: "Bearer {{ birdman_admin_key_ca_slurp.content | b64decode | trim }}"
-        return_content: true
-        status_code: 200
-      register: birdman_ca_fetch
-      no_log: true
-
-    - name: Write master CA cert (0644, публичный серт — не секрет)
-      ansible.builtin.copy:
-        content: "{{ birdman_ca_fetch.content }}"
-        dest: "{{ birdman_master_ca_file }}"
-        owner: root
-        group: root
-        mode: "0644"
       notify: Restart birdman-agent
 
 - name: Install birdman-agent.service unit

@@ -188,6 +188,7 @@ type enrollMaster struct {
 	nodeID        string
 	token         string
 	unimplemented bool
+	leafTTL       time.Duration // issued-leaf lifetime; 0 → 90d (real master default)
 
 	mu                  sync.Mutex
 	enrolls             []*agentlinkv1.EnrollRequest
@@ -208,7 +209,11 @@ func (m *enrollMaster) Enroll(ctx context.Context, req *agentlinkv1.EnrollReques
 	} else if req.GetNodeToken() != m.token {
 		return nil, status.Error(codes.PermissionDenied, "bad node token")
 	}
-	notAfter := time.Now().Add(90 * 24 * time.Hour)
+	ttl := 90 * 24 * time.Hour
+	if m.leafTTL > 0 {
+		ttl = m.leafTTL
+	}
+	notAfter := time.Now().Add(ttl)
 	certPEM, err := m.ca.signCSR(req.GetCsrPem(), nodeID, notAfter)
 	if err != nil {
 		return nil, err
@@ -495,6 +500,49 @@ func TestRenewalSwapAndReconnect(t *testing.T) {
 	}
 }
 
+// TestRenewedCertStillInWindowDoesNotSpin: a MISCONFIGURED master that issues
+// leaves already inside the renewal window (TTL ≤ RenewBefore — impossible with
+// the real master's hard-coded 90d, but a config bug could) must not send the
+// agent into a tight errRenew→reconnect→renew loop hammering Enroll. The guard
+// in maybeRenew keeps the fresh leaf, logs loudly, and defers to the daily
+// ticker — so Enroll is called a BOUNDED number of times, not unboundedly.
+func TestRenewedCertStillInWindowDoesNotSpin(t *testing.T) {
+	ca := newTestCA(t)
+	// 7d issued leaf < 14d RenewBefore → every renewal lands back in-window.
+	m := &enrollMaster{ca: ca, nodeID: "node-6", token: goodToken, leafTTL: 7 * 24 * time.Hour}
+	lis := serveEnrollMaster(t, m)
+
+	root := t.TempDir()
+	certDir := filepath.Join(root, "tls")
+	caFile := filepath.Join(root, "ca.pem")
+	if err := os.WriteFile(caFile, ca.certPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	certPEM, keyPEM := ca.clientLeafPEM(t, "node-6", time.Now().Add(7*24*time.Hour)) // seeded in-window → triggers renewal
+	writeSeed(t, certDir, map[string][]byte{
+		"client.crt": certPEM, "client.key": keyPEM, "ca.pem": ca.certPEM,
+	}, map[string]os.FileMode{"client.key": 0o600})
+
+	startLinkClient(t, mtlsConfig(lis, caFile, certDir, goodToken))
+
+	// The on-connect renewal fires once; the guard then stops the reconnect
+	// spin (a spin would rack up Enroll calls with no sleep between them).
+	eventually(t, "the in-window renewal happened at least once", func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return len(m.enrolls) >= 1
+	})
+	// Give a would-be spin ample time to blow the count up (RenewCheckEvery is
+	// 1h in tests, so no scheduled renewal fires in this window).
+	time.Sleep(300 * time.Millisecond)
+	m.mu.Lock()
+	n := len(m.enrolls)
+	m.mu.Unlock()
+	if n > 3 {
+		t.Fatalf("Enroll called %d times — the renewal is spinning (misconfig guard failed)", n)
+	}
+}
+
 // TestExpiredCertEnrollsByToken: a fully expired cert (node down > TTL) cannot
 // renew over mTLS, so the agent self-heals via Enroll-by-token and returns on a
 // fresh mTLS session.
@@ -570,8 +618,20 @@ func TestExpiredLeafRejectedByServer(t *testing.T) {
 	defer conn.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, err := agentlinkv1.NewAgentLinkClient(conn).Enroll(ctx, &agentlinkv1.EnrollRequest{CsrPem: []byte("x")}); err == nil {
+	_, err = agentlinkv1.NewAgentLinkClient(conn).Enroll(ctx, &agentlinkv1.EnrollRequest{CsrPem: []byte("x")})
+	if err == nil {
 		t.Fatal("an expired client leaf must be rejected by the mTLS handshake")
+	}
+	// err != nil alone is too weak: the handler would ALSO reject this garbage
+	// CSR with InvalidArgument — which would mean the handshake SUCCEEDED and
+	// the expired leaf was accepted. Assert the TRANSPORT rejected it: a failed
+	// mTLS handshake surfaces as codes.Unavailable carrying a TLS-layer message
+	// ("handshake failed: remote error: tls: ... certificate"), never as the
+	// handler's InvalidArgument.
+	if code := status.Code(err); code != codes.Unavailable &&
+		!strings.Contains(err.Error(), "handshake") &&
+		!strings.Contains(err.Error(), "certificate") {
+		t.Fatalf("expired leaf must fail at the TLS handshake (want Unavailable / TLS error), got code=%v err=%v", code, err)
 	}
 }
 

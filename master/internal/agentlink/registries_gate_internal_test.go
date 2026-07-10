@@ -139,13 +139,16 @@ func TestHubSendDeliversSetRegistriesToTrustedSessions(t *testing.T) {
 // normally. Without the strip, the replay loop would push the stale secret
 // onto the untrusted link.
 func TestHubAttachStripsPendingSetRegistriesForUntrustedSession(t *testing.T) {
-	hub, _ := gateHub(t)
+	hub, withheld := gateHub(t)
 
 	hub.attach("node-x", nil, true, false)
 	hub.Send("node-x", gateSetRegistries("ghcr.io"))
 	hub.Send("node-x", gateStop("srv-1"))
 	if got := hub.PendingCount("node-x"); got != 2 {
 		t.Fatalf("pending = %d before downgrade, want 2", got)
+	}
+	if got := withheld.Load(); got != 0 {
+		t.Fatalf("withheld counter = %d before downgrade, want 0 (nothing withheld yet)", got)
 	}
 
 	// Same node reconnects with neither cert nor loopback.
@@ -155,6 +158,12 @@ func TestHubAttachStripsPendingSetRegistriesForUntrustedSession(t *testing.T) {
 	}
 	if kinds := drainKinds(sess2); len(kinds) != 1 || kinds[0] != "stop" {
 		t.Fatalf("replayed kinds = %v, want exactly [stop]", kinds)
+	}
+	// The strip is a withhold point too: it must bump
+	// birdman_agentlink_registries_withheld_total for metric consistency with
+	// the Send/attach-preface skips (T5 review).
+	if got := withheld.Load(); got != 1 {
+		t.Fatalf("withheld counter = %d after the untrusted reconnect stripped the stale snapshot, want 1", got)
 	}
 }
 
