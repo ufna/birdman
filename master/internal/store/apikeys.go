@@ -139,6 +139,47 @@ func (s *Store) RevokeAPIKey(ctx context.Context, id string) (APIKey, bool, erro
 	return k, true, nil
 }
 
+// PurgeAPIKey hard-deletes an already-revoked key row (registries v1 design
+// §6): unlike RevokeAPIKey it never revokes anything — it is a cleanup step
+// on top of a key that is already stopped, so revoked keys don't pile up in
+// the admin list forever. The three-way result distinguishes: purged=true
+// (row deleted, the returned APIKey carries its last known fields for the
+// audit event); notRevoked=true (the key exists but is still active — purge
+// refuses, caller answers 409 not_revoked); both false (no such key — 404,
+// including on a retried purge of an id already deleted). Like RevokeAPIKey,
+// the read and the delete share one transaction (row locked FOR UPDATE) so a
+// concurrent revoke/purge on the same id can't race the active/gone check
+// against the delete.
+func (s *Store) PurgeAPIKey(ctx context.Context, id string) (APIKey, bool, bool, error) {
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return APIKey{}, false, false, err
+	}
+	defer tx.Rollback(ctx)
+
+	var k APIKey
+	err = tx.QueryRow(ctx, `
+		select id::text, name, scopes, created_at, revoked_at
+		from api_keys where id = $1::uuid for update`, id).
+		Scan(&k.ID, &k.Name, &k.Scopes, &k.CreatedAt, &k.RevokedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return APIKey{}, false, false, nil // no such key
+	}
+	if err != nil {
+		return APIKey{}, false, false, err
+	}
+	if k.RevokedAt == nil {
+		return k, false, true, nil // active — purge never revokes
+	}
+	if _, err := tx.Exec(ctx, `delete from api_keys where id = $1::uuid`, id); err != nil {
+		return APIKey{}, false, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return APIKey{}, false, false, err
+	}
+	return k, true, false, nil
+}
+
 // AuthAPIKey verifies a bearer key and returns its scopes.
 func (s *Store) AuthAPIKey(ctx context.Context, token string) (APIKey, error) {
 	id, secret, err := parseToken(apiKeyPrefix, token)
