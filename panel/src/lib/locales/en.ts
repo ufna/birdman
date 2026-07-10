@@ -146,6 +146,11 @@ export const en = {
   'event.agent_upgrade': 'Agent upgrade',
   'event.agent_upgrade_succeeded': 'Agent upgraded',
   'event.agent_upgrade_failed': 'Agent upgrade failed',
+  'event.registry_upserted': 'Registry saved',
+  'event.registry_removed': 'Registry removed',
+  'event.apikey_created': 'Key created',
+  'event.apikey_revoked': 'Key revoked',
+  'event.apikey_purged': 'Key deleted forever',
 
   // — API-key scope labels (codes stay in the API) —
   'scope.admin': 'Admin',
@@ -366,8 +371,8 @@ export const en = {
   'deploys.howto.step1.pullNote': 'Pull access to ghcr is already configured on the node — nothing else to set up there.',
   'deploys.howto.step2.title': '2. Get a deploy-scoped API key',
   'deploys.howto.step2.desc': 'The commands below authenticate with a key that has the `deploy` scope.',
-  'deploys.howto.step2.adminLink': 'Create one on the Access screen',
-  'deploys.howto.step2.readonlyHint': 'A key is created by an admin on the Access screen.',
+  'deploys.howto.step2.adminLink': 'Create one on the Admin screen',
+  'deploys.howto.step2.readonlyHint': 'An admin creates one on the Admin screen.',
   'deploys.howto.step2.secretNote': 'The secret is shown once, right after creation — save it somewhere safe.',
   'deploys.howto.step3.title': '3. Register the version and deploy',
   'deploys.howto.step3.registerLabel': 'Register a new version (channel prod here — use staging for a staging build):',
@@ -384,7 +389,7 @@ export const en = {
   'nav.cost': 'Cost',
   'nav.alerts': 'Alerts',
   'nav.logs': 'Logs',
-  'nav.access': 'Access',
+  'nav.access': 'Admin',
 
   // — severity / key-status / alert-state labels (raw codes stay in the API) —
   'severity.critical': 'Critical',
@@ -550,6 +555,43 @@ export const en = {
   'access.secret.done': 'Done',
   'access.toast.created': 'Key {name} created',
   'access.toast.revoked': 'Key {name} revoked',
+
+  // — Access screen: purge (hard-delete) a revoked key —
+  'access.purge': 'Delete forever',
+  'access.purge.title': 'Delete key {name} forever?',
+  'access.purge.desc': 'The key row is deleted for good (audit log entries stay). This cannot be undone.',
+  'access.toast.purged': 'Key {name} deleted forever',
+
+  // — Access screen: Registries section (private registry credentials) —
+  'access.registries': 'Registries',
+  'access.registries.hint': 'The token only needs pull access to packages (read:packages) — nothing more.',
+  'access.registries.empty': 'No registries yet.',
+  'access.registries.col.host': 'Host',
+  'access.registries.col.username': 'Username',
+  'access.registries.col.token': 'Token',
+  'access.registries.col.note': 'Note',
+  'access.registries.col.updated': 'Updated',
+  'access.registries.tokenMasked': '••••',
+  'access.registries.add': 'Add registry',
+  'access.registries.create.title': 'Add or replace a registry',
+  'access.registries.create.desc':
+    'Host, username and token for a private registry. Submitting the same host again replaces its username, token and note — that is how you rotate a token.',
+  'access.registries.create.host': 'Host',
+  'access.registries.create.hostPlaceholder': 'e.g. ghcr.io',
+  'access.registries.create.username': 'Username',
+  'access.registries.create.usernamePlaceholder': 'registry username',
+  'access.registries.create.token': 'Token',
+  'access.registries.create.tokenPlaceholder': 'personal access token',
+  'access.registries.create.note': 'Note',
+  'access.registries.create.notePlaceholder': 'optional note',
+  'access.registries.create.submit': 'Save',
+  'access.registries.create.err': "Couldn't save the registry.",
+  'access.registries.delete': 'Delete',
+  'access.registries.delete.title': 'Delete registry {host}?',
+  'access.registries.delete.desc':
+    'Connected nodes lose this credential immediately — anonymous pulls may start failing for private images on this host.',
+  'access.registries.toast.saved': 'Registry {host} saved',
+  'access.registries.toast.deleted': 'Registry {host} deleted',
 } as const;
 
 export type MessageKey = keyof typeof en;

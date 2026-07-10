@@ -130,11 +130,11 @@ describe('DeployHowto — сворачивание по умолчанию', () 
   });
 });
 
-describe('DeployHowto — ссылка на Доступ по скоупу', () => {
+describe('DeployHowto — ссылка на Админку по скоупу', () => {
   it('admin видит внутреннюю ссылку /access и переходит через navigate (не полный reload)', () => {
     const navigate = vi.fn();
     render(withSession(sess('admin'), <DeployHowto ctx={ctx} navigate={navigate} defaultExpanded />));
-    const link = screen.getByRole('link', { name: 'Create one on the Access screen' });
+    const link = screen.getByRole('link', { name: 'Create one on the Admin screen' });
     expect(link.getAttribute('href')).toBe('/access');
     fireEvent.click(link);
     expect(navigate).toHaveBeenCalledWith('/access');
@@ -142,13 +142,13 @@ describe('DeployHowto — ссылка на Доступ по скоупу', () 
 
   it('readonly видит текст без ссылки', () => {
     render(withSession(sess('readonly'), <DeployHowto ctx={ctx} navigate={() => {}} defaultExpanded />));
-    expect(screen.queryByRole('link', { name: 'Create one on the Access screen' })).toBeNull();
-    expect(screen.getByText('A key is created by an admin on the Access screen.')).toBeTruthy();
+    expect(screen.queryByRole('link', { name: 'Create one on the Admin screen' })).toBeNull();
+    expect(screen.getByText('An admin creates one on the Admin screen.')).toBeTruthy();
   });
 
   it('нет сессии — тоже текст без ссылки (не считается админом)', () => {
     render(withSession(null, <DeployHowto ctx={ctx} navigate={() => {}} defaultExpanded />));
-    expect(screen.queryByRole('link', { name: 'Create one on the Access screen' })).toBeNull();
+    expect(screen.queryByRole('link', { name: 'Create one on the Admin screen' })).toBeNull();
   });
 });
 

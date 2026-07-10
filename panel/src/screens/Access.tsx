@@ -1,8 +1,12 @@
-// Доступ (П2, admin-only): управление API-ключами (GET/POST/DELETE /v1/apikeys).
-// Таблица ключей (name, scopes, created, active/revoked); создание — диалог с
-// чекбоксами скоупов, секрет показывается РОВНО один раз (после закрытия
-// вычищается из памяти); отзыв — confirm + обработка 409 last_admin_key.
-// Экран скрыт из навигации/роутинга для не-admin (эндпоинты admin-scoped).
+// Админка (П2, admin-only; nav-ключ nav.access — маршрут/гейт исторический
+// /access не переименовывали, T6 меняет только видимые EN/RU-значения):
+// секция «API-ключи» (GET/POST/DELETE /v1/apikeys) — таблица (name, scopes,
+// created, active/revoked), создание диалогом с чекбоксами скоупов (секрет
+// показывается РОВНО один раз, после закрытия вычищается из памяти), отзыв
+// (confirm + 409 last_admin_key) и purge отозванных (hard-delete строки,
+// ?purge=true — см. RevokeAction/PurgeAction ниже); секция «Реестры»
+// (RegistriesSection) — приватные registry-креды, см. её файл. Экран скрыт
+// из навигации/роутинга для не-admin (эндпоинты admin-scoped).
 
 import { useMemo, useState } from 'react';
 import type { ColumnDef } from '@tanstack/react-table';
@@ -16,6 +20,7 @@ import { useToast } from '../components/Toast';
 import { DataTable } from '../components/DataTable';
 import { StateBadge, toneOfKeyStatus } from '../components/Badge';
 import { ConfirmButton } from '../components/ConfirmDialog';
+import { RegistriesSection } from '../components/RegistriesSection';
 import { Card, CardHeader, ErrorNote, LoadingRow } from '../components/ui';
 
 /** Скоупы, которые можно выдать ключу (совпадает с validScopes в master). */
@@ -51,6 +56,7 @@ export function Access() {
           <KeysTable keys={keys.data} reload={keys.reload} />
         )}
       </Card>
+      <RegistriesSection />
     </div>
   );
 }
@@ -92,7 +98,11 @@ function KeysTable({ keys, reload }: { keys: ApiKey[]; reload: () => void }) {
         id: 'actions',
         header: '',
         cell: ({ row }) =>
-          row.original.revoked_at === null ? <RevokeAction apiKey={row.original} onDone={reload} /> : null,
+          row.original.revoked_at === null ? (
+            <RevokeAction apiKey={row.original} onDone={reload} />
+          ) : (
+            <PurgeAction apiKey={row.original} onDone={reload} />
+          ),
       },
     ],
     [t, fmt, reload],
@@ -128,6 +138,31 @@ function RevokeAction({ apiKey, onDone }: { apiKey: ApiKey; onDone: () => void }
         onConfirm={async () => {
           await api.revokeApiKey(apiKey.id);
           toast.success(t('access.toast.revoked', { name: apiKey.name }));
+          onDone();
+        }}
+      />
+    </div>
+  );
+}
+
+/** Purge (hard-delete) — только для ЯВНО revoked-строк (Task 6, registries v1
+ *  design §6): кнопка сама по себе гейтит недостижимый на active-ключах 409
+ *  not_revoked, но ConfirmButton всё равно переживёт его дефолтным errMessage,
+ *  если store когда-нибудь вернёт его по другой причине. */
+function PurgeAction({ apiKey, onDone }: { apiKey: ApiKey; onDone: () => void }) {
+  const { t } = useT();
+  const toast = useToast();
+  return (
+    <div className="flex justify-end">
+      <ConfirmButton
+        label={t('access.purge')}
+        tone="dead"
+        title={t('access.purge.title', { name: apiKey.name })}
+        description={t('access.purge.desc')}
+        confirmLabel={t('access.purge')}
+        onConfirm={async () => {
+          await api.purgeApiKey(apiKey.id);
+          toast.success(t('access.toast.purged', { name: apiKey.name }));
           onDone();
         }}
       />

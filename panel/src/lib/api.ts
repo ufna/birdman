@@ -253,6 +253,30 @@ export interface CreatedApiKey {
   secret: string;
 }
 
+// --- Реестры (registries v1, GET/POST/DELETE /v1/registries, admin-only) ---
+// Токен write-only: POST его принимает, но ни GET, ни события никогда его не
+// возвращают — RegistryInfo структурно не имеет поля token (master/internal/
+// store/registries.go: Registry без Token; RegistryCred с токеном — только
+// внутри master, для agentlink).
+
+export interface RegistryInfo {
+  id: string;
+  host: string;
+  username: string;
+  note: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Тело POST /v1/registries: upsert по (нормализованному) host — тот же host
+ *  заменяет username/token/note целиком (единственный способ сменить токен). */
+export interface RegistryInput {
+  host: string;
+  username: string;
+  token: string;
+  note?: string;
+}
+
 export class ApiError extends Error {
   constructor(
     public readonly status: number,
@@ -379,6 +403,18 @@ export const api = {
   /** Отзыв ключа (409 last_admin_key — нельзя отозвать последний admin). */
   revokeApiKey: (id: string) =>
     request<{ key: ApiKey }>('DELETE', `/v1/apikeys/${encodeURIComponent(id)}`).then((r) => r.key),
+  /** Purge (hard-delete) уже отозванного ключа: 409 not_revoked на активном,
+   *  404 на неизвестном/повторном вызове (registries v1 design §6). */
+  purgeApiKey: (id: string) =>
+    request<void>('DELETE', `/v1/apikeys/${encodeURIComponent(id)}${qs({ purge: 'true' })}`),
+
+  // --- Реестры (admin-only) ---
+
+  listRegistries: () => request<{ registries: RegistryInfo[] }>('GET', '/v1/registries').then((r) => r.registries),
+  /** Создаёт или (тот же host) заменяет username/token/note. */
+  upsertRegistry: (body: RegistryInput) =>
+    request<{ registry: RegistryInfo }>('POST', '/v1/registries', body).then((r) => r.registry),
+  deleteRegistry: (id: string) => request<void>('DELETE', `/v1/registries/${encodeURIComponent(id)}`),
 };
 
 /**
