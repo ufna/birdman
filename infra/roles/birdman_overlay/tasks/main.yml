@@ -7,4 +7,4 @@
 
 - name: Bring overlay up (config, ufw, container)
   ansible.builtin.include_tasks: up.yml
-  when: not birdman_overlay_prepare_only
+  when: not (birdman_overlay_prepare_only | bool)

@@ -43,7 +43,7 @@
 # У образа есть ENTRYPOINT — для утилитных вызовов всегда --entrypoint.
 - name: Generate WireGuard private key (once, box-only)
   ansible.builtin.shell:
-    cmd: umask 077 && docker run --rm --entrypoint wg {{ birdman_overlay_image }} genkey > {{ birdman_overlay_conf_dir }}/wg.key
+    cmd: umask 077 && rm -f {{ birdman_overlay_conf_dir }}/wg.key.tmp && docker run --rm --entrypoint wg {{ birdman_overlay_image }} genkey > {{ birdman_overlay_conf_dir }}/wg.key.tmp && mv {{ birdman_overlay_conf_dir }}/wg.key.tmp {{ birdman_overlay_conf_dir }}/wg.key
     creates: "{{ birdman_overlay_conf_dir }}/wg.key"
   no_log: true
 
