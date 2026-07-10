@@ -14,7 +14,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
-	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/ufna/birdman/master/internal/agentlink"
 	"github.com/ufna/birdman/master/internal/store"
@@ -24,11 +23,17 @@ import (
 
 func TestMain(m *testing.M) { os.Exit(testdb.Run(m)) }
 
-// startServer wires a Hub+Service pair behind a bufconn gRPC server. It
-// returns the Hub (to seed pending commands / inspect coalescing straight
-// from a test, as the existing replay test already does) and the Service
-// (T3 adds BroadcastRegistries, called directly here the same way main.go
-// wires it to the httpapi onRegistriesChanged hook) alongside the client.
+// startServer wires a Hub+Service pair behind a gRPC server on REAL loopback
+// TCP (127.0.0.1) — since the SetRegistries gate (mTLS agentlink v1, design
+// §3) registry snapshots only reach sessions that are cert-authenticated or
+// loopback, and these token-session tests assert the trusted dev-box shape:
+// token auth over 127.0.0.1. (bufconn's peer address is a non-IP and
+// classifies as NOT loopback — the untrusted harness lives in
+// registries_gate_test.go.) It returns the Hub (to seed pending commands /
+// inspect coalescing straight from a test, as the existing replay test
+// already does) and the Service (T3 adds BroadcastRegistries, called
+// directly here the same way main.go wires it to the httpapi
+// onRegistriesChanged hook) alongside the client.
 func startServer(t *testing.T, st *store.Store) (*agentlink.Hub, *agentlink.Service, agentlinkv1.AgentLinkClient) {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
@@ -45,19 +50,19 @@ func startServerWithLog(t *testing.T, st *store.Store, log *slog.Logger) (*agent
 	// default and behaves identically for a token Hello with no client cert.
 	svc := agentlink.NewService(st, hub, nil, nil, agentlink.AuthMixed, log)
 
-	lis := bufconn.Listen(1 << 20)
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen tcp loopback: %v", err)
+	}
 	srv := grpc.NewServer()
 	agentlinkv1.RegisterAgentLinkServer(srv, svc)
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 
-	conn, err := grpc.NewClient("passthrough:///bufconn",
-		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
-			return lis.DialContext(ctx)
-		}),
+	conn, err := grpc.NewClient(lis.Addr().String(),
 		grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		t.Fatalf("dial bufconn: %v", err)
+		t.Fatalf("dial %s: %v", lis.Addr(), err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 	return hub, svc, agentlinkv1.NewAgentLinkClient(conn)
@@ -300,46 +305,9 @@ func TestSessionReplacedByNewConnection(t *testing.T) {
 }
 
 // --- T3: registries distribution over agentlink (docs/superpowers/specs/2026-07-09-registries-design.md §2) ---
-
-// TestHubCoalescesSetRegistries: enqueueing a new SetRegistries for a node
-// removes any older unacked SetRegistries from its pending queue — Hub never
-// holds more than one, so a chatty stream of registry changes (or a node
-// that never acks) cannot grow the queue unbounded. Coalescing is scoped to
-// SetRegistries only: a pending command of another kind is untouched by it.
-// Pure Hub-level test — no store/gRPC needed.
-func TestHubCoalescesSetRegistries(t *testing.T) {
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	hub := agentlink.NewHub(log)
-	const nodeID = "node-under-test"
-
-	setRegistries := func(username string) *agentlinkv1.MasterMsg {
-		return &agentlinkv1.MasterMsg{Msg: &agentlinkv1.MasterMsg_SetRegistries{SetRegistries: &agentlinkv1.SetRegistries{
-			Registries: []*agentlinkv1.RegistryCred{{Host: "ghcr.io", Username: username, Token: "tok"}},
-		}}}
-	}
-
-	hub.Send(nodeID, setRegistries("alice"))
-	if got := hub.PendingCount(nodeID); got != 1 {
-		t.Fatalf("after 1st SetRegistries: want pending=1, got %d", got)
-	}
-
-	// Two consecutive registries changes must coalesce to exactly one
-	// pending entry, not accumulate.
-	hub.Send(nodeID, setRegistries("bob"))
-	if got := hub.PendingCount(nodeID); got != 1 {
-		t.Fatalf("after 2nd SetRegistries: want coalesced pending=1, got %d", got)
-	}
-
-	// A different command kind is unaffected by SetRegistries coalescing: it
-	// survives a further registries change, which only removes its own kind.
-	hub.Send(nodeID, &agentlinkv1.MasterMsg{Msg: &agentlinkv1.MasterMsg_Start{Start: &agentlinkv1.StartServer{
-		ServerId: "srv-1",
-	}}})
-	hub.Send(nodeID, setRegistries("carol"))
-	if got := hub.PendingCount(nodeID); got != 2 {
-		t.Fatalf("want 2 pending (1 Start + 1 coalesced SetRegistries), got %d", got)
-	}
-}
+// (TestHubCoalescesSetRegistries lives in hub_test.go: since the registries
+// gate, enqueueing a SetRegistries at all requires a trusted live session,
+// which only the internal attach can synthesize without a transport.)
 
 // TestAttachSendsRegistriesSnapshotBeforePendingReplay: a fresh registries
 // snapshot built from the store must reach a (re)connecting node BEFORE any

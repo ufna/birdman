@@ -401,9 +401,22 @@ func (s *Service) readLoop(ctx context.Context, stream agentlinkv1.AgentLink_Ses
 // together, not just each safe on its own. Split out of Session so the
 // concurrency regression test can drive it directly, the same way it drives
 // BroadcastRegistries, without needing a full gRPC stream per attempt.
+//
+// Registries gate (design §3): a session that is neither cert-authenticated
+// nor loopback gets NO preface — skipped entirely (WARN + withheld counter),
+// before the DB read, so the plaintext creds are not even materialized for a
+// link that must not carry them. The Hub strips any stale pending
+// SetRegistries on such an attach (hub.attach) and withholds broadcasts
+// (Hub.Send), so the invariant holds at every send point. When the node
+// reconnects with a cert, the attach preface delivers the then-current
+// snapshot — nothing is lost.
 func (s *Service) attachWithFreshRegistries(ctx context.Context, nodeID string, certAuth, loopback bool) *session {
 	s.regMu.Lock()
 	defer s.regMu.Unlock()
+	if !certAuth && !loopback {
+		s.hub.noteRegistriesWithheld(nodeID, "attach-preface")
+		return s.hub.attach(nodeID, nil, certAuth, loopback)
+	}
 	return s.hub.attach(nodeID, s.registriesSnapshot(ctx, nodeID), certAuth, loopback)
 }
 
@@ -454,6 +467,10 @@ func registryCredsToProto(creds []store.RegistryCred) []*agentlinkv1.RegistryCre
 // attach) could each read-then-send independently and have an older read
 // delivered after a newer one (task review, Fix 1;
 // TestServiceRegistriesSnapshotReadEnqueueSerializedAcrossAttachAndBroadcast).
+//
+// Per-node trust is enforced inside Hub.Send (registries gate, design §3):
+// an untrusted session is skipped entirely — not enqueued — with a WARN and
+// the withheld counter, so this fan-out needs no trust knowledge of its own.
 func (s *Service) BroadcastRegistries(ctx context.Context) {
 	s.regMu.Lock()
 	defer s.regMu.Unlock()

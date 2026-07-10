@@ -129,6 +129,44 @@ func TestNodeCertExpiryMetric(t *testing.T) {
 	}
 }
 
+// birdman_agentlink_registries_withheld_total counts SetRegistries deliveries
+// the gate skipped for untrusted sessions (design §3 «Гейт SetRegistries»).
+// The hub increments it via SetRegistriesWithheldCounter (main.go wiring); a
+// plain counter is present at 0 from registration.
+func TestAgentlinkRegistriesWithheldCounter(t *testing.T) {
+	st := testdb.New(t)
+	m := metrics.New(st, testLog())
+
+	if got := findCounter(t, m.Registry, "birdman_agentlink_registries_withheld_total", nil); got != 0 {
+		t.Fatalf("withheld counter = %v at registration, want 0", got)
+	}
+	m.AgentlinkRegistriesWithheld.Inc()
+	if got := findCounter(t, m.Registry, "birdman_agentlink_registries_withheld_total", nil); got != 1 {
+		t.Fatalf("withheld counter = %v after Inc, want 1", got)
+	}
+}
+
+// findCounter is findGauge for counters.
+func findCounter(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) float64 {
+	t.Helper()
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, met := range mf.GetMetric() {
+			if labelsMatch(met.GetLabel(), labels) {
+				return met.GetCounter().GetValue()
+			}
+		}
+	}
+	t.Fatalf("metric %s%v not found", name, labels)
+	return 0
+}
+
 // findGauge gathers reg and returns the value of the metric matching name and
 // exactly the given label set, failing the test if none matches.
 func findGauge(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) float64 {

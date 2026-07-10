@@ -29,7 +29,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
-	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/ufna/birdman/master/internal/agentlink"
 	"github.com/ufna/birdman/master/internal/store"
@@ -102,11 +101,15 @@ func clientLeaf(t *testing.T, caCertPEM, caKeyPEM []byte, nodeID string) tls.Cer
 	return cert
 }
 
-// startTLSServer runs the AgentLink service behind a bufconn gRPC server whose
-// transport creds mirror the production listener: server leaf from the CA,
-// ClientCAs = the CA, ClientAuth = VerifyClientCertIfGiven (so a client cert
-// is optional but, when presented, is verified into VerifiedChains).
-func startTLSServer(t *testing.T, st *store.Store, mode agentlink.AuthMode, caCertPEM, caKeyPEM []byte) *bufconn.Listener {
+// startTLSServer runs the AgentLink service behind a gRPC server on REAL
+// loopback TCP whose transport creds mirror the production listener: server
+// leaf from the CA, ClientCAs = the CA, ClientAuth = VerifyClientCertIfGiven
+// (so a client cert is optional but, when presented, is verified into
+// VerifiedChains). Loopback TCP (not bufconn) because since the SetRegistries
+// gate (design §3) the registries preface — requireAuthed's success signal —
+// only reaches trusted sessions, and this file's token-session cases model
+// the trusted dev box: token over 127.0.0.1. Returns the address to dial.
+func startTLSServer(t *testing.T, st *store.Store, mode agentlink.AuthMode, caCertPEM, caKeyPEM []byte) string {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	creds := credentials.NewTLS(&tls.Config{
@@ -115,18 +118,22 @@ func startTLSServer(t *testing.T, st *store.Store, mode agentlink.AuthMode, caCe
 		ClientAuth:   tls.VerifyClientCertIfGiven,
 		MinVersion:   tls.VersionTLS12,
 	})
-	lis := bufconn.Listen(1 << 20)
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen tcp loopback: %v", err)
+	}
 	srv := grpc.NewServer(grpc.Creds(creds))
 	agentlinkv1.RegisterAgentLinkServer(srv, agentlink.NewService(st, agentlink.NewHub(log), nil, nil, mode, log))
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
-	return lis
+	return lis.Addr().String()
 }
 
-// tlsClient dials the bufconn listener with the CA as its RootCAs and
-// ServerName "birdman-master" (the leaf's DNS SAN). A nil clientCert connects
+// tlsClient dials addr with the CA as its RootCAs and ServerName
+// "birdman-master" (the leaf's DNS SAN — overrides the IP-literal target the
+// same way the agent overrides its master_addr). A nil clientCert connects
 // without one; otherwise it is offered for VerifyClientCertIfGiven.
-func tlsClient(t *testing.T, lis *bufconn.Listener, caCertPEM []byte, clientCert *tls.Certificate) agentlinkv1.AgentLinkClient {
+func tlsClient(t *testing.T, addr string, caCertPEM []byte, clientCert *tls.Certificate) agentlinkv1.AgentLinkClient {
 	t.Helper()
 	cfg := &tls.Config{
 		RootCAs:    caPool(t, caCertPEM),
@@ -136,13 +143,10 @@ func tlsClient(t *testing.T, lis *bufconn.Listener, caCertPEM []byte, clientCert
 	if clientCert != nil {
 		cfg.Certificates = []tls.Certificate{*clientCert}
 	}
-	conn, err := grpc.NewClient("passthrough:///bufconn",
-		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
-			return lis.DialContext(ctx)
-		}),
+	conn, err := grpc.NewClient(addr,
 		grpc.WithTransportCredentials(credentials.NewTLS(cfg)))
 	if err != nil {
-		t.Fatalf("dial: %v", err)
+		t.Fatalf("dial %s: %v", addr, err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 	return agentlinkv1.NewAgentLinkClient(conn)

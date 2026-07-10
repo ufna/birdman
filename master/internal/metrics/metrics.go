@@ -30,6 +30,12 @@ type Metrics struct {
 	// Deploy manager (итерация 3, docs/specs/master.md §5).
 	DeployPrepull prometheus.Histogram // seconds from deploy start to all nodes pulled
 
+	// AgentlinkRegistriesWithheld counts SetRegistries deliveries skipped by
+	// the registries gate — sessions that are neither cert-authenticated nor
+	// loopback (mTLS agentlink v1, design §3). Incremented by the hub via
+	// SetRegistriesWithheldCounter (main.go wiring).
+	AgentlinkRegistriesWithheld prometheus.Counter
+
 	// agentlink holds the late-wired callbacks behind the sessions{auth} and
 	// tls_cert_expiry{cert="server"} samples (mTLS agentlink v1, design §3):
 	// the hub and the server-leaf holder are constructed around the same time
@@ -86,9 +92,14 @@ func New(st *store.Store, log *slog.Logger) *Metrics {
 			Help:    "Time from POST /v1/deploy to every fleet node reporting the image pulled.",
 			Buckets: []float64{1, 2, 5, 10, 30, 60, 120, 300, 600, 900},
 		}),
+		AgentlinkRegistriesWithheld: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "birdman_agentlink_registries_withheld_total",
+			Help: "SetRegistries deliveries withheld from agentlink sessions that are neither cert-authenticated nor loopback (registries gate, mTLS v1).",
+		}),
 	}
 	m.agentlink = &agentlinkCollector{st: st, log: log}
-	reg.MustRegister(m.AllocDuration, m.AllocFailures, m.MMQueueDepth, m.MMTimeToMatch, m.MMTickets, m.DeployPrepull)
+	reg.MustRegister(m.AllocDuration, m.AllocFailures, m.MMQueueDepth, m.MMTimeToMatch, m.MMTickets, m.DeployPrepull,
+		m.AgentlinkRegistriesWithheld)
 	reg.MustRegister(&dbCollector{st: st, log: log})
 	reg.MustRegister(m.agentlink)
 	reg.MustRegister(collectors.NewGoCollector())

@@ -170,6 +170,9 @@ func run() error {
 		}
 		return time.Time{}, false
 	})
+	// Registries gate (design §3): every SetRegistries skipped for an
+	// untrusted session (neither cert-auth nor loopback) is counted.
+	hub.SetRegistriesWithheldCounter(m.AgentlinkRegistriesWithheld.Inc)
 	// Deploy manager (итерация 3): PrePull fan-out + PullReport-driven flip.
 	dep := deploy.New(deploy.Options{
 		Store: st, Sender: hub, Log: log,

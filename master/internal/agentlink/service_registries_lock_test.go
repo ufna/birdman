@@ -65,8 +65,11 @@ func TestServiceRegistriesSnapshotReadEnqueueSerializedAcrossAttachAndBroadcast(
 
 	const nodeID = "node-under-test"
 
+	// Loopback (trusted) sessions throughout: this test targets read/enqueue
+	// SERIALIZATION; the registries gate (mTLS v1, design §3) would simply
+	// withhold every snapshot from an untrusted session.
 	var sessMu sync.Mutex
-	curSess := svc.attachWithFreshRegistries(ctx, nodeID, false, false)
+	curSess := svc.attachWithFreshRegistries(ctx, nodeID, false, true)
 
 	const rounds = 60
 	const workersPerRound = 16
@@ -92,7 +95,7 @@ func TestServiceRegistriesSnapshotReadEnqueueSerializedAcrossAttachAndBroadcast(
 		// task review.
 		go func() {
 			defer wg.Done()
-			newSess := svc.attachWithFreshRegistries(ctx, nodeID, false, false)
+			newSess := svc.attachWithFreshRegistries(ctx, nodeID, false, true)
 			sessMu.Lock()
 			curSess = newSess
 			sessMu.Unlock()
