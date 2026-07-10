@@ -189,6 +189,11 @@ type enrollMaster struct {
 	token         string
 	unimplemented bool
 	leafTTL       time.Duration // issued-leaf lifetime; 0 → 90d (real master default)
+	// rejectEmptyTokenHello models a master rolled back to `token` mode: it
+	// ignores the client cert and refuses a Hello that carries no node_token
+	// (which is exactly the Hello a cert session sends) with PermissionDenied,
+	// while still accepting a Hello that carries the valid token.
+	rejectEmptyTokenHello bool
 
 	mu                  sync.Mutex
 	enrolls             []*agentlinkv1.EnrollRequest
@@ -246,6 +251,9 @@ func (m *enrollMaster) Session(stream agentlinkv1.AgentLink_SessionServer) error
 	m.hellos = append(m.hellos, hello)
 	m.sessionLeafNotAfter = append(m.sessionLeafNotAfter, naUnix)
 	m.mu.Unlock()
+	if m.rejectEmptyTokenHello && hello.GetNodeToken() == "" {
+		return status.Error(codes.PermissionDenied, "token required (token-mode)")
+	}
 	for {
 		if _, err := stream.Recv(); err != nil {
 			return err
@@ -445,6 +453,58 @@ func TestEnrollUnimplementedFallsBackToToken(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(certDir, "client.crt")); !os.IsNotExist(err) {
 		t.Fatalf("no cert must be written on Unimplemented fallback (stat err=%v)", err)
+	}
+}
+
+// TestCertSessionPermissionDeniedFallsBackToToken: the token-mode rollback
+// recovery path (design §Безопасность / §Принятые ограничения). An already
+// enrolled agent (valid client cert on disk) dials mTLS and sends an
+// EMPTY-token Hello — the cert is its identity. If the operator rolled the
+// master back to `token` mode (emergency), that master ignores the client cert
+// and refuses the empty-token Hello with PermissionDenied. Without a fallback
+// the node would strand at max-backoff off-link. The agent must instead fall
+// back ONCE to a token-authenticated Hello over the SAME already-verified mTLS
+// connection (reusing the on-disk node_token, which crosses only a link whose
+// RootCAs the agent checked), and connect.
+func TestCertSessionPermissionDeniedFallsBackToToken(t *testing.T) {
+	ca := newTestCA(t)
+	m := &enrollMaster{ca: ca, nodeID: "node-7", token: goodToken, rejectEmptyTokenHello: true}
+	lis := serveEnrollMaster(t, m)
+
+	root := t.TempDir()
+	certDir := filepath.Join(root, "tls")
+	caFile := filepath.Join(root, "ca.pem")
+	if err := os.WriteFile(caFile, ca.certPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Already enrolled: a valid, well-in-date leaf → the agent dials mTLS
+	// straight away and its first Hello carries no token (renewal window is 14d;
+	// 80d is safely outside it, so no renewal Enroll fires first).
+	certPEM, keyPEM := ca.clientLeafPEM(t, "node-7", time.Now().Add(80*24*time.Hour))
+	writeSeed(t, certDir, map[string][]byte{
+		"client.crt": certPEM, "client.key": keyPEM, "ca.pem": ca.certPEM,
+	}, map[string]os.FileMode{"client.key": 0o600})
+
+	startLinkClient(t, mtlsConfig(lis, caFile, certDir, goodToken))
+
+	// The agent recovers: a Hello carrying the node_token lands (the fallback),
+	// proving it did not simply back off forever after the cert rejection.
+	eventually(t, "token-fallback Hello after a cert-session PermissionDenied", func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		for _, h := range m.hellos {
+			if h.GetNodeToken() == goodToken {
+				return true
+			}
+		}
+		return false
+	})
+	// Order proof: the cert session was tried FIRST (empty-token Hello) before
+	// the token fallback — cert→token, not token-only from the start.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.hellos) == 0 || m.hellos[0].GetNodeToken() != "" {
+		t.Fatalf("want an empty-token cert Hello first, got hellos=%+v", m.hellos)
 	}
 }
 

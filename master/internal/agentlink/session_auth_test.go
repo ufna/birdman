@@ -8,7 +8,9 @@ package agentlink_test
 // VerifiedChains exactly as the production listener does. The matrix:
 //   mixed → cert-session ok (identity from CN, empty token) AND token-session ok;
 //   mtls  → token-only denied, cert ok, cert+mismatching-token denied, dead-node cert denied;
-//   token → client certs ignored (byte-identical regression).
+//   token → client certs ignored (byte-identical regression);
+//   dead-node → refused on BOTH the cert AND the token Session path, in every mode
+//               (revocation, design §Безопасность).
 
 import (
 	"context"
@@ -299,4 +301,35 @@ func TestSessionTokenModeIgnoresClientCert(t *testing.T) {
 	// A valid cert + a valid token: authenticates via the token path, unchanged.
 	cert2 := clientLeaf(t, caCert, caKey, f.NodeID)
 	requireAuthed(t, tlsClient(t, lis, caCert, &cert2), f.NodeToken)
+}
+
+// --- revocation on the token Session path (dead-node) ---
+
+// The cert Session path already refuses a dead node (TestSessionCertDeadNode*),
+// but bcrypt token auth (store.AuthNodeToken) carries no not-dead check, so the
+// token Session path used to let a revoked node back in. Revocation must reject
+// the token path too (design §Безопасность: "серт И токен отвергаются" — holds
+// in all modes for Session). A dead node with a perfectly valid node_token is
+// now refused, in mixed AND in token mode. A live node with the same token is
+// unaffected (byte-identical regression, covered by the *OK / token-mode tests).
+
+func TestSessionTokenDeadNodeMixedDenied(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10)
+	markDead(t, st, f.NodeID)
+	caCert, caKey := testCA(t)
+	lis := startTLSServer(t, st, agentlink.AuthMixed, caCert, caKey)
+	// No client cert; a valid token for a DEAD node must be refused on the
+	// token Session path, exactly as the cert path already refuses one.
+	requireDenied(t, tlsClient(t, lis, caCert, nil), f.NodeToken)
+}
+
+func TestSessionTokenDeadNodeTokenModeDenied(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10)
+	markDead(t, st, f.NodeID)
+	caCert, caKey := testCA(t)
+	lis := startTLSServer(t, st, agentlink.AuthToken, caCert, caKey)
+	// Even in the emergency token-mode rollback a dead node must never link.
+	requireDenied(t, tlsClient(t, lis, caCert, nil), f.NodeToken)
 }

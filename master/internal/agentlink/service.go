@@ -266,6 +266,15 @@ func (s *Service) authenticate(ctx context.Context, hello *agentlinkv1.Hello) (s
 		s.log.Error("agentlink: auth failed", "err", err)
 		return store.Node{}, false, loopback, status.Error(codes.Internal, "auth failed")
 	}
+	// Revocation applies to the token path too (design §Безопасность): a dead
+	// node must never link, in ANY mode. AuthNodeToken carries no not-dead check
+	// — it is also used by Enroll-by-token, which enforces its own — so the
+	// Session token path enforces it here, mirroring authorizeCert on the cert
+	// path. A non-dead node is unaffected, so the token-mode regression stays
+	// byte-identical for every live node.
+	if node.State == "dead" {
+		return store.Node{}, false, loopback, status.Error(codes.PermissionDenied, "node is dead")
+	}
 	return node, false, loopback, nil
 }
 

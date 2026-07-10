@@ -181,12 +181,17 @@ func (c *Client) Run(ctx context.Context) error {
 		// the conn is torn down and rebuilt only when the TLS material changes
 		// (renewal → errRenew).
 		rebuild := false
+		// tokenFallback latches after a cert session is refused with
+		// PermissionDenied so the token retry happens at most ONCE per
+		// connection — see the fallback branch below for why this is loop-safe.
+		tokenFallback := false
 		for !rebuild {
 			if ctx.Err() != nil {
 				break
 			}
+			certSes := tr.certSes && !tokenFallback
 			started := time.Now()
-			serr := c.session(ctx, tr.client, tr.certSes)
+			serr := c.session(ctx, tr.client, certSes)
 			c.setConnected(false)
 			if ctx.Err() != nil {
 				break
@@ -201,6 +206,23 @@ func (c *Client) Run(ctx context.Context) error {
 				backoff = c.cfg.BackoffMin
 				rebuild = true
 				break
+			}
+			// Token-mode rollback recovery (design §Безопасность / §Принятые
+			// ограничения): an enrolled agent dials mTLS and sends an empty-token
+			// Hello (the cert is its identity). A master rolled back to `token`
+			// mode ignores the cert and refuses that Hello with PermissionDenied,
+			// which would otherwise strand the node at max-backoff. Fall back ONCE
+			// to a token-authenticated Hello over this SAME already-verified
+			// connection (its RootCAs were checked at dial, so reusing the on-disk
+			// node_token leaks nothing). Loop-safe by construction: the latch
+			// flips certSes off for the rest of this conn's life, so a second
+			// PermissionDenied (genuine auth failure — dead node, or `mtls` with a
+			// bad cert) falls straight through to max-backoff below.
+			// cert → token → (still denied) → backoff, never a spin.
+			if certSes && c.cfg.NodeToken != "" && status.Code(serr) == codes.PermissionDenied {
+				c.logf("[link] mTLS Hello rejected (PermissionDenied) — retrying once with a token-auth Hello (master rolled back to token mode?)")
+				tokenFallback = true
+				continue
 			}
 			if time.Since(started) >= c.cfg.StableAfter {
 				backoff = c.cfg.BackoffMin // the session was healthy — start over
@@ -273,6 +295,14 @@ func (c *Client) session(ctx context.Context, client agentlinkv1.AgentLinkClient
 		Servers:       c.src.Snapshot(),
 	}}}
 	if err := stream.Send(hello); err != nil {
+		// On a streaming RPC a Send races the server's decision: when the master
+		// rejects the Hello, Send surfaces io.EOF and the real status (e.g.
+		// PermissionDenied on a token-mode rollback) is only readable from Recv.
+		// recvLoop has not started yet, so this Recv is race-free — surface the
+		// true code so backoff and the token fallback act on it, not on EOF.
+		if _, rerr := stream.Recv(); rerr != nil {
+			return rerr
+		}
 		return err
 	}
 	c.setConnected(true)
