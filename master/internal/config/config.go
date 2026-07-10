@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/ufna/birdman/master/internal/secrets"
 )
 
 type TLS struct {
@@ -110,6 +112,13 @@ type Config struct {
 	// duration string (e.g. "2m", "30s") — yaml.v3 parses time.Duration via
 	// time.ParseDuration natively.
 	StatsRollupInterval time.Duration `yaml:"stats_rollup_interval"`
+	// SecretsKeyFile is the path to the master's at-rest encryption key —
+	// base64 of 32 random bytes, one line, 0600 (secrets-encryption design §2).
+	// The ansible role provisions /etc/birdman/secrets.key here. Env override
+	// BIRDMAN_SECRETS_KEY_FILE (path); the dev/test env value override is
+	// BIRDMAN_SECRETS_KEY (the base64 key itself, for dev-compose/CI where the
+	// container has no /etc/birdman). Resolved to key bytes by SecretsKey().
+	SecretsKeyFile string `yaml:"secrets_key_file"`
 }
 
 func defaults() Config {
@@ -177,6 +186,9 @@ func Load(path string) (Config, error) {
 	if v := os.Getenv("BIRDMAN_AGENTLINK_AUTH"); v != "" {
 		cfg.AgentlinkAuth = v
 	}
+	if v := os.Getenv("BIRDMAN_SECRETS_KEY_FILE"); v != "" {
+		cfg.SecretsKeyFile = v
+	}
 	if cfg.ListenAPI == "" {
 		cfg.ListenAPI = ":8100"
 	}
@@ -198,4 +210,40 @@ func Load(path string) (Config, error) {
 		return cfg, fmt.Errorf("agentlink_auth %q is not supported (token|mixed|mtls)", cfg.AgentlinkAuth)
 	}
 	return cfg, nil
+}
+
+// SecretsKey resolves the 32-byte at-rest master key (secrets-encryption design
+// §2) from exactly ONE source, deliberately choosing it so a config-file
+// default path and a dev env value cannot trip secrets.LoadKey's both-sources
+// ambiguity guard:
+//
+//   - BIRDMAN_SECRETS_KEY (a base64 key VALUE) WINS when set — the dev-compose/
+//     CI override — even if SecretsKeyFile also holds a (default) path. This is
+//     the normal dev case: master.example.yaml ships a secrets_key_file path,
+//     but a container with no /etc/birdman injects the key by env instead, and
+//     that must not read as "two conflicting sources".
+//   - Otherwise the file at SecretsKeyFile (env BIRDMAN_SECRETS_KEY_FILE
+//     overrides the yaml value, applied in Load) is the single source.
+//
+// Because exactly one source ever reaches LoadKey, its ambiguity error fires
+// only for a genuinely broken direct caller, never for a dev override layered
+// over a default path. The env VALUE is read here rather than stored on Config
+// so a raw key never lands in the marshalled struct. This never generates a
+// key: a missing/invalid source is a hard error (fail-loud; master must not
+// start able to decrypt nothing) — the caller reports it and refuses to boot.
+func (c Config) SecretsKey() ([]byte, error) {
+	if v := os.Getenv("BIRDMAN_SECRETS_KEY"); v != "" {
+		return secrets.LoadKey("", v)
+	}
+	return secrets.LoadKey(c.SecretsKeyFile, "")
+}
+
+// SecretsKeyFileInUse reports whether the resolved key source is the file (not
+// the BIRDMAN_SECRETS_KEY env value), and the path — so the caller can WARN on
+// an over-permissive file mode only when a file is actually read (design §2).
+func (c Config) SecretsKeyFileInUse() (string, bool) {
+	if os.Getenv("BIRDMAN_SECRETS_KEY") != "" {
+		return "", false
+	}
+	return c.SecretsKeyFile, c.SecretsKeyFile != ""
 }

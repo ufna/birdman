@@ -393,13 +393,49 @@ func TestSecretsErrorHygiene(t *testing.T) {
 	}
 }
 
-// assertNoSecret fails if msg contains any of the given secrets as a raw
-// substring (key bytes or plaintext must never surface in an error string).
+// assertNoSecret fails if msg contains any of the given secrets in ANY plausible
+// rendering — raw bytes, lowercase hex, or standard base64. A key or plaintext
+// echoed into an error could be logged; checking only the raw bytes would miss a
+// value that surfaced hex- or base64-encoded (e.g. a mistakenly %x/%q-formatted
+// key), so all three renderings are scanned.
 func assertNoSecret(t *testing.T, label, msg string, secretVals ...[]byte) {
 	t.Helper()
 	for _, s := range secretVals {
-		if len(s) > 0 && strings.Contains(msg, string(s)) {
-			t.Fatalf("%s error leaked a secret (key or plaintext) in its text: %q", label, msg)
+		if len(s) == 0 {
+			continue
 		}
+		for _, rendering := range []string{
+			string(s),
+			hex.EncodeToString(s),
+			base64.StdEncoding.EncodeToString(s),
+		} {
+			if strings.Contains(msg, rendering) {
+				t.Fatalf("%s error leaked a secret (key or plaintext) in its text: %q", label, msg)
+			}
+		}
+	}
+}
+
+// TestSecretsDecryptDoesNotEchoMalformedKeyID guards the carried Task-1 minor:
+// the wrong-key Decrypt error names the envelope's key_id, but that field is
+// attacker/corruption-controlled. A corrupted or legacy value that happens to
+// carry the "birdman:v1:" prefix could put a PLAINTEXT FRAGMENT where the key_id
+// belongs; Decrypt must shape-check the key_id (8 hex chars) and refuse to echo
+// anything else, so no plaintext can spill into a logged error via the key_id
+// slot.
+func TestSecretsDecryptDoesNotEchoMalformedKeyID(t *testing.T) {
+	c, err := secrets.New(key32(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	leak := "ghp_PLAINTEXT_LEAK_do_not_echo_me"
+	// A value whose 3rd ':'-field is a plaintext fragment, not a real key_id.
+	forged := prefix + leak + ":" + base64.StdEncoding.EncodeToString([]byte("body"))
+	_, err = c.Decrypt(forged, colToken)
+	if err == nil {
+		t.Fatal("Decrypt of an envelope with a non-key_id 3rd field must fail")
+	}
+	if strings.Contains(err.Error(), leak) {
+		t.Fatalf("Decrypt echoed a plaintext fragment from the key_id slot into its error: %q", err.Error())
 	}
 }

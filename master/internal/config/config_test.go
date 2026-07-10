@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"testing"
@@ -85,6 +87,89 @@ func TestLoadTLSExtraSANs(t *testing.T) {
 	if len(cfg.TLS.ExtraSANs) != 2 || cfg.TLS.ExtraSANs[0] != "master.internal" || cfg.TLS.ExtraSANs[1] != "10.0.0.5" {
 		t.Fatalf("extra_sans = %v, want [master.internal 10.0.0.5]", cfg.TLS.ExtraSANs)
 	}
+}
+
+// secrets-encryption design §2: secrets_key_file is loaded from yaml and
+// overridden by BIRDMAN_SECRETS_KEY_FILE.
+func TestLoadSecretsKeyFileEnvOverride(t *testing.T) {
+	withDSN(t)
+	path := writeConfig(t, "secrets_key_file: \"/etc/birdman/secrets.key\"\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SecretsKeyFile != "/etc/birdman/secrets.key" {
+		t.Fatalf("secrets_key_file from yaml = %q", cfg.SecretsKeyFile)
+	}
+	t.Setenv("BIRDMAN_SECRETS_KEY_FILE", "/run/keys/other.key")
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SecretsKeyFile != "/run/keys/other.key" {
+		t.Fatalf("env override secrets_key_file = %q, want /run/keys/other.key", cfg.SecretsKeyFile)
+	}
+}
+
+// TestConfigSecretsKeyEnvValueWinsOverFile is the precedence crux (design §2):
+// with BOTH a secrets_key_file (a valid key file) AND the BIRDMAN_SECRETS_KEY
+// dev env VALUE set, SecretsKey() must resolve to the ENV value and must NOT
+// raise LoadKey's both-sources ambiguity error — a dev override layered over a
+// shipped default path is the normal dev case, not a misconfiguration.
+func TestConfigSecretsKeyEnvValueWinsOverFile(t *testing.T) {
+	fileKey := bytes.Repeat([]byte{0x11}, 32)
+	envKey := bytes.Repeat([]byte{0x22}, 32)
+	path := writeKeyFile(t, fileKey)
+
+	cfg := Config{SecretsKeyFile: path}
+	t.Setenv("BIRDMAN_SECRETS_KEY", base64.StdEncoding.EncodeToString(envKey))
+
+	got, err := cfg.SecretsKey()
+	if err != nil {
+		t.Fatalf("SecretsKey with both sources must NOT be ambiguous (env wins): %v", err)
+	}
+	if !bytes.Equal(got, envKey) {
+		t.Fatal("SecretsKey returned the file key; the env value must win as a dev override")
+	}
+	// And a file is then NOT in use (no mode WARN to do).
+	if _, inUse := cfg.SecretsKeyFileInUse(); inUse {
+		t.Fatal("SecretsKeyFileInUse must be false when the env value is the source")
+	}
+}
+
+// With no env value, the file is the single source and is reported in use.
+func TestConfigSecretsKeyFromFile(t *testing.T) {
+	fileKey := bytes.Repeat([]byte{0x33}, 32)
+	path := writeKeyFile(t, fileKey)
+	cfg := Config{SecretsKeyFile: path}
+
+	got, err := cfg.SecretsKey()
+	if err != nil {
+		t.Fatalf("SecretsKey(file): %v", err)
+	}
+	if !bytes.Equal(got, fileKey) {
+		t.Fatal("SecretsKey returned the wrong key from the file")
+	}
+	if p, inUse := cfg.SecretsKeyFileInUse(); !inUse || p != path {
+		t.Fatalf("SecretsKeyFileInUse = (%q, %v), want (%q, true)", p, inUse, path)
+	}
+}
+
+// No source at all → fail loud (master must not start).
+func TestConfigSecretsKeyMissing(t *testing.T) {
+	cfg := Config{}
+	if _, err := cfg.SecretsKey(); err == nil {
+		t.Fatal("SecretsKey with neither a file nor the env value must error")
+	}
+}
+
+func writeKeyFile(t *testing.T, key []byte) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "secrets.key")
+	if err := os.WriteFile(path, []byte(base64.StdEncoding.EncodeToString(key)+"\n"), 0o600); err != nil {
+		t.Fatalf("write key file: %v", err)
+	}
+	return path
 }
 
 func writeConfig(t *testing.T, body string) string {

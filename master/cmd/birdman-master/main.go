@@ -30,6 +30,7 @@ import (
 	"github.com/ufna/birdman/master/internal/matchmaker"
 	"github.com/ufna/birdman/master/internal/metrics"
 	"github.com/ufna/birdman/master/internal/reconcile"
+	"github.com/ufna/birdman/master/internal/secrets"
 	"github.com/ufna/birdman/master/internal/statsrollup"
 	"github.com/ufna/birdman/master/internal/store"
 	"github.com/ufna/birdman/master/internal/tlsutil"
@@ -66,11 +67,47 @@ func run() error {
 	}
 	log.Info("migrations applied")
 
-	st, err := store.Open(ctx, cfg.DSN)
+	// At-rest secrets key (design §2): load the box key and build the AEAD codec
+	// BEFORE opening the store, which now requires it. Fail loud — a missing or
+	// invalid key means the master cannot decrypt registries.token /
+	// internal_ca.key_pem, so it must NOT start. It NEVER auto-generates a key:
+	// that would mask a DR escrow failure by minting a key the existing
+	// ciphertext cannot be read with.
+	key, err := cfg.SecretsKey()
+	if err != nil {
+		return fmt.Errorf("secrets key: %w", err)
+	}
+	codec, err := secrets.New(key)
+	if err != nil {
+		return fmt.Errorf("secrets codec: %w", err)
+	}
+	// A key file more permissive than 0600 is a WARN, not a failure (design §2)
+	// — and only when a file is actually the source (the dev env value has no
+	// file to stat).
+	if path, ok := cfg.SecretsKeyFileInUse(); ok {
+		if info, statErr := os.Stat(path); statErr == nil && info.Mode().Perm()&0o077 != 0 {
+			log.Warn("secrets key file is more permissive than 0600",
+				"path", path, "mode", info.Mode().Perm().String())
+		}
+	}
+
+	st, err := store.Open(ctx, cfg.DSN, codec)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
+
+	// Encrypt any legacy plaintext registries.token / internal_ca.key_pem rows
+	// in place, under an advisory lock, IMMEDIATELY after Open and BEFORE the
+	// first secret read (EnsureInternalCA below) or any serving — so the strict
+	// read paths never trip on pre-encryption data and an old plaintext dump
+	// stays restorable (restore → start → this pass encrypts it; design §3).
+	// Logs only a count, never a secret value.
+	if n, err := st.EncryptExistingSecrets(ctx); err != nil {
+		return fmt.Errorf("encrypt existing secrets: %w", err)
+	} else if n > 0 {
+		log.Info("secrets: encrypted existing rows at-rest", "count", n)
+	}
 
 	// Bootstrap: with no API keys in the database, mint an admin key and
 	// print it once (docs/specs/master.md §6, уточнено в v0).

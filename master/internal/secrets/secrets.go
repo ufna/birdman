@@ -105,6 +105,15 @@ func (c *Codec) Decrypt(envelope string, aad string) ([]byte, error) {
 		return nil, errors.New("secrets: malformed envelope")
 	}
 	envKeyID := parts[2]
+	// Shape-check the key_id BEFORE it can reach an error string. The field is
+	// controlled by the (possibly corrupted or legacy) input, so a value that
+	// carries our prefix but arbitrary text in the key_id slot could otherwise
+	// spill a plaintext fragment into a logged mismatch error. A real key_id is
+	// exactly keyIDBytes*2 lowercase hex chars; anything else is a malformed
+	// envelope and is never echoed.
+	if !isKeyID(envKeyID) {
+		return nil, errors.New("secrets: malformed envelope: bad key_id")
+	}
 	if envKeyID != c.keyID {
 		// The DR crux: name both fingerprints so an operator sees exactly which
 		// key the ciphertext needs versus which key is loaded (design §6). key_id
@@ -133,6 +142,23 @@ func (c *Codec) Decrypt(envelope string, aad string) ([]byte, error) {
 // paths use it to tell an already-encrypted value from a legacy plaintext one.
 func IsEncrypted(s string) bool {
 	return strings.HasPrefix(s, envPrefix)
+}
+
+// isKeyID reports whether s has the exact shape of a key_id fingerprint —
+// keyIDBytes*2 lowercase hex chars. Decrypt validates the envelope's key_id
+// field with this before echoing it, so only a well-formed fingerprint (never a
+// corrupted value's arbitrary bytes) can appear in a mismatch error.
+func isKeyID(s string) bool {
+	if len(s) != keyIDBytes*2 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 // LoadKey resolves the 32-byte master key from exactly one source and returns
