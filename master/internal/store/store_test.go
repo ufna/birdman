@@ -65,6 +65,76 @@ func TestAPIKeys(t *testing.T) {
 	}
 }
 
+// TestAPIKeyPurge covers PurgeAPIKey's tri-state result (registries v1
+// design §6, docs/superpowers/specs/2026-07-09-registries-design.md): an
+// active key refuses (notRevoked=true, nothing deleted); a revoked key is
+// hard-deleted (purged=true); an unknown or already-purged id reports both
+// false with no error — retrying purge is never a destructive escalation.
+func TestAPIKeyPurge(t *testing.T) {
+	st := testdb.New(t)
+	ctx := context.Background()
+
+	active, _, err := st.CreateAPIKey(ctx, "active", []string{"readonly"})
+	if err != nil {
+		t.Fatalf("create active: %v", err)
+	}
+	revoked, _, err := st.CreateAPIKey(ctx, "revoked", []string{"readonly"})
+	if err != nil {
+		t.Fatalf("create revoked: %v", err)
+	}
+	if _, _, err := st.RevokeAPIKey(ctx, revoked.ID); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+
+	// Active key: purge refuses, nothing deleted.
+	if k, purged, notRevoked, err := st.PurgeAPIKey(ctx, active.ID); err != nil || purged || !notRevoked {
+		t.Fatalf("purge active: k=%+v purged=%v notRevoked=%v err=%v", k, purged, notRevoked, err)
+	}
+	keys, err := st.ListAPIKeys(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasAPIKey(keys, active.ID) {
+		t.Fatalf("purge must not delete an active key")
+	}
+
+	// Revoked key: purge deletes the row and returns its last known fields.
+	k, purged, notRevoked, err := st.PurgeAPIKey(ctx, revoked.ID)
+	if err != nil || !purged || notRevoked {
+		t.Fatalf("purge revoked: k=%+v purged=%v notRevoked=%v err=%v", k, purged, notRevoked, err)
+	}
+	if k.Name != "revoked" {
+		t.Fatalf("purge returned wrong key: %+v", k)
+	}
+	keys, err = st.ListAPIKeys(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasAPIKey(keys, revoked.ID) {
+		t.Fatalf("purged key still present in ListAPIKeys")
+	}
+
+	// Retry on the now-gone id: both false, no error — not a destructive
+	// escalation on a repeated ?purge=true.
+	if k, purged, notRevoked, err := st.PurgeAPIKey(ctx, revoked.ID); err != nil || purged || notRevoked {
+		t.Fatalf("retry purge: k=%+v purged=%v notRevoked=%v err=%v", k, purged, notRevoked, err)
+	}
+
+	// Unknown id: same as retry — both false, no error.
+	if k, purged, notRevoked, err := st.PurgeAPIKey(ctx, uuid.NewString()); err != nil || purged || notRevoked {
+		t.Fatalf("purge unknown: k=%+v purged=%v notRevoked=%v err=%v", k, purged, notRevoked, err)
+	}
+}
+
+func hasAPIKey(keys []store.APIKey, id string) bool {
+	for _, k := range keys {
+		if k.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 // 100 goroutines race for a single ready server: exactly one allocation
 // succeeds, the rest get no_capacity (docs/specs/master.md §3).
 func TestAllocateConcurrentSingleServer(t *testing.T) {

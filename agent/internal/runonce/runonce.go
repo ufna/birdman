@@ -130,7 +130,12 @@ func Run(ctx context.Context, opts Options) int {
 	}
 	defer client.Close()
 
-	var creds *runtime.Credentials
+	// run-once is deliberately host-blind (docs/superpowers/specs/2026-07-09-registries-design.md
+	// §3): the operator supplies image_ref directly on the command line —
+	// there is no attacker-controlled input here, unlike the daemon's
+	// master/legacy host-matched chain — so the configured file cred, if
+	// any, applies regardless of the ref's host.
+	var lookup runtime.CredLookup
 	if cfg.RegistryAuth != nil {
 		token, err := cfg.RegistryAuth.Token()
 		if err != nil {
@@ -138,11 +143,12 @@ func Run(ctx context.Context, opts Options) int {
 			diag.Printf("%v", err)
 			return 1
 		}
-		creds = &runtime.Credentials{Username: cfg.RegistryAuth.Username, Token: token}
+		username := cfg.RegistryAuth.Username
+		lookup = func(string) (string, string, error) { return username, token, nil }
 	}
 
 	diag.Printf("ensuring image %s (pull if not local)", opts.ImageRef)
-	img, err := client.EnsureImage(ctx, opts.ImageRef, creds)
+	img, err := client.EnsureImage(ctx, opts.ImageRef, lookup)
 	if err != nil {
 		transition(lifecycle.StateFailed, "image pull failed")
 		diag.Printf("%v", err)

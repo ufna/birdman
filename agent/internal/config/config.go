@@ -18,11 +18,21 @@ type Limits struct {
 	MemMB     int `yaml:"mem_mb"`
 }
 
-// RegistryAuth configures pulls from a private registry (GHCR).
+// RegistryAuth configures pulls from a private registry (GHCR by default).
 // The token itself lives only in TokenFile — never in the config or code.
+// This is the legacy (pre-registries-v1) fallback: the primary path is the
+// master's Admin → Registries (agent-side host-match pull auth,
+// docs/superpowers/specs/2026-07-09-registries-design.md §3).
 type RegistryAuth struct {
 	Username  string `yaml:"username"`
 	TokenFile string `yaml:"token_file"`
+	// Host scopes this credential to one registry host (host-matched
+	// against image_ref, same as the master-supplied creds — §3): an
+	// attacker-controlled image_ref on a foreign host must not receive this
+	// token either. Optional; defaults to ghcr.io (with a one-time WARN,
+	// agent/internal/daemon.Manager) for configs written before this field
+	// existed.
+	Host string `yaml:"host"`
 }
 
 // Token reads the registry token from TokenFile. The value must never be
@@ -181,6 +191,17 @@ func (c *Config) validate() error {
 	if a := c.RegistryAuth; a != nil {
 		if a.Username == "" || a.TokenFile == "" {
 			return fmt.Errorf("registry_auth: username and token_file are required")
+		}
+		// A legacy docker.io host can never match a real pull: containerd
+		// resolves docker.io/index.docker.io to registry-1.docker.io before
+		// the host-match runs (daemon.Manager.legacyCred), so this cred would
+		// silently never fire — the same reason master's
+		// store.NormalizeRegistryHost rejects it on POST /v1/registries
+		// (docs/superpowers/specs/2026-07-09-registries-design.md §3, task
+		// review Fix 4). Config-time validation error, not just a runtime
+		// WARN: a misconfig here should not boot silently.
+		if h := strings.ToLower(strings.TrimSpace(a.Host)); h == "docker.io" || h == "index.docker.io" {
+			return fmt.Errorf("registry_auth: host %q is not supported — docker.io/index.docker.io resolves to registry-1.docker.io, so an exact host-match cred can never fire", a.Host)
 		}
 	}
 	if c.LogMaxSizeMB < 0 || c.LogRetentionDays < 0 {

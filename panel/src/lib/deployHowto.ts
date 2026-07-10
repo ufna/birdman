@@ -5,6 +5,13 @@
 // no-hardcoded.test.ts счастливым: кириллицы в этом файле нет вообще (это
 // код-примеры, не UI-текст — подписи вокруг них живут в DeployHowto.tsx
 // через t()).
+//
+// Task 7 (registries v1 §5, docs/superpowers/specs/2026-07-09-registries-design.md)
+// добавляет опциональную подстановку deploy-ключа в билдеры (HowtoKey) и два
+// чистых хелпера для пикера/inline-создания на карточке: deployKeyOptions
+// (фильтр активных deploy/admin ключей) и defaultDeployKeyName (deploy-YYYYMMDD).
+
+import type { ApiKey } from './api';
 
 /**
  * Контекст карточки: origin — адрес панели/master (за SSH-туннелем это
@@ -26,20 +33,43 @@ export const GENERIC_IMAGE_EXAMPLE = 'ghcr.io/<org>/<game>-server:1.2.3';
 const PROJECT_PLACEHOLDER = '<project>';
 
 /**
+ * Deploy-ключ, чьи данные подставляются в curl-команды карточки (Task 7 §5):
+ * name всегда всплывает комментарием `# key: <name>` над командой; secret,
+ * если известен (ключ создан прямо сейчас), заменяет плейсхолдер
+ * $BIRDMAN_DEPLOY_KEY в Authorization. Без secret (выбран СУЩЕСТВУЮЩИЙ ключ)
+ * плейсхолдер остаётся — секреты старых ключей невосстановимы by design
+ * (bcrypt-хэш, показ ровно один раз при создании).
+ */
+export interface HowtoKey {
+  name: string;
+  secret?: string;
+}
+
+function keyCommentLines(key: HowtoKey | undefined): string[] {
+  return key !== undefined ? [`# key: ${key.name}`] : [];
+}
+
+function bearerToken(key: HowtoKey | undefined): string {
+  return key?.secret ?? '$BIRDMAN_DEPLOY_KEY';
+}
+
+/**
  * curl регистрации версии: POST {origin}/v1/versions (скоуп deploy), тело
  * {project, semver, image_ref, channel} — поля сверены с
- * master/internal/httpapi/handlers.go (createVersionRequest). Ключ — только
- * плейсхолдер $BIRDMAN_DEPLOY_KEY, секретов в командах нет. Формат
+ * master/internal/httpapi/handlers.go (createVersionRequest). Без key — только
+ * плейсхолдер $BIRDMAN_DEPLOY_KEY, секретов в командах нет (поведение по
+ * умолчанию не меняется — Task 7 добавляет key строго опционально). Формат
  * Authorization: Bearer сверен с master/internal/httpapi/auth.go.
  */
-export function registerVersionCurl(ctx: HowtoCtx, semver: string, channel: 'staging' | 'prod'): string {
+export function registerVersionCurl(ctx: HowtoCtx, semver: string, channel: 'staging' | 'prod', key?: HowtoKey): string {
   const body = JSON.stringify(
     { project: ctx.project, semver, image_ref: ctx.exampleImage, channel },
     null,
     2,
   );
   return [
-    'curl -H "Authorization: Bearer $BIRDMAN_DEPLOY_KEY" \\',
+    ...keyCommentLines(key),
+    `curl -H "Authorization: Bearer ${bearerToken(key)}" \\`,
     '  -H "Content-Type: application/json" \\',
     `  -X POST ${ctx.origin}/v1/versions \\`,
     `  -d '${body}'`,
@@ -50,11 +80,12 @@ export function registerVersionCurl(ctx: HowtoCtx, semver: string, channel: 'sta
  * curl деплоя уже зарегистрированной версии: POST {origin}/v1/deploy, тело
  * {version_id} (см. panel/src/lib/api.ts — api.deploy). version_id — плейсхолдер:
  * реальный id смотрят в таблице версий этого же экрана (появится там после
- * регистрации).
+ * регистрации). key — см. registerVersionCurl.
  */
-export function deployCurl(ctx: HowtoCtx): string {
+export function deployCurl(ctx: HowtoCtx, key?: HowtoKey): string {
   return [
-    'curl -H "Authorization: Bearer $BIRDMAN_DEPLOY_KEY" \\',
+    ...keyCommentLines(key),
+    `curl -H "Authorization: Bearer ${bearerToken(key)}" \\`,
     '  -H "Content-Type: application/json" \\',
     `  -X POST ${ctx.origin}/v1/deploy \\`,
     `  -d '{"version_id":"<version_id>"}'`,
@@ -78,4 +109,27 @@ export function buildHowtoCtx(
   const [{ project, versions }] = projects;
   const active = versions.find((v) => v.state === 'active') ?? versions[0];
   return { origin, project, exampleImage: active?.image_ref ?? GENERIC_IMAGE_EXAMPLE };
+}
+
+/**
+ * Ключи, которые имеет смысл предлагать в пикере шага 2 (Task 7 §5): активные
+ * (не отозванные) и способные аутентифицировать деплой-команды — скоуп
+ * `deploy` или `admin` (admin включает deploy, master §6). Revoked-ключ в
+ * комментарии команды был бы вводящим в заблуждение, а ключ без deploy/admin
+ * не смог бы выполнить сами curl-команды.
+ */
+export function deployKeyOptions(keys: ApiKey[]): ApiKey[] {
+  return keys.filter((k) => k.revoked_at === null && (k.scopes.includes('deploy') || k.scopes.includes('admin')));
+}
+
+/**
+ * Дефолтное имя для только что создаваемого deploy-ключа: `deploy-YYYYMMDD`.
+ * UTC-геттеры — значение детерминировано независимо от локальной TZ вызывающего
+ * (важно для тестов и для консистентности с остальным UTC-соглашением панели).
+ */
+export function defaultDeployKeyName(now: Date = new Date()): string {
+  const y = now.getUTCFullYear();
+  const m = String(now.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(now.getUTCDate()).padStart(2, '0');
+  return `deploy-${String(y)}${m}${d}`;
 }

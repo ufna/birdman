@@ -77,6 +77,15 @@ func (s *Server) handleRevokeAPIKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "api key id must be a uuid")
 		return
 	}
+	// ?purge=true|1 hard-deletes an already-revoked key instead of the
+	// default soft-revoke (registries v1 design §6): same-route-double-DELETE
+	// escalation was rejected on review — an explicit, distinct query value is
+	// required, so a plain retry/double-click of the revoke call (no purge
+	// param, or any other value) keeps taking the byte-identical path below.
+	if isTrue(r.URL.Query().Get("purge")) {
+		s.purgeAPIKey(w, r, id)
+		return
+	}
 	key, changed, err := s.st.RevokeAPIKey(r.Context(), id)
 	switch {
 	case errors.Is(err, store.ErrLastAdminKey):
@@ -103,4 +112,36 @@ func (s *Server) handleRevokeAPIKey(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"key": key})
+}
+
+// purgeAPIKey handles DELETE /v1/apikeys/{id}?purge=true (registries v1
+// design §6): hard-deletes a key row, but ONLY if it is already revoked —
+// purge never revokes on its own behalf, so an active key answers 409
+// not_revoked instead of being silently revoked-then-deleted. A missing row
+// (unknown id, or the same id purged again) answers 404: the retry case is
+// deliberately a no-op-shaped 404, not a repeated 204, so a double-click
+// can't escalate into anything more destructive than the first call already
+// was.
+func (s *Server) purgeAPIKey(w http.ResponseWriter, r *http.Request, id string) {
+	key, purged, notRevoked, err := s.st.PurgeAPIKey(r.Context(), id)
+	switch {
+	case err != nil:
+		storeError(w, err)
+		return
+	case notRevoked:
+		writeError(w, http.StatusConflict, "not_revoked", "key is still active; revoke it before purging")
+		return
+	case !purged:
+		writeError(w, http.StatusNotFound, "not_found", "api key "+id+" not found")
+		return
+	}
+	// Defense in depth, mirroring revoke: the key is already revoked and so
+	// already refused by AuthAPIKey, but drop any stale cache/session entry
+	// for it anyway.
+	s.auth.invalidateKey(id)
+	if err := s.st.InsertEvent(r.Context(), store.EventAPIKeyPurged, store.EventRef{},
+		map[string]any{"name": key.Name}); err != nil {
+		s.log.Error("apikey: purge event write failed", "key_id", key.ID, "err", err)
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

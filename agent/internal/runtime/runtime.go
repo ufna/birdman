@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/oci"
 	"github.com/containerd/containerd/remotes/docker"
+	"github.com/distribution/reference"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 )
 
@@ -61,11 +63,41 @@ const (
 	serverOOMScoreAdj = 500
 )
 
-// Credentials authenticate pulls from a private registry. Token is read from
-// registry_auth.token_file by the caller and must never be logged.
-type Credentials struct {
-	Username string
-	Token    string
+// CredLookup resolves the pull credential for a registry host (registries
+// v1, docs/superpowers/specs/2026-07-09-registries-design.md §3). host is
+// whatever the containerd docker resolver is actually about to contact — the
+// implementation must key off exactly that (host-matched auth, no fallback
+// to "any host" — the security property this whole design closes: an
+// attacker-controlled image_ref on a foreign host must never receive our
+// token). token must never be logged by any implementation.
+//
+// The signature matches docker.WithAuthCreds's own callback exactly (so an
+// implementation plugs straight into it, no adapting closure needed) and
+// carries its error convention: err != nil fails the pull — e.g. a matched
+// legacy registry_auth whose token_file can't be read must fail loudly
+// rather than degrade to an anonymous pull that only shows up later as a
+// confusing registry 401. username == "" && err == nil means no cred source
+// matched host: pull anonymously.
+type CredLookup func(host string) (username, token string, err error)
+
+// HostFromRef extracts the normalized (lowercase) registry host out of an
+// image reference using a real reference parser
+// (github.com/distribution/reference — already pulled in transitively via
+// containerd/images/archive, so this adds no new dependency), not a naive
+// string split: it follows the same bare-ref/host:port/Docker-Hub
+// normalization rules as the master's host validation
+// (store.NormalizeRegistryHost), including defaulting an unqualified ref
+// (e.g. "ubuntu:22.04") to "docker.io" — v1 never stores a credential for
+// docker.io (rejected at the master API), so that host always falls through
+// to an anonymous pull. ok=false means the ref could not be parsed at all
+// (no host to look up — the caller falls back to anonymous, or to a
+// host-blind fallback where that is deliberate, e.g. run-once).
+func HostFromRef(ref string) (host string, ok bool) {
+	named, err := reference.ParseNormalizedNamed(ref)
+	if err != nil {
+		return "", false
+	}
+	return strings.ToLower(reference.Domain(named)), true
 }
 
 // Client is a containerd client bound to the birdman namespace.
@@ -87,8 +119,13 @@ func (c *Client) Close() error { return c.c.Close() }
 
 // EnsureImage returns the image for ref: the local content store first
 // (обычно образ уже прогрет PrePull'ом — agent.md §3), иначе pull из
-// registry с авторизацией (creds != nil).
-func (c *Client) EnsureImage(ctx context.Context, ref string, creds *Credentials) (containerd.Image, error) {
+// registry с авторизацией — lookup is consulted with the resolver-provided
+// host (the host containerd's docker authorizer is actually about to
+// contact, NOT a host we compute ourselves — docs/superpowers/specs/2026-07-09-registries-design.md
+// §3); an error from lookup fails the pull (e.g. an unreadable legacy
+// token_file), an empty username with a nil error means anonymous. lookup
+// may be nil (always anonymous).
+func (c *Client) EnsureImage(ctx context.Context, ref string, lookup CredLookup) (containerd.Image, error) {
 	if img, err := c.c.GetImage(ctx, ref); err == nil {
 		ok, uerr := img.IsUnpacked(ctx, containerd.DefaultSnapshotter)
 		if uerr == nil && ok {
@@ -102,11 +139,12 @@ func (c *Client) EnsureImage(ctx context.Context, ref string, creds *Credentials
 		// локальный образ есть, но непригоден — честный pull ниже
 	}
 	opts := []containerd.RemoteOpt{containerd.WithPullUnpack}
-	if creds != nil {
-		authorizer := docker.NewDockerAuthorizer(
-			docker.WithAuthCreds(func(host string) (string, string, error) {
-				return creds.Username, creds.Token, nil
-			}))
+	if lookup != nil {
+		// CredLookup already has docker.WithAuthCreds's own callback shape
+		// (host string) (string, string, error), error convention included —
+		// no adapting closure needed, and no swallowing a lookup error into
+		// a silent anonymous pull.
+		authorizer := docker.NewDockerAuthorizer(docker.WithAuthCreds(lookup))
 		resolver := docker.NewResolver(docker.ResolverOptions{
 			Hosts: docker.ConfigureDefaultRegistries(docker.WithAuthorizer(authorizer)),
 		})

@@ -8,6 +8,8 @@ package daemon
 import (
 	"context"
 	"syscall"
+
+	"github.com/ufna/birdman/agent/internal/runtime"
 )
 
 // Exit is the terminal status of a server container.
@@ -46,6 +48,10 @@ type StartSpec struct {
 	CPUMillis  int
 	MemMB      int
 	Env        map[string]string
+	// Lookup resolves the registry credential for the image pull, host-first
+	// (registries v1, docs/superpowers/specs/2026-07-09-registries-design.md
+	// §3). May be nil (always anonymous).
+	Lookup runtime.CredLookup
 }
 
 // RestoredServer is one container recovered from the runtime on startup.
@@ -62,8 +68,9 @@ type RestoredServer struct {
 
 // Runtime abstracts containerd for the manager.
 type Runtime interface {
-	// Pull ensures the image is present locally (PrePull).
-	Pull(ctx context.Context, imageRef string) error
+	// Pull ensures the image is present locally (PrePull). lookup resolves
+	// the registry credential, host-first (registries v1, §3); may be nil.
+	Pull(ctx context.Context, imageRef string, lookup runtime.CredLookup) error
 	// Start ensures the image, creates and starts the container.
 	Start(ctx context.Context, spec StartSpec) (Handle, error)
 	// Restore lists containers owned by the agent and re-attaches to them.

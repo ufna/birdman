@@ -4,45 +4,26 @@ import (
 	"context"
 	"syscall"
 
-	"github.com/ufna/birdman/agent/internal/config"
 	"github.com/ufna/birdman/agent/internal/imagegc"
 	"github.com/ufna/birdman/agent/internal/runtime"
 )
 
 // ContainerdRuntime adapts runtime.Client (containerd) to the Runtime
-// interface. Registry credentials are resolved lazily per pull so a rotated
-// token file is picked up without an agent restart.
+// interface. Registry auth is resolved by the caller-supplied CredLookup
+// (registries v1, docs/superpowers/specs/2026-07-09-registries-design.md
+// §3) — the manager owns the master-snapshot/legacy-file/anonymous chain,
+// this type just forwards it to EnsureImage.
 type ContainerdRuntime struct {
 	Client *runtime.Client
-	Auth   *config.RegistryAuth // nil for public images
 }
 
-func (r *ContainerdRuntime) creds() (*runtime.Credentials, error) {
-	if r.Auth == nil {
-		return nil, nil
-	}
-	token, err := r.Auth.Token()
-	if err != nil {
-		return nil, err
-	}
-	return &runtime.Credentials{Username: r.Auth.Username, Token: token}, nil
-}
-
-func (r *ContainerdRuntime) Pull(ctx context.Context, imageRef string) error {
-	creds, err := r.creds()
-	if err != nil {
-		return err
-	}
-	_, err = r.Client.EnsureImage(ctx, imageRef, creds)
+func (r *ContainerdRuntime) Pull(ctx context.Context, imageRef string, lookup runtime.CredLookup) error {
+	_, err := r.Client.EnsureImage(ctx, imageRef, lookup)
 	return err
 }
 
 func (r *ContainerdRuntime) Start(ctx context.Context, spec StartSpec) (Handle, error) {
-	creds, err := r.creds()
-	if err != nil {
-		return nil, err
-	}
-	img, err := r.Client.EnsureImage(ctx, spec.ImageRef, creds)
+	img, err := r.Client.EnsureImage(ctx, spec.ImageRef, spec.Lookup)
 	if err != nil {
 		return nil, err
 	}

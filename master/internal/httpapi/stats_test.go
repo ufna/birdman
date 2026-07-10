@@ -274,15 +274,29 @@ func seedStatsRollupWindow(t *testing.T, st *store.Store, f *testdb.Fixture) tim
 		endAt(today.AddDate(0, 0, -2).Add(30*time.Minute)))
 
 	// Trailing live window (yesterday/today): a still-running match plus two
-	// finished ones on "today", one of them zero-duration.
+	// finished ones on "today", one of them zero-duration. The still-running
+	// match is anchored to "yesterday" (today.AddDate(-1)) plus a fixed
+	// hour — always safely in the past no matter when the test runs, since
+	// yesterday necessarily ended before today (and so before `now`) began.
+	// The two "today" matches below are instead anchored to `now` itself
+	// (with a few minutes' safety margin), NOT to a fixed hour of today: a
+	// fixed hour (e.g. the today+7h this used to be) is only in the past if
+	// the test happens to run after that hour UTC — otherwise the match has
+	// a future started_at, which store.StatMatchesOverlapping (the live
+	// tail's raw-match input, bounded by started_at < now) correctly
+	// excludes while the on-the-fly reference's store.StatMatches (no upper
+	// bound at all) still includes — surfacing as an extra bucket in one
+	// path but not the other. That was this test's actual, easily
+	// reproduced (any run before ~07:00 UTC — a large chunk of every day)
+	// historical flake, not anything UTC-midnight-specific.
 	insertStatMatchAt(t, st, srv110, "eu", 5,
 		today.AddDate(0, 0, -1).Add(9*time.Hour+58*time.Minute),
 		today.AddDate(0, 0, -1).Add(10*time.Hour),
 		nil) // still running
 	insertStatMatchAt(t, st, srv100, "eu", 6,
-		today.Add(59*time.Minute), today.Add(time.Hour), endAt(today.Add(time.Hour+20*time.Minute)))
+		now.Add(-4*time.Minute), now.Add(-3*time.Minute), endAt(now.Add(-1*time.Minute)))
 	insertStatMatchAt(t, st, srv100, "eu-degenerate", 1,
-		today.Add(7*time.Hour-time.Minute), today.Add(7*time.Hour), endAt(today.Add(7*time.Hour)))
+		now.Add(-6*time.Minute), now.Add(-5*time.Minute), endAt(now.Add(-5*time.Minute)))
 
 	return today
 }
@@ -342,28 +356,68 @@ func TestStatsOverviewRollupBacked(t *testing.T) {
 		}
 	})
 
+	// equals_on_the_fly_path must hold no matter what moment in the UTC day
+	// it happens to run at — see the two time-anchoring choices below, both
+	// needed to make that true (confirmed by forcing the crossing in a
+	// throwaway probe while diagnosing this test's historical flakiness):
+	//
+	//  1. The reference reuses the handler's own GeneratedAt as `now` instead
+	//     of taking a fresh time.Now(). Without this, whenever the handler's
+	//     now and this test's own (separate, necessarily slightly later)
+	//     now() straddle a UTC day boundary, stats.DayAxisUTC produces two
+	//     different day axes (shifted by one day), so every bucketed field
+	//     mismatches for reasons that have nothing to do with a real bug.
+	//
+	//  2. Backfill is (re-)run at the top of every loop iteration instead of
+	//     once before the loop, even though it's the same rollup window
+	//     every time — it's idempotent (store.UpsertRollupDay replaces,
+	//     never appends), so this only costs a few extra milliseconds.
+	//     Backfill decides its own immutable/live split from ITS OWN
+	//     time.Now(), independent of the handler's; reusing GeneratedAt
+	//     (point 1) can't paper over the two disagreeing, because that
+	//     disagreement is baked into the rollup table's actual contents
+	//     before the handler ever runs. Concretely: if a UTC midnight passes
+	//     between Backfill's now and the handler's, the day that was
+	//     "yesterday" when Backfill ran is skipped by Backfill (its own
+	//     trailing-2-day exclusion) *and* dropped by the handler's live-tail
+	//     recompute (statsDims' filterDimsFrom, because by the handler's now
+	//     that day is no longer "yesterday or today") — e.g. the
+	//     still-running match seedStatsRollupWindow seeds on "yesterday"
+	//     would silently vanish from the rollup-backed response (matches,
+	//     players, peak CCU and its semver's version_distribution entry all
+	//     go missing for that one day) while the on-the-fly reference, a
+	//     plain raw-table scan with no rollup dependency, still has it —
+	//     a real, if narrow (bounded by Backfill's own runtime — ~25ms
+	//     measured against this suite's dockerized Postgres, so a ~1-in-3M
+	//     chance per run of even landing in the vulnerable window), gap.
+	//     Re-running Backfill immediately before each request shrinks that
+	//     window to Backfill's own runtime instead of the whole subtest's
+	//     cumulative runtime (seeding + any earlier iterations) — the best
+	//     achievable from the test side without an injectable clock in
+	//     internal/statsrollup or internal/httpapi (out of scope: this is a
+	//     test fix, not a production one).
 	t.Run("equals_on_the_fly_path", func(t *testing.T) {
 		ts, st, f, roSecret := newStatsAPI(t)
 		ctx := t.Context()
 		seedStatsRollupWindow(t, st, f)
 
 		job := statsrollup.New(st, time.Hour, opsLog())
-		if err := job.Backfill(ctx); err != nil {
-			t.Fatalf("backfill: %v", err)
-		}
 
 		for _, days := range []int{30, 7} {
+			if err := job.Backfill(ctx); err != nil {
+				t.Fatalf("backfill: %v", err)
+			}
+
 			var got stats.OverviewResponse
 			httpGetJSON(t, ts.URL, fmt.Sprintf("/v1/stats/overview?days=%d", days), roSecret, &got)
 
-			now := time.Now().UTC()
+			now := got.GeneratedAt // the handler's own clock snapshot, not a fresh time.Now()
 			axis := stats.DayAxisUTC(now, days)
 			refMatches, err := st.StatMatches(ctx, axis[0])
 			if err != nil {
 				t.Fatalf("reference StatMatches: %v", err)
 			}
 			want := stats.BuildOverview(refMatches, axis, days, now)
-			got.GeneratedAt = want.GeneratedAt // two separate time.Now() calls; not a data field
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("days=%d: rollup-backed overview != on-the-fly reference\n got=%+v\nwant=%+v", days, got, want)
 			}
@@ -448,21 +502,27 @@ func TestStatsCostRollupBacked(t *testing.T) {
 		}
 	})
 
+	// equals_on_the_fly_path mirrors TestStatsOverviewRollupBacked's subtest
+	// of the same name — same two time-anchoring fixes (reuse the handler's
+	// GeneratedAt as `now` instead of a fresh time.Now(); re-run the
+	// idempotent Backfill every iteration instead of once), same reason: see
+	// that subtest's comment for the full mechanism this guards against.
 	t.Run("equals_on_the_fly_path", func(t *testing.T) {
 		ts, st, f, roSecret := newStatsAPI(t)
 		ctx := t.Context()
 		seedStatsRollupWindow(t, st, f)
 
 		job := statsrollup.New(st, time.Hour, opsLog())
-		if err := job.Backfill(ctx); err != nil {
-			t.Fatalf("backfill: %v", err)
-		}
 
 		for _, days := range []int{30, 7} {
+			if err := job.Backfill(ctx); err != nil {
+				t.Fatalf("backfill: %v", err)
+			}
+
 			var got stats.CostResponse
 			httpGetJSON(t, ts.URL, fmt.Sprintf("/v1/stats/cost?days=%d", days), roSecret, &got)
 
-			now := time.Now().UTC()
+			now := got.GeneratedAt // the handler's own clock snapshot, not a fresh time.Now()
 			axis := stats.DayAxisUTC(now, days)
 			refMatches, err := st.StatMatches(ctx, axis[0])
 			if err != nil {
@@ -473,7 +533,6 @@ func TestStatsCostRollupBacked(t *testing.T) {
 				t.Fatalf("reference RegionUtilization: %v", err)
 			}
 			want := stats.BuildCost(refMatches, util, axis, days, now)
-			got.GeneratedAt = want.GeneratedAt
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("days=%d: rollup-backed cost != on-the-fly reference\n got=%+v\nwant=%+v", days, got, want)
 			}
@@ -515,10 +574,15 @@ func TestStatsOccupancyBoundary(t *testing.T) {
 	// A normal in-window match on a distinct version, so the window has a
 	// real started-match too (not otherwise empty) without masking the
 	// boundary match's phantom entry above — they must not share a semver.
+	// Anchored to `now` (a few minutes back), not a fixed hour of today —
+	// see seedStatsRollupWindow's matching comment above: a fixed hour is
+	// only safely in the past if the test happens to run after that hour
+	// UTC, otherwise store.StatMatchesOverlapping's started_at < now bound
+	// excludes it from the live tail.
 	v2 := f.AddVersion(t, "2.0.0")
 	srvNormal := f.InsertServer(t, f.NodeID, v2, "reaped", 21302, 0)
 	insertStatMatchAt(t, st, srvNormal, "eu-boundary", 3,
-		today.Add(58*time.Minute), today.Add(time.Hour), endAt(today.Add(time.Hour+10*time.Minute)))
+		now.Add(-3*time.Minute), now.Add(-2*time.Minute), endAt(now.Add(-1*time.Minute)))
 
 	job := statsrollup.New(st, time.Hour, opsLog())
 	if err := job.Backfill(ctx); err != nil {

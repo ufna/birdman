@@ -112,10 +112,22 @@ const (
 	// audit payload carries key_id/name/scopes — never the secret.
 	EventAPIKeyCreated = "apikey_created" // POST /v1/apikeys
 	EventAPIKeyRevoked = "apikey_revoked" // DELETE /v1/apikeys/{id}
+	// EventAPIKeyPurged (registries v1,
+	// docs/superpowers/specs/2026-07-09-registries-design.md §6): hard-delete
+	// of an already-revoked key, so revoked keys stop piling up in the admin
+	// list. Payload carries only {name} — the row (and its id) is gone.
+	EventAPIKeyPurged = "apikey_purged" // DELETE /v1/apikeys/{id}?purge=true
 
 	// Alert mute/suppression annotations (П2 Alerts screen, master.md §6). v0:
 	// a mute is a master-level annotation, not a real vmalert/Discord silence
 	// (ops.md §1 TODO). Payload carries mute_id/alertname/region — no secrets.
 	EventAlertMuted   = "alert_muted"   // POST /v1/alerts/mutes
 	EventAlertUnmuted = "alert_unmuted" // DELETE /v1/alerts/mutes/{id}
+
+	// Private registry credentials (registries v1, admin panel "Реестры",
+	// docs/superpowers/specs/2026-07-09-registries-design.md §1). Payload
+	// carries host/username — NEVER the token: it is write-only and must
+	// never land in an audit event, a log line, or a GET response.
+	EventRegistryUpserted = "registry_upserted" // POST /v1/registries (create or replace-by-host)
+	EventRegistryRemoved  = "registry_removed"  // DELETE /v1/registries/{id}
 )

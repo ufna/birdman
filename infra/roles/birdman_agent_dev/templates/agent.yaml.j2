@@ -9,6 +9,7 @@ data_dir: {{ birdman_data_dir }}
 registry_auth:
   username: "{{ birdman_registry_username }}"
   token_file: {{ birdman_registry_token_file }}   # токен только в файле 0600, не в конфиге
+  host: "{{ birdman_registry_host | default('ghcr.io') }}"   # legacy-фоллбэк; основной путь — Админка → Реестры
 
 # master-линк (итерация 1): master на этой же тачке, только localhost.
 master_addr: "{{ birdman_master_addr }}"

@@ -117,7 +117,8 @@ func run() error {
 		return fmt.Errorf("deploy resume: %w", err)
 	}
 
-	agentlinkv1.RegisterAgentLinkServer(grpcServer, agentlink.NewService(st, hub, dep, logRouter, log))
+	agentlinkSvc := agentlink.NewService(st, hub, dep, logRouter, log)
+	agentlinkv1.RegisterAgentLinkServer(grpcServer, agentlinkSvc)
 	grpcLis, err := net.Listen("tcp", cfg.ListenGRPC)
 	if err != nil {
 		return fmt.Errorf("listen grpc: %w", err)
@@ -129,7 +130,11 @@ func run() error {
 	}
 	mm := matchmaker.New(st, m, mmCfg, log)
 	apiHandler := httpapi.New(st, m, mm, dep, hub, logRouter, cfg.Metrics.VictoriaMetricsURL, cfg.Metrics.VictoriaLogsURL, log).
-		WithAlertsSources(cfg.Alerts.VmalertURL, cfg.Alerts.LogPath)
+		WithAlertsSources(cfg.Alerts.VmalertURL, cfg.Alerts.LogPath).
+		// After every successful POST/DELETE /v1/registries, refresh every
+		// connected agent's in-memory credential set (docs/superpowers/specs/
+		// 2026-07-09-registries-design.md §2, T3).
+		WithRegistriesHook(agentlinkSvc.BroadcastRegistries)
 	api := &http.Server{
 		Addr:              cfg.ListenAPI,
 		Handler:           apiHandler,

@@ -185,3 +185,92 @@ func TestAPIKeyRevokeIdempotent(t *testing.T) {
 		t.Fatalf("idempotent revoke should emit exactly 1 event, got %d", n)
 	}
 }
+
+// TestAPIKeyPurge covers ?purge=true (registries v1 design §6,
+// docs/superpowers/specs/2026-07-09-registries-design.md): hard-delete is
+// admin-gated exactly like revoke, applies ONLY to an already-revoked key
+// (never revokes on its own behalf), and a retried purge on the now-gone id
+// is a plain 404 — no destructive escalation from a retry/double-click.
+// Values other than purge=true|1 (including its absence) take the
+// byte-identical plain-DELETE path.
+func TestAPIKeyPurge(t *testing.T) {
+	st, ts := newAPIKeyServer(t)
+	ctx := t.Context()
+	_, adminSecret, _ := st.CreateAPIKey(ctx, "admin", []string{httpapi.ScopeAdmin})
+	_, roSecret, _ := st.CreateAPIKey(ctx, "ro", []string{httpapi.ScopeReadonly})
+	admin := &client{t: t, base: ts.URL, key: adminSecret}
+	ro := &client{t: t, base: ts.URL, key: roSecret}
+
+	active, _, _ := st.CreateAPIKey(ctx, "active-key", []string{httpapi.ScopeReadonly})
+	revoked, _, _ := st.CreateAPIKey(ctx, "revoked-key", []string{httpapi.ScopeReadonly})
+
+	// readonly cannot purge — same admin-only gate as revoke.
+	if code, _ := ro.do("DELETE", "/v1/apikeys/"+revoked.ID+"?purge=true", nil); code != 403 {
+		t.Fatalf("ro purge: want 403, got %d", code)
+	}
+
+	// purge on a never-revoked key: 409 not_revoked, purge never revokes.
+	code, body := admin.do("DELETE", "/v1/apikeys/"+active.ID+"?purge=true", nil)
+	if code != 409 {
+		t.Fatalf("purge active: want 409, got %d %v", code, body)
+	}
+	if body["error"] != "not_revoked" {
+		t.Fatalf("purge active: want error=not_revoked, got %v", body)
+	}
+	if !listHasKey(t, admin, active.ID) {
+		t.Fatalf("purge active must not delete the row")
+	}
+
+	// revoke, then purge: 204, event recorded, row gone from the list.
+	if code, _ := admin.do("DELETE", "/v1/apikeys/"+revoked.ID, nil); code != 200 {
+		t.Fatalf("revoke before purge: want 200, got %d", code)
+	}
+	code, body = admin.do("DELETE", "/v1/apikeys/"+revoked.ID+"?purge=true", nil)
+	if code != 204 {
+		t.Fatalf("purge revoked: want 204, got %d %v", code, body)
+	}
+	if listHasKey(t, admin, revoked.ID) {
+		t.Fatalf("purged key still present in the list")
+	}
+	if n, err := st.CountEvents(ctx, store.EventAPIKeyPurged); err != nil || n != 1 {
+		t.Fatalf("apikey_purged events = %d err=%v, want 1", n, err)
+	}
+
+	// retry: the row is already gone → 404, not a repeated 204/destructive
+	// escalation.
+	if code, _ := admin.do("DELETE", "/v1/apikeys/"+revoked.ID+"?purge=true", nil); code != 404 {
+		t.Fatalf("retry purge: want 404, got %d", code)
+	}
+
+	// purge of an unknown id → 404; non-uuid id → 400 (same guard as revoke).
+	if code, _ := admin.do("DELETE", "/v1/apikeys/"+uuid.NewString()+"?purge=true", nil); code != 404 {
+		t.Fatalf("purge unknown: want 404, got %d", code)
+	}
+	if code, _ := admin.do("DELETE", "/v1/apikeys/not-a-uuid?purge=true", nil); code != 400 {
+		t.Fatalf("purge bad uuid: want 400, got %d", code)
+	}
+
+	// Anything other than purge=true|1 takes the byte-identical plain-DELETE
+	// path: it revokes (200), it does not hard-delete.
+	other, _, _ := st.CreateAPIKey(ctx, "other-key", []string{httpapi.ScopeReadonly})
+	if code, body := admin.do("DELETE", "/v1/apikeys/"+other.ID+"?purge=false", nil); code != 200 {
+		t.Fatalf("purge=false: want 200 (plain revoke), got %d %v", code, body)
+	}
+	if !listHasKey(t, admin, other.ID) {
+		t.Fatalf("purge=false must not hard-delete the row")
+	}
+}
+
+func listHasKey(t *testing.T, c *client, id string) bool {
+	t.Helper()
+	code, body := c.do("GET", "/v1/apikeys", nil)
+	if code != 200 {
+		t.Fatalf("list keys: %d %v", code, body)
+	}
+	for _, it := range body["apikeys"].([]any) {
+		if it.(map[string]any)["id"] == id {
+			return true
+		}
+	}
+	return false
+}

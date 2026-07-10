@@ -128,6 +128,7 @@ type fakeHandler struct {
 	srvDrains []*agentlinkv1.DrainServer
 	upgrades  []*agentlinkv1.UpgradeAgent
 	tails     []*agentlinkv1.TailLogs
+	setRegs   []*agentlinkv1.SetRegistries
 }
 
 func (h *fakeHandler) Start(_ context.Context, c *agentlinkv1.StartServer) {
@@ -175,10 +176,28 @@ func (h *fakeHandler) TailLogs(_ context.Context, c *agentlinkv1.TailLogs) {
 	defer h.mu.Unlock()
 	h.tails = append(h.tails, c)
 }
+func (h *fakeHandler) SetRegistries(_ context.Context, c *agentlinkv1.SetRegistries) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.setRegs = append(h.setRegs, c)
+}
 func (h *fakeHandler) startCount() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return len(h.starts)
+}
+func (h *fakeHandler) setRegsCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.setRegs)
+}
+func (h *fakeHandler) lastSetRegs() *agentlinkv1.SetRegistries {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.setRegs) == 0 {
+		return nil
+	}
+	return h.setRegs[len(h.setRegs)-1]
 }
 
 // fakeSource serves a fixed server map.
@@ -403,6 +422,66 @@ func TestCommandDispatchAckAndIdempotency(t *testing.T) {
 		}
 		return got4 && got5
 	})
+}
+
+// TestSetRegistriesDispatchedAckedAndReplaced covers the agent side of
+// registries v1 (docs/superpowers/specs/2026-07-09-registries-design.md §2):
+// SetRegistries reaches the handler and is acked through the existing
+// machinery, exactly like every other command kind. A second, different
+// snapshot is delivered as a full replacement (the handler sees the new set,
+// not a merge — the actual in-memory replace lives in daemon.Manager /
+// registryStore; this only proves dispatch conveys the latest snapshot
+// whole). Duplicate cmd_id is re-acked but not re-dispatched.
+func TestSetRegistriesDispatchedAckedAndReplaced(t *testing.T) {
+	h := newHarness(t)
+	handler := &fakeHandler{}
+	startClient(t, h, handler, &fakeSource{}, NewOutbox(t.Logf))
+	eventually(t, "connected", func() bool { s, _, _, _ := h.fake.counts(); return s == 1 })
+
+	first := &agentlinkv1.MasterMsg{Msg: &agentlinkv1.MasterMsg_SetRegistries{SetRegistries: &agentlinkv1.SetRegistries{
+		CmdId: "sr-1",
+		Registries: []*agentlinkv1.RegistryCred{
+			{Host: "ghcr.io", Username: "u1", Token: "t1"},
+		},
+	}}}
+	h.fake.push(t, first)
+	eventually(t, "first snapshot dispatched and acked", func() bool {
+		_, _, _, acks := h.fake.counts()
+		return handler.setRegsCount() == 1 && acks == 1
+	})
+	if got := handler.lastSetRegs(); got.GetCmdId() != "sr-1" || len(got.GetRegistries()) != 1 ||
+		got.GetRegistries()[0].GetHost() != "ghcr.io" {
+		t.Fatalf("first snapshot: %+v", got)
+	}
+
+	// A second, different snapshot is a full replace, not a merge: the
+	// handler receives the whole new set as one message.
+	second := &agentlinkv1.MasterMsg{Msg: &agentlinkv1.MasterMsg_SetRegistries{SetRegistries: &agentlinkv1.SetRegistries{
+		CmdId: "sr-2",
+		Registries: []*agentlinkv1.RegistryCred{
+			{Host: "registry.example.com:5000", Username: "u2", Token: "t2"},
+		},
+	}}}
+	h.fake.push(t, second)
+	eventually(t, "second snapshot dispatched and acked", func() bool {
+		_, _, _, acks := h.fake.counts()
+		return handler.setRegsCount() == 2 && acks == 2
+	})
+	if got := handler.lastSetRegs(); got.GetCmdId() != "sr-2" || len(got.GetRegistries()) != 1 ||
+		got.GetRegistries()[0].GetHost() != "registry.example.com:5000" {
+		t.Fatalf("second snapshot: %+v", got)
+	}
+
+	// Duplicate cmd_id: re-acked, NOT re-dispatched (same idempotency
+	// contract as every other command kind).
+	h.fake.push(t, second)
+	eventually(t, "duplicate re-acked", func() bool {
+		_, _, _, acks := h.fake.counts()
+		return acks == 3
+	})
+	if handler.setRegsCount() != 2 {
+		t.Fatalf("duplicate cmd_id dispatched again: setRegsCount=%d", handler.setRegsCount())
+	}
 }
 
 func TestReconnectCycle(t *testing.T) {

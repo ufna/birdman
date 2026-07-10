@@ -22,6 +22,8 @@
 4. `containerd create+start`: host network; bind mount: каталог `/run/birdman/servers/{server_id}` → `/birdman` (ro-каталог, rw-сокет 0666 — connect(2) к сокету работает и на ro-mount); env: `BIRDMAN_SOCKET=/birdman/agent.sock`, `BIRDMAN_PORT`, `BIRDMAN_SERVER_ID`, `BIRDMAN_REGION` + env из команды; cgroups-лимиты из `limits`; `oom_score_adj` дедикам > агенту. (Уточнено в v0: монтируется именно каталог — рестартовавший агент пересоздаёт сокет-файл, и liba реконнектится к новому inode; file-mount замораживал бы старый.)
 5. Grace-период readiness: **30с** на `ready` от liba, иначе `failed` + stop.
 
+(Уточнено в v0, Реестры v1.) Шаг 1 (Ensure image) резолвит pull-credential по host, распарсенному из `image_ref` настоящим reference-парсером (`github.com/distribution/reference`, не строковый сплит — те же правила нормализации, что у мастерской валидации `store.NormalizeRegistryHost`, `master.md` §1): цепочка «реестры от мастера (`SetRegistries`, `protocol.md` §1, точное совпадение host) → legacy `registry_auth` из `agent.yaml` (fallback, тоже host-scoped — см. §10) → анонимный pull». Credential выдаётся только при совпадении host — увод `image_ref` на чужой хост не получает наш токен (это и закрывает исходную дыру: обладатель deploy-ключа больше не может увести pull-токен, зарегистрировав версию с образом на чужом хосте); PrePull-путь использует тот же lookup, что и StartServer. `docker.io`/`index.docker.io` не поддерживаются в v1 (containerd резолвит их в `registry-1.docker.io` — точный host-match не сработал бы; master отклоняет такие host при регистрации реестра, `master.md` §6; агент, в свою очередь, **фейлит загрузку конфига**, если legacy `registry_auth.host` указывает на docker.io — мисконфиг не бутится молча). Битый legacy `token_file` (host совпал, но файл не читается) **фейлит pull**, не маскируется анонимным — так же, как и раньше, и как в `run-once` (§11). Наблюдаемость: перед каждым pull — advisory-лог `host=… source=master|legacy|anonymous` (никогда не токен) — «почему pull анонимный» дебажится по журналу агента без доступа к БД master'а.
+
 Стейт-машина на агенте: `pulling → starting → ready → allocated → draining → stopped|failed`. Переходы `ready/allocated/draining` диктует master (allocated) и liba (ready, match_end); `failed` — exit-код ≠0, отсутствие `ready`, OOM.
 
 `StopServer{server_id, grace_s}`: SIGTERM → grace (деф. 30с) → SIGKILL → delete container, освободить порт и сокет.
@@ -71,15 +73,23 @@ port_range: [20000, 29999]
 limits_default: { cpu_millis: 3500, mem_mb: 4096 }
 log_dir: /var/log/birdman
 data_dir: /var/lib/birdman
-registry_auth:              # (уточнено в v0) pull приватного registry (GHCR)
+registry_auth:              # (уточнено в v0) pull приватного registry — bootstrap/
+                            # fallback-путь (Реестры v1: основной путь — Админка →
+                            # Реестры в панели, ниже)
   username: "ufna"
   token_file: /etc/birdman/ghcr.token   # токен только в файле — никогда в конфиге/коде
+  host: "ghcr.io"           # (Реестры v1) host, к которому привязан этот креденшел —
+                            # host-match, §3; опционально, деф. ghcr.io (единственный
+                            # host, с которым говорил pre-Реестры-v1 фоллбэк) +
+                            # WARN в лог один раз за процесс при срабатывании дефолта
 tls_insecure: false         # (уточнено в v0) true — не проверять серт master
                             # (ТОЛЬКО dev: self-signed автогенерация master v0)
 tls_ca_file: ""             # (уточнено в v0) прод-путь: пин CA-серта master
 ```
 
-TLS: при первом коннекте агент обменивает `node_token` на клиентский сертификат (mTLS дальше) — см. `protocol.md` §Auth. (Уточнено в v0: обмена пока нет — агент шлёт `node_token` в Hello при каждом коннекте поверх TLS server-auth; проверка серта master — `tls_ca_file`, в dev допустим `tls_insecure: true`.)
+(Уточнено в v0, Реестры v1.) Помимо `registry_auth` (файловый fallback выше), master раздаёт агенту полный набор registry-кредов по agentlink (`SetRegistries`, `protocol.md` §1) — эти креды агент держит **только в памяти** (никогда не пишет на диск, в конфиг не попадают) и получает заново при каждом Hello (после рестарта агента — из первого же снапшота от мастера, ещё до реплея pending-команд). Host-match и полная цепочка приоритетов — §3.
+
+TLS: при первом коннекте агент обменивает `node_token` на клиентский сертификат (mTLS дальше) — см. `protocol.md` §Auth. (Уточнено в v0: обмена пока нет — агент шлёт `node_token` в Hello при каждом коннекте поверх TLS server-auth; проверка серта master — `tls_ca_file`, в dev допустим `tls_insecure: true`. Реестры v1 добавляет жёсткий гейт итерации 5 поверх этого же ограничения — см. `protocol.md` §Auth.)
 
 ## 11. Acceptance
 
