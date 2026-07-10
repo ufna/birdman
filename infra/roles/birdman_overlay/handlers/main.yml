@@ -1,0 +1,8 @@
+---
+# Пересоздание (не docker restart): подхватывает и новый образ, и новый
+# конфиг. Рестарт хаба рвёт линки удалённых нод на секунды — агенты
+# реконнектятся штатно (спека §2, принятое ограничение №4).
+- name: Restart birdman-overlay
+  ansible.builtin.command:
+    cmd: docker compose -f {{ birdman_overlay_dir }}/compose.yml up -d --force-recreate --wait
+  changed_when: true
