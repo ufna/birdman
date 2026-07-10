@@ -4,6 +4,11 @@
 
 dsn: "postgres://postgres:{{ birdman_pg_password }}@127.0.0.1:{{ birdman_master_pg_port }}/birdman?sslmode=disable"
 
+# Мастер-ключ шифрования обратимых секретов at-rest (registries.token,
+# internal_ca.key_pem — secrets-encryption §2). Файл 0600 на боксе,
+# провижинится этой ролью; master без него не стартует (fail-loud).
+secrets_key_file: "{{ birdman_master_secrets_key_file }}"
+
 # Только localhost: наружу master на дев-боксе не выставляется.
 listen_api: "{{ birdman_master_api_addr }}"
 listen_grpc: "{{ birdman_master_grpc_addr }}"

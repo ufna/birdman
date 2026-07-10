@@ -35,7 +35,11 @@ create table nodes (
 
 -- (v1, mTLS agentlink — миграция 000008) внутренняя CA в PG: переживает потерю
 -- бокса вместе с дампом (restore-runbook, ops.md §5). key_pem — обратимый секрет
--- (класс риска = registries.token), никогда не логируется, /v1/ca его не отдаёт.
+-- (класс риска = registries.token); (v1, secrets-encryption) хранится
+-- AEAD-шифротекстом at-rest — конверт birdman:v1:<key_id>:…, ключ
+-- /etc/birdman/secrets.key: master шифрует перед INSERT, расшифровывает после
+-- SELECT (ops.md §5), в дампе только шифротекст. Никогда не логируется,
+-- /v1/ca его не отдаёт.
 create table internal_ca (
   id         uuid primary key default gen_random_uuid(),
   cert_pem   text not null,
@@ -250,7 +254,7 @@ POST /v1/rollback: шаг 3 в обратную сторону (образы у�
 
 ## 7. Операционное
 
-- Один бинарь `birdman-master`; конфиг `/etc/birdman/master.yaml` (dsn, listen :443 и :8443 gRPC, tls-серты, project defaults). systemd unit с `Restart=always`. (Уточнено в v0: дев-дефолты `listen_api :8100`, `listen_grpc :8444`; env-переопределения `BIRDMAN_DSN`/`BIRDMAN_LISTEN_API`/`BIRDMAN_LISTEN_GRPC`.)
+- Один бинарь `birdman-master`; конфиг `/etc/birdman/master.yaml` (dsn, listen :443 и :8443 gRPC, tls-серты, project defaults, `secrets_key_file`). systemd unit с `Restart=always`. (Уточнено в v0: дев-дефолты `listen_api :8100`, `listen_grpc :8444`; env-переопределения `BIRDMAN_DSN`/`BIRDMAN_LISTEN_API`/`BIRDMAN_LISTEN_GRPC`.) (Уточнено в v1, secrets-encryption §2.) `secrets_key_file` (деф. `/etc/birdman/secrets.key`, 0600, провижинится ролью `birdman_master_dev`) — мастер-ключ шифрования обратимых секретов at-rest (`registries.token`/`internal_ca.key_pem`), **обязателен**: без валидного ключа master не стартует (fail-loud). Env-оверрайды: `BIRDMAN_SECRETS_KEY_FILE` (путь, замещает yaml-значение) и `BIRDMAN_SECRETS_KEY` (значение base64 для dev/CI — при заданном значении оно **выигрывает** у файла; ровно один источник доходит до загрузчика ключа).
 - (Уточнено в v1, mTLS agentlink.) Внутренняя CA живёт в Postgres (`internal_ca`, миграция 000008; master генерит её под advisory-lock при первом старте — ECDSA P-256, TTL 10 лет). Без внешних `tls.cert_file/key_file` master **выпускает себе server-лист от этой CA при старте** (в память, TTL 90 дней, hot-rotate за 14 дней до истечения через `GetCertificate`) — self-signed автоген (`EnsureServerCert`) выведен из эксплуатации. gRPC-листенер `:8444`: `ClientCAs` = активные CA, `ClientAuth: VerifyClientCertIfGiven` (Enroll обязан работать до выдачи серта); строгость Session — конфиг `agentlink_auth: token|mixed|mtls` (env `BIRDMAN_AGENTLINK_AUTH`, деф. `mixed`; `protocol.md` §Auth). Наблюдаемость: `birdman_agentlink_sessions{auth="mtls|token"}`, `birdman_tls_cert_expiry_timestamp_seconds{cert="ca|server"}`, `birdman_node_cert_expiry_timestamp_seconds{node}`, `birdman_agentlink_registries_withheld_total`.
 - Graceful shutdown: стоп приёма API → дожидание in-flight (≤5с) → exit. Агенты переподключаются сами.
 - QoS-эндпоинт: крошечный UDP-echo в составе агента на каждой тачке (порт 19999) — master отдаёт их список в `/v1/qos`.

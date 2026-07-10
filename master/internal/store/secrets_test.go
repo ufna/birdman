@@ -285,3 +285,16 @@ func TestSecretsWrongKey(t *testing.T) {
 		t.Fatalf("wrong-key CA error must name both key_ids (want=%s loaded=%s): %v", right.KeyID(), wrong.KeyID(), err)
 	}
 }
+
+// TestOpenRejectsNilCodec: store.Open must fail loudly when handed a nil codec
+// instead of deferring the failure to a nil-deref at the first Encrypt/Decrypt.
+// The guard fires before any network work, so this is hermetic — no database.
+func TestOpenRejectsNilCodec(t *testing.T) {
+	_, err := store.Open(context.Background(), "postgres://user@127.0.0.1:1/nope?sslmode=disable", nil)
+	if err == nil {
+		t.Fatal("store.Open must reject a nil codec")
+	}
+	if !strings.Contains(err.Error(), "codec") {
+		t.Fatalf("nil-codec error must name the codec, got: %v", err)
+	}
+}

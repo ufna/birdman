@@ -56,6 +56,13 @@ func (s *Store) SetCommandSender(sender CommandSender) { s.sender = sender }
 // (main does, immediately after Open) so legacy plaintext rows are upgraded
 // under the strict-read invariant.
 func Open(ctx context.Context, dsn string, codec *secrets.Codec) (*Store, error) {
+	if codec == nil {
+		// Fail loud here rather than let a nil codec nil-deref at the first
+		// Encrypt/Decrypt on a secret read/write path. Both real callers pass a
+		// codec (main via the box key, testdb via a random one); this guards a
+		// future caller from a confusing deferred crash.
+		return nil, errors.New("store.Open: secrets codec is required (nil codec would nil-deref at first Encrypt/Decrypt)")
+	}
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("parse dsn: %w", err)
