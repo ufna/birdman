@@ -41,7 +41,9 @@ func startServer(t *testing.T, st *store.Store) (*agentlink.Hub, *agentlink.Serv
 func startServerWithLog(t *testing.T, st *store.Store, log *slog.Logger) (*agentlink.Hub, *agentlink.Service, agentlinkv1.AgentLinkClient) {
 	t.Helper()
 	hub := agentlink.NewHub(log)
-	svc := agentlink.NewService(st, hub, nil, nil, log)
+	// Existing tests run token-mode/no-client-cert; mixed is the production
+	// default and behaves identically for a token Hello with no client cert.
+	svc := agentlink.NewService(st, hub, nil, nil, agentlink.AuthMixed, log)
 
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()

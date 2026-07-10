@@ -60,13 +60,13 @@ func TestServiceRegistriesSnapshotReadEnqueueSerializedAcrossAttachAndBroadcast(
 	st := testdb.New(t)
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	hub := NewHub(log)
-	svc := NewService(st, hub, nil, nil, log)
+	svc := NewService(st, hub, nil, nil, AuthMixed, log)
 	ctx := context.Background()
 
 	const nodeID = "node-under-test"
 
 	var sessMu sync.Mutex
-	curSess := svc.attachWithFreshRegistries(ctx, nodeID)
+	curSess := svc.attachWithFreshRegistries(ctx, nodeID, false, false)
 
 	const rounds = 60
 	const workersPerRound = 16
@@ -92,7 +92,7 @@ func TestServiceRegistriesSnapshotReadEnqueueSerializedAcrossAttachAndBroadcast(
 		// task review.
 		go func() {
 			defer wg.Done()
-			newSess := svc.attachWithFreshRegistries(ctx, nodeID)
+			newSess := svc.attachWithFreshRegistries(ctx, nodeID, false, false)
 			sessMu.Lock()
 			curSess = newSess
 			sessMu.Unlock()

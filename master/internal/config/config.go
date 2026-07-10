@@ -11,12 +11,22 @@ import (
 )
 
 type TLS struct {
-	// CertFile/KeyFile: PEM pair used for the gRPC AgentLink listener.
-	// When empty, a self-signed pair is generated into AutoCertDir on
-	// first start (dev mode; see docs/specs/protocol.md §Auth).
-	CertFile    string `yaml:"cert_file"`
-	KeyFile     string `yaml:"key_file"`
+	// CertFile/KeyFile: external PEM pair for the gRPC AgentLink listener.
+	// When both are empty, the master issues its own server leaf from the
+	// internal CA (in memory, hot-rotated) instead — mTLS agentlink v1,
+	// docs/superpowers/specs/2026-07-10-mtls-agentlink-design.md §1.
+	CertFile string `yaml:"cert_file"`
+	KeyFile  string `yaml:"key_file"`
+	// AutoCertDir is accepted for config compatibility but no longer used:
+	// the retired self-signed autogen wrote its pair here (design §1). Kept so
+	// existing master.yaml files with this key still load.
 	AutoCertDir string `yaml:"auto_cert_dir"`
+	// ExtraSANs are appended to the internally issued server leaf's SANs
+	// (design §1) — extra DNS names or IPs for external probes. Optional; each
+	// entry is classified as IP or DNS by tlsutil.IssueServerLeaf. Agents
+	// verify the master by ServerName "birdman-master", so they never need
+	// these; ignored entirely when an external CertFile/KeyFile is set.
+	ExtraSANs []string `yaml:"extra_sans"`
 }
 
 // JoinToken configures the optional HMAC join token
@@ -78,14 +88,22 @@ type Alerts struct {
 }
 
 type Config struct {
-	DSN         string      `yaml:"dsn"`
-	ListenAPI   string      `yaml:"listen_api"`
-	ListenGRPC  string      `yaml:"listen_grpc"`
-	TLS         TLS         `yaml:"tls"`
-	Matchmaking Matchmaking `yaml:"matchmaking"`
-	Compat      Compat      `yaml:"compat"`
-	Metrics     Metrics     `yaml:"metrics"`
-	Alerts      Alerts      `yaml:"alerts"`
+	DSN        string `yaml:"dsn"`
+	ListenAPI  string `yaml:"listen_api"`
+	ListenGRPC string `yaml:"listen_grpc"`
+	TLS        TLS    `yaml:"tls"`
+	// AgentlinkAuth selects how the gRPC AgentLink listener authenticates
+	// agents (mTLS agentlink v1, design §3): "token" (client certs ignored —
+	// pre-mTLS behaviour, byte-identical; emergency rollback), "mixed"
+	// (Session accepts a verified client cert OR a node_token; the
+	// post-release default and transition mode) or "mtls" (Session requires a
+	// verified client cert; token-only Hello → PermissionDenied, though
+	// Enroll-by-token stays possible). Env override BIRDMAN_AGENTLINK_AUTH.
+	AgentlinkAuth string      `yaml:"agentlink_auth"`
+	Matchmaking   Matchmaking `yaml:"matchmaking"`
+	Compat        Compat      `yaml:"compat"`
+	Metrics       Metrics     `yaml:"metrics"`
+	Alerts        Alerts      `yaml:"alerts"`
 	// StatsRollupInterval is how often the rollup-maintenance job
 	// (internal/statsrollup, «Статистика v1» T9) recomputes the trailing
 	// two UTC days of match_stats_daily/match_ccu_daily. A human-readable
@@ -99,6 +117,9 @@ func defaults() Config {
 		ListenAPI:  ":8100",
 		ListenGRPC: ":8444",
 		TLS:        TLS{AutoCertDir: "certs"},
+		// Post-release default (design §3): accept both cert-auth and
+		// token-auth during the transition to strict mTLS.
+		AgentlinkAuth: "mixed",
 		// VictoriaMetrics/VictoriaLogs of the same box (ops.md §1 recommended
 		// stack); the proxies return 502 if the upstream is not running, 503
 		// only when the URL is unset.
@@ -153,6 +174,9 @@ func Load(path string) (Config, error) {
 	if v := os.Getenv("BIRDMAN_VMALERT_URL"); v != "" {
 		cfg.Alerts.VmalertURL = v
 	}
+	if v := os.Getenv("BIRDMAN_AGENTLINK_AUTH"); v != "" {
+		cfg.AgentlinkAuth = v
+	}
 	if cfg.ListenAPI == "" {
 		cfg.ListenAPI = ":8100"
 	}
@@ -164,6 +188,14 @@ func Load(path string) (Config, error) {
 	}
 	if d := cfg.Compat.Default; d != "" && d != "major.minor" {
 		return cfg, fmt.Errorf("compat.default %q is not supported (only \"major.minor\")", d)
+	}
+	if cfg.AgentlinkAuth == "" {
+		cfg.AgentlinkAuth = "mixed"
+	}
+	switch cfg.AgentlinkAuth {
+	case "token", "mixed", "mtls":
+	default:
+		return cfg, fmt.Errorf("agentlink_auth %q is not supported (token|mixed|mtls)", cfg.AgentlinkAuth)
 	}
 	return cfg, nil
 }

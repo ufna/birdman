@@ -2,15 +2,36 @@ package agentlink
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"log/slog"
+	"net"
 	"sync"
 
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
 	"github.com/ufna/birdman/master/internal/store"
 	agentlinkv1 "github.com/ufna/birdman/proto/agentlink/v1"
+)
+
+// AuthMode selects how Session authenticates an agent (mTLS agentlink v1,
+// docs/superpowers/specs/2026-07-10-mtls-agentlink-design.md §3). The config
+// enum agentlink_auth maps 1:1 onto these values.
+type AuthMode string
+
+const (
+	// AuthToken ignores client certs entirely — behaviour is byte-identical to
+	// the pre-mTLS code (emergency rollback).
+	AuthToken AuthMode = "token"
+	// AuthMixed accepts a verified client cert OR a node_token — the
+	// post-release default and transition mode.
+	AuthMixed AuthMode = "mixed"
+	// AuthMTLS requires a verified client cert for Session; a token-only Hello
+	// is PermissionDenied (Enroll-by-token stays possible — a later task).
+	AuthMTLS AuthMode = "mtls"
 )
 
 // PullSink consumes agent PullReports (the deploy manager waits for `pulled`
@@ -29,6 +50,7 @@ type Service struct {
 	hub  *Hub
 	pull PullSink
 	logs *LogRouter
+	mode AuthMode
 	log  *slog.Logger
 
 	// regMu serializes "read the current registries from the store" with
@@ -59,8 +81,14 @@ type Service struct {
 	regMu sync.Mutex
 }
 
-func NewService(st *store.Store, hub *Hub, pull PullSink, logs *LogRouter, log *slog.Logger) *Service {
-	return &Service{st: st, hub: hub, pull: pull, logs: logs, log: log}
+// NewService wires the AgentLink service. mode selects the Session auth policy
+// (design §3); an empty mode normalises to AuthMixed so a zero-value
+// construction preserves the post-release default.
+func NewService(st *store.Store, hub *Hub, pull PullSink, logs *LogRouter, mode AuthMode, log *slog.Logger) *Service {
+	if mode == "" {
+		mode = AuthMixed
+	}
+	return &Service{st: st, hub: hub, pull: pull, logs: logs, mode: mode, log: log}
 }
 
 func (s *Service) Session(stream agentlinkv1.AgentLink_SessionServer) error {
@@ -74,13 +102,9 @@ func (s *Service) Session(stream agentlinkv1.AgentLink_SessionServer) error {
 	if hello == nil {
 		return status.Error(codes.InvalidArgument, "first message must be Hello")
 	}
-	node, err := s.st.AuthNodeToken(ctx, hello.GetNodeToken())
+	node, certAuth, loopback, err := s.authenticate(ctx, hello)
 	if err != nil {
-		if errors.Is(err, store.ErrBadToken) {
-			return status.Error(codes.PermissionDenied, "bad node token")
-		}
-		s.log.Error("agentlink: auth failed", "err", err)
-		return status.Error(codes.Internal, "auth failed")
+		return err
 	}
 	if hello.GetRegion() != "" && hello.GetRegion() != node.Region {
 		s.log.Warn("agentlink: hello region differs from registration, keeping registered region",
@@ -97,7 +121,7 @@ func (s *Service) Session(stream agentlinkv1.AgentLink_SessionServer) error {
 	// Attach prefaces the stream with a fresh registries snapshot, computed
 	// here BEFORE attach so it lands ahead of any replayed pending command
 	// (docs/superpowers/specs/2026-07-09-registries-design.md §2).
-	sess := s.attachWithFreshRegistries(ctx, node.ID)
+	sess := s.attachWithFreshRegistries(ctx, node.ID, certAuth, loopback)
 	defer s.hub.detach(node.ID, sess)
 
 	recvErr := make(chan error, 1)
@@ -113,6 +137,115 @@ func (s *Service) Session(stream agentlinkv1.AgentLink_SessionServer) error {
 	case <-sess.done:
 		return status.Error(codes.Aborted, "session replaced by a new connection")
 	}
+}
+
+// authenticate resolves the node behind a Session stream and how it proved its
+// identity (design §3). It returns the node, whether a verified client cert was
+// used (certAuth) and whether the peer address is loopback (loopback) — the
+// last two are recorded on the session for a later task (the SetRegistries gate
+// and the sessions{auth} metric). Returned errors are already gRPC status
+// errors, ready to fail the stream.
+//
+// Policy by mode:
+//   - token: client certs ignored entirely; token auth, byte-identical to
+//     pre-mTLS.
+//   - mixed: a verified client cert authenticates (cert path); otherwise token
+//     auth.
+//   - mtls: a verified client cert is required; a token-only Hello (no verified
+//     cert) is PermissionDenied.
+func (s *Service) authenticate(ctx context.Context, hello *agentlinkv1.Hello) (store.Node, bool, bool, error) {
+	loopback := peerIsLoopback(ctx)
+
+	if s.mode != AuthToken {
+		if leaf := verifiedLeaf(ctx); leaf != nil {
+			node, err := s.authorizeCert(ctx, leaf, hello.GetNodeToken())
+			return node, true, loopback, err
+		}
+		if s.mode == AuthMTLS {
+			return store.Node{}, false, loopback, status.Error(codes.PermissionDenied, "client certificate required")
+		}
+	}
+
+	// token path: mode token|mixed with no verified client cert.
+	node, err := s.st.AuthNodeToken(ctx, hello.GetNodeToken())
+	if err != nil {
+		if errors.Is(err, store.ErrBadToken) {
+			return store.Node{}, false, loopback, status.Error(codes.PermissionDenied, "bad node token")
+		}
+		s.log.Error("agentlink: auth failed", "err", err)
+		return store.Node{}, false, loopback, status.Error(codes.Internal, "auth failed")
+	}
+	return node, false, loopback, nil
+}
+
+// authorizeCert authorizes a Session whose client cert already chained to the
+// listener's ClientCAs (the internal CA) during the handshake (design §3). The
+// identity is the cert CN — a node_id; the node must exist and not be dead
+// (identity from the cert, authorization always re-read from the DB, so a valid
+// cert for a dead/removed node is useless). A node_token, if the agent still
+// sends one alongside its cert, MUST name the SAME node (confused-deputy guard)
+// — it is only parsed, never bcrypt-checked: the verified cert is proof enough,
+// so no bcrypt runs on this path.
+func (s *Service) authorizeCert(ctx context.Context, leaf *x509.Certificate, token string) (store.Node, error) {
+	nodeID := leaf.Subject.CommonName
+	if nodeID == "" {
+		return store.Node{}, status.Error(codes.PermissionDenied, "client certificate has no subject CN")
+	}
+	if token != "" {
+		tokID, err := store.ParseNodeTokenID(token)
+		if err != nil || tokID != nodeID {
+			return store.Node{}, status.Error(codes.PermissionDenied, "node token does not match client certificate")
+		}
+	}
+	node, err := s.st.GetNode(ctx, nodeID)
+	if errors.Is(err, store.ErrNotFound) {
+		return store.Node{}, status.Error(codes.PermissionDenied, "unknown node")
+	}
+	if err != nil {
+		s.log.Error("agentlink: node lookup failed", "node_id", nodeID, "err", err)
+		return store.Node{}, status.Error(codes.Internal, "auth failed")
+	}
+	if node.State == "dead" {
+		return store.Node{}, status.Error(codes.PermissionDenied, "node is dead")
+	}
+	return node, nil
+}
+
+// verifiedLeaf returns VerifiedChains[0][0] — the client leaf that chained to
+// the listener's ClientCAs (the internal CA) — or nil when the peer presented
+// no cert or no chain verified. With the listener on VerifyClientCertIfGiven a
+// non-empty VerifiedChains means the handshake already validated the cert
+// against the internal CA; Session then only has to authorize the identity.
+func verifiedLeaf(ctx context.Context) *x509.Certificate {
+	p, ok := peer.FromContext(ctx)
+	if !ok {
+		return nil
+	}
+	tlsInfo, ok := p.AuthInfo.(credentials.TLSInfo)
+	if !ok {
+		return nil
+	}
+	if len(tlsInfo.State.VerifiedChains) == 0 || len(tlsInfo.State.VerifiedChains[0]) == 0 {
+		return nil
+	}
+	return tlsInfo.State.VerifiedChains[0][0]
+}
+
+// peerIsLoopback reports whether the gRPC peer's address is a loopback IP
+// (design §3: the SetRegistries gate treats loopback links as trusted, dev
+// compatibility). A missing peer, a non-IP address (e.g. bufconn) or an
+// unparseable host is treated as not-loopback.
+func peerIsLoopback(ctx context.Context) bool {
+	p, ok := peer.FromContext(ctx)
+	if !ok || p.Addr == nil {
+		return false
+	}
+	host, _, err := net.SplitHostPort(p.Addr.String())
+	if err != nil {
+		host = p.Addr.String()
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (s *Service) writeLoop(ctx context.Context, stream agentlinkv1.AgentLink_SessionServer, sess *session) error {
@@ -177,10 +310,10 @@ func (s *Service) readLoop(ctx context.Context, stream agentlinkv1.AgentLink_Ses
 // together, not just each safe on its own. Split out of Session so the
 // concurrency regression test can drive it directly, the same way it drives
 // BroadcastRegistries, without needing a full gRPC stream per attempt.
-func (s *Service) attachWithFreshRegistries(ctx context.Context, nodeID string) *session {
+func (s *Service) attachWithFreshRegistries(ctx context.Context, nodeID string, certAuth, loopback bool) *session {
 	s.regMu.Lock()
 	defer s.regMu.Unlock()
-	return s.hub.attach(nodeID, s.registriesSnapshot(ctx, nodeID))
+	return s.hub.attach(nodeID, s.registriesSnapshot(ctx, nodeID), certAuth, loopback)
 }
 
 // registriesSnapshot builds a fresh SetRegistries command from the current

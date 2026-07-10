@@ -50,7 +50,7 @@ func TestHubSendPushOrderMatchesMutationOrderUnderConcurrency(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	hub := NewHub(log)
 	const nodeID = "node-under-test"
-	sess := hub.attach(nodeID, nil)
+	sess := hub.attach(nodeID, nil, false, false)
 
 	const rounds = 200
 	const workersPerRound = 24

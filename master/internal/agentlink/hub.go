@@ -34,6 +34,15 @@ type nodeQueue struct {
 type session struct {
 	out  chan *agentlinkv1.MasterMsg
 	done chan struct{} // closed when the session is replaced
+	// How this session authenticated, fixed at attach time (mTLS agentlink v1,
+	// docs/superpowers/specs/2026-07-10-mtls-agentlink-design.md §3). certAuth
+	// is true when the agent presented a verified client cert; loopback is true
+	// when the peer address is loopback. Consumed by a later task: the
+	// SetRegistries gate (queue/push only if certAuth || loopback) and the
+	// sessions{auth} metric. Recorded here so both are decided once, from the
+	// authenticated peer, and never re-derived per command.
+	certAuth bool
+	loopback bool
 }
 
 func NewHub(log *slog.Logger) *Hub {
@@ -131,10 +140,12 @@ func (h *Hub) PendingCount(nodeID string) int {
 // contradicts h.mu's own serialization order. push is non-blocking, so this
 // adds no unbounded lock hold time — it was already O(len(pending)) here
 // before this change, via the replay copy this replaces.
-func (h *Hub) attach(nodeID string, preface *agentlinkv1.MasterMsg) *session {
+func (h *Hub) attach(nodeID string, preface *agentlinkv1.MasterMsg, certAuth, loopback bool) *session {
 	s := &session{
-		out:  make(chan *agentlinkv1.MasterMsg, 256),
-		done: make(chan struct{}),
+		out:      make(chan *agentlinkv1.MasterMsg, 256),
+		done:     make(chan struct{}),
+		certAuth: certAuth,
+		loopback: loopback,
 	}
 	h.mu.Lock()
 	q := h.queue(nodeID)

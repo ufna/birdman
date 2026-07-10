@@ -28,6 +28,18 @@ func composeToken(prefix, id, secret string) string {
 	return prefix + id + "." + secret
 }
 
+// ParseNodeTokenID extracts the node id embedded in a node_token
+// ("bnt_<node_uuid>.<secret>") WITHOUT verifying the secret — it reuses the
+// same parseToken helper AuthNodeToken uses. The confused-deputy guard on a
+// cert-authenticated Session (agentlink, mTLS agentlink v1 design §3) uses it
+// to require that a node_token, if the agent still sends one alongside its
+// client cert, names the SAME node as the certificate's CN. Returns an error
+// if the token is malformed.
+func ParseNodeTokenID(token string) (string, error) {
+	id, _, err := parseToken(nodeTokenPrefix, token)
+	return id, err
+}
+
 func parseToken(prefix, token string) (id, secret string, err error) {
 	rest, ok := strings.CutPrefix(token, prefix)
 	if !ok {

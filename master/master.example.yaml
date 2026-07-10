@@ -25,12 +25,28 @@ alerts:
   vmalert_url: "http://127.0.0.1:8880"
   log_path: "/var/log/birdman/alerts.log"
 
+# Режим аутентификации agentlink-листенера (mTLS agentlink v1, §3):
+#   token — клиентские серты игнорируются (поведение до mTLS, байт-в-байт; экстренный откат);
+#   mixed — Session принимает верифицированный клиентский серт ИЛИ node_token (дефолт, переходный период);
+#   mtls  — Session требует клиентский серт (token-only Hello → PermissionDenied; Enroll по токену остаётся).
+# Env-override: BIRDMAN_AGENTLINK_AUTH.
+agentlink_auth: "mixed"
+
 tls:
-  # Продовые серты (если пусто — self-signed автогенерация в auto_cert_dir
-  # при первом старте; dev-режим).
+  # Внешние серты для gRPC-листенера. Если ОБА пусты — master сам выпускает
+  # server-лист от внутренней CA (в памяти, hot-rotate; mTLS agentlink v1 §1);
+  # клиентские серты нод листенер проверяет по внутренней CA независимо от того,
+  # свой лист или внешний.
   cert_file: ""
   key_file: ""
+  # auto_cert_dir больше не используется (self-signed автоген выведен из
+  # эксплуатации в §1); оставлено принятым для совместимости старых конфигов.
   auto_cert_dir: "certs"
+  # Доп. SAN'ы для выпускаемого server-листа (DNS или IP, для внешних probe'ов).
+  # Агентам не нужны — они верят master'у по ServerName "birdman-master".
+  extra_sans: []
+  #  - "master.internal"
+  #  - "10.0.0.5"
 
 stats_rollup_interval: 2m  # период пересчёта хвоста match_stats_daily/ccu_daily (панель П2 Statistics)
 
