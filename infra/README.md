@@ -120,9 +120,10 @@ ansible-playbook playbooks/add-node.yml  # идемпотентно; хаб + в
 ⚠️ Роль агента — та же дев-роль `birdman_agent_dev`, генерализованная на
 удалённые ноды (не прод-суита ops.md §4: без hardening/vault/node_exporter).
 ⚠️ Инвариант: пока на хабе живёт форвардер — `agentlink_auth: mtls` only.
-Снос оверлея: `docker compose -f /opt/birdman/overlay/compose.yml down` +
-удалить `/etc/birdman/overlay`, `/opt/birdman/overlay` + 4 UFW-правила
-`birdman-dev` (51827/udp и `in on birdman-wg0`).
+Снос оверлея (на КАЖДОМ боксе оверлея): `docker compose -f
+/opt/birdman/overlay/compose.yml down` + удалить `/etc/birdman/overlay`,
+`/opt/birdman/overlay` и образ (`docker rmi birdman-overlay:local`); UFW-правила
+оверлея — только на хабе: 4 правила `birdman-dev` (51827/udp и `in on birdman-wg0`).
 
 ## Дев vs прод
 
