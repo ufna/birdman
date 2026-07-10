@@ -17,6 +17,10 @@ birdman_data_dir: /var/lib/birdman
 
 birdman_registry_username: ufna
 birdman_registry_token_file: /etc/birdman/ghcr.token
+# Хост, к которому применяется legacy-кред (registry_auth); мастерские
+# реестры (Админка → Реестры) матчатся сами по своему host, независимо от
+# этого значения.
+birdman_registry_host: ghcr.io
 
 # Комментарий UFW-правил — по нему находим/сверяем свои правила на общем боксе.
 birdman_ufw_comment: birdman-dev

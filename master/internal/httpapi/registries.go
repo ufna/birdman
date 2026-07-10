@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -42,7 +43,12 @@ func (s *Server) handleListRegistries(w http.ResponseWriter, r *http.Request) {
 // docker.io rejection) happens inside UpsertRegistry and surfaces here as a
 // 400 with a clear detail. After a successful write it fires
 // onRegistriesChanged (nil-safe) so a connected agent set can be refreshed
-// (T3 wires the actual broadcast).
+// (T3 wires the actual broadcast) — with context.WithoutCancel (task review,
+// Fix 2): the write is already durable at this point, and the hook's own
+// store read (BroadcastRegistries) must not abort just because the client
+// that made this request happened to disconnect right after the commit —
+// that would leave connected agents on a stale credential set until the next
+// change or reconnect.
 func (s *Server) handleCreateRegistry(w http.ResponseWriter, r *http.Request) {
 	var req createRegistryRequest
 	if !decodeJSON(w, r, &req) {
@@ -67,14 +73,18 @@ func (s *Server) handleCreateRegistry(w http.ResponseWriter, r *http.Request) {
 		s.log.Error("registry: upsert event write failed", "host", reg.Host, "err", err)
 	}
 	if s.onRegistriesChanged != nil {
-		s.onRegistriesChanged(r.Context())
+		// WithoutCancel: the broadcast must survive this request's client
+		// disconnecting (see the doc comment above).
+		s.onRegistriesChanged(context.WithoutCancel(r.Context()))
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"registry": reg})
 }
 
 // handleDeleteRegistry is DELETE /v1/registries/{id} (admin). 204 on a real
-// removal (emits registry_removed + fires onRegistriesChanged), 404 for an
-// unknown/already-removed id, 400 for a non-uuid id.
+// removal (emits registry_removed + fires onRegistriesChanged, via
+// context.WithoutCancel — see handleCreateRegistry's doc comment, task
+// review Fix 2), 404 for an unknown/already-removed id, 400 for a non-uuid
+// id.
 func (s *Server) handleDeleteRegistry(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if _, err := uuid.Parse(id); err != nil {
@@ -95,7 +105,9 @@ func (s *Server) handleDeleteRegistry(w http.ResponseWriter, r *http.Request) {
 		s.log.Error("registry: delete event write failed", "host", reg.Host, "err", err)
 	}
 	if s.onRegistriesChanged != nil {
-		s.onRegistriesChanged(r.Context())
+		// WithoutCancel: the broadcast must survive this request's client
+		// disconnecting (see handleCreateRegistry's doc comment).
+		s.onRegistriesChanged(context.WithoutCancel(r.Context()))
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

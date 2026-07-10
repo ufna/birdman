@@ -192,6 +192,17 @@ func (c *Config) validate() error {
 		if a.Username == "" || a.TokenFile == "" {
 			return fmt.Errorf("registry_auth: username and token_file are required")
 		}
+		// A legacy docker.io host can never match a real pull: containerd
+		// resolves docker.io/index.docker.io to registry-1.docker.io before
+		// the host-match runs (daemon.Manager.legacyCred), so this cred would
+		// silently never fire — the same reason master's
+		// store.NormalizeRegistryHost rejects it on POST /v1/registries
+		// (docs/superpowers/specs/2026-07-09-registries-design.md §3, task
+		// review Fix 4). Config-time validation error, not just a runtime
+		// WARN: a misconfig here should not boot silently.
+		if h := strings.ToLower(strings.TrimSpace(a.Host)); h == "docker.io" || h == "index.docker.io" {
+			return fmt.Errorf("registry_auth: host %q is not supported — docker.io/index.docker.io resolves to registry-1.docker.io, so an exact host-match cred can never fire", a.Host)
+		}
 	}
 	if c.LogMaxSizeMB < 0 || c.LogRetentionDays < 0 {
 		return fmt.Errorf("log_max_size_mb and log_retention_days must be positive")

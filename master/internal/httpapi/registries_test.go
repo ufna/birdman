@@ -2,6 +2,7 @@ package httpapi_test
 
 import (
 	"context"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -224,5 +225,130 @@ func TestRegistriesValidation(t *testing.T) {
 	}
 	if hook.count() != 0 {
 		t.Fatalf("hook must not fire on a validation failure, got %d", hook.count())
+	}
+}
+
+// ctxRecorder is an onRegistriesChanged hook that captures the exact
+// context.Context it was invoked with (not just a count), so a test can
+// inspect its cancellation behavior after the fact.
+type ctxRecorder struct {
+	mu    sync.Mutex
+	calls int
+	last  context.Context
+}
+
+func (c *ctxRecorder) fire(ctx context.Context) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls++
+	c.last = ctx
+}
+
+func (c *ctxRecorder) snapshot() (int, context.Context) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls, c.last
+}
+
+// TestRegistriesHookSurvivesRequestContextCancellation is a regression test
+// for task-review Fix 2 (registries-v1 branch, final-review round):
+// onRegistriesChanged used to run with r.Context() itself — a client that
+// disconnects right after the DB commit cancels r.Context(), and since
+// BroadcastRegistries' own store read (and the Hub sends it triggers) reuse
+// that same ctx, the change stays durable in Postgres but is never
+// distributed to connected agents until the next change or reconnect. Fix:
+// both handleCreateRegistry and handleDeleteRegistry now invoke
+// s.onRegistriesChanged(context.WithoutCancel(r.Context())).
+//
+// This is a synchronous, deterministic reproduction — no goroutines or
+// timing races. It drives Server.ServeHTTP directly, in-process (no real
+// network round trip, so nothing here depends on scheduler luck), with a
+// request whose context it controls; ServeHTTP runs the full handler
+// (decode → store write → audit event → hook) to completion and returns
+// before the test ever touches the context's cancellation — so whatever the
+// hook captured is exactly what production code handed it, not an artifact
+// of timing. ONLY AFTER ServeHTTP returns does the test cancel the
+// ORIGINAL request context and check whether the hook's captured context
+// noticed. Pre-fix, the hook's captured context IS r.Context() (the same
+// object) — cancelling the original after the fact also cancels the
+// captured one, proving they were wrongly the same context. Post-fix,
+// WithoutCancel's returned context is provably detached: Err() must stay
+// nil no matter what happens to its parent afterward.
+func TestRegistriesHookSurvivesRequestContextCancellation(t *testing.T) {
+	st := testdb.New(t)
+	log := opsLog()
+	m := metrics.New(st, log)
+	mm := matchmaker.New(st, m, matchmaker.Config{}, log)
+	dep := deploy.New(deploy.Options{Store: st, Sender: &testdb.CommandRecorder{}, Log: log})
+	hook := &ctxRecorder{}
+	srv := httpapi.New(st, m, mm, dep, nil, nil, "", "", log).WithRegistriesHook(hook.fire)
+
+	ctx := t.Context()
+	_, adminSecret, err := st.CreateAPIKey(ctx, "admin", []string{httpapi.ScopeAdmin})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// --- POST /v1/registries ---
+	reqCtx, cancel := context.WithCancel(context.Background())
+	body := strings.NewReader(`{"host":"ghcr.io","username":"alice","token":"tok-cancel-1"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/registries", body).WithContext(reqCtx)
+	req.Header.Set("Authorization", "Bearer "+adminSecret)
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create: want 201, got %d: %s", w.Code, w.Body.String())
+	}
+	calls, hookCtx := hook.snapshot()
+	if calls != 1 {
+		t.Fatalf("want the hook to fire exactly once after create, got %d", calls)
+	}
+	if hookCtx == nil {
+		t.Fatal("hook did not capture a context")
+	}
+	if err := hookCtx.Err(); err != nil {
+		t.Fatalf("hook context must not be cancelled before the request context is, got %v", err)
+	}
+
+	// Simulate the client disconnecting right after the response was
+	// written: cancel the ORIGINAL request context now, once the handler
+	// (and hook) has already run to completion.
+	cancel()
+	if reqCtx.Err() == nil {
+		t.Fatal("sanity check failed: the original request context should be cancelled now")
+	}
+	if err := hookCtx.Err(); err != nil {
+		t.Fatalf("POST: hook's context must survive the request context's cancellation (context.WithoutCancel), got %v", err)
+	}
+
+	// --- DELETE /v1/registries/{id} — same property, the other call site. ---
+	regs, err := st.ListRegistries(ctx)
+	if err != nil || len(regs) != 1 {
+		t.Fatalf("want exactly 1 registry seeded by the POST above: %v (err=%v)", regs, err)
+	}
+	regID := regs[0].ID
+
+	delCtx, delCancel := context.WithCancel(context.Background())
+	delReq := httptest.NewRequest(http.MethodDelete, "/v1/registries/"+regID, nil).WithContext(delCtx)
+	delReq.Header.Set("Authorization", "Bearer "+adminSecret)
+	delW := httptest.NewRecorder()
+
+	srv.ServeHTTP(delW, delReq)
+
+	if delW.Code != http.StatusNoContent {
+		t.Fatalf("delete: want 204, got %d: %s", delW.Code, delW.Body.String())
+	}
+	calls, hookCtx = hook.snapshot()
+	if calls != 2 {
+		t.Fatalf("want the hook to have fired twice total (create+delete), got %d", calls)
+	}
+	delCancel()
+	if delCtx.Err() == nil {
+		t.Fatal("sanity check failed: the delete request context should be cancelled now")
+	}
+	if err := hookCtx.Err(); err != nil {
+		t.Fatalf("DELETE: hook's context must survive the request context's cancellation (context.WithoutCancel), got %v", err)
 	}
 }

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -120,6 +121,52 @@ registry_auth:
 	}
 	if cfg2.RegistryAuth.Host != "" {
 		t.Fatalf("registry_auth.host must stay empty when absent, got %q", cfg2.RegistryAuth.Host)
+	}
+}
+
+// TestRegistryAuthHostDockerIORejected: registry_auth.host normalizing to
+// docker.io/index.docker.io must fail Load with a clear, actionable error
+// (task review, Fix 4) rather than boot silently — containerd resolves
+// docker.io/index.docker.io to registry-1.docker.io before
+// daemon.Manager's host-match ever runs, so this cred could never fire for a
+// real pull, exactly the reason store.NormalizeRegistryHost rejects it on
+// POST /v1/registries master-side (docs/superpowers/specs/2026-07-09-registries-design.md
+// §3). Covers case-insensitivity and incidental whitespace, matching the
+// normalization the runtime path (daemon.Manager.legacyRegistryHost) applies.
+func TestRegistryAuthHostDockerIORejected(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "tok")
+	if err := os.WriteFile(tokenFile, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, host := range []string{"docker.io", "index.docker.io", "Docker.IO", "  docker.io  "} {
+		t.Run(host, func(t *testing.T) {
+			_, err := Load(write(t, `
+region: eu
+limits_default: { cpu_millis: 1000, mem_mb: 512 }
+registry_auth:
+  username: "ufna"
+  token_file: `+tokenFile+`
+  host: "`+host+`"
+`))
+			if err == nil {
+				t.Fatalf("want a validation error for registry_auth.host %q, got nil", host)
+			}
+			if !strings.Contains(err.Error(), "docker.io") {
+				t.Fatalf("error should name docker.io for a clear, actionable reason, got: %v", err)
+			}
+		})
+	}
+
+	// A real, non-docker.io host must still load fine (no false positive).
+	if _, err := Load(write(t, `
+region: eu
+limits_default: { cpu_millis: 1000, mem_mb: 512 }
+registry_auth:
+  username: "ufna"
+  token_file: `+tokenFile+`
+  host: "ghcr.io"
+`)); err != nil {
+		t.Fatalf("ghcr.io host must not be rejected: %v", err)
 	}
 }
 
