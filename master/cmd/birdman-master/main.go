@@ -159,6 +159,17 @@ func run() error {
 	st.SetCommandSender(hub)
 
 	m := metrics.New(st, log)
+	// mTLS agentlink v1 observability (design §3): live sessions by auth kind
+	// (the operator flips agentlink_auth to mtls once {auth="token"}==0) and
+	// the served leaf's expiry — external certs work too: since Go 1.23
+	// LoadX509KeyPair populates Leaf, and issueServerLeaf always does.
+	m.WireAgentlinkSessions(hub.SessionAuthCounts)
+	m.WireTLSServerCertExpiry(func() (time.Time, bool) {
+		if c := holder.get(); c != nil && c.Leaf != nil {
+			return c.Leaf.NotAfter, true
+		}
+		return time.Time{}, false
+	})
 	// Deploy manager (итерация 3): PrePull fan-out + PullReport-driven flip.
 	dep := deploy.New(deploy.Options{
 		Store: st, Sender: hub, Log: log,

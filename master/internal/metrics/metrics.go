@@ -4,9 +4,12 @@ package metrics
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
@@ -26,6 +29,30 @@ type Metrics struct {
 
 	// Deploy manager (итерация 3, docs/specs/master.md §5).
 	DeployPrepull prometheus.Histogram // seconds from deploy start to all nodes pulled
+
+	// agentlink holds the late-wired callbacks behind the sessions{auth} and
+	// tls_cert_expiry{cert="server"} samples (mTLS agentlink v1, design §3):
+	// the hub and the server-leaf holder are constructed around the same time
+	// as Metrics in main.go, so New registers the collector immediately and
+	// the callbacks arrive via the Wire* methods right after.
+	agentlink *agentlinkCollector
+}
+
+// WireAgentlinkSessions connects the birdman_agentlink_sessions{auth} gauge
+// to the hub's live-session counts (Hub.SessionAuthCounts). Until wired the
+// gauge emits nothing; once wired it always emits BOTH auth="mtls" and
+// auth="token" samples — the operator's flip-readiness check is precisely
+// sessions{auth="token"} == 0, which needs an explicit 0.
+func (m *Metrics) WireAgentlinkSessions(f func() (mtls, token int)) {
+	m.agentlink.sessions.Store(&f)
+}
+
+// WireTLSServerCertExpiry connects the
+// birdman_tls_cert_expiry_timestamp_seconds{cert="server"} sample to the
+// in-memory server-leaf holder (main.go). The callback returns ok=false when
+// no leaf (or no parsed Leaf) is available, in which case nothing is emitted.
+func (m *Metrics) WireTLSServerCertExpiry(f func() (time.Time, bool)) {
+	m.agentlink.serverCert.Store(&f)
 }
 
 func New(st *store.Store, log *slog.Logger) *Metrics {
@@ -60,8 +87,10 @@ func New(st *store.Store, log *slog.Logger) *Metrics {
 			Buckets: []float64{1, 2, 5, 10, 30, 60, 120, 300, 600, 900},
 		}),
 	}
+	m.agentlink = &agentlinkCollector{st: st, log: log}
 	reg.MustRegister(m.AllocDuration, m.AllocFailures, m.MMQueueDepth, m.MMTimeToMatch, m.MMTickets, m.DeployPrepull)
 	reg.MustRegister(&dbCollector{st: st, log: log})
+	reg.MustRegister(m.agentlink)
 	reg.MustRegister(collectors.NewGoCollector())
 	reg.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	return m
@@ -99,7 +128,71 @@ var (
 		"birdman_node_capacity_slots",
 		"Capacity slots of active nodes, per region.",
 		[]string{"region"}, nil)
+	// mTLS agentlink v1 (design §3 "Наблюдаемость"): cert-expiry gauges feed
+	// the CertExpiry alert ("< 14 дней", ops.md §1); node label = hostname,
+	// consistent with birdman_node_heartbeat_age_seconds.
+	nodeCertExpiryDesc = prometheus.NewDesc(
+		"birdman_node_cert_expiry_timestamp_seconds",
+		"Unix time when the node's agentlink client cert expires (nodes.cert_not_after); absent until the node enrolls.",
+		[]string{"node"}, nil)
+	agentlinkSessionsDesc = prometheus.NewDesc(
+		"birdman_agentlink_sessions",
+		"Live agentlink sessions by auth (mtls: verified client cert; token: node_token). token==0 signals readiness for the mtls flip.",
+		[]string{"auth"}, nil)
+	tlsCertExpiryDesc = prometheus.NewDesc(
+		"birdman_tls_cert_expiry_timestamp_seconds",
+		"Unix time when the given TLS cert expires (ca: newest active internal CA — the signer; server: current gRPC server leaf).",
+		[]string{"cert"}, nil)
 )
+
+// agentlinkCollector emits the mTLS agentlink v1 observability samples that
+// need late-wired in-process state (design §3): the sessions{auth} gauge
+// (hub callback), the server-leaf expiry (cert holder callback) and — kept in
+// this collector so ONE collector owns the whole
+// birdman_tls_cert_expiry_timestamp_seconds family — the DB-derived internal
+// CA expiry. Unwired callbacks simply emit nothing.
+type agentlinkCollector struct {
+	st         *store.Store
+	log        *slog.Logger
+	sessions   atomic.Pointer[func() (mtls, token int)]
+	serverCert atomic.Pointer[func() (time.Time, bool)]
+}
+
+func (c *agentlinkCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- agentlinkSessionsDesc
+	ch <- tlsCertExpiryDesc
+}
+
+func (c *agentlinkCollector) Collect(ch chan<- prometheus.Metric) {
+	if f := c.sessions.Load(); f != nil {
+		mtls, token := (*f)()
+		ch <- prometheus.MustNewConstMetric(agentlinkSessionsDesc, prometheus.GaugeValue, float64(mtls), "mtls")
+		ch <- prometheus.MustNewConstMetric(agentlinkSessionsDesc, prometheus.GaugeValue, float64(token), "token")
+	}
+	if f := c.serverCert.Load(); f != nil {
+		if notAfter, ok := (*f)(); ok {
+			ch <- prometheus.MustNewConstMetric(tlsCertExpiryDesc, prometheus.GaugeValue,
+				float64(notAfter.Unix()), "server")
+		}
+	}
+
+	// CA expiry: the newest active row is the signer (same choice as
+	// store.loadActiveCA). No row yet (first boot hasn't ensured the CA) —
+	// emit nothing.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	var caExpiry float64
+	err := c.st.Pool.QueryRow(ctx, `
+		select extract(epoch from not_after) from internal_ca
+		where active order by created_at desc limit 1`).Scan(&caExpiry)
+	switch {
+	case err == nil:
+		ch <- prometheus.MustNewConstMetric(tlsCertExpiryDesc, prometheus.GaugeValue, caExpiry, "ca")
+	case errors.Is(err, pgx.ErrNoRows): // pre-first-boot: no CA yet, nothing to report
+	default:
+		c.log.Error("metrics: internal_ca expiry query failed", "err", err)
+	}
+}
 
 // dbCollector derives gauge metrics from Postgres on scrape.
 type dbCollector struct {
@@ -115,6 +208,7 @@ func (c *dbCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- matchesRunningDesc
 	ch <- playersOnlineDesc
 	ch <- capacitySlotsDesc
+	ch <- nodeCertExpiryDesc
 }
 
 func (c *dbCollector) Collect(ch chan<- prometheus.Metric) {
@@ -162,6 +256,25 @@ func (c *dbCollector) Collect(ch chan<- prometheus.Metric) {
 			ch <- prometheus.MustNewConstMetric(capacitySlotsDesc, prometheus.GaugeValue, n, region)
 		}
 		crows.Close()
+	}
+
+	// Enrolled nodes' client-cert expiry (mTLS agentlink v1, design §3) —
+	// second half of the CertExpiry alert alongside tls_cert_expiry above.
+	if nrows, err := c.st.Pool.Query(ctx, `
+		select hostname, extract(epoch from cert_not_after)
+		from nodes where cert_not_after is not null`); err != nil {
+		c.log.Error("metrics: node cert expiry query failed", "err", err)
+	} else {
+		for nrows.Next() {
+			var hostname string
+			var expiry float64
+			if err := nrows.Scan(&hostname, &expiry); err != nil {
+				c.log.Error("metrics: node cert expiry scan failed", "err", err)
+				break
+			}
+			ch <- prometheus.MustNewConstMetric(nodeCertExpiryDesc, prometheus.GaugeValue, expiry, hostname)
+		}
+		nrows.Close()
 	}
 
 	rows, err := c.st.Pool.Query(ctx, `

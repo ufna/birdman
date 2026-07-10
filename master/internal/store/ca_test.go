@@ -107,14 +107,18 @@ func TestSetNodeCert(t *testing.T) {
 	ctx := context.Background()
 	f := testdb.Seed(t, st, "eu", 10)
 
-	// Unknown node → ErrNotFound, nothing written.
-	if err := st.SetNodeCert(ctx, uuid.NewString(), "deadbeef", time.Now()); !errors.Is(err, store.ErrNotFound) {
+	// Unknown node → ErrNotFound; the whole tx rolls back, so no event either.
+	if err := st.SetNodeCert(ctx, uuid.NewString(), "deadbeef", time.Now(),
+		store.EventNodeEnrolled, "0.2.0"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("unknown node: want ErrNotFound, got %v", err)
+	}
+	if n, err := st.CountEvents(ctx, store.EventNodeEnrolled); err != nil || n != 0 {
+		t.Fatalf("failed SetNodeCert must not leave an event behind: n=%d err=%v", n, err)
 	}
 
 	serial := "0a1b2c3d4e5f"
 	notAfter := time.Now().Add(90 * 24 * time.Hour).UTC().Truncate(time.Second)
-	if err := st.SetNodeCert(ctx, f.NodeID, serial, notAfter); err != nil {
+	if err := st.SetNodeCert(ctx, f.NodeID, serial, notAfter, store.EventNodeEnrolled, "0.2.0"); err != nil {
 		t.Fatalf("SetNodeCert: %v", err)
 	}
 
@@ -133,9 +137,43 @@ func TestSetNodeCert(t *testing.T) {
 	}
 	first := *n.EnrolledAt
 
-	// A renewal updates serial/expiry but preserves the original enrolled_at.
+	// The cert write and its audit event are one transaction (design §3): a
+	// node_enrolled event exists, references the node, and its payload carries
+	// exactly {serial, not_after, agent_version} — no token, no key material.
+	evs, err := st.ListEvents(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var enrolled *store.Event
+	for i := range evs {
+		if evs[i].Kind == store.EventNodeEnrolled {
+			enrolled = &evs[i]
+		}
+	}
+	if enrolled == nil {
+		t.Fatal("SetNodeCert wrote no node_enrolled event")
+	}
+	if enrolled.NodeID == nil || *enrolled.NodeID != f.NodeID {
+		t.Fatalf("event node_id = %v, want %s", enrolled.NodeID, f.NodeID)
+	}
+	if got := enrolled.Payload["serial"]; got != serial {
+		t.Fatalf("event payload serial = %v, want %s", got, serial)
+	}
+	if got := enrolled.Payload["not_after"]; got != notAfter.UTC().Format(time.RFC3339) {
+		t.Fatalf("event payload not_after = %v, want %s", got, notAfter.UTC().Format(time.RFC3339))
+	}
+	if got := enrolled.Payload["agent_version"]; got != "0.2.0" {
+		t.Fatalf("event payload agent_version = %v, want 0.2.0", got)
+	}
+	if len(enrolled.Payload) != 3 {
+		t.Fatalf("event payload must carry exactly {serial, not_after, agent_version}, got %v", enrolled.Payload)
+	}
+
+	// A renewal updates serial/expiry, preserves the original enrolled_at and
+	// writes a node_cert_renewed event.
 	serial2 := "ffee0011"
-	if err := st.SetNodeCert(ctx, f.NodeID, serial2, notAfter.Add(30*24*time.Hour)); err != nil {
+	if err := st.SetNodeCert(ctx, f.NodeID, serial2, notAfter.Add(30*24*time.Hour),
+		store.EventNodeCertRenewed, "0.3.0"); err != nil {
 		t.Fatalf("SetNodeCert renewal: %v", err)
 	}
 	n2, err := st.GetNode(ctx, f.NodeID)
@@ -147,5 +185,11 @@ func TestSetNodeCert(t *testing.T) {
 	}
 	if n2.EnrolledAt == nil || !n2.EnrolledAt.Equal(first) {
 		t.Fatalf("enrolled_at changed on renewal: was %v, now %v", first, n2.EnrolledAt)
+	}
+	if cnt, err := st.CountEvents(ctx, store.EventNodeCertRenewed); err != nil || cnt != 1 {
+		t.Fatalf("node_cert_renewed events = %d (err=%v), want 1", cnt, err)
+	}
+	if cnt, err := st.CountEvents(ctx, store.EventNodeEnrolled); err != nil || cnt != 1 {
+		t.Fatalf("node_enrolled events after renewal = %d (err=%v), want still 1", cnt, err)
 	}
 }

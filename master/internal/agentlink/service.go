@@ -1,6 +1,7 @@
 package agentlink
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/ufna/birdman/master/internal/store"
+	"github.com/ufna/birdman/master/internal/tlsutil"
 	agentlinkv1 "github.com/ufna/birdman/proto/agentlink/v1"
 )
 
@@ -137,6 +139,95 @@ func (s *Service) Session(stream agentlinkv1.AgentLink_SessionServer) error {
 	case <-sess.done:
 		return status.Error(codes.Aborted, "session replaced by a new connection")
 	}
+}
+
+// Enroll swaps a node credential for a signed client leaf (mTLS agentlink v1,
+// design §3 "Enroll handler"). Authentication is EITHER the node_token
+// (bootstrap/recovery: bcrypt via AuthNodeToken — its ~100ms is a natural
+// anti-brute-force, and the agent's PermissionDenied max-backoff already
+// applies) OR a live verified client cert on the connection (renewal: node id
+// from the chain's CN, token empty). If both are present they must resolve to
+// the same node (confused-deputy guard, same rule as Session). Authorization
+// is always re-read from the DB: the node must exist and not be dead.
+//
+// Enroll is deliberately independent of s.mode: agentlink_auth gates Session
+// admission, not enrollment. Enroll-by-token must survive even mtls mode (a
+// new node has no cert yet — design §3), and cert renewal keeps working
+// during a token-mode emergency rollback so certs stay fresh for the flip
+// back.
+//
+// The nodes.cert_* update and the audit event (node_enrolled | ...renewed,
+// payload {serial, not_after, agent_version} — no token, no key bytes) are
+// one transaction (store.SetNodeCert). Never log the token or any key
+// material here.
+func (s *Service) Enroll(ctx context.Context, req *agentlinkv1.EnrollRequest) (*agentlinkv1.EnrollResponse, error) {
+	var node store.Node
+	var eventKind string
+	if leaf := verifiedLeaf(ctx); leaf != nil {
+		// Renewal over a live cert; a token, if also sent, must name the SAME
+		// node (authorizeCert parses it without a bcrypt run — the verified
+		// cert is proof enough).
+		n, err := s.authorizeCert(ctx, leaf, req.GetNodeToken())
+		if err != nil {
+			return nil, err
+		}
+		node, eventKind = n, store.EventNodeCertRenewed
+	} else {
+		if req.GetNodeToken() == "" {
+			return nil, status.Error(codes.PermissionDenied, "enrollment requires a node token or a verified client certificate")
+		}
+		n, err := s.st.AuthNodeToken(ctx, req.GetNodeToken())
+		if err != nil {
+			if errors.Is(err, store.ErrBadToken) {
+				return nil, status.Error(codes.PermissionDenied, "bad node token")
+			}
+			s.log.Error("agentlink: enroll auth failed", "err", err)
+			return nil, status.Error(codes.Internal, "auth failed")
+		}
+		if n.State == "dead" {
+			return nil, status.Error(codes.PermissionDenied, "node is dead")
+		}
+		node, eventKind = n, store.EventNodeEnrolled
+	}
+
+	caCert, caKey, err := s.st.EnsureInternalCA(ctx)
+	if err != nil {
+		s.log.Error("agentlink: enroll: internal CA unavailable", "node_id", node.ID, "err", err)
+		return nil, status.Error(codes.Internal, "internal CA unavailable")
+	}
+	certPEM, leaf, err := tlsutil.IssueClientLeafFromCSR(caCert, caKey, node.ID, req.GetCsrPem())
+	if err != nil {
+		if errors.Is(err, tlsutil.ErrBadCSR) {
+			return nil, status.Error(codes.InvalidArgument, "invalid CSR")
+		}
+		// tlsutil never puts key material into its errors, so logging err is safe.
+		s.log.Error("agentlink: enroll: client leaf issue failed", "node_id", node.ID, "err", err)
+		return nil, status.Error(codes.Internal, "certificate issue failed")
+	}
+	serial := leaf.SerialNumber.Text(16)
+
+	if err := s.st.SetNodeCert(ctx, node.ID, serial, leaf.NotAfter, eventKind, req.GetAgentVersion()); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			// The node vanished between authentication and the write.
+			return nil, status.Error(codes.PermissionDenied, "unknown node")
+		}
+		s.log.Error("agentlink: enroll: cert record failed", "node_id", node.ID, "err", err)
+		return nil, status.Error(codes.Internal, "enrollment failed")
+	}
+
+	cas, err := s.st.ActiveCAs(ctx)
+	if err != nil {
+		s.log.Error("agentlink: enroll: active CA bundle read failed", "node_id", node.ID, "err", err)
+		return nil, status.Error(codes.Internal, "enrollment failed")
+	}
+	s.log.Info("agentlink: node enrolled",
+		"node_id", node.ID, "serial", serial, "not_after", leaf.NotAfter,
+		"agent_version", req.GetAgentVersion(), "renewal", eventKind == store.EventNodeCertRenewed)
+	return &agentlinkv1.EnrollResponse{
+		CertPem:      certPEM,
+		CaBundlePem:  bytes.Join(cas, nil),
+		NotAfterUnix: leaf.NotAfter.Unix(),
+	}, nil
 }
 
 // authenticate resolves the node behind a Session stream and how it proved its

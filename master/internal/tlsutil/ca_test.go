@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"net"
 	"strings"
 	"testing"
@@ -182,12 +183,15 @@ func TestIssueClientLeafFromCSR_Broken(t *testing.T) {
 	}
 	nodeID := "22222222-2222-2222-2222-222222222222"
 
-	if _, _, err := tlsutil.IssueClientLeafFromCSR(caCertPEM, caKeyPEM, nodeID, []byte("not a pem")); err == nil {
-		t.Errorf("garbage CSR: want error, got nil")
+	// Every CSR-supplied fault must be marked ErrBadCSR: the Enroll handler
+	// maps it to codes.InvalidArgument, as opposed to server-side CA failures
+	// (→ Internal).
+	if _, _, err := tlsutil.IssueClientLeafFromCSR(caCertPEM, caKeyPEM, nodeID, []byte("not a pem")); !errors.Is(err, tlsutil.ErrBadCSR) {
+		t.Errorf("garbage CSR: want ErrBadCSR, got %v", err)
 	}
 	brokenDER := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: []byte("xxxx")})
-	if _, _, err := tlsutil.IssueClientLeafFromCSR(caCertPEM, caKeyPEM, nodeID, brokenDER); err == nil {
-		t.Errorf("broken-DER CSR: want error, got nil")
+	if _, _, err := tlsutil.IssueClientLeafFromCSR(caCertPEM, caKeyPEM, nodeID, brokenDER); !errors.Is(err, tlsutil.ErrBadCSR) {
+		t.Errorf("broken-DER CSR: want ErrBadCSR, got %v", err)
 	}
 	// Valid structure, corrupted signature (last DER byte) → CheckSignature must reject.
 	csr := makeCSR(t, "x")
@@ -195,8 +199,8 @@ func TestIssueClientLeafFromCSR_Broken(t *testing.T) {
 	der := append([]byte(nil), block.Bytes...)
 	der[len(der)-1] ^= 0xff
 	tampered := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der})
-	if _, _, err := tlsutil.IssueClientLeafFromCSR(caCertPEM, caKeyPEM, nodeID, tampered); err == nil {
-		t.Errorf("tampered-signature CSR: want error, got nil")
+	if _, _, err := tlsutil.IssueClientLeafFromCSR(caCertPEM, caKeyPEM, nodeID, tampered); !errors.Is(err, tlsutil.ErrBadCSR) {
+		t.Errorf("tampered-signature CSR: want ErrBadCSR, got %v", err)
 	}
 }
 
@@ -233,8 +237,8 @@ func TestIssueClientLeafFromCSR_NonP256(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			csr := makeCSRWith(t, tc.key, "attacker")
-			if _, _, err := tlsutil.IssueClientLeafFromCSR(caCertPEM, caKeyPEM, nodeID, csr); err == nil {
-				t.Errorf("%s CSR: want error (issuer must require ECDSA P-256), got nil", tc.name)
+			if _, _, err := tlsutil.IssueClientLeafFromCSR(caCertPEM, caKeyPEM, nodeID, csr); !errors.Is(err, tlsutil.ErrBadCSR) {
+				t.Errorf("%s CSR: want ErrBadCSR (issuer must require ECDSA P-256), got %v", tc.name, err)
 			}
 		})
 	}
@@ -259,6 +263,11 @@ func TestIssueClientLeafFromCSR_CAKeyNeverLeaks(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), marker) || strings.Contains(err.Error(), string(badKey)) {
 		t.Fatalf("error leaked CA key bytes: %q", err.Error())
+	}
+	// A server-side CA fault is NOT a bad CSR — Enroll must answer Internal,
+	// not InvalidArgument, or the agent would uselessly regenerate its CSR.
+	if errors.Is(err, tlsutil.ErrBadCSR) {
+		t.Fatalf("corrupt CA key must not be classified ErrBadCSR: %v", err)
 	}
 }
 

@@ -160,13 +160,20 @@ func IssueServerLeaf(caCertPEM, caKeyPEM []byte, hostname string, extraSANs []st
 	return certPEM, keyPEM, nil
 }
 
+// ErrBadCSR marks every CSR-supplied fault in IssueClientLeafFromCSR
+// (malformed PEM/DER, bad proof-of-possession signature, wrong key
+// type/curve): the Enroll handler maps it to codes.InvalidArgument — the
+// agent sent garbage — as opposed to server-side CA failures, which stay
+// unmarked and map to codes.Internal.
+var ErrBadCSR = errors.New("bad csr")
+
 // IssueClientLeafFromCSR signs a 90-day client leaf for a node from its CSR.
 // The CSR carries only the node's public key; its signature is verified (proof
 // of possession) and its subject is IGNORED — the leaf's CN is always nodeID,
 // the authenticated identity. The enrolling key MUST be ECDSA P-256 (ECDSA
 // P-256 throughout); a malformed CSR, a bad CSR signature, or any other key
-// type/curve is an error. Returns the cert PEM and the parsed leaf
-// (serial/NotAfter for the caller to persist).
+// type/curve is an error wrapping ErrBadCSR. Returns the cert PEM and the
+// parsed leaf (serial/NotAfter for the caller to persist).
 func IssueClientLeafFromCSR(caCertPEM, caKeyPEM []byte, nodeID string, csrPEM []byte) (certPEM []byte, leaf *x509.Certificate, err error) {
 	caCert, caKey, err := parseCAKeypair(caCertPEM, caKeyPEM)
 	if err != nil {
@@ -174,20 +181,20 @@ func IssueClientLeafFromCSR(caCertPEM, caKeyPEM []byte, nodeID string, csrPEM []
 	}
 	block, _ := pem.Decode(csrPEM)
 	if block == nil || block.Type != "CERTIFICATE REQUEST" {
-		return nil, nil, errors.New("csr: not a CERTIFICATE REQUEST PEM")
+		return nil, nil, fmt.Errorf("%w: not a CERTIFICATE REQUEST PEM", ErrBadCSR)
 	}
 	csr, err := x509.ParseCertificateRequest(block.Bytes)
 	if err != nil {
-		return nil, nil, fmt.Errorf("parse csr: %w", err)
+		return nil, nil, fmt.Errorf("%w: parse: %v", ErrBadCSR, err)
 	}
 	if err := csr.CheckSignature(); err != nil {
-		return nil, nil, fmt.Errorf("csr signature: %w", err)
+		return nil, nil, fmt.Errorf("%w: signature: %v", ErrBadCSR, err)
 	}
 	// Enforce ECDSA P-256 on the enrolling key: an RSA, Ed25519, or wrong-curve
 	// node identity key must never be minted into a birdman client leaf.
 	pub, ok := csr.PublicKey.(*ecdsa.PublicKey)
 	if !ok || pub.Curve != elliptic.P256() {
-		return nil, nil, errors.New("client CSR must use ECDSA P-256")
+		return nil, nil, fmt.Errorf("%w: client CSR must use ECDSA P-256", ErrBadCSR)
 	}
 	serial, err := randSerial()
 	if err != nil {

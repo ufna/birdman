@@ -119,12 +119,24 @@ func (s *Store) ActiveCAs(ctx context.Context) ([][]byte, error) {
 	return out, rows.Err()
 }
 
-// SetNodeCert records a freshly issued client cert for a node (Enroll handler,
-// design §3): serial and expiry feed admission/metrics; enrolled_at marks the
-// FIRST enrollment and is preserved across renewals. Returns ErrNotFound if the
-// node no longer exists.
-func (s *Store) SetNodeCert(ctx context.Context, nodeID, serial string, notAfter time.Time) error {
-	ct, err := s.Pool.Exec(ctx, `
+// SetNodeCert records a freshly issued client cert for a node AND writes the
+// matching audit event (EventNodeEnrolled for the first token→cert exchange,
+// EventNodeCertRenewed for a renewal over a live cert) in ONE transaction —
+// the Enroll handler (design §3) must never leave a cert recorded without its
+// audit trail or vice versa (same tx+insertEvent idiom as setNodeDrain).
+// serial and expiry feed admission/metrics; enrolled_at marks the FIRST
+// enrollment and is preserved across renewals (coalesce). The event payload
+// is exactly {serial, not_after, agent_version} — never the node_token,
+// never key material. Returns ErrNotFound (nothing written) if the node no
+// longer exists.
+func (s *Store) SetNodeCert(ctx context.Context, nodeID, serial string, notAfter time.Time, eventKind, agentVersion string) error {
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	ct, err := tx.Exec(ctx, `
 		update nodes
 		set cert_serial = $2, cert_not_after = $3, enrolled_at = coalesce(enrolled_at, now())
 		where id = $1::uuid`, nodeID, serial, notAfter)
@@ -134,5 +146,12 @@ func (s *Store) SetNodeCert(ctx context.Context, nodeID, serial string, notAfter
 	if ct.RowsAffected() == 0 {
 		return ErrNotFound
 	}
-	return nil
+	if err := insertEvent(ctx, tx, eventKind, EventRef{NodeID: &nodeID}, map[string]any{
+		"serial":        serial,
+		"not_after":     notAfter.UTC().Format(time.RFC3339),
+		"agent_version": agentVersion,
+	}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }

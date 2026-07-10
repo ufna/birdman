@@ -165,6 +165,26 @@ func (h *Hub) attach(nodeID string, preface *agentlinkv1.MasterMsg, certAuth, lo
 	return s
 }
 
+// SessionAuthCounts reports live sessions by how they authenticated: mtls =
+// verified client cert, token = node_token. Read on every scrape by the
+// birdman_agentlink_sessions{auth} gauge (mTLS agentlink v1, design §3) — the
+// operator flips agentlink_auth to mtls once {auth="token"} reaches 0.
+func (h *Hub) SessionAuthCounts() (mtls, token int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, q := range h.queues {
+		if q.sess == nil {
+			continue
+		}
+		if q.sess.certAuth {
+			mtls++
+		} else {
+			token++
+		}
+	}
+	return mtls, token
+}
+
 // ConnectedNodes returns the ids of nodes with a live session — used by
 // Service.BroadcastRegistries to fan a fresh snapshot out to every agent
 // currently online (design doc §2).

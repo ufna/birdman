@@ -113,6 +113,39 @@ func TestHubSendPushOrderMatchesMutationOrderUnderConcurrency(t *testing.T) {
 	t.Logf("rounds=%d workersPerRound=%d ground-truth-dropped=%d (expected: rare, non-fatal — full-channel drops are correct behavior)", rounds, workersPerRound, dropped)
 }
 
+// TestHubSessionAuthCounts: the hub reports live sessions by how they
+// authenticated — the birdman_agentlink_sessions{auth} gauge reads these
+// counts on scrape (mTLS agentlink v1, design §3: the operator flips
+// agentlink_auth to mtls once {auth="token"} hits 0). certAuth classifies a
+// session as mtls regardless of loopback; a replaced session must not double
+// count; detach removes it from the counts.
+func TestHubSessionAuthCounts(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	hub := NewHub(log)
+
+	if mtls, token := hub.SessionAuthCounts(); mtls != 0 || token != 0 {
+		t.Fatalf("empty hub: counts = (%d, %d), want (0, 0)", mtls, token)
+	}
+
+	hub.attach("node-cert", nil, true, false)
+	hub.attach("node-token-loopback", nil, false, true)
+	tokenSess := hub.attach("node-token-remote", nil, false, false)
+	if mtls, token := hub.SessionAuthCounts(); mtls != 1 || token != 2 {
+		t.Fatalf("counts = (%d, %d), want (1 mtls, 2 token) — loopback does not make a session mtls", mtls, token)
+	}
+
+	// A reconnect that replaces node-cert's session keeps it counted once.
+	hub.attach("node-cert", nil, true, false)
+	if mtls, token := hub.SessionAuthCounts(); mtls != 1 || token != 2 {
+		t.Fatalf("after session replacement: counts = (%d, %d), want (1, 2)", mtls, token)
+	}
+
+	hub.detach("node-token-remote", tokenSess)
+	if mtls, token := hub.SessionAuthCounts(); mtls != 1 || token != 1 {
+		t.Fatalf("after detach: counts = (%d, %d), want (1, 1)", mtls, token)
+	}
+}
+
 // drainSetRegistries reads every currently-buffered SetRegistries host off
 // sess.out without blocking, in arrival order — mirrors the non-blocking
 // shape of session.push itself.
