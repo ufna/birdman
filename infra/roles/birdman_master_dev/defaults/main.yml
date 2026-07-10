@@ -32,4 +32,10 @@ birdman_master_secrets_key_file: /etc/birdman/secrets.key
 # отвергается. Fresh-провижининг тоже ок: агент делает Enroll-by-token (он разрешён
 # и в mtls) → серт → mTLS-сессия. Для zero-downtime перевода СУЩЕСТВУЮЩЕГО insecure-агента
 # на мульти-нодовом флоте временно переопредели в `mixed` (-e), дождись sessions{token}=0, верни mtls.
+# ⚠️ ИНВАРИАНТ (итерация 5, оверлей): пока на хабе живёт socat-форвардер
+# (контейнер birdman-overlay), режим — ТОЛЬКО mtls. Форвардер отдаёт master'у
+# peer-адрес 127.0.0.1, и в mixed токен-агент С ОВЕРЛЕЯ прошёл бы
+# loopback-ветку гейта SetRegistries (спека iter5 §Безопасность). mixed на
+# этом флоте больше не нужен: все ноды заходят mTLS через Enroll с первого
+# коннекта.
 birdman_agentlink_auth: mtls

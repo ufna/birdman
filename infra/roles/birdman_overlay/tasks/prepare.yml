@@ -1,0 +1,65 @@
+---
+- name: Assert docker is present (контейнерный оверлей без docker невозможен)
+  ansible.builtin.command:
+    cmd: docker info
+  changed_when: false
+
+- name: Create overlay directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ birdman_overlay_dir }}", mode: "0755" }
+    - { path: "{{ birdman_overlay_dir }}/build", mode: "0755" }
+    - { path: "{{ birdman_overlay_conf_dir }}", mode: "0700" }
+
+- name: Copy image build context (Dockerfile + entrypoint)
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ birdman_overlay_dir }}/build/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: [Dockerfile, entrypoint.sh]
+  register: birdman_overlay_build_ctx
+
+- name: Check overlay image exists
+  ansible.builtin.command:
+    cmd: docker image inspect {{ birdman_overlay_image }}
+  register: birdman_overlay_image_check
+  changed_when: false
+  failed_when: false
+
+- name: Build overlay image (локально на боксе, без внешнего registry)
+  ansible.builtin.command:
+    cmd: docker build -t {{ birdman_overlay_image }} {{ birdman_overlay_dir }}/build
+  when: birdman_overlay_build_ctx is changed or birdman_overlay_image_check.rc != 0
+  notify: Restart birdman-overlay
+
+# Приватный ключ рождается и умирает на своём боксе: no_log, 0600, creates.
+# У образа есть ENTRYPOINT — для утилитных вызовов всегда --entrypoint.
+- name: Generate WireGuard private key (once, box-only)
+  ansible.builtin.shell:
+    cmd: umask 077 && rm -f {{ birdman_overlay_conf_dir }}/wg.key.tmp && docker run --rm --entrypoint wg {{ birdman_overlay_image }} genkey > {{ birdman_overlay_conf_dir }}/wg.key.tmp && mv {{ birdman_overlay_conf_dir }}/wg.key.tmp {{ birdman_overlay_conf_dir }}/wg.key
+    creates: "{{ birdman_overlay_conf_dir }}/wg.key"
+  no_log: true
+
+- name: Enforce key ownership and mode
+  ansible.builtin.file:
+    path: "{{ birdman_overlay_conf_dir }}/wg.key"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Derive public key
+  ansible.builtin.command:
+    cmd: docker run --rm -v {{ birdman_overlay_conf_dir }}:/keys:ro --entrypoint sh {{ birdman_overlay_image }} -c 'wg pubkey < /keys/wg.key'
+  register: birdman_overlay_pubkey_cmd
+  changed_when: false
+
+- name: Publish pubkey as host fact (публичен; конфиги соседей читают его из hostvars)
+  ansible.builtin.set_fact:
+    birdman_overlay_pubkey: "{{ birdman_overlay_pubkey_cmd.stdout | trim }}"

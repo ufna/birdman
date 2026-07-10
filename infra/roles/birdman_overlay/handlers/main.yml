@@ -1,0 +1,13 @@
+---
+# Пересоздание (не docker restart): подхватывает и новый образ, и новый
+# конфиг. До первого up.yml compose.yml ещё не отрендерен (prepare_only-плей
+# add-node) — тогда рестартовать нечего, up.yml сам поднимет контейнер со
+# свежим образом. Рестарт хаба рвёт линки удалённых нод на секунды — агенты
+# реконнектятся штатно (спека §2, принятое ограничение №4).
+- name: Restart birdman-overlay
+  ansible.builtin.shell:
+    cmd: |
+      if [ -f {{ birdman_overlay_dir }}/compose.yml ]; then
+        docker compose -f {{ birdman_overlay_dir }}/compose.yml up -d --force-recreate --wait
+      fi
+  changed_when: true

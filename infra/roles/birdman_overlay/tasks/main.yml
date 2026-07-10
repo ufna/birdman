@@ -1,0 +1,10 @@
+---
+# Всё аддитивно и только birdman-объекты. Хост-футпринт: контейнер + образ
+# + /etc/birdman/overlay + (хаб) UFW-правила. Снос: compose down + удалить
+# каталоги/правила — бокс байт-в-байт как был (спека §1).
+- name: Prepare overlay (image, key, pubkey fact)
+  ansible.builtin.include_tasks: prepare.yml
+
+- name: Bring overlay up (config, ufw, container)
+  ansible.builtin.include_tasks: up.yml
+  when: not (birdman_overlay_prepare_only | bool)

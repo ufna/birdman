@@ -1,0 +1,30 @@
+# {{ ansible_managed }}
+# wg-формат для `wg setconf` (НЕ wg-quick: без Address/DNS). PrivateKey
+# задаётся entrypoint'ом отдельно из wg.key — конфиг без секретов.
+[Interface]
+{% if birdman_overlay_mode == 'hub' %}
+ListenPort = {{ birdman_overlay_port }}
+{% for node in groups['birdman_nodes'] | sort %}
+{% if hostvars[node].birdman_overlay_pubkey is defined %}
+
+[Peer]
+# {{ node }} ({{ hostvars[node].ansible_host }})
+PublicKey = {{ hostvars[node].birdman_overlay_pubkey }}
+# строго /32: криптографическая привязка overlay-IP к ключу (анти-спуф)
+AllowedIPs = {{ hostvars[node].birdman_overlay_ip }}/32
+{% else %}
+
+# {{ node }}: pubkey-факт отсутствует (нода не в этом прогоне) — peer пропущен
+{% endif %}
+{% endfor %}
+{% else %}
+
+[Peer]
+# хаб {{ birdman_overlay_hub_host }}
+PublicKey = {{ hostvars[birdman_overlay_hub_host].birdman_overlay_pubkey }}
+# только хаб (/32, не /24): спок не маршрутизирует транзит между нодами
+AllowedIPs = {{ hostvars[birdman_overlay_hub_host].birdman_overlay_ip }}/32
+Endpoint = {{ hostvars[birdman_overlay_hub_host].ansible_host }}:{{ birdman_overlay_port }}
+# спок — единственный инициатор; keepalive держит conntrack-путь живым
+PersistentKeepalive = 25
+{% endif %}

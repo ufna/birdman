@@ -1,0 +1,43 @@
+---
+# Изолированный контейнерный WireGuard-оверлей birdman
+# (спека docs/superpowers/specs/2026-07-10-iter5-second-node-design.md).
+# Решения владельца: подсеть 10.77.0.0/24, порт 51827/udp, userspace
+# wireguard-go в контейнере — kernel-модуль НЕ используется, даже если
+# загружен на хосте (изоляция от чужого меша на общем боксе).
+#
+# ИНВАРИАНТ БЕЗОПАСНОСТИ (спека §Безопасность): пока на хабе живёт
+# socat-форвардер, master обязан оставаться в agentlink_auth: mtls —
+# форвардер отдаёт peer-адрес 127.0.0.1, и в mixed токен-агент С ОВЕРЛЕЯ
+# прошёл бы loopback-ветку гейта SetRegistries.
+
+# Режим экземпляра: hub (master-бокс: слушает UDP, несёт форвардеры) |
+# spoke (нода: единственный инициатор). Задаётся плеем.
+birdman_overlay_mode: spoke
+# true = только подготовка (образ + ключ + pubkey-факт), без конфига и
+# контейнера: первый плей add-node.yml собирает pubkey-факты всех нод ДО
+# рендера хаб-конфига с peer-блоками.
+birdman_overlay_prepare_only: false
+
+birdman_overlay_cidr: "10.77.0.0/24"   # решение владельца №3
+birdman_overlay_port: 51827            # UDP хаба, решение владельца №3
+birdman_overlay_iface: birdman-wg0
+# Overlay-IP экземпляра — обязательная пер-хост переменная инвентаря
+# (10.77.0.1 — хаб; 10.77.0.2+ — ноды). Дефолта нет намеренно.
+
+# Хост-хаб в инвентаре: споки берут его pubkey/endpoint из hostvars,
+# хаб собирает peer-блоки из hostvars группы birdman_nodes.
+birdman_overlay_hub_host: birdman-dev
+
+# TCP-порты control-plane, форвардимые хабом с overlay-IP на 127.0.0.1:
+# 8444 agentlink gRPC, 9428 VictoriaLogs insert, 8428 VictoriaMetrics
+# remote-write (задел под vmagent нод — решение владельца №6).
+# НЕ форвардим: 8100 (admin-REST — delegate_to), 5433 (PG), 3000/8880.
+birdman_overlay_forwards: [8444, 9428, 8428]
+
+birdman_overlay_dir: /opt/birdman/overlay        # compose-проект + build-контекст
+birdman_overlay_conf_dir: /etc/birdman/overlay   # wg.key + wg.conf (ro в контейнер)
+birdman_overlay_image: "birdman-overlay:local"   # свой образ, docker build на боксе
+birdman_overlay_container: birdman-overlay
+
+# Комментарий UFW-правил хаба — по нему находим/сносим свои правила.
+birdman_ufw_comment: birdman-dev
