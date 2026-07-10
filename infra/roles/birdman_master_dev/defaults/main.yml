@@ -23,4 +23,8 @@ birdman_master_admin_key_file: /etc/birdman/master-admin.key
 # cert-auth, и token-auth, Enroll включён. Флип в mtls (строгий mTLS) — по
 # команде владельца в Фазе D; token — экстренный откат. CA master создаёт сам
 # в Postgres при первом старте — здесь ничего доставлять не нужно.
-birdman_agentlink_auth: mixed
+# mtls: дев-бокс переведён в строгий режим (Фаза D 10.07.2026) — token-only Hello
+# отвергается. Fresh-провижининг тоже ок: агент делает Enroll-by-token (он разрешён
+# и в mtls) → серт → mTLS-сессия. Для zero-downtime перевода СУЩЕСТВУЮЩЕГО insecure-агента
+# на мульти-нодовом флоте временно переопредели в `mixed` (-e), дождись sessions{token}=0, верни mtls.
+birdman_agentlink_auth: mtls
