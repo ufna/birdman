@@ -1,0 +1,40 @@
+---
+# Добавление игровой ноды birdman «одной командой» (спека iter5 §4; форма
+# acceptance ops.md §108/§133):
+#   ansible-playbook playbooks/add-node.yml
+# Идемпотентен; следующая нода = host-блок в inventories/dev/hosts.yml + прогон.
+#
+# ⚠️ -l/--limit: хаб (birdman-dev) обязан попадать в лимит вместе с новой
+# нодой — конфиг хаба собирает peer-блоки из фактов нод ЭТОГО прогона;
+# нода вне прогона остаётся в конфиге хаба «peer пропущен» до полного
+# прогона. Staged-выкатка одного хаба: -l birdman-dev (плеи нод скипаются).
+#
+# Порядок плеев жёсткий: (1) факты+pubkey всех нод → (2) хаб с peer'ами и
+# форвардерами → (3) споки + агент (регистрация delegate_to master-бокса).
+- name: Nodes prepare — docker check, overlay image, wg key, pubkey fact
+  hosts: birdman_nodes
+  become: true
+  roles:
+    - role: birdman_overlay
+      birdman_overlay_prepare_only: true
+      birdman_overlay_mode: spoke
+
+- name: Hub — overlay with node peers + control-plane forwarders
+  hosts: birdman_dev
+  become: true
+  roles:
+    - role: birdman_overlay
+      birdman_overlay_mode: hub
+
+- name: Nodes — overlay spoke up + agent (register via master box)
+  hosts: birdman_nodes
+  become: true
+  pre_tasks:
+    - name: Assert containerd is up (агенту нужен /run/containerd/containerd.sock)
+      ansible.builtin.command:
+        cmd: systemctl is-active containerd
+      changed_when: false
+  roles:
+    - role: birdman_overlay
+      birdman_overlay_mode: spoke
+    - role: birdman_agent_dev
