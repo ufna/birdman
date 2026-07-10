@@ -26,9 +26,23 @@ create table nodes (
                     check (state in ('active','draining','quarantine','dead')),
   last_heartbeat_at timestamptz,
   labels            jsonb not null default '{}',
-  token_hash        text not null default '',  -- (уточнено в v0) bcrypt node_token,
-                                               -- пока не реализован обмен token→mTLS-серт
+  token_hash        text not null default '',  -- bcrypt node_token (v1: recovery-кред, обмен на серт реализован)
+  cert_serial       text,                       -- (v1) serial активного клиентского серта ноды
+  cert_not_after    timestamptz,                -- (v1) истечение серта — admission + метрики
+  enrolled_at       timestamptz,                -- (v1) первый token→cert Enroll (renewal его не трогает)
   created_at        timestamptz not null default now()
+);
+
+-- (v1, mTLS agentlink — миграция 000008) внутренняя CA в PG: переживает потерю
+-- бокса вместе с дампом (restore-runbook, ops.md §5). key_pem — обратимый секрет
+-- (класс риска = registries.token), никогда не логируется, /v1/ca его не отдаёт.
+create table internal_ca (
+  id         uuid primary key default gen_random_uuid(),
+  cert_pem   text not null,
+  key_pem    text not null,
+  active     bool not null default true,
+  created_at timestamptz not null default now(),
+  not_after  timestamptz not null
 );
 
 create table versions (
@@ -195,7 +209,8 @@ POST /v1/rollback: шаг 3 в обратную сторону (образы у�
 | `DELETE /v1/matchmaking/tickets/{id}` | matchmaking | отмена |
 | `GET /v1/qos` | public | пинг-эндпоинты регионов `[{region, host, udp_port}]` |
 | `POST /v1/allocate` | allocate | граница флота (см. §3) |
-| `GET /v1/nodes` · `/v1/servers` · `/v1/matches` · `/v1/versions` | readonly | списки с фильтрами |
+| `GET /v1/nodes` · `/v1/servers` · `/v1/matches` · `/v1/versions` | readonly | списки с фильтрами; `/v1/nodes` (v1) отдаёт аддитивные cert-поля `cert_serial`, `cert_not_after`, `enrolled_at` (nullable) |
+| `GET /v1/ca` | readonly | публичный PEM-бандл активных внутренних CA (`text/plain`) — для ansible (кладёт `master-ca.pem` на ноды) и отладки; приватный ключ CA неоткуда прочитать by construction (mTLS v1, `protocol.md` §Auth) |
 | `GET /v1/events/stream` (SSE) | readonly | live-лента для панели |
 | `PUT /v1/fleets/{region}` | admin | buffer, max_servers, reap_ttl |
 | `PUT /v1/projects/{slug}` | admin | match_size проекта (уточнено в v0) |
@@ -235,7 +250,8 @@ POST /v1/rollback: шаг 3 в обратную сторону (образы у�
 
 ## 7. Операционное
 
-- Один бинарь `birdman-master`; конфиг `/etc/birdman/master.yaml` (dsn, listen :443 и :8443 gRPC, tls-серты, project defaults). systemd unit с `Restart=always`. (Уточнено в v0: дев-дефолты `listen_api :8100`, `listen_grpc :8444`; env-переопределения `BIRDMAN_DSN`/`BIRDMAN_LISTEN_API`/`BIRDMAN_LISTEN_GRPC`; без сертов в конфиге — self-signed автогенерация при первом старте.)
+- Один бинарь `birdman-master`; конфиг `/etc/birdman/master.yaml` (dsn, listen :443 и :8443 gRPC, tls-серты, project defaults). systemd unit с `Restart=always`. (Уточнено в v0: дев-дефолты `listen_api :8100`, `listen_grpc :8444`; env-переопределения `BIRDMAN_DSN`/`BIRDMAN_LISTEN_API`/`BIRDMAN_LISTEN_GRPC`.)
+- (Уточнено в v1, mTLS agentlink.) Внутренняя CA живёт в Postgres (`internal_ca`, миграция 000008; master генерит её под advisory-lock при первом старте — ECDSA P-256, TTL 10 лет). Без внешних `tls.cert_file/key_file` master **выпускает себе server-лист от этой CA при старте** (в память, TTL 90 дней, hot-rotate за 14 дней до истечения через `GetCertificate`) — self-signed автоген (`EnsureServerCert`) выведен из эксплуатации. gRPC-листенер `:8444`: `ClientCAs` = активные CA, `ClientAuth: VerifyClientCertIfGiven` (Enroll обязан работать до выдачи серта); строгость Session — конфиг `agentlink_auth: token|mixed|mtls` (env `BIRDMAN_AGENTLINK_AUTH`, деф. `mixed`; `protocol.md` §Auth). Наблюдаемость: `birdman_agentlink_sessions{auth="mtls|token"}`, `birdman_tls_cert_expiry_timestamp_seconds{cert="ca|server"}`, `birdman_node_cert_expiry_timestamp_seconds{node}`, `birdman_agentlink_registries_withheld_total`.
 - Graceful shutdown: стоп приёма API → дожидание in-flight (≤5с) → exit. Агенты переподключаются сами.
 - QoS-эндпоинт: крошечный UDP-echo в составе агента на каждой тачке (порт 19999) — master отдаёт их список в `/v1/qos`.
 - Логи master: journald, JSON-формат.
