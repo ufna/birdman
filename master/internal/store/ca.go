@@ -1,0 +1,131 @@
+package store
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/ufna/birdman/master/internal/tlsutil"
+)
+
+// CA is one active internal-CA row: the public cert PEM plus the (reversible-
+// secret) private key PEM. key_pem is never logged and never formatted with
+// %v — same discipline as registries.token.
+type CA struct {
+	CertPEM []byte
+	KeyPEM  []byte
+}
+
+// internalCALockKey names the PG advisory lock that serializes first-time CA
+// generation — the same idiom as reconcile's PlanFleet lock, so two masters
+// starting at once create exactly one CA row.
+const internalCALockKey = "birdman:internal_ca"
+
+// rowQuerier is satisfied by *pgxpool.Pool and pgx.Tx.
+type rowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+func loadActiveCA(ctx context.Context, q rowQuerier) (CA, bool, error) {
+	var cert, key string
+	err := q.QueryRow(ctx, `
+		select cert_pem, key_pem from internal_ca
+		where active order by created_at desc limit 1`).Scan(&cert, &key)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return CA{}, false, nil
+	}
+	if err != nil {
+		return CA{}, false, err
+	}
+	return CA{CertPEM: []byte(cert), KeyPEM: []byte(key)}, true, nil
+}
+
+// EnsureInternalCA returns the active internal CA's cert+key PEM, generating
+// and persisting one on the first call. Concurrent first-calls are serialized
+// by a blocking PG advisory lock so exactly one CA row is ever created; the key
+// survives master-box loss with the PG dump (design §1). The key PEM is a
+// reversible secret — callers must never log it.
+func (s *Store) EnsureInternalCA(ctx context.Context) (certPEM, keyPEM []byte, err error) {
+	if ca, ok, err := loadActiveCA(ctx, s.Pool); err != nil {
+		return nil, nil, err
+	} else if ok {
+		return ca.CertPEM, ca.KeyPEM, nil
+	}
+
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	// Block (not try) so a concurrent starter waits on the lock and then, on
+	// the double-check below, sees the row we — or it — committed.
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1, 42))`, internalCALockKey); err != nil {
+		return nil, nil, err
+	}
+	if ca, ok, err := loadActiveCA(ctx, tx); err != nil {
+		return nil, nil, err
+	} else if ok {
+		return ca.CertPEM, ca.KeyPEM, nil
+	}
+
+	cPEM, kPEM, err := tlsutil.GenerateCA()
+	if err != nil {
+		return nil, nil, err
+	}
+	notAfter, err := tlsutil.CertNotAfter(cPEM)
+	if err != nil {
+		return nil, nil, err
+	}
+	if _, err := tx.Exec(ctx, `
+		insert into internal_ca (cert_pem, key_pem, not_after)
+		values ($1, $2, $3)`, string(cPEM), string(kPEM), notAfter); err != nil {
+		return nil, nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, nil, err
+	}
+	return cPEM, kPEM, nil
+}
+
+// ActiveCAs returns every active internal CA (normally one; two only during a
+// manual CA-rotation window), oldest first — the source for the master's
+// ClientCAs pool and the agent-facing ca_bundle_pem.
+func (s *Store) ActiveCAs(ctx context.Context) ([]CA, error) {
+	rows, err := s.Pool.Query(ctx, `
+		select cert_pem, key_pem from internal_ca
+		where active order by created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []CA
+	for rows.Next() {
+		var cert, key string
+		if err := rows.Scan(&cert, &key); err != nil {
+			return nil, err
+		}
+		out = append(out, CA{CertPEM: []byte(cert), KeyPEM: []byte(key)})
+	}
+	return out, rows.Err()
+}
+
+// SetNodeCert records a freshly issued client cert for a node (Enroll handler,
+// design §3): serial and expiry feed admission/metrics; enrolled_at marks the
+// FIRST enrollment and is preserved across renewals. Returns ErrNotFound if the
+// node no longer exists.
+func (s *Store) SetNodeCert(ctx context.Context, nodeID, serial string, notAfter time.Time) error {
+	ct, err := s.Pool.Exec(ctx, `
+		update nodes
+		set cert_serial = $2, cert_not_after = $3, enrolled_at = coalesce(enrolled_at, now())
+		where id = $1::uuid`, nodeID, serial, notAfter)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}

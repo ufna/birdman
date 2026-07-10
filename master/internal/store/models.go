@@ -15,6 +15,11 @@ type Node struct {
 	LastHeartbeatAt *time.Time     `json:"last_heartbeat_at,omitempty"`
 	Labels          map[string]any `json:"labels"`
 	CreatedAt       time.Time      `json:"created_at"`
+	// mTLS client-cert fields (mTLS agentlink v1, migration 000008) — nil
+	// until the node enrolls; enrolled_at is the first-enrollment time.
+	CertSerial   *string    `json:"cert_serial,omitempty"`
+	CertNotAfter *time.Time `json:"cert_not_after,omitempty"`
+	EnrolledAt   *time.Time `json:"enrolled_at,omitempty"`
 }
 
 type Version struct {
@@ -130,4 +135,12 @@ const (
 	// never land in an audit event, a log line, or a GET response.
 	EventRegistryUpserted = "registry_upserted" // POST /v1/registries (create or replace-by-host)
 	EventRegistryRemoved  = "registry_removed"  // DELETE /v1/registries/{id}
+
+	// Agent mTLS enrollment (mTLS agentlink v1,
+	// docs/superpowers/specs/2026-07-10-mtls-agentlink-design.md §3). The Enroll
+	// RPC swaps a node_token (or a live client cert) for a signed client cert.
+	// Payload carries {serial, not_after, agent_version} — NEVER the node_token
+	// or any key material.
+	EventNodeEnrolled    = "node_enrolled"     // first token→cert exchange (Enroll by node_token)
+	EventNodeCertRenewed = "node_cert_renewed" // client cert renewed over a live mTLS session
 )
