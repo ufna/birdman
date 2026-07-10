@@ -50,7 +50,10 @@ func TestHubSendPushOrderMatchesMutationOrderUnderConcurrency(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	hub := NewHub(log)
 	const nodeID = "node-under-test"
-	sess := hub.attach(nodeID, nil)
+	// Loopback (trusted) session: this test targets push/mutation ORDERING,
+	// and the registries gate (mTLS v1, design §3) would withhold every
+	// SetRegistries from an untrusted session before ordering even comes up.
+	sess := hub.attach(nodeID, nil, false, true)
 
 	const rounds = 200
 	const workersPerRound = 24
@@ -111,6 +114,83 @@ func TestHubSendPushOrderMatchesMutationOrderUnderConcurrency(t *testing.T) {
 		}
 	}
 	t.Logf("rounds=%d workersPerRound=%d ground-truth-dropped=%d (expected: rare, non-fatal — full-channel drops are correct behavior)", rounds, workersPerRound, dropped)
+}
+
+// TestHubCoalescesSetRegistries: enqueueing a new SetRegistries for a node
+// removes any older unacked SetRegistries from its pending queue — Hub never
+// holds more than one, so a chatty stream of registry changes (or a node
+// that never acks) cannot grow the queue unbounded (registries-v1 design
+// §2). Coalescing is scoped to SetRegistries only: a pending command of
+// another kind is untouched by it. Pure Hub-level test — no store/gRPC
+// needed. Moved here from service_test.go when the registries gate landed
+// (mTLS v1, design §3): a SetRegistries is only enqueued for a TRUSTED live
+// session, so the test attaches a loopback one first via the internal API.
+func TestHubCoalescesSetRegistries(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	hub := NewHub(log)
+	const nodeID = "node-under-test"
+	hub.attach(nodeID, nil, false, true) // loopback token session — trusted
+
+	setRegistries := func(username string) *agentlinkv1.MasterMsg {
+		return &agentlinkv1.MasterMsg{Msg: &agentlinkv1.MasterMsg_SetRegistries{SetRegistries: &agentlinkv1.SetRegistries{
+			Registries: []*agentlinkv1.RegistryCred{{Host: "ghcr.io", Username: username, Token: "tok"}},
+		}}}
+	}
+
+	hub.Send(nodeID, setRegistries("alice"))
+	if got := hub.PendingCount(nodeID); got != 1 {
+		t.Fatalf("after 1st SetRegistries: want pending=1, got %d", got)
+	}
+
+	// Two consecutive registries changes must coalesce to exactly one
+	// pending entry, not accumulate.
+	hub.Send(nodeID, setRegistries("bob"))
+	if got := hub.PendingCount(nodeID); got != 1 {
+		t.Fatalf("after 2nd SetRegistries: want coalesced pending=1, got %d", got)
+	}
+
+	// A different command kind is unaffected by SetRegistries coalescing: it
+	// survives a further registries change, which only removes its own kind.
+	hub.Send(nodeID, &agentlinkv1.MasterMsg{Msg: &agentlinkv1.MasterMsg_Start{Start: &agentlinkv1.StartServer{
+		ServerId: "srv-1",
+	}}})
+	hub.Send(nodeID, setRegistries("carol"))
+	if got := hub.PendingCount(nodeID); got != 2 {
+		t.Fatalf("want 2 pending (1 Start + 1 coalesced SetRegistries), got %d", got)
+	}
+}
+
+// TestHubSessionAuthCounts: the hub reports live sessions by how they
+// authenticated — the birdman_agentlink_sessions{auth} gauge reads these
+// counts on scrape (mTLS agentlink v1, design §3: the operator flips
+// agentlink_auth to mtls once {auth="token"} hits 0). certAuth classifies a
+// session as mtls regardless of loopback; a replaced session must not double
+// count; detach removes it from the counts.
+func TestHubSessionAuthCounts(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	hub := NewHub(log)
+
+	if mtls, token := hub.SessionAuthCounts(); mtls != 0 || token != 0 {
+		t.Fatalf("empty hub: counts = (%d, %d), want (0, 0)", mtls, token)
+	}
+
+	hub.attach("node-cert", nil, true, false)
+	hub.attach("node-token-loopback", nil, false, true)
+	tokenSess := hub.attach("node-token-remote", nil, false, false)
+	if mtls, token := hub.SessionAuthCounts(); mtls != 1 || token != 2 {
+		t.Fatalf("counts = (%d, %d), want (1 mtls, 2 token) — loopback does not make a session mtls", mtls, token)
+	}
+
+	// A reconnect that replaces node-cert's session keeps it counted once.
+	hub.attach("node-cert", nil, true, false)
+	if mtls, token := hub.SessionAuthCounts(); mtls != 1 || token != 2 {
+		t.Fatalf("after session replacement: counts = (%d, %d), want (1, 2)", mtls, token)
+	}
+
+	hub.detach("node-token-remote", tokenSess)
+	if mtls, token := hub.SessionAuthCounts(); mtls != 1 || token != 1 {
+		t.Fatalf("after detach: counts = (%d, %d), want (1, 1)", mtls, token)
+	}
 }
 
 // drainSetRegistries reads every currently-buffered SetRegistries host off

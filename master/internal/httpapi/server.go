@@ -65,6 +65,9 @@ func New(st *store.Store, m *metrics.Metrics, mm *matchmaker.Matchmaker, dep *de
 	s.mux.HandleFunc("GET /v1/nodes", s.requireScope(ScopeReadonly, s.handleListNodes))
 	s.mux.HandleFunc("POST /v1/nodes/{id}/drain", s.requireScope(ScopeAdmin, s.handleDrainNode))
 	s.mux.HandleFunc("POST /v1/nodes/{id}/undrain", s.requireScope(ScopeAdmin, s.handleUndrainNode))
+	// Public internal-CA cert bundle (mTLS agentlink v1, ca.go) — ansible
+	// delivers it to nodes; cert-only, the CA key cannot leak (design §5).
+	s.mux.HandleFunc("GET /v1/ca", s.requireScope(ScopeReadonly, s.handleGetCA))
 	s.mux.HandleFunc("GET /v1/servers", s.requireScope(ScopeReadonly, s.handleListServers))
 	s.mux.HandleFunc("GET /v1/servers/{id}/logs", s.requireScope(ScopeReadonly, s.handleServerLogs))
 	s.mux.HandleFunc("POST /v1/agent-upgrade", s.requireScope(ScopeAdmin, s.handleAgentUpgrade))

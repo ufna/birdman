@@ -14,6 +14,34 @@ option go_package = "github.com/ufna/birdman/proto/agentlink/v1;agentlinkv1";
 // handling on the agent must be idempotent by cmd_id (at-least-once).
 service AgentLink {
   rpc Session(stream AgentMsg) returns (stream MasterMsg);
+  // Enroll (mTLS v1, аддитивно) — unary-обмен node_token → клиентский
+  // сертификат на том же gRPC-листенере, что и Session. Это НЕ команда:
+  // cmd_id/Ack/pending-машинерия не участвуют (обычный запрос-ответ).
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+}
+
+// EnrollRequest — заявка ноды на клиентский сертификат
+// (docs/superpowers/specs/2026-07-10-mtls-agentlink-design.md §2). Две роли:
+//   * bootstrap/recovery — node_token заполнен (bcrypt-проверка, как в Hello);
+//   * renewal — node_token ПУСТОЙ: авторизация по действующему клиентскому
+//     серту поверх уже установленной mTLS-сессии соединения.
+// Приватный ключ генерит агент и НИКОГДА не отдаёт: csr_pem несёт только
+// публичный ключ + доказательство владения (master проверяет подпись CSR;
+// subject CSR игнорируется — CN проставляет master из аутентифицированной
+// идентичности). Ни node_token, ни материал ключей никогда не логируются.
+message EnrollRequest {
+  string node_token    = 1; // bootstrap/recovery; ПУСТОЙ при renewal по действующему client-серту
+  bytes  csr_pem       = 2; // PKCS#10; ключ генерит агент, приватный ключ никогда не покидает ноду
+  string agent_version = 3; // наблюдаемость (лог/событие)
+}
+
+// EnrollResponse — подписанный master'ом ответ на заявку. cert_pem/ca_bundle_pem
+// — публичные серты (не секреты); срок берётся из not_after_unix, окно renewal
+// агент считает сам.
+message EnrollResponse {
+  bytes cert_pem       = 1; // подписанный клиентский серт, CN = node_id
+  bytes ca_bundle_pem  = 2; // текущий траст-бандл CA (задел под ротацию CA без ansible)
+  int64 not_after_unix = 3; // срок действия выданного листа (unix seconds)
 }
 
 message AgentMsg {

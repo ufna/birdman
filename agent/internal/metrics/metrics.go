@@ -39,6 +39,11 @@ type Sample struct {
 
 	DiskUsed  uint64
 	DiskTotal uint64
+
+	// CertExpiryUnix is the NotAfter (unix seconds) of the loaded agentlink
+	// client certificate, or 0 when none is loaded (token/insecure session).
+	// The node-local half of the CertExpiry alert (mTLS agentlink v1, design §4).
+	CertExpiryUnix int64
 }
 
 // Handler serves GET /metrics from sample().
@@ -114,6 +119,13 @@ func Render(version string, s Sample) string {
 	fmt.Fprintf(&b, "birdman_agent_ports_used %d\n", s.PortsUsed)
 	gauge("birdman_agent_ports_total", "Size of the host port pool.")
 	fmt.Fprintf(&b, "birdman_agent_ports_total %d\n", s.PortsTotal)
+
+	// Only emitted with a loaded client cert: a token/insecure session has no
+	// expiry to report, and a 0 sample would look like the epoch.
+	if s.CertExpiryUnix > 0 {
+		gauge("birdman_agent_cert_expiry_timestamp_seconds", "NotAfter of the loaded agentlink client certificate (unix seconds).")
+		fmt.Fprintf(&b, "birdman_agent_cert_expiry_timestamp_seconds %d\n", s.CertExpiryUnix)
+	}
 
 	return b.String()
 }

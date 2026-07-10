@@ -7,16 +7,14 @@ package link
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
-	"fmt"
-	"os"
+	"errors"
+	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 
 	agentlinkv1 "github.com/ufna/birdman/proto/agentlink/v1"
@@ -60,23 +58,35 @@ type Source interface {
 // Config parameterizes the link client.
 type Config struct {
 	MasterAddr    string
-	NodeToken     string // sent in Hello on every connect (v0 auth); never log
+	NodeToken     string // enroll/recovery credential + token-fallback Hello; never log
 	Hostname      string
 	Region        string
 	CapacitySlots int32
 	AgentVersion  string
 
-	TLSInsecure bool   // dev only: skip cert verification (self-signed master)
-	TLSCAFile   string // pin a CA instead (production path)
+	TLSInsecure bool   // dev/loopback only: skip cert verification, token auth, no enroll
+	TLSCAFile   string // bootstrap CA (public); unioned with {TLSCertDir}/ca.pem
+	// TLSCertDir holds the enrolled mTLS material (client.key 0600, client.crt,
+	// ca.pem). When set (and not TLSInsecure / not DialOptions), the client
+	// manages mTLS: enroll → dial → renew (mTLS agentlink v1, design §4).
+	TLSCertDir    string
+	TLSServerName string // ServerName verified on the master leaf; default birdman-master
 
 	HeartbeatEvery time.Duration // default 2s (agent.md §4)
 	BackoffMin     time.Duration // default 1s
 	BackoffMax     time.Duration // default 30s
 	StableAfter    time.Duration // session age that resets backoff; default 5s
 
-	// DialOptions overrides transport options entirely (tests: bufconn
-	// dialer + insecure credentials).
+	RenewBefore     time.Duration // renew when NotAfter-now < this; default 14d
+	RenewCheckEvery time.Duration // renewal ticker while a session is up; default 24h
+
+	// DialOptions overrides transport options entirely (existing token-path
+	// tests: bufconn dialer + insecure credentials). When set, the client does
+	// NOT manage TLS or enrollment — the caller owns the transport.
 	DialOptions []grpc.DialOption
+	// DialContext injects a custom dialer (bufconn) while the client still
+	// computes TLS credentials and enrolls — the seam for real-mTLS tests.
+	DialContext func(context.Context, string) (net.Conn, error)
 }
 
 func (c *Config) applyDefaults() {
@@ -92,6 +102,15 @@ func (c *Config) applyDefaults() {
 	if c.StableAfter <= 0 {
 		c.StableAfter = 5 * time.Second
 	}
+	if c.RenewBefore <= 0 {
+		c.RenewBefore = 14 * 24 * time.Hour // design §4 renewal window
+	}
+	if c.RenewCheckEvery <= 0 {
+		c.RenewCheckEvery = 24 * time.Hour // daily ticker
+	}
+	if c.TLSServerName == "" {
+		c.TLSServerName = "birdman-master"
+	}
 }
 
 // Client maintains the master link.
@@ -105,6 +124,10 @@ type Client struct {
 
 	mu        sync.Mutex
 	connected bool
+
+	// certNotAfter is the loaded client cert's NotAfter (unix seconds), 0 when
+	// none; read by maybeRenew and the cert-expiry metric.
+	certNotAfter atomic.Int64
 }
 
 // New creates a link client. logf may be nil.
@@ -133,49 +156,122 @@ func (c *Client) setConnected(v bool) {
 // with exponential backoff (BackoffMin → BackoffMax cap). Hello with the
 // current server map is re-sent on every (re)connect.
 func (c *Client) Run(ctx context.Context) error {
-	opts, err := c.dialOptions()
-	if err != nil {
-		return err
-	}
-	conn, err := grpc.NewClient(c.cfg.MasterAddr, opts...)
-	if err != nil {
-		return fmt.Errorf("grpc client for %s: %w", c.cfg.MasterAddr, err)
-	}
-	defer conn.Close()
-	client := agentlinkv1.NewAgentLinkClient(conn)
-
 	backoff := c.cfg.BackoffMin
 	for {
-		started := time.Now()
-		err := c.session(ctx, client)
-		c.setConnected(false)
 		if ctx.Err() != nil {
 			return nil
 		}
-		if time.Since(started) >= c.cfg.StableAfter {
-			backoff = c.cfg.BackoffMin // the session was healthy — start over
+		// Acquire a connection whose credentials match the current TLS material,
+		// enrolling first if there is no usable client cert (design §4).
+		tr, err := c.acquireTransport(ctx)
+		if err != nil {
+			c.setConnected(false)
+			if ctx.Err() != nil {
+				return nil
+			}
+			var ok bool
+			if backoff, ok = c.backoffAfter(ctx, backoff, err, "connect"); !ok {
+				return nil
+			}
+			continue
 		}
-		if status.Code(err) == codes.PermissionDenied {
-			// Bad node token: retrying fast is pointless and noisy.
-			backoff = c.cfg.BackoffMax
-			c.logf("[link] master rejected node token (PermissionDenied) — check node_token; retry in %s", backoff)
-		} else {
-			c.logf("[link] session ended: %v — reconnect in %s", err, backoff)
+
+		// Run sessions on this connection. gRPC transparently re-handshakes the
+		// managed conn across transient stream breaks (incl. master restarts);
+		// the conn is torn down and rebuilt only when the TLS material changes
+		// (renewal → errRenew).
+		rebuild := false
+		// tokenFallback latches after a cert session is refused with
+		// PermissionDenied so the token retry happens at most ONCE per
+		// connection — see the fallback branch below for why this is loop-safe.
+		tokenFallback := false
+		for !rebuild {
+			if ctx.Err() != nil {
+				break
+			}
+			certSes := tr.certSes && !tokenFallback
+			started := time.Now()
+			serr := c.session(ctx, tr.client, certSes)
+			c.setConnected(false)
+			if ctx.Err() != nil {
+				break
+			}
+			if errors.Is(serr, errRenew) {
+				// No sleep before the rebuild — renewal is a fast, expected
+				// event. This can't spin: maybeRenew only returns errRenew when
+				// the NEW leaf is OUTSIDE the renewal window; a leaf issued
+				// still-inside the window is kept without signalling errRenew
+				// (enroll.go misconfig guard), so the on-reconnect check won't
+				// immediately renew again.
+				backoff = c.cfg.BackoffMin
+				rebuild = true
+				break
+			}
+			// Token-mode rollback recovery (design §Безопасность / §Принятые
+			// ограничения): an enrolled agent dials mTLS and sends an empty-token
+			// Hello (the cert is its identity). A master rolled back to `token`
+			// mode ignores the cert and refuses that Hello with PermissionDenied,
+			// which would otherwise strand the node at max-backoff. Fall back ONCE
+			// to a token-authenticated Hello over this SAME already-verified
+			// connection (its RootCAs were checked at dial, so reusing the on-disk
+			// node_token leaks nothing). Loop-safe by construction: the latch
+			// flips certSes off for the rest of this conn's life, so a second
+			// PermissionDenied (genuine auth failure — dead node, or `mtls` with a
+			// bad cert) falls straight through to max-backoff below.
+			// cert → token → (still denied) → backoff, never a spin.
+			if certSes && c.cfg.NodeToken != "" && status.Code(serr) == codes.PermissionDenied {
+				c.logf("[link] mTLS Hello rejected (PermissionDenied) — retrying once with a token-auth Hello (master rolled back to token mode?)")
+				tokenFallback = true
+				continue
+			}
+			if time.Since(started) >= c.cfg.StableAfter {
+				backoff = c.cfg.BackoffMin // the session was healthy — start over
+			}
+			var ok bool
+			if backoff, ok = c.backoffAfter(ctx, backoff, serr, "session"); !ok {
+				break
+			}
 		}
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-time.After(backoff):
-		}
-		if backoff *= 2; backoff > c.cfg.BackoffMax {
-			backoff = c.cfg.BackoffMax
-		}
+		tr.conn.Close()
 	}
+}
+
+// backoffAfter logs the reason, applies the PermissionDenied max-backoff cap
+// (a bad token/cert is pointless to retry fast), sleeps for the current
+// backoff, and returns the next backoff plus whether to keep going (false = ctx
+// cancelled during the wait).
+func (c *Client) backoffAfter(ctx context.Context, backoff time.Duration, err error, where string) (time.Duration, bool) {
+	if status.Code(err) == codes.PermissionDenied {
+		backoff = c.cfg.BackoffMax
+		c.logf("[link] master rejected node (PermissionDenied) — check node_token/certificate; retry in %s", backoff)
+	} else {
+		c.logf("[link] %s ended: %v — reconnect in %s", where, err, backoff)
+	}
+	select {
+	case <-ctx.Done():
+		return backoff, false
+	case <-time.After(backoff):
+	}
+	if backoff *= 2; backoff > c.cfg.BackoffMax {
+		backoff = c.cfg.BackoffMax
+	}
+	return backoff, true
 }
 
 // session runs one Session stream: Hello → heartbeats + outbox + acks until
 // the stream breaks.
-func (c *Client) session(ctx context.Context, client agentlinkv1.AgentLinkClient) error {
+func (c *Client) session(ctx context.Context, client agentlinkv1.AgentLinkClient, certSession bool) error {
+	// Renewal check on every (re)connect (design §4): a cert inside the window
+	// is renewed over this live mTLS conn, then the link reconnects with the
+	// fresh material.
+	if certSession {
+		if swapped, err := c.maybeRenew(ctx, client); err != nil {
+			c.logf("[link] certificate renewal check failed: %v — continuing with the current cert", err)
+		} else if swapped {
+			return errRenew
+		}
+	}
+
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -183,8 +279,15 @@ func (c *Client) session(ctx context.Context, client agentlinkv1.AgentLinkClient
 	if err != nil {
 		return err
 	}
+	// On a cert session the certificate IS the identity — the node_token leaves
+	// the hot path of the wire protocol (design §4). A token/fallback session
+	// (Unimplemented or dev insecure) still carries it, as today.
+	token := ""
+	if !certSession {
+		token = c.cfg.NodeToken
+	}
 	hello := &agentlinkv1.AgentMsg{Msg: &agentlinkv1.AgentMsg_Hello{Hello: &agentlinkv1.Hello{
-		NodeToken:     c.cfg.NodeToken,
+		NodeToken:     token,
 		Hostname:      c.cfg.Hostname,
 		Region:        c.cfg.Region,
 		CapacitySlots: c.cfg.CapacitySlots,
@@ -192,11 +295,19 @@ func (c *Client) session(ctx context.Context, client agentlinkv1.AgentLinkClient
 		Servers:       c.src.Snapshot(),
 	}}}
 	if err := stream.Send(hello); err != nil {
+		// On a streaming RPC a Send races the server's decision: when the master
+		// rejects the Hello, Send surfaces io.EOF and the real status (e.g.
+		// PermissionDenied on a token-mode rollback) is only readable from Recv.
+		// recvLoop has not started yet, so this Recv is race-free — surface the
+		// true code so backoff and the token fallback act on it, not on EOF.
+		if _, rerr := stream.Recv(); rerr != nil {
+			return rerr
+		}
 		return err
 	}
 	c.setConnected(true)
-	c.logf("[link] connected to %s (hello: %d servers)",
-		c.cfg.MasterAddr, len(hello.GetHello().GetServers()))
+	c.logf("[link] connected to %s (mtls=%v, hello: %d servers)",
+		c.cfg.MasterAddr, certSession, len(hello.GetHello().GetServers()))
 
 	acks := make(chan string, 64)
 	recvErr := make(chan error, 1)
@@ -204,12 +315,24 @@ func (c *Client) session(ctx context.Context, client agentlinkv1.AgentLinkClient
 
 	ticker := time.NewTicker(c.cfg.HeartbeatEvery)
 	defer ticker.Stop()
+	// Daily renewal ticker for long-lived sessions (a match box can stay up for
+	// weeks). No-op on token sessions.
+	renew := time.NewTicker(c.cfg.RenewCheckEvery)
+	defer renew.Stop()
 	for {
 		select {
 		case <-sctx.Done():
 			return sctx.Err()
 		case err := <-recvErr:
 			return err
+		case <-renew.C:
+			if certSession {
+				if swapped, err := c.maybeRenew(ctx, client); err != nil {
+					c.logf("[link] scheduled certificate renewal failed: %v — will retry", err)
+				} else if swapped {
+					return errRenew
+				}
+			}
 		case cmdID := <-acks:
 			if err := stream.Send(&agentlinkv1.AgentMsg{Msg: &agentlinkv1.AgentMsg_Ack{
 				Ack: &agentlinkv1.Ack{CmdId: cmdID},
@@ -331,30 +454,6 @@ func commandID(m *agentlinkv1.MasterMsg) string {
 		return c.SetRegistries.GetCmdId()
 	}
 	return ""
-}
-
-func (c *Client) dialOptions() ([]grpc.DialOption, error) {
-	if len(c.cfg.DialOptions) > 0 {
-		return c.cfg.DialOptions, nil
-	}
-	tc := &tls.Config{MinVersion: tls.VersionTLS12}
-	switch {
-	case c.cfg.TLSInsecure:
-		// dev only: master runs on a self-signed autogenerated cert
-		// (protocol.md §Auth, уточнено в v0).
-		tc.InsecureSkipVerify = true
-	case c.cfg.TLSCAFile != "":
-		pem, err := os.ReadFile(c.cfg.TLSCAFile)
-		if err != nil {
-			return nil, fmt.Errorf("read tls_ca_file: %w", err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("tls_ca_file %s: no certificates found", c.cfg.TLSCAFile)
-		}
-		tc.RootCAs = pool
-	}
-	return []grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(tc))}, nil
 }
 
 // cmdCache remembers the last N handled cmd_ids (idempotency window).

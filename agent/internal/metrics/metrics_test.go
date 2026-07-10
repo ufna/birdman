@@ -57,6 +57,28 @@ func TestRender(t *testing.T) {
 	}
 }
 
+// TestRenderCertExpiry: the client-cert expiry gauge (mTLS agentlink v1,
+// design §4) is emitted only when a cert is loaded (CertExpiryUnix > 0) and is
+// absent otherwise (token/insecure sessions have no client cert).
+func TestRenderCertExpiry(t *testing.T) {
+	s := sample()
+	s.CertExpiryUnix = 1893456000 // 2030-01-01T00:00:00Z
+	out := Render("test", s)
+	for _, want := range []string{
+		"# TYPE birdman_agent_cert_expiry_timestamp_seconds gauge\n",
+		"birdman_agent_cert_expiry_timestamp_seconds 1893456000\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in output:\n%s", want, out)
+		}
+	}
+
+	// No cert loaded → the series must be absent entirely (not a zero sample).
+	if strings.Contains(Render("test", sample()), "birdman_agent_cert_expiry_timestamp_seconds") {
+		t.Fatal("cert-expiry gauge must be absent when no client cert is loaded")
+	}
+}
+
 func TestServe(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

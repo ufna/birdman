@@ -6,6 +6,7 @@ package agentlink
 import (
 	"log/slog"
 	"sync"
+	"sync/atomic"
 
 	"github.com/google/uuid"
 
@@ -22,8 +23,40 @@ import (
 type Hub struct {
 	log *slog.Logger
 
+	// registriesWithheld is the birdman_agentlink_registries_withheld_total
+	// hook (SetRegistriesWithheldCounter), bumped every time the registries
+	// gate skips a SetRegistries delivery (design §3). Atomic — not under mu —
+	// so noteRegistriesWithheld is safe to call from inside Send/attach
+	// critical sections; nil until wired.
+	registriesWithheld atomic.Pointer[func()]
+
 	mu     sync.Mutex
 	queues map[string]*nodeQueue
+}
+
+// SetRegistriesWithheldCounter wires the withheld-counter increment (main.go:
+// metrics.AgentlinkRegistriesWithheld.Inc). Call before serving.
+func (h *Hub) SetRegistriesWithheldCounter(f func()) {
+	h.registriesWithheld.Store(&f)
+}
+
+// noteRegistriesWithheld records one gate skip: the operator-visible WARN the
+// design demands plus the counter. point names the send point (attach preface
+// vs broadcast/send). Never logs credentials — only ids.
+func (h *Hub) noteRegistriesWithheld(nodeID, point string) {
+	h.log.Warn("agentlink: SetRegistries withheld — session is neither cert-authenticated nor loopback (registries gate, mTLS v1)",
+		"node_id", nodeID, "point", point)
+	h.incRegistriesWithheld()
+}
+
+// incRegistriesWithheld bumps birdman_agentlink_registries_withheld_total when
+// wired. Split out of noteRegistriesWithheld so a call site that already emits
+// its own, more specific WARN (attach's stale-pending strip) still keeps the
+// metric consistent without also logging the generic withheld message.
+func (h *Hub) incRegistriesWithheld() {
+	if f := h.registriesWithheld.Load(); f != nil {
+		(*f)()
+	}
 }
 
 type nodeQueue struct {
@@ -34,7 +67,21 @@ type nodeQueue struct {
 type session struct {
 	out  chan *agentlinkv1.MasterMsg
 	done chan struct{} // closed when the session is replaced
+	// How this session authenticated, fixed at attach time (mTLS agentlink v1,
+	// docs/superpowers/specs/2026-07-10-mtls-agentlink-design.md §3). certAuth
+	// is true when the agent presented a verified client cert; loopback is true
+	// when the peer address is loopback. Consumed by the SetRegistries gate
+	// (queue/push only if certAuth || loopback) and the sessions{auth} metric.
+	// Recorded here so both are decided once, from the authenticated peer, and
+	// never re-derived per command.
+	certAuth bool
+	loopback bool
 }
+
+// trustedForRegistries: registry credentials may be enqueued/pushed only to a
+// session that proved itself with a client cert or lives on a loopback link
+// (dev compatibility) — the mechanical Реестры-v1 gate (design §3).
+func (s *session) trustedForRegistries() bool { return s.certAuth || s.loopback }
 
 func NewHub(log *slog.Logger) *Hub {
 	return &Hub{log: log, queues: map[string]*nodeQueue{}}
@@ -57,6 +104,17 @@ func (h *Hub) queue(nodeID string) *nodeQueue {
 // (docs/superpowers/specs/2026-07-09-registries-design.md §2). Other command
 // kinds are unaffected. Returns the cmd_id.
 //
+// Registries gate (mTLS agentlink v1, design §3): a SetRegistries is
+// enqueued/pushed ONLY when the node's live session is trustedForRegistries
+// (certAuth || loopback). Otherwise — including no live session at all, so a
+// registries secret is never parked in an offline node's queue — it is
+// skipped ENTIRELY (not enqueued: the secret must not wait in pending on an
+// untrusted link), with a WARN and the withheld counter; Send then returns ""
+// (no cmd_id). Nothing is lost: the attach preface rebuilds the snapshot from
+// the DB whenever the node (re)connects trusted. All other command kinds
+// bypass the gate — "an untrusted node gets no work at all" is the
+// agentlink_auth=mtls mode, not this gate.
+//
 // The push happens INSIDE the same critical section as the pending-queue
 // mutation (not after unlocking) so that two goroutines racing Send for the
 // same node's live session can never push out of the order their mutations
@@ -73,6 +131,11 @@ func (h *Hub) Send(nodeID string, msg *agentlinkv1.MasterMsg) string {
 	h.mu.Lock()
 	q := h.queue(nodeID)
 	if isSetRegistries(msg) {
+		if q.sess == nil || !q.sess.trustedForRegistries() {
+			h.mu.Unlock()
+			h.noteRegistriesWithheld(nodeID, "send")
+			return ""
+		}
 		q.pending = removeSetRegistries(q.pending)
 	}
 	q.pending = append(q.pending, msg)
@@ -131,10 +194,26 @@ func (h *Hub) PendingCount(nodeID string) int {
 // contradicts h.mu's own serialization order. push is non-blocking, so this
 // adds no unbounded lock hold time — it was already O(len(pending)) here
 // before this change, via the replay copy this replaces.
-func (h *Hub) attach(nodeID string, preface *agentlinkv1.MasterMsg) *session {
+//
+// Registries gate (design §3): when the new session is NOT
+// trustedForRegistries, any SetRegistries still pending from an earlier,
+// trusted session is STRIPPED before the replay — otherwise the replay loop
+// below would push that stale secret onto the untrusted link. Dropping it
+// loses nothing: the preface always rebuilds from the DB on the next trusted
+// attach. A non-nil preface for an untrusted session is refused for the same
+// reason — the caller (attachWithFreshRegistries) pre-gates and passes nil,
+// so this is a structural backstop keeping the invariant "an untrusted
+// session's queue never holds a SetRegistries" local to the Hub.
+func (h *Hub) attach(nodeID string, preface *agentlinkv1.MasterMsg, certAuth, loopback bool) *session {
 	s := &session{
-		out:  make(chan *agentlinkv1.MasterMsg, 256),
-		done: make(chan struct{}),
+		out:      make(chan *agentlinkv1.MasterMsg, 256),
+		done:     make(chan struct{}),
+		certAuth: certAuth,
+		loopback: loopback,
+	}
+	if !s.trustedForRegistries() && preface != nil {
+		h.noteRegistriesWithheld(nodeID, "attach-preface")
+		preface = nil
 	}
 	h.mu.Lock()
 	q := h.queue(nodeID)
@@ -142,6 +221,18 @@ func (h *Hub) attach(nodeID string, preface *agentlinkv1.MasterMsg) *session {
 		close(q.sess.done)
 	}
 	q.sess = s
+	if !s.trustedForRegistries() {
+		if stripped := removeSetRegistries(q.pending); len(stripped) != len(q.pending) {
+			q.pending = stripped
+			h.log.Warn("agentlink: dropped a stale pending SetRegistries — node reconnected on an untrusted link (registries gate, mTLS v1)",
+				"node_id", nodeID)
+			// The strip is a withhold point too — keep the counter consistent
+			// with the Send/attach-preface skips (T5 review). Its own WARN above
+			// is more specific, so bump the metric directly rather than via
+			// noteRegistriesWithheld.
+			h.incRegistriesWithheld()
+		}
+	}
 	if preface != nil {
 		stampCmdID(preface, uuid.NewString())
 		q.pending = append([]*agentlinkv1.MasterMsg{preface}, removeSetRegistries(q.pending)...)
@@ -152,6 +243,26 @@ func (h *Hub) attach(nodeID string, preface *agentlinkv1.MasterMsg) *session {
 	h.mu.Unlock()
 
 	return s
+}
+
+// SessionAuthCounts reports live sessions by how they authenticated: mtls =
+// verified client cert, token = node_token. Read on every scrape by the
+// birdman_agentlink_sessions{auth} gauge (mTLS agentlink v1, design §3) — the
+// operator flips agentlink_auth to mtls once {auth="token"} reaches 0.
+func (h *Hub) SessionAuthCounts() (mtls, token int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, q := range h.queues {
+		if q.sess == nil {
+			continue
+		}
+		if q.sess.certAuth {
+			mtls++
+		} else {
+			token++
+		}
+	}
+	return mtls, token
 }
 
 // ConnectedNodes returns the ids of nodes with a live session — used by

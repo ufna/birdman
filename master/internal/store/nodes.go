@@ -129,11 +129,13 @@ func (s *Store) GetNode(ctx context.Context, id string) (Node, error) {
 	var labels []byte
 	err := s.Pool.QueryRow(ctx, `
 		select n.id::text, n.project_id::text, p.slug, n.region, n.hostname, host(n.public_ip),
-		       n.capacity_slots, n.agent_version, n.state, n.last_heartbeat_at, n.labels, n.created_at
+		       n.capacity_slots, n.agent_version, n.state, n.last_heartbeat_at, n.labels, n.created_at,
+		       n.cert_serial, n.cert_not_after, n.enrolled_at
 		from nodes n join projects p on p.id = n.project_id
 		where n.id = $1::uuid`, id).
 		Scan(&n.ID, &n.ProjectID, &n.Project, &n.Region, &n.Hostname, &n.PublicIP,
-			&n.CapacitySlots, &n.AgentVersion, &n.State, &n.LastHeartbeatAt, &labels, &n.CreatedAt)
+			&n.CapacitySlots, &n.AgentVersion, &n.State, &n.LastHeartbeatAt, &labels, &n.CreatedAt,
+			&n.CertSerial, &n.CertNotAfter, &n.EnrolledAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Node{}, ErrNotFound
 	}
@@ -206,7 +208,8 @@ func (s *Store) setNodeDrain(ctx context.Context, id string, drain bool) (Node, 
 func (s *Store) ListNodes(ctx context.Context) ([]Node, error) {
 	rows, err := s.Pool.Query(ctx, `
 		select n.id::text, n.project_id::text, p.slug, n.region, n.hostname, host(n.public_ip),
-		       n.capacity_slots, n.agent_version, n.state, n.last_heartbeat_at, n.labels, n.created_at
+		       n.capacity_slots, n.agent_version, n.state, n.last_heartbeat_at, n.labels, n.created_at,
+		       n.cert_serial, n.cert_not_after, n.enrolled_at
 		from nodes n join projects p on p.id = n.project_id
 		order by n.created_at`)
 	if err != nil {
@@ -218,7 +221,8 @@ func (s *Store) ListNodes(ctx context.Context) ([]Node, error) {
 		var n Node
 		var labels []byte
 		if err := rows.Scan(&n.ID, &n.ProjectID, &n.Project, &n.Region, &n.Hostname, &n.PublicIP,
-			&n.CapacitySlots, &n.AgentVersion, &n.State, &n.LastHeartbeatAt, &labels, &n.CreatedAt); err != nil {
+			&n.CapacitySlots, &n.AgentVersion, &n.State, &n.LastHeartbeatAt, &labels, &n.CreatedAt,
+			&n.CertSerial, &n.CertNotAfter, &n.EnrolledAt); err != nil {
 			return nil, err
 		}
 		if len(labels) > 0 {

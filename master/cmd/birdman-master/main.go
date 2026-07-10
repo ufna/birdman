@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -83,16 +85,65 @@ func run() error {
 			"api_key", key)
 	}
 
-	// gRPC AgentLink over TLS (self-signed autogen in dev; real certs via
-	// config; agent auth = node_token in Hello — protocol.md §Auth v0 note).
-	cert, err := serverCert(cfg, log)
+	// gRPC AgentLink over TLS (mTLS agentlink v1, design §1, §3). The internal
+	// CA (Postgres) backs both directions: it verifies agent client certs
+	// (ClientCAs) and, unless external certs are configured, signs the master's
+	// own server leaf. It is ensured unconditionally — even with an external
+	// server cert, agent client certs are always internal-CA-signed (via the
+	// Enroll RPC, a later task), so ClientCAs must be the internal CA regardless
+	// of where the server cert comes from.
+	caCertPEM, caKeyPEM, err := st.EnsureInternalCA(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("ensure internal CA: %w", err)
 	}
+	activeCAs, err := st.ActiveCAs(ctx)
+	if err != nil {
+		return fmt.Errorf("active CAs: %w", err)
+	}
+	// TODO(mtls): the ClientCAs pool is built once here at startup. A mid-process
+	// CA rotation (adding a second active internal_ca row) would need this pool
+	// refreshed to accept leaves signed by the new CA before the old one is
+	// retired — a documented runbook follow-up (design §1 "Ротация CA"), not
+	// automated here.
+	clientCAs, err := tlsutil.CAPool(activeCAs)
+	if err != nil {
+		return fmt.Errorf("client CA pool: %w", err)
+	}
+
+	// Server leaf: external cert_file/key_file keep the current path unchanged
+	// (no rotation — managed externally); otherwise the master issues itself a
+	// leaf from the internal CA and hot-rotates it (started after loopCtx below).
+	hostname, _ := os.Hostname()
+	holder := &serverCertHolder{}
+	rotateServerLeaf := false
+	if cfg.TLS.CertFile != "" && cfg.TLS.KeyFile != "" {
+		ext, err := tls.LoadX509KeyPair(cfg.TLS.CertFile, cfg.TLS.KeyFile)
+		if err != nil {
+			return fmt.Errorf("load tls keypair: %w", err)
+		}
+		holder.set(&ext)
+		log.Info("agentlink TLS: serving external server cert", "cert_file", cfg.TLS.CertFile)
+	} else {
+		leaf, err := issueServerLeaf(caCertPEM, caKeyPEM, hostname, cfg.TLS.ExtraSANs)
+		if err != nil {
+			return fmt.Errorf("issue server leaf: %w", err)
+		}
+		holder.set(leaf)
+		rotateServerLeaf = true
+		log.Info("agentlink TLS: issued server leaf from internal CA", "not_after", leaf.Leaf.NotAfter)
+	}
+
+	// VerifyClientCertIfGiven — NOT RequireAndVerifyClientCert: the Enroll RPC
+	// (a later task) must work on a connection with no client cert yet. Per-RPC
+	// strictness is enforced in agentlink by agentlink_auth (design §3). The
+	// leaf is served via GetCertificate (the holder closure), not static
+	// Certificates, so hot-rotate can swap it without recreating the listener.
 	grpcServer := grpc.NewServer(
 		grpc.Creds(credentials.NewTLS(&tls.Config{
-			Certificates: []tls.Certificate{cert},
-			MinVersion:   tls.VersionTLS12,
+			GetCertificate: holder.getCertificate,
+			ClientCAs:      clientCAs,
+			ClientAuth:     tls.VerifyClientCertIfGiven,
+			MinVersion:     tls.VersionTLS12,
 		})),
 		grpc.KeepaliveParams(keepalive.ServerParameters{
 			Time:    30 * time.Second,
@@ -108,6 +159,20 @@ func run() error {
 	st.SetCommandSender(hub)
 
 	m := metrics.New(st, log)
+	// mTLS agentlink v1 observability (design §3): live sessions by auth kind
+	// (the operator flips agentlink_auth to mtls once {auth="token"}==0) and
+	// the served leaf's expiry — external certs work too: since Go 1.23
+	// LoadX509KeyPair populates Leaf, and issueServerLeaf always does.
+	m.WireAgentlinkSessions(hub.SessionAuthCounts)
+	m.WireTLSServerCertExpiry(func() (time.Time, bool) {
+		if c := holder.get(); c != nil && c.Leaf != nil {
+			return c.Leaf.NotAfter, true
+		}
+		return time.Time{}, false
+	})
+	// Registries gate (design §3): every SetRegistries skipped for an
+	// untrusted session (neither cert-auth nor loopback) is counted.
+	hub.SetRegistriesWithheldCounter(m.AgentlinkRegistriesWithheld.Inc)
 	// Deploy manager (итерация 3): PrePull fan-out + PullReport-driven flip.
 	dep := deploy.New(deploy.Options{
 		Store: st, Sender: hub, Log: log,
@@ -117,7 +182,7 @@ func run() error {
 		return fmt.Errorf("deploy resume: %w", err)
 	}
 
-	agentlinkSvc := agentlink.NewService(st, hub, dep, logRouter, log)
+	agentlinkSvc := agentlink.NewService(st, hub, dep, logRouter, agentlink.AuthMode(cfg.AgentlinkAuth), log)
 	agentlinkv1.RegisterAgentLinkServer(grpcServer, agentlinkSvc)
 	grpcLis, err := net.Listen("tcp", cfg.ListenGRPC)
 	if err != nil {
@@ -145,6 +210,11 @@ func run() error {
 	// stats rollup (backfill once + tail recompute every StatsRollupInterval).
 	loopCtx, cancelLoops := context.WithCancel(context.Background())
 	defer cancelLoops()
+	// Hot-rotate the internally issued server leaf (design §1): daily check,
+	// re-issue when <14 days from expiry. Skipped for external certs.
+	if rotateServerLeaf {
+		go holder.rotateLoop(loopCtx, caCertPEM, caKeyPEM, hostname, cfg.TLS.ExtraSANs, log)
+	}
 	go reconcile.New(st, hub, log).Run(loopCtx, time.Second)
 	go reconcile.NewLeaseChecker(st, log).Run(loopCtx, time.Second)
 	go mm.Run(loopCtx)
@@ -232,12 +302,86 @@ func matchmakerConfig(cfg config.Config, log *slog.Logger) (matchmaker.Config, e
 	return mc, nil
 }
 
-func serverCert(cfg config.Config, log *slog.Logger) (tls.Certificate, error) {
-	if cfg.TLS.CertFile != "" && cfg.TLS.KeyFile != "" {
-		return tls.LoadX509KeyPair(cfg.TLS.CertFile, cfg.TLS.KeyFile)
+// serverCertHolder holds the current gRPC server leaf behind a mutex so the
+// hot-rotate goroutine can swap it atomically while GetCertificate serves it on
+// every handshake (mTLS agentlink v1, design §1). Serving via GetCertificate
+// (not static tls.Config.Certificates) is precisely what lets the leaf be
+// replaced without recreating the listener.
+type serverCertHolder struct {
+	mu   sync.RWMutex
+	cert *tls.Certificate
+}
+
+func (h *serverCertHolder) set(c *tls.Certificate) {
+	h.mu.Lock()
+	h.cert = c
+	h.mu.Unlock()
+}
+
+func (h *serverCertHolder) get() *tls.Certificate {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.cert
+}
+
+// getCertificate is the tls.Config.GetCertificate closure: it returns the
+// current leaf for every ClientHello.
+func (h *serverCertHolder) getCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+	return h.get(), nil
+}
+
+// serverLeafRenewBefore: re-issue the server leaf once it is within this window
+// of expiry. Leaves are 90 days (tlsutil), so a daily check with a 14-day
+// window rotates well ahead of expiry even across long uptimes (design §1).
+const serverLeafRenewBefore = 14 * 24 * time.Hour
+
+// rotateLoop re-issues the server leaf from the internal CA and swaps it into
+// the holder once it is <14 days from expiry, checked daily — the master can
+// run without a restart longer than a 90-day leaf lives (design §1). It never
+// logs key material (tlsutil keeps key bytes out of its errors).
+func (h *serverCertHolder) rotateLoop(ctx context.Context, caCertPEM, caKeyPEM []byte, hostname string, extraSANs []string, log *slog.Logger) {
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if cur := h.get(); cur != nil && cur.Leaf != nil && time.Until(cur.Leaf.NotAfter) > serverLeafRenewBefore {
+				continue
+			}
+			leaf, err := issueServerLeaf(caCertPEM, caKeyPEM, hostname, extraSANs)
+			if err != nil {
+				log.Error("agentlink TLS: server leaf rotation failed", "err", err)
+				continue
+			}
+			h.set(leaf)
+			log.Info("agentlink TLS: server leaf rotated", "not_after", leaf.Leaf.NotAfter)
+		}
 	}
-	log.Info("no TLS cert configured — using self-signed (dev mode)", "dir", cfg.TLS.AutoCertDir)
-	return tlsutil.EnsureServerCert(cfg.TLS.AutoCertDir)
+}
+
+// issueServerLeaf issues a server leaf from the internal CA and builds a
+// tls.Certificate with its parsed Leaf populated, so the rotate loop can read
+// NotAfter without re-parsing. tlsutil.IssueServerLeaf never puts key material
+// in its error, so wrapping/returning err is safe.
+func issueServerLeaf(caCertPEM, caKeyPEM []byte, hostname string, extraSANs []string) (*tls.Certificate, error) {
+	certPEM, keyPEM, err := tlsutil.IssueServerLeaf(caCertPEM, caKeyPEM, hostname, extraSANs)
+	if err != nil {
+		return nil, err
+	}
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return nil, err
+	}
+	if cert.Leaf == nil {
+		leaf, err := x509.ParseCertificate(cert.Certificate[0])
+		if err != nil {
+			return nil, err
+		}
+		cert.Leaf = leaf
+	}
+	return &cert, nil
 }
 
 func retry(ctx context.Context, attempts int, delay time.Duration, fn func() error) error {

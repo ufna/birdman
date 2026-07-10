@@ -147,19 +147,9 @@ func runDaemon(args []string) int {
 
 	go rot.Run(ctx.Done())
 	go gc.Run(ctx, time.Minute)
-	go func() {
-		// Metrics endpoint (agent.md §9) — localhost only, scraped by vmagent.
-		if err := metrics.Serve(ctx, cfg.MetricsAddr, version, mgr.MetricsSample, logf); err != nil {
-			logf("metrics: %v", err)
-		}
-	}()
-	go func() {
-		// QoS UDP echo (agent.md §8) — the public ping target of the node.
-		if err := qosecho.Serve(ctx, cfg.QoSEchoAddr, logf); err != nil {
-			logf("qos echo: %v", err)
-		}
-	}()
-
+	// The link client owns the mTLS enrollment/renewal (agent.md §10, design
+	// §4); it is created before the metrics server so the cert-expiry gauge can
+	// read its loaded certificate.
 	lc := link.New(link.Config{
 		MasterAddr:    cfg.MasterAddr,
 		NodeToken:     token,
@@ -169,7 +159,29 @@ func runDaemon(args []string) int {
 		AgentVersion:  version,
 		TLSInsecure:   cfg.TLSInsecure,
 		TLSCAFile:     cfg.TLSCAFile,
+		TLSCertDir:    cfg.TLSCertDir,
+		TLSServerName: cfg.TLSServerName,
 	}, mgr, mgr, outbox, logf)
+
+	go func() {
+		// Metrics endpoint (agent.md §9) — localhost only, scraped by vmagent.
+		// birdman_agent_cert_expiry_timestamp_seconds is the node-local view of
+		// the enrolled client cert (design §4).
+		sample := func() metrics.Sample {
+			s := mgr.MetricsSample()
+			s.CertExpiryUnix = lc.CertExpiryUnix()
+			return s
+		}
+		if err := metrics.Serve(ctx, cfg.MetricsAddr, version, sample, logf); err != nil {
+			logf("metrics: %v", err)
+		}
+	}()
+	go func() {
+		// QoS UDP echo (agent.md §8) — the public ping target of the node.
+		if err := qosecho.Serve(ctx, cfg.QoSEchoAddr, logf); err != nil {
+			logf("qos echo: %v", err)
+		}
+	}()
 
 	logf("birdman-agent %s: linking to master %s (region %s, %d slots)",
 		version, cfg.MasterAddr, cfg.Region, cfg.CapacitySlots)

@@ -76,6 +76,14 @@ birdman_disk_warn_pct: 85
 birdman_disk_crit_pct: 92
 birdman_ready_empty_for: "3m"          # BufferEmpty: ready==0 держится столько
 birdman_tick_degraded_for: "5m"
+# CertExpiry (mTLS agentlink v1): предупреждаем, когда любой серт (CA/сервер
+# master'а, клиентский серт ноды, локальный взгляд агента) истекает раньше чем
+# через это окно. 14д = renewal-окно клиентских сертов (дизайн §1). Само окно
+# совпадает с порогом renewal, а тикер renewal — 24ч, поэтому "горит, только
+# если renewal застрял" обеспечивает НЕ этот порог, а for:25h у правила
+# (rules.yml.j2): здоровый серт законно бывает <14д до ~24ч за цикл.
+# 14*86400 = 1209600.
+birdman_cert_expiry_warn_seconds: 1209600
 
 # --- бэкапы Postgres (ops.md §5) ---
 birdman_postgres_container: birdman-postgres   # контейнер из роли birdman_master_dev

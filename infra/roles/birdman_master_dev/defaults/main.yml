@@ -17,3 +17,10 @@ birdman_master_pg_port: 5433
 # первом прогоне, admin-ключ выхватывается из журнала первого старта master.
 birdman_master_pg_pass_file: /etc/birdman/pg.pass
 birdman_master_admin_key_file: /etc/birdman/master-admin.key
+
+# Режим аутентификации agentlink-листенера (mTLS agentlink v1, дизайн §3/§6):
+# token|mixed|mtls. Дефолт mixed — переходный период: листенер принимает и
+# cert-auth, и token-auth, Enroll включён. Флип в mtls (строгий mTLS) — по
+# команде владельца в Фазе D; token — экстренный откат. CA master создаёт сам
+# в Postgres при первом старте — здесь ничего доставлять не нужно.
+birdman_agentlink_auth: mixed

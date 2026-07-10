@@ -114,6 +114,8 @@ export const ru: Record<MessageKey, string> = {
   'event.node_recovered': 'Тачка восстановлена',
   'event.node_drain': 'Тачка опустошается',
   'event.node_undrain': 'Тачка возвращена',
+  'event.node_enrolled': 'Сертификат тачки выдан',
+  'event.node_cert_renewed': 'Сертификат тачки обновлён',
   'event.server_failed': 'Дедик упал',
   'event.server_recovered': 'Дедик восстановлен',
   'event.server_drain': 'Дедик опустошается',

@@ -9,8 +9,12 @@ listen_api: "{{ birdman_master_api_addr }}"
 listen_grpc: "{{ birdman_master_grpc_addr }}"
 
 tls:
-  # Пусто → self-signed автогенерация при первом старте (dev-режим);
-  # агент ходит с tls_insecure: true.
+  # Пусто → master выпускает себе server-лист от внутренней CA (в PG) при
+  # каждом старте (mTLS agentlink v1, дизайн §1). auto_cert_dir оставлен
+  # принятым, но неиспользуемым — self-signed автоген выведен из эксплуатации.
   cert_file: ""
   key_file: ""
   auto_cert_dir: "{{ birdman_master_data_dir }}/certs"
+
+# Режим аутентификации agentlink-листенера: token|mixed|mtls (mTLS v1, §6).
+agentlink_auth: "{{ birdman_agentlink_auth | default('mixed') }}"

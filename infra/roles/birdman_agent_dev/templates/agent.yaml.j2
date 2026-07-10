@@ -14,4 +14,8 @@ registry_auth:
 # master-линк (итерация 1): master на этой же тачке, только localhost.
 master_addr: "{{ birdman_master_addr }}"
 node_token_file: {{ birdman_node_token_file }}    # выдан POST /v1/nodes; файл 0600
-tls_insecure: true   # ТОЛЬКО dev: master v0 на self-signed серте (protocol.md §Auth)
+# mTLS agentlink v1 (дизайн §4): агент верифицирует цепочку master'а до
+# внутренней CA + ServerName birdman-master, обменивает node_token на клиентский
+# серт (Enroll). CA-серт кладёт ansible (GET /v1/ca). tls_cert_dir не задаём —
+# дефолт {data_dir}/tls корректен.
+tls_ca_file: {{ birdman_master_ca_file }}

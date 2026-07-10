@@ -12,6 +12,8 @@
 
 Агент — stateless поверх containerd. На старте: `containerd list` по namespace `birdman` → восстановить карту server_id→container (labels: `server_id`, `version`, `port`; уточнено в v0: плюс `state` и `match-id` — агент пишет их при переходах, чтобы после рестарта продолжить с ready/allocated, а не гонять readiness-grace заново) → доложить master в Hello. Мёртвые контейнеры (умерли, пока агент не смотрел) — Event `failed` + cleanup. Контейнеры agent-рестарт **переживают** (containerd их держит) — рестарт/апгрейд агента не трогает живые матчи.
 
+(Уточнено в v1, mTLS.) Материал mTLS (`client.key`/`client.crt`/`ca.pem` в `tls_cert_dir`, каталог агента 0700) рестарт агента **переживает**: при действующем по сроку серте агент открывает mTLS-сессию сразу, без повторного `Enroll`. Полностью истёкший серт (нода лежала >90 дней) → mTLS-хендшейк невозможен → агент сам падает обратно в Enroll-by-token (токен на диске) и самовосстанавливается без ansible (`protocol.md` §Auth).
+
 ## 3. Запуск дедика
 
 Команда `StartServer{server_id, image_ref, env, limits{cpu_millis, mem_mb}, port?}`:
@@ -82,14 +84,22 @@ registry_auth:              # (уточнено в v0) pull приватного
                             # host-match, §3; опционально, деф. ghcr.io (единственный
                             # host, с которым говорил pre-Реестры-v1 фоллбэк) +
                             # WARN в лог один раз за процесс при срабатывании дефолта
-tls_insecure: false         # (уточнено в v0) true — не проверять серт master
-                            # (ТОЛЬКО dev: self-signed автогенерация master v0)
-tls_ca_file: ""             # (уточнено в v0) прод-путь: пин CA-серта master
+tls_ca_file: /etc/birdman/master-ca.pem  # (уточнено в v1) bootstrap-траст: публичный
+                            # CA-серт master'а, кладёт ansible; эффективный траст-пул =
+                            # этот файл ∪ {tls_cert_dir}/ca.pem (оба — только публичные серты)
+tls_cert_dir: ""            # (v1) каталог агента (0700, деф. {data_dir}/tls):
+                            # client.key (0600, генерит агент), client.crt, ca.pem —
+                            # материал mTLS, полученный при Enroll
+tls_server_name: birdman-master  # (v1) SAN, проверяемый на серте master'а (DNS SAN
+                            # его листа) — верификация IP-независима
+tls_insecure: false         # (уточнено в v1) true — не проверять серт master; ТОЛЬКО dev
+                            # и ТОЛЬКО при loopback master_addr — иначе ОШИБКА загрузки
+                            # конфига (агент не стартует); см. ниже и protocol.md §Auth
 ```
 
 (Уточнено в v0, Реестры v1.) Помимо `registry_auth` (файловый fallback выше), master раздаёт агенту полный набор registry-кредов по agentlink (`SetRegistries`, `protocol.md` §1) — эти креды агент держит **только в памяти** (никогда не пишет на диск, в конфиг не попадают) и получает заново при каждом Hello (после рестарта агента — из первого же снапшота от мастера, ещё до реплея pending-команд). Host-match и полная цепочка приоритетов — §3.
 
-TLS: при первом коннекте агент обменивает `node_token` на клиентский сертификат (mTLS дальше) — см. `protocol.md` §Auth. (Уточнено в v0: обмена пока нет — агент шлёт `node_token` в Hello при каждом коннекте поверх TLS server-auth; проверка серта master — `tls_ca_file`, в dev допустим `tls_insecure: true`. Реестры v1 добавляет жёсткий гейт итерации 5 поверх этого же ограничения — см. `protocol.md` §Auth.)
+TLS: при первом коннекте агент обменивает `node_token` на клиентский сертификат unary-вызовом `Enroll` по server-auth TLS (ключ генерит сам, в CSR только публичная часть), сохраняет `client.key`/`client.crt`/`ca.pem` в `tls_cert_dir` атомарно (tmp+rename) и дальше ходит mTLS; при cert-сессии `node_token` в Hello **не шлёт**. Renewal (за 14 дней до истечения листа) — тем же `Enroll` поверх действующей mTLS-сессии + мягкий реконнект линка. (Уточнено в v1, mTLS — реализовано; см. `protocol.md` §Auth. `codes.Unimplemented` от старого master'а → WARN + token-auth Hello. `tls_insecure: true` легален **только** при loopback `master_addr` — агентская половина гейта итерации 5: закрывает и кражу токена, и спуфинг `UpgradeAgent`/`StartServer` по не-localhost линку; не-loopback + insecure → ошибка загрузки конфига, агент не стартует.)
 
 ## 11. Acceptance
 

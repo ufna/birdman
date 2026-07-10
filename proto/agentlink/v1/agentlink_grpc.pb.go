@@ -20,6 +20,7 @@ const _ = grpc.SupportPackageIsVersion9
 
 const (
 	AgentLink_Session_FullMethodName = "/agentlink.v1.AgentLink/Session"
+	AgentLink_Enroll_FullMethodName  = "/agentlink.v1.AgentLink/Enroll"
 )
 
 // AgentLinkClient is the client API for AgentLink service.
@@ -36,6 +37,10 @@ const (
 // handling on the agent must be idempotent by cmd_id (at-least-once).
 type AgentLinkClient interface {
 	Session(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AgentMsg, MasterMsg], error)
+	// Enroll (mTLS v1, аддитивно) — unary-обмен node_token → клиентский
+	// сертификат на том же gRPC-листенере, что и Session. Это НЕ команда:
+	// cmd_id/Ack/pending-машинерия не участвуют (обычный запрос-ответ).
+	Enroll(ctx context.Context, in *EnrollRequest, opts ...grpc.CallOption) (*EnrollResponse, error)
 }
 
 type agentLinkClient struct {
@@ -59,6 +64,16 @@ func (c *agentLinkClient) Session(ctx context.Context, opts ...grpc.CallOption) 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type AgentLink_SessionClient = grpc.BidiStreamingClient[AgentMsg, MasterMsg]
 
+func (c *agentLinkClient) Enroll(ctx context.Context, in *EnrollRequest, opts ...grpc.CallOption) (*EnrollResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(EnrollResponse)
+	err := c.cc.Invoke(ctx, AgentLink_Enroll_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AgentLinkServer is the server API for AgentLink service.
 // All implementations must embed UnimplementedAgentLinkServer
 // for forward compatibility.
@@ -73,6 +88,10 @@ type AgentLink_SessionClient = grpc.BidiStreamingClient[AgentMsg, MasterMsg]
 // handling on the agent must be idempotent by cmd_id (at-least-once).
 type AgentLinkServer interface {
 	Session(grpc.BidiStreamingServer[AgentMsg, MasterMsg]) error
+	// Enroll (mTLS v1, аддитивно) — unary-обмен node_token → клиентский
+	// сертификат на том же gRPC-листенере, что и Session. Это НЕ команда:
+	// cmd_id/Ack/pending-машинерия не участвуют (обычный запрос-ответ).
+	Enroll(context.Context, *EnrollRequest) (*EnrollResponse, error)
 	mustEmbedUnimplementedAgentLinkServer()
 }
 
@@ -85,6 +104,9 @@ type UnimplementedAgentLinkServer struct{}
 
 func (UnimplementedAgentLinkServer) Session(grpc.BidiStreamingServer[AgentMsg, MasterMsg]) error {
 	return status.Errorf(codes.Unimplemented, "method Session not implemented")
+}
+func (UnimplementedAgentLinkServer) Enroll(context.Context, *EnrollRequest) (*EnrollResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Enroll not implemented")
 }
 func (UnimplementedAgentLinkServer) mustEmbedUnimplementedAgentLinkServer() {}
 func (UnimplementedAgentLinkServer) testEmbeddedByValue()                   {}
@@ -114,13 +136,36 @@ func _AgentLink_Session_Handler(srv interface{}, stream grpc.ServerStream) error
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type AgentLink_SessionServer = grpc.BidiStreamingServer[AgentMsg, MasterMsg]
 
+func _AgentLink_Enroll_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EnrollRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentLinkServer).Enroll(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentLink_Enroll_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentLinkServer).Enroll(ctx, req.(*EnrollRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AgentLink_ServiceDesc is the grpc.ServiceDesc for AgentLink service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var AgentLink_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "agentlink.v1.AgentLink",
 	HandlerType: (*AgentLinkServer)(nil),
-	Methods:     []grpc.MethodDesc{},
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "Enroll",
+			Handler:    _AgentLink_Enroll_Handler,
+		},
+	},
 	Streams: []grpc.StreamDesc{
 		{
 			StreamName:    "Session",
