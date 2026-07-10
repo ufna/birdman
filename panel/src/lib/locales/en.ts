@@ -149,6 +149,7 @@ export const en = {
   'event.agent_upgrade_succeeded': 'Agent upgraded',
   'event.agent_upgrade_failed': 'Agent upgrade failed',
   'event.registry_upserted': 'Registry saved',
+  'event.registry_updated': 'Registry updated',
   'event.registry_removed': 'Registry removed',
   'event.apikey_created': 'Key created',
   'event.apikey_revoked': 'Key revoked',
@@ -576,33 +577,52 @@ export const en = {
 
   // — Access screen: Registries section (private registry credentials) —
   'access.registries': 'Registries',
-  'access.registries.hint': 'The token only needs pull access to packages (read:packages) — nothing more.',
+  'access.registries.hint': 'Credentials only need pull (read) access to the registry — nothing more.',
   'access.registries.empty': 'No registries yet.',
   'access.registries.col.host': 'Host',
+  'access.registries.col.type': 'Type',
   'access.registries.col.username': 'Username',
   'access.registries.col.token': 'Token',
   'access.registries.col.note': 'Note',
   'access.registries.col.updated': 'Updated',
   'access.registries.tokenMasked': '••••',
+  // Registry-type dropdown labels (raw code stays in the API).
+  'access.registries.type.ghcr': 'ghcr',
+  'access.registries.type.gar': 'Google Artifact Registry',
+  'access.registries.type.generic': 'Generic',
+  // Per-type help — names where to get the credential.
+  'access.registries.help.ghcr':
+    'Personal access token with the read:packages scope — GitHub Settings → Developer settings → Personal access tokens.',
+  'access.registries.help.gar':
+    'Service-account JSON key with the Artifact Registry Reader role — GCP Console → IAM → Service Accounts → Keys. Paste the whole key file.',
+  'access.registries.help.generic': 'Username and password (or token) for docker login to this registry.',
   'access.registries.add': 'Add registry',
   'access.registries.create.title': 'Add or replace a registry',
   'access.registries.create.desc':
-    'Host, username and token for a private registry. Submitting the same host again replaces its username, token and note — that is how you rotate a token.',
+    'Pick a type, then fill the host and credentials for a private registry. Submitting the same host again replaces its credentials — that is how you rotate a token.',
   'access.registries.create.host': 'Host',
   'access.registries.create.hostPlaceholder': 'e.g. ghcr.io',
+  'access.registries.create.hostGarPlaceholder': 'REGION-docker.pkg.dev',
   'access.registries.create.username': 'Username',
   'access.registries.create.usernamePlaceholder': 'registry username',
   'access.registries.create.token': 'Token',
   'access.registries.create.tokenPlaceholder': 'personal access token',
+  'access.registries.create.tokenGarPlaceholder': '{ "type": "service_account", "private_key": "…", … }',
   'access.registries.create.note': 'Note',
   'access.registries.create.notePlaceholder': 'optional note',
   'access.registries.create.submit': 'Save',
   'access.registries.create.err': "Couldn't save the registry.",
+  'access.registries.edit': 'Edit',
+  'access.registries.edit.title': 'Edit registry {host}',
+  'access.registries.edit.desc':
+    'The host is immutable — delete and re-add to change it. Leave the token empty to keep the current secret, or enter a new one to rotate it.',
+  'access.registries.keepSecret': 'Leave empty to keep the current token',
   'access.registries.delete': 'Delete',
   'access.registries.delete.title': 'Delete registry {host}?',
   'access.registries.delete.desc':
     'Connected nodes lose this credential immediately — anonymous pulls may start failing for private images on this host.',
   'access.registries.toast.saved': 'Registry {host} saved',
+  'access.registries.toast.updated': 'Registry {host} updated',
   'access.registries.toast.deleted': 'Registry {host} deleted',
 } as const;
 

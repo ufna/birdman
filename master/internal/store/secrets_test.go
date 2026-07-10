@@ -36,7 +36,7 @@ func TestSecretsAtRestHygiene(t *testing.T) {
 	ctx := context.Background()
 
 	const plainToken = "ghp_hygieneToken_do_not_dump_0123456789"
-	if _, err := st.UpsertRegistry(ctx, "ghcr.io", "alice", plainToken, "note"); err != nil {
+	if _, err := st.UpsertRegistry(ctx, "ghcr.io", "ghcr", "alice", plainToken, "note"); err != nil {
 		t.Fatalf("UpsertRegistry: %v", err)
 	}
 	if _, _, err := st.EnsureInternalCA(ctx); err != nil {
@@ -208,7 +208,7 @@ func TestSecretsStrictReadRegistries(t *testing.T) {
 	ctx := context.Background()
 
 	// A normal encrypted row plus a rogue plaintext row inserted straight to SQL.
-	if _, err := st.UpsertRegistry(ctx, "ok.example.com", "alice", "ghp_ok", ""); err != nil {
+	if _, err := st.UpsertRegistry(ctx, "ok.example.com", "generic", "alice", "ghp_ok", ""); err != nil {
 		t.Fatalf("UpsertRegistry: %v", err)
 	}
 	if _, err := st.Pool.Exec(ctx,
@@ -255,7 +255,7 @@ func TestSecretsWrongKey(t *testing.T) {
 	st, dsn := testdb.NewWithCodec(t, right)
 	ctx := context.Background()
 
-	if _, err := st.UpsertRegistry(ctx, "ghcr.io", "alice", "ghp_secret", ""); err != nil {
+	if _, err := st.UpsertRegistry(ctx, "ghcr.io", "ghcr", "alice", "ghp_secret", ""); err != nil {
 		t.Fatalf("UpsertRegistry: %v", err)
 	}
 	if _, _, err := st.EnsureInternalCA(ctx); err != nil {

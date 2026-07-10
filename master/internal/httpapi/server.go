@@ -44,10 +44,10 @@ type Server struct {
 	log           *slog.Logger
 	mux           *http.ServeMux
 
-	// onRegistriesChanged fires after a successful POST/DELETE /v1/registries
-	// (registries.go). nil-safe — an unset hook is simply not called. T3 wires
-	// it to broadcast a fresh SetRegistries snapshot to connected agents
-	// (docs/superpowers/specs/2026-07-09-registries-design.md §2).
+	// onRegistriesChanged fires after a successful POST/PATCH/DELETE
+	// /v1/registries (registries.go). nil-safe — an unset hook is simply not
+	// called. T3 wires it to broadcast a fresh SetRegistries snapshot to
+	// connected agents (docs/superpowers/specs/2026-07-09-registries-design.md §2).
 	onRegistriesChanged func(context.Context)
 }
 
@@ -95,6 +95,7 @@ func New(st *store.Store, m *metrics.Metrics, mm *matchmaker.Matchmaker, dep *de
 	// scope on every route, including the list read (secret-adjacent).
 	s.mux.HandleFunc("GET /v1/registries", s.requireScope(ScopeAdmin, s.handleListRegistries))
 	s.mux.HandleFunc("POST /v1/registries", s.requireScope(ScopeAdmin, s.handleCreateRegistry))
+	s.mux.HandleFunc("PATCH /v1/registries/{id}", s.requireScope(ScopeAdmin, s.handlePatchRegistry))
 	s.mux.HandleFunc("DELETE /v1/registries/{id}", s.requireScope(ScopeAdmin, s.handleDeleteRegistry))
 	s.mux.HandleFunc("GET /v1/stats/overview", s.requireScope(ScopeReadonly, s.handleStatsOverview))
 	s.mux.HandleFunc("GET /v1/stats/cost", s.requireScope(ScopeReadonly, s.handleStatsCost))
