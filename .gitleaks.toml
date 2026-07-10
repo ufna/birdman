@@ -1,0 +1,37 @@
+# gitleaks configuration for the birdman monorepo.
+#
+# CI (.github/workflows/secret-scan.yml) runs a FULL git-history scan:
+#   docker run ... zricethezav/gitleaks:latest git /repo --redact --verbose
+# No --config flag is passed, so gitleaks auto-discovers this file at the repo
+# root (/repo/.gitleaks.toml) and applies it to every commit it scans.
+#
+# We keep the entire default ruleset and only add a narrow allowlist for two
+# INTENTIONAL non-secrets that already live in the tree. A follow-up commit
+# cannot clear a full-history scan (the values persist in older commits), so the
+# suppression has to live in config — but it is scoped to one exact placeholder
+# value and one test-only file, never a real secret pattern or a directory.
+
+[extend]
+useDefault = true
+
+# Dev-only placeholder secrets-key in master/dev-compose.yml.
+# Pinned to the EXACT value (not the whole file) so that a real credential
+# accidentally committed to that compose file would still be flagged.
+# base64 of the ASCII string "birdman-dev-only-secrets-key-32b" — the at-rest
+# encryption analogue of `POSTGRES_PASSWORD: birdman` on the same dev compose.
+[[allowlists]]
+description = "Dev-only BIRDMAN_SECRETS_KEY placeholder (master/dev-compose.yml)"
+regexTarget = "line"
+regexes = [
+  '''YmlyZG1hbi1kZXYtb25seS1zZWNyZXRzLWtleS0zMmI=''',
+]
+
+# Fake "-----BEGIN EC PRIVATE KEY-----" fixtures in the secrets store test.
+# The bodies ("LEGACY-PLAINTEXT-KEY", "CONCURRENT") are obviously not key
+# material; they exist to drive the at-rest encryption / strict-read paths.
+# Path-scoped to this single test file only.
+[[allowlists]]
+description = "Fake PEM test fixtures (master/internal/store/secrets_test.go)"
+paths = [
+  '''master/internal/store/secrets_test\.go''',
+]

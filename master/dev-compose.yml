@@ -26,6 +26,11 @@ services:
       BIRDMAN_DSN: postgres://postgres:birdman@postgres:5432/birdman?sslmode=disable
       BIRDMAN_LISTEN_API: ":8100"
       BIRDMAN_LISTEN_GRPC: ":8444"
+      # Ключ шифрования секретов at-rest (registries.token, internal_ca.key_pem).
+      # base64 32 байт. dev-only, как POSTGRES_PASSWORD: birdman — в контейнере
+      # нет /etc/birdman/secrets.key, поэтому ключ инжектится значением через env
+      # (BIRDMAN_SECRETS_KEY выигрывает у secrets_key_file; см. config.SecretsKey).
+      BIRDMAN_SECRETS_KEY: "YmlyZG1hbi1kZXYtb25seS1zZWNyZXRzLWtleS0zMmI="
     ports:
       - "8100:8100"   # REST API
       - "8444:8444"   # gRPC AgentLink

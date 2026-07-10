@@ -23,6 +23,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/ufna/birdman/master/internal/secrets"
 	"github.com/ufna/birdman/master/internal/store"
 )
 
@@ -113,8 +114,22 @@ func startDockerPostgres() (string, func(), error) {
 	return "", nil, fmt.Errorf("postgres not ready in time: %v", lastErr)
 }
 
-// New returns a Store bound to a fresh migrated database.
+// New returns a Store bound to a fresh migrated database, encrypted at-rest
+// with a RANDOM per-database key. This means the entire integration suite runs
+// over encryption automatically — every UpsertRegistry/EnsureInternalCA writes
+// an envelope and every read decrypts — without any test opting in.
 func New(t *testing.T) *store.Store {
+	t.Helper()
+	st, _ := NewWithCodec(t, randomCodec(t))
+	return st
+}
+
+// NewWithCodec is New with a caller-supplied codec, and also returns the
+// database DSN so a test can open a SECOND store on the SAME database with a
+// DIFFERENT codec — the wrong-key DR rehearsal (a restore against the wrong
+// key must fail loudly, not misread). The returned DSN already carries the
+// pool_max_conns tuning, so store.Open(ctx, dsn, otherCodec) reuses it.
+func NewWithCodec(t *testing.T, codec *secrets.Codec) (*store.Store, string) {
 	t.Helper()
 	if adminDSN == "" {
 		t.Skip(skipMsg)
@@ -131,11 +146,11 @@ func New(t *testing.T) *store.Store {
 		t.Fatalf("create database: %v", err)
 	}
 
-	dsn := withDatabase(t, adminDSN, name)
-	if err := store.MigrateUp(dsn); err != nil {
+	if err := store.MigrateUp(withDatabase(t, adminDSN, name)); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	st, err := store.Open(ctx, withParam(t, dsn, "pool_max_conns", "20"))
+	dsn := withParam(t, withDatabase(t, adminDSN, name), "pool_max_conns", "20")
+	st, err := store.Open(ctx, dsn, codec)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -146,7 +161,22 @@ func New(t *testing.T) *store.Store {
 		}
 		_ = admin.Close(ctx)
 	})
-	return st
+	return st, dsn
+}
+
+// randomCodec builds a codec from 32 random bytes — a throwaway per-database
+// key. Tests that need a specific/second key use NewWithCodec instead.
+func randomCodec(t *testing.T) *secrets.Codec {
+	t.Helper()
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatalf("random key: %v", err)
+	}
+	c, err := secrets.New(key)
+	if err != nil {
+		t.Fatalf("new codec: %v", err)
+	}
+	return c
 }
 
 func withDatabase(t *testing.T, dsn, db string) string {

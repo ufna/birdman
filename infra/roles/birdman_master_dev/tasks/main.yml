@@ -59,6 +59,46 @@
     mode: "0755"
   notify: Restart birdman-master
 
+# Мастер-ключ шифрования обратимых секретов at-rest (registries.token,
+# internal_ca.key_pem — дизайн secrets-encryption §2/§6). openssl rand, а НЕ
+# lookup('password'): нужен полноэнтропийный 256-битный ключ, не пароль из
+# букв-цифр. Идемпотентно (creates:) — генерится один раз; никогда не
+# регенерируется (регенерация замаскировала бы DR-сбой «не тот ключ»).
+# Запись атомарна (mktemp в том же каталоге → openssl → mv): если openssl
+# упадёт на полпути, финальный путь не появится и creates: не заблокирует
+# повторную генерацию — пустой/битый ключ никогда не «залипает».
+- name: Generate master secrets key once (kept only on the box)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    umask 077
+    tmp="$(mktemp {{ birdman_master_secrets_key_file }}.XXXXXX)"
+    trap 'rm -f "$tmp"' EXIT
+    openssl rand -base64 32 > "$tmp"
+    mv "$tmp" {{ birdman_master_secrets_key_file }}
+  args:
+    creates: "{{ birdman_master_secrets_key_file }}"
+    executable: /bin/bash
+  register: birdman_secrets_key_gen
+  no_log: true
+
+- name: Enforce secrets key ownership/mode
+  ansible.builtin.file:
+    path: "{{ birdman_master_secrets_key_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+
+# Только при первом провижининге: ключ обязателен для DR, но кладётся ТОЛЬКО в
+# менеджер паролей владельца — не в git/vault (инвариант «секреты только на
+# боксе», решение владельца: эскроу = менеджер паролей).
+- name: Remind operator to escrow the secrets key (first provisioning only)
+  ansible.builtin.debug:
+    msg: >-
+      Эскроу {{ birdman_master_secrets_key_file }} в менеджер паролей владельца —
+      без него restore дампа нечитаем (master упадёт с key_id-mismatch). Ключ
+      НЕ класть в git/vault и НЕ рядом с дампами/в бэкап-хранилище.
+  when: birdman_secrets_key_gen is changed
+
 - name: Install master config /etc/birdman/master.yaml
   ansible.builtin.template:
     src: master.yaml.j2

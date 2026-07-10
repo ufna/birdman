@@ -76,6 +76,13 @@ func (s *Store) UpsertRegistry(ctx context.Context, host, username, token, note 
 	if token == "" {
 		return Registry{}, errors.New("token is required")
 	}
+	// Encrypt the token before it ever reaches SQL: only the AEAD envelope is
+	// written, so pg_dump/DB files carry ciphertext (design §4). AAD binds it to
+	// this column — a value replayed into internal_ca.key_pem would not open.
+	encToken, err := s.codec.Encrypt([]byte(token), "registries.token")
+	if err != nil {
+		return Registry{}, err
+	}
 	var r Registry
 	err = s.Pool.QueryRow(ctx, `
 		insert into registries (host, username, token, note)
@@ -86,7 +93,7 @@ func (s *Store) UpsertRegistry(ctx context.Context, host, username, token, note 
 			note = excluded.note,
 			updated_at = now()
 		returning `+registryCols,
-		h, username, token, note).
+		h, username, encToken, note).
 		Scan(&r.ID, &r.Host, &r.Username, &r.Note, &r.CreatedAt, &r.UpdatedAt)
 	if err != nil {
 		return Registry{}, err
@@ -126,9 +133,19 @@ func (s *Store) ListRegistryCreds(ctx context.Context) ([]RegistryCred, error) {
 	out := []RegistryCred{}
 	for rows.Next() {
 		var c RegistryCred
-		if err := rows.Scan(&c.Host, &c.Username, &c.Token); err != nil {
+		var encToken string
+		if err := rows.Scan(&c.Host, &c.Username, &encToken); err != nil {
 			return nil, err
 		}
+		// Strict read (design §4): after the startup encrypt-existing pass every
+		// stored token is an envelope, so a non-envelope value is an error, not a
+		// silent passthrough. The error carries no token bytes; the agentlink
+		// caller logs it without the value.
+		token, err := s.codec.Decrypt(encToken, "registries.token")
+		if err != nil {
+			return nil, fmt.Errorf("decrypt registries.token for %s: %w", c.Host, err)
+		}
+		c.Token = string(token)
 		out = append(out, c)
 	}
 	return out, rows.Err()

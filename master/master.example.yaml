@@ -1,12 +1,25 @@
 # Конфиг birdman-master (см. docs/specs/master.md §7; дев-дефолты v0).
 # Любое поле можно переопределить env-переменными:
 #   BIRDMAN_DSN, BIRDMAN_LISTEN_API, BIRDMAN_LISTEN_GRPC, BIRDMAN_VM_URL,
-#   BIRDMAN_VL_URL, BIRDMAN_VMALERT_URL.
+#   BIRDMAN_VL_URL, BIRDMAN_VMALERT_URL, BIRDMAN_SECRETS_KEY_FILE.
 
 dsn: "postgres://postgres:birdman@localhost:5432/birdman?sslmode=disable"
 
 listen_api: ":8100"   # REST API (+ /metrics, /healthz)
 listen_grpc: ":8444"  # gRPC AgentLink (всегда TLS)
+
+# Ключ шифрования обратимых секретов at-rest (registries.token,
+# internal_ca.key_pem) — AEAD AES-256-GCM, конверт birdman:v1:... в тех же
+# колонках (secrets-encryption design §2). Файл: base64 32 случайных байт, одна
+# строка, 0600 (генерится ansible один раз: `openssl rand -base64 32`). Мастер
+# ОБЯЗАН иметь ключ — без него не стартует (расшифровать секреты нечем) и НИКОГДА
+# не генерит его сам. Права шире 0600 → WARN (не фейл).
+#   Env-override пути: BIRDMAN_SECRETS_KEY_FILE.
+#   Dev/CI: вместо файла можно задать сам ключ значением через BIRDMAN_SECRETS_KEY
+#   (base64) — оно выигрывает у secrets_key_file (dev-compose, где нет
+#   /etc/birdman). См. restore-runbook (ops.md §5): эскроу-копию ключа положить
+#   ДО старта мастера против восстановленной БД, иначе key_id-mismatch.
+secrets_key_file: "/etc/birdman/secrets.key"
 
 # Наблюдаемость: read-only прокси метрик для панели (итерация 4, panel.md §1.3).
 # Панель берёт графики из VictoriaMetrics через master (GET /v1/metrics/query,

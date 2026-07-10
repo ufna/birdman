@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib" // database/sql driver for golang-migrate
 
+	"github.com/ufna/birdman/master/internal/secrets"
 	"github.com/ufna/birdman/master/migrations"
 	agentlinkv1 "github.com/ufna/birdman/proto/agentlink/v1"
 )
@@ -35,6 +36,11 @@ type CommandSender interface {
 type Store struct {
 	Pool *pgxpool.Pool
 
+	// codec encrypts/decrypts the reversible at-rest secrets (registries.token,
+	// internal_ca.key_pem). Required — every Open supplies one (main via the
+	// loaded box key, testdb via a random per-database key). The read/write
+	// paths that touch those two columns go through it; nothing else does.
+	codec  *secrets.Codec
 	sender CommandSender // nil until SetCommandSender (some tests)
 }
 
@@ -42,8 +48,21 @@ type Store struct {
 // before the API/matchmaker start allocating.
 func (s *Store) SetCommandSender(sender CommandSender) { s.sender = sender }
 
-// Open connects a pgx pool and verifies connectivity.
-func Open(ctx context.Context, dsn string) (*Store, error) {
+// Open connects a pgx pool, verifies connectivity, and binds the at-rest
+// secrets codec. codec is mandatory — the master loads it from the box key at
+// startup (fail-loud if absent, see cmd/birdman-master) and testdb generates a
+// random one per database, so every Store can encrypt/decrypt its reversible
+// secrets. Callers must run EncryptExistingSecrets before the first secret read
+// (main does, immediately after Open) so legacy plaintext rows are upgraded
+// under the strict-read invariant.
+func Open(ctx context.Context, dsn string, codec *secrets.Codec) (*Store, error) {
+	if codec == nil {
+		// Fail loud here rather than let a nil codec nil-deref at the first
+		// Encrypt/Decrypt on a secret read/write path. Both real callers pass a
+		// codec (main via the box key, testdb via a random one); this guards a
+		// future caller from a confusing deferred crash.
+		return nil, errors.New("store.Open: secrets codec is required (nil codec would nil-deref at first Encrypt/Decrypt)")
+	}
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("parse dsn: %w", err)
@@ -58,7 +77,7 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 		pool.Close()
 		return nil, fmt.Errorf("ping: %w", err)
 	}
-	return &Store{Pool: pool}, nil
+	return &Store{Pool: pool, codec: codec}, nil
 }
 
 func (s *Store) Close() { s.Pool.Close() }

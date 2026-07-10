@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -31,19 +32,29 @@ type rowQuerier interface {
 }
 
 // loadActiveCA returns the newest active CA's cert+key — the signer. It is the
-// only key-reading query; ActiveCAs reads cert_pem alone.
-func loadActiveCA(ctx context.Context, q rowQuerier) (caKeypair, bool, error) {
-	var cert, key string
+// only key-reading query; ActiveCAs reads cert_pem alone. It is a Store method
+// (it needs the codec to decrypt key_pem) but still takes a rowQuerier so it
+// runs against either the pool or an open tx (EnsureInternalCA's double-check).
+// The key_pem column holds an AEAD envelope; the read is strict (design §4) —
+// after the startup pass a non-envelope value is an error, and a wrong key
+// yields the key_id-mismatch diagnostic (the DR crux), never a silent misread.
+// cert_pem is not a secret and is stored/read in the clear.
+func (s *Store) loadActiveCA(ctx context.Context, q rowQuerier) (caKeypair, bool, error) {
+	var cert, encKey string
 	err := q.QueryRow(ctx, `
 		select cert_pem, key_pem from internal_ca
-		where active order by created_at desc limit 1`).Scan(&cert, &key)
+		where active order by created_at desc limit 1`).Scan(&cert, &encKey)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return caKeypair{}, false, nil
 	}
 	if err != nil {
 		return caKeypair{}, false, err
 	}
-	return caKeypair{certPEM: []byte(cert), keyPEM: []byte(key)}, true, nil
+	key, err := s.codec.Decrypt(encKey, "internal_ca.key_pem")
+	if err != nil {
+		return caKeypair{}, false, fmt.Errorf("decrypt internal_ca.key_pem: %w", err)
+	}
+	return caKeypair{certPEM: []byte(cert), keyPEM: key}, true, nil
 }
 
 // EnsureInternalCA returns the active internal CA's cert+key PEM, generating
@@ -52,7 +63,7 @@ func loadActiveCA(ctx context.Context, q rowQuerier) (caKeypair, bool, error) {
 // survives master-box loss with the PG dump (design §1). The key PEM is a
 // reversible secret — callers must never log it.
 func (s *Store) EnsureInternalCA(ctx context.Context) (certPEM, keyPEM []byte, err error) {
-	if ca, ok, err := loadActiveCA(ctx, s.Pool); err != nil {
+	if ca, ok, err := s.loadActiveCA(ctx, s.Pool); err != nil {
 		return nil, nil, err
 	} else if ok {
 		return ca.certPEM, ca.keyPEM, nil
@@ -69,7 +80,7 @@ func (s *Store) EnsureInternalCA(ctx context.Context) (certPEM, keyPEM []byte, e
 	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1, 42))`, internalCALockKey); err != nil {
 		return nil, nil, err
 	}
-	if ca, ok, err := loadActiveCA(ctx, tx); err != nil {
+	if ca, ok, err := s.loadActiveCA(ctx, tx); err != nil {
 		return nil, nil, err
 	} else if ok {
 		return ca.certPEM, ca.keyPEM, nil
@@ -83,9 +94,17 @@ func (s *Store) EnsureInternalCA(ctx context.Context) (certPEM, keyPEM []byte, e
 	if err != nil {
 		return nil, nil, err
 	}
+	// Encrypt the private key before it is persisted (design §4): the row holds
+	// an AEAD envelope, so the CA key never sits in the clear in the DB or a
+	// dump. cert_pem is public and stored as-is. The plaintext kPEM is returned
+	// to the caller (it must sign leaves in memory) but never logged.
+	encKey, err := s.codec.Encrypt(kPEM, "internal_ca.key_pem")
+	if err != nil {
+		return nil, nil, err
+	}
 	if _, err := tx.Exec(ctx, `
 		insert into internal_ca (cert_pem, key_pem, not_after)
-		values ($1, $2, $3)`, string(cPEM), string(kPEM), notAfter); err != nil {
+		values ($1, $2, $3)`, string(cPEM), encKey, notAfter); err != nil {
 		return nil, nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
