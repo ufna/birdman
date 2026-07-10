@@ -134,6 +134,7 @@ const (
 	// carries host/username — NEVER the token: it is write-only and must
 	// never land in an audit event, a log line, or a GET response.
 	EventRegistryUpserted = "registry_upserted" // POST /v1/registries (create or replace-by-host)
+	EventRegistryUpdated  = "registry_updated"  // PATCH /v1/registries/{id} (Реестры v2: partial edit)
 	EventRegistryRemoved  = "registry_removed"  // DELETE /v1/registries/{id}
 
 	// Agent mTLS enrollment (mTLS agentlink v1,

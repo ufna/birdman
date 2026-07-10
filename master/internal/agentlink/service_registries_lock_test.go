@@ -83,7 +83,7 @@ func TestServiceRegistriesSnapshotReadEnqueueSerializedAcrossAttachAndBroadcast(
 			go func() {
 				defer wg.Done()
 				host := fmt.Sprintf("r%d-w%d.example", r, w)
-				if _, err := st.UpsertRegistry(ctx, host, "u", "t", ""); err != nil {
+				if _, err := st.UpsertRegistry(ctx, host, "generic", "u", "t", ""); err != nil {
 					t.Errorf("round %d worker %d: upsert: %v", r, w, err)
 					return
 				}

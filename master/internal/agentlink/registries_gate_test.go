@@ -114,7 +114,7 @@ func wireWithheldCounter(hub *agentlink.Hub) *atomic.Int64 {
 
 func seedRegistry(t *testing.T, st *store.Store, host, token string) {
 	t.Helper()
-	if _, err := st.UpsertRegistry(context.Background(), host, "alice", token, ""); err != nil {
+	if _, err := st.UpsertRegistry(context.Background(), host, "generic", "alice", token, ""); err != nil {
 		t.Fatalf("seed registry: %v", err)
 	}
 }

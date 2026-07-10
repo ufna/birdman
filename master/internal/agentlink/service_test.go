@@ -321,7 +321,7 @@ func TestAttachSendsRegistriesSnapshotBeforePendingReplay(t *testing.T) {
 	st := testdb.New(t)
 	f := testdb.Seed(t, st, "eu", 10)
 	ctx := context.Background()
-	if _, err := st.UpsertRegistry(ctx, "ghcr.io", "alice", "tok-secret", "primary"); err != nil {
+	if _, err := st.UpsertRegistry(ctx, "ghcr.io", "ghcr", "alice", "tok-secret", "primary"); err != nil {
 		t.Fatalf("seed registry: %v", err)
 	}
 
@@ -552,7 +552,7 @@ func TestBroadcastRegistriesReachesAllConnectedNodes(t *testing.T) {
 		t.Fatalf("node2 attach preface: %+v (err=%v)", in, err)
 	}
 
-	if _, err := st.UpsertRegistry(ctx, "ghcr.io", "alice", "tok-broadcast", ""); err != nil {
+	if _, err := st.UpsertRegistry(ctx, "ghcr.io", "ghcr", "alice", "tok-broadcast", ""); err != nil {
 		t.Fatalf("upsert registry: %v", err)
 	}
 	svc.BroadcastRegistries(ctx)
@@ -584,7 +584,7 @@ func TestRegistriesTokenNeverLogged(t *testing.T) {
 	f := testdb.Seed(t, st, "eu", 10)
 	ctx := context.Background()
 	const secretToken = "s3cr3t-registry-token-should-never-be-logged"
-	if _, err := st.UpsertRegistry(ctx, "ghcr.io", "alice", secretToken, ""); err != nil {
+	if _, err := st.UpsertRegistry(ctx, "ghcr.io", "ghcr", "alice", secretToken, ""); err != nil {
 		t.Fatalf("seed registry: %v", err)
 	}
 
