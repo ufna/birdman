@@ -1,14 +1,18 @@
 package tlsutil_test
 
 import (
+	"crypto"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,14 +32,21 @@ func parseLeaf(t *testing.T, certPEM []byte) *x509.Certificate {
 	return c
 }
 
-// makeCSR builds a PKCS#10 CSR whose subject CN is deliberately attacker-chosen
-// — the issuer must ignore it and stamp its own CN.
+// makeCSR builds a P-256 PKCS#10 CSR whose subject CN is deliberately
+// attacker-chosen — the issuer must ignore it and stamp its own CN.
 func makeCSR(t *testing.T, cn string) []byte {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return makeCSRWith(t, key, cn)
+}
+
+// makeCSRWith builds a CSR signed by an arbitrary key — used to prove the
+// issuer rejects any enrolling key that is not ECDSA P-256.
+func makeCSRWith(t *testing.T, key crypto.Signer, cn string) []byte {
+	t.Helper()
 	der, err := x509.CreateCertificateRequest(rand.Reader,
 		&x509.CertificateRequest{Subject: pkix.Name{CommonName: cn}}, key)
 	if err != nil {
@@ -186,6 +197,91 @@ func TestIssueClientLeafFromCSR_Broken(t *testing.T) {
 	tampered := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der})
 	if _, _, err := tlsutil.IssueClientLeafFromCSR(caCertPEM, caKeyPEM, nodeID, tampered); err == nil {
 		t.Errorf("tampered-signature CSR: want error, got nil")
+	}
+}
+
+// The enrolling key must be ECDSA P-256 (ca.go header: "ECDSA P-256
+// throughout"). An RSA, Ed25519, or wrong-curve key — even with a valid CSR
+// signature — is rejected before any leaf is minted.
+func TestIssueClientLeafFromCSR_NonP256(t *testing.T) {
+	caCertPEM, caKeyPEM, err := tlsutil.GenerateCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeID := "33333333-3333-3333-3333-333333333333"
+
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, edKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p384Key, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		key  crypto.Signer
+	}{
+		{"rsa-2048", rsaKey},
+		{"ed25519", edKey},
+		{"ecdsa-p384", p384Key},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			csr := makeCSRWith(t, tc.key, "attacker")
+			if _, _, err := tlsutil.IssueClientLeafFromCSR(caCertPEM, caKeyPEM, nodeID, csr); err == nil {
+				t.Errorf("%s CSR: want error (issuer must require ECDSA P-256), got nil", tc.name)
+			}
+		})
+	}
+}
+
+// Global constraint (design §Global-Constraints): CA key material must never
+// leak into an error string. A corrupt CA key PEM that reaches the EC-key
+// parser must still yield an error echoing none of its bytes.
+func TestIssueClientLeafFromCSR_CAKeyNeverLeaks(t *testing.T) {
+	caCertPEM, _, err := tlsutil.GenerateCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const marker = "TOP-SECRET-CA-KEY-MATERIAL-DO-NOT-LEAK"
+	badKey := pem.EncodeToMemory(&pem.Block{
+		Type:  "EC PRIVATE KEY",
+		Bytes: []byte(marker + "-0123456789abcdef-padding"),
+	})
+	_, _, err = tlsutil.IssueClientLeafFromCSR(caCertPEM, badKey, "node-x", makeCSR(t, "x"))
+	if err == nil {
+		t.Fatal("corrupt CA key: want error, got nil")
+	}
+	if strings.Contains(err.Error(), marker) || strings.Contains(err.Error(), string(badKey)) {
+		t.Fatalf("error leaked CA key bytes: %q", err.Error())
+	}
+}
+
+// CertNotAfter round-trips a real cert's expiry and rejects non-certificate PEM.
+func TestCertNotAfter(t *testing.T) {
+	caCertPEM, _, err := tlsutil.GenerateCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	na, err := tlsutil.CertNotAfter(caCertPEM)
+	if err != nil {
+		t.Fatalf("CertNotAfter(valid): %v", err)
+	}
+	if na.IsZero() {
+		t.Error("CertNotAfter returned the zero time for a valid cert")
+	}
+	for _, bad := range [][]byte{
+		[]byte("not a pem"),
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("xxxx")}),
+	} {
+		if _, err := tlsutil.CertNotAfter(bad); err == nil {
+			t.Errorf("CertNotAfter(%q): want error, got nil", bad)
+		}
 	}
 }
 

@@ -10,12 +10,14 @@ import (
 	"github.com/ufna/birdman/master/internal/tlsutil"
 )
 
-// CA is one active internal-CA row: the public cert PEM plus the (reversible-
-// secret) private key PEM. key_pem is never logged and never formatted with
-// %v — same discipline as registries.token.
-type CA struct {
-	CertPEM []byte
-	KeyPEM  []byte
+// caKeypair is the active internal CA's public cert PEM plus its (reversible-
+// secret) private key PEM — the signer. keyPEM is never logged and never
+// formatted with %v — same discipline as registries.token. It is deliberately
+// unexported: EnsureInternalCA is the single key-bearing path, while ActiveCAs
+// exposes certs only, so the CA key has nowhere to leak from (design §5).
+type caKeypair struct {
+	certPEM []byte
+	keyPEM  []byte
 }
 
 // internalCALockKey names the PG advisory lock that serializes first-time CA
@@ -28,18 +30,20 @@ type rowQuerier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-func loadActiveCA(ctx context.Context, q rowQuerier) (CA, bool, error) {
+// loadActiveCA returns the newest active CA's cert+key — the signer. It is the
+// only key-reading query; ActiveCAs reads cert_pem alone.
+func loadActiveCA(ctx context.Context, q rowQuerier) (caKeypair, bool, error) {
 	var cert, key string
 	err := q.QueryRow(ctx, `
 		select cert_pem, key_pem from internal_ca
 		where active order by created_at desc limit 1`).Scan(&cert, &key)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return CA{}, false, nil
+		return caKeypair{}, false, nil
 	}
 	if err != nil {
-		return CA{}, false, err
+		return caKeypair{}, false, err
 	}
-	return CA{CertPEM: []byte(cert), KeyPEM: []byte(key)}, true, nil
+	return caKeypair{certPEM: []byte(cert), keyPEM: []byte(key)}, true, nil
 }
 
 // EnsureInternalCA returns the active internal CA's cert+key PEM, generating
@@ -51,7 +55,7 @@ func (s *Store) EnsureInternalCA(ctx context.Context) (certPEM, keyPEM []byte, e
 	if ca, ok, err := loadActiveCA(ctx, s.Pool); err != nil {
 		return nil, nil, err
 	} else if ok {
-		return ca.CertPEM, ca.KeyPEM, nil
+		return ca.certPEM, ca.keyPEM, nil
 	}
 
 	tx, err := s.Pool.Begin(ctx)
@@ -68,7 +72,7 @@ func (s *Store) EnsureInternalCA(ctx context.Context) (certPEM, keyPEM []byte, e
 	if ca, ok, err := loadActiveCA(ctx, tx); err != nil {
 		return nil, nil, err
 	} else if ok {
-		return ca.CertPEM, ca.KeyPEM, nil
+		return ca.certPEM, ca.keyPEM, nil
 	}
 
 	cPEM, kPEM, err := tlsutil.GenerateCA()
@@ -90,24 +94,27 @@ func (s *Store) EnsureInternalCA(ctx context.Context) (certPEM, keyPEM []byte, e
 	return cPEM, kPEM, nil
 }
 
-// ActiveCAs returns every active internal CA (normally one; two only during a
-// manual CA-rotation window), oldest first — the source for the master's
-// ClientCAs pool and the agent-facing ca_bundle_pem.
-func (s *Store) ActiveCAs(ctx context.Context) ([]CA, error) {
+// ActiveCAs returns the cert PEM of every active internal CA (normally one; two
+// only during a manual CA-rotation window), oldest first — the source for the
+// master's ClientCAs pool (T3), the agent-facing ca_bundle_pem (T4) and GET
+// /v1/ca (T7). The signing key is deliberately NOT returned: it is reachable
+// only through EnsureInternalCA (the signer path), so /v1/ca has nowhere to
+// read it from by construction (design §5).
+func (s *Store) ActiveCAs(ctx context.Context) ([][]byte, error) {
 	rows, err := s.Pool.Query(ctx, `
-		select cert_pem, key_pem from internal_ca
+		select cert_pem from internal_ca
 		where active order by created_at`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []CA
+	var out [][]byte
 	for rows.Next() {
-		var cert, key string
-		if err := rows.Scan(&cert, &key); err != nil {
+		var cert string
+		if err := rows.Scan(&cert); err != nil {
 			return nil, err
 		}
-		out = append(out, CA{CertPEM: []byte(cert), KeyPEM: []byte(key)})
+		out = append(out, []byte(cert))
 	}
 	return out, rows.Err()
 }

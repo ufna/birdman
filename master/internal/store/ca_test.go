@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -54,8 +55,14 @@ func TestEnsureInternalCARoundtrip(t *testing.T) {
 	if len(active) != 1 {
 		t.Fatalf("ActiveCAs = %d, want 1", len(active))
 	}
-	if string(active[0].CertPEM) != string(certPEM) || string(active[0].KeyPEM) != string(keyPEM) {
-		t.Fatal("ActiveCAs row does not match EnsureInternalCA")
+	if string(active[0]) != string(certPEM) {
+		t.Fatal("ActiveCAs cert does not match EnsureInternalCA")
+	}
+	// Certs-only by construction: the signing key must never ride along — every
+	// planned consumer (ClientCAs pool, ca_bundle_pem, GET /v1/ca) needs certs
+	// only, and /v1/ca must have nowhere to read the key from (design §5).
+	if strings.Contains(string(active[0]), string(keyPEM)) {
+		t.Fatal("ActiveCAs leaked the CA private key alongside the cert")
 	}
 }
 
