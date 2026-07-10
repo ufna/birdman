@@ -8,13 +8,14 @@
   ansible.builtin.set_fact:
     birdman_ghcr_token: "{{ lookup('env', 'BIRDMAN_GHCR_TOKEN') }}"
   no_log: true
+  when: birdman_registry_legacy
 
 - name: Fail if BIRDMAN_GHCR_TOKEN is not exported
   ansible.builtin.fail:
     msg: >-
       env BIRDMAN_GHCR_TOKEN пуст. Экспортируй токен перед запуском
       (см. infra/README.md). Токен никогда не хранится в репо.
-  when: birdman_ghcr_token | length == 0
+  when: birdman_registry_legacy and birdman_ghcr_token | length == 0
 
 - name: Create birdman directories
   ansible.builtin.file:
@@ -65,6 +66,7 @@
         src: "{{ birdman_master_admin_key_file }}"
       register: birdman_admin_key_ca_slurp
       no_log: true
+      delegate_to: "{{ birdman_master_api_host }}"
 
     - name: Fetch active CA cert bundle (text/plain PEM)
       ansible.builtin.uri:
@@ -76,6 +78,7 @@
         status_code: 200
       register: birdman_ca_fetch
       no_log: true
+      delegate_to: "{{ birdman_master_api_host }}"
 
     - name: Write master CA cert (0644, публичный серт — не секрет)
       ansible.builtin.copy:
@@ -103,6 +106,7 @@
     group: root
     mode: "0600"
   no_log: true
+  when: birdman_registry_legacy
 
 - name: Allow birdman dedicated-server port range in UFW (additive)
   community.general.ufw:
@@ -120,6 +124,8 @@
     comment: "{{ birdman_ufw_comment }}"
 
 # --- регистрация ноды в master (одноразовая, идемпотентная) ---
+# REST — на birdman_master_api_host (delegate_to): для дев-бокса это он сам,
+# для удалённой ноды — master-бокс (admin-ключ его не покидает; спека iter5 §3).
 
 - name: Check for stored node token
   ansible.builtin.stat:
@@ -134,6 +140,7 @@
         src: "{{ birdman_master_admin_key_file }}"
       register: birdman_admin_key_slurp
       no_log: true
+      delegate_to: "{{ birdman_master_api_host }}"
 
     - name: Create node (one-time node_token in response)
       ansible.builtin.uri:
@@ -151,6 +158,7 @@
         status_code: 201
       register: birdman_node_reg
       no_log: true
+      delegate_to: "{{ birdman_master_api_host }}"
 
     - name: Store node token (0600, box only)
       ansible.builtin.copy:

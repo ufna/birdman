@@ -46,3 +46,16 @@ birdman_vector_dir: /opt/birdman/vector             # compose.yml (аналог 
 # /insert — база; loki-sink vector сам допишет /loki/api/v1/push
 birdman_vl_sink_url: "http://127.0.0.1:9428/insert"
 birdman_vector_data_dir: /var/lib/birdman/vector   # checkpoint + disk-буфер
+
+# --- генерализация на удалённые ноды (итерация 5, спека iter5 §3/§4) ---
+# Хост инвентаря, на котором выполняются REST-вызовы master API (slurp
+# admin-ключа, POST /v1/nodes, GET /v1/ca). Дефолт — сам хост (дев-бокс:
+# master на той же тачке, поведение байт-в-байт прежнее). Для удалённой
+# ноды = хост master-бокса: admin-ключ НЕ покидает master-бокс, REST не
+# покидает его localhost.
+birdman_master_api_host: "{{ inventory_hostname }}"
+# Legacy-путь кредов реестра (env BIRDMAN_GHCR_TOKEN → ghcr.token →
+# registry_auth в agent.yaml). Основной путь — Админка → Реестры
+# (SetRegistries по mTLS-линку). false = на диске ноды нет ghcr-токена
+# вообще (меньше секретов на боксе).
+birdman_registry_legacy: true
