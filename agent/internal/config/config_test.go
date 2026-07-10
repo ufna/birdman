@@ -170,6 +170,95 @@ registry_auth:
 	}
 }
 
+// TestTLSCertDefaults: tls_cert_dir defaults to {data_dir}/tls and
+// tls_server_name to "birdman-master" (mTLS agentlink v1, design §4). Explicit
+// values win; the cert dir default tracks a custom data_dir.
+func TestTLSCertDefaults(t *testing.T) {
+	cfg, err := Load(write(t, `
+region: dev
+limits_default: { cpu_millis: 1000, mem_mb: 512 }
+data_dir: /tmp/bm
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TLSCertDir != "/tmp/bm/tls" {
+		t.Fatalf("tls_cert_dir default = %q, want /tmp/bm/tls", cfg.TLSCertDir)
+	}
+	if cfg.TLSServerName != "birdman-master" {
+		t.Fatalf("tls_server_name default = %q, want birdman-master", cfg.TLSServerName)
+	}
+
+	// Explicit values are honored.
+	cfg, err = Load(write(t, `
+region: dev
+limits_default: { cpu_millis: 1000, mem_mb: 512 }
+data_dir: /tmp/bm
+tls_cert_dir: /etc/birdman/tls
+tls_server_name: master.internal
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TLSCertDir != "/etc/birdman/tls" || cfg.TLSServerName != "master.internal" {
+		t.Fatalf("explicit tls_cert_dir/tls_server_name not honored: %+v", cfg)
+	}
+}
+
+// TestTLSInsecureNonLoopbackRejected: tls_insecure: true is the agent half of
+// the iteration-5 gate (design §4/§Безопасность). It is legal ONLY on a
+// loopback master_addr (dev/debug); with a non-loopback master_addr the config
+// must fail to LOAD (the agent must not boot a MITM-exposed link silently —
+// same fail-closed principle as the docker.io host reject).
+func TestTLSInsecureNonLoopbackRejected(t *testing.T) {
+	base := `
+region: dev
+limits_default: { cpu_millis: 1000, mem_mb: 512 }
+node_token: "bnt_x.y"
+tls_insecure: true
+`
+	for _, addr := range []string{
+		"master.example.com:8444",
+		"10.0.0.5:8444",
+		"[2001:db8::1]:8444",
+		"8.8.8.8:8444",
+	} {
+		t.Run("reject/"+addr, func(t *testing.T) {
+			_, err := Load(write(t, base+"master_addr: \""+addr+"\"\n"))
+			if err == nil {
+				t.Fatalf("tls_insecure with non-loopback master_addr %q must fail to load", addr)
+			}
+			if !strings.Contains(err.Error(), "tls_insecure") {
+				t.Fatalf("error should name tls_insecure, got: %v", err)
+			}
+		})
+	}
+
+	// Loopback master_addr keeps tls_insecure legal (dev).
+	for _, addr := range []string{
+		"127.0.0.1:8444",
+		"127.0.0.5:8444",
+		"[::1]:8444",
+		"localhost:8444",
+	} {
+		t.Run("allow/"+addr, func(t *testing.T) {
+			cfg, err := Load(write(t, base+"master_addr: \""+addr+"\"\n"))
+			if err != nil {
+				t.Fatalf("tls_insecure on loopback master_addr %q must load: %v", addr, err)
+			}
+			if !cfg.TLSInsecure {
+				t.Fatalf("tls_insecure not parsed: %+v", cfg)
+			}
+		})
+	}
+
+	// tls_insecure without master_addr at all (e.g. run-once configs) is not a
+	// run-mode concern and must not block Load.
+	if _, err := Load(write(t, base)); err != nil {
+		t.Fatalf("tls_insecure without master_addr must still load: %v", err)
+	}
+}
+
 func TestUnknownKeysIgnored(t *testing.T) {
 	if _, err := Load(write(t, `
 region: eu
