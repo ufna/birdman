@@ -2,7 +2,8 @@
 # Entrypoint оверлей-контейнера birdman (спека iter5 §1). Порядок жёсткий:
 # wireguard-go (userspace tun в хостовом netns) → setconf/ключ → адрес/up →
 # (хаб) socat-форвардеры → супервизор: смерть ЛЮБОГО процесса валит
-# контейнер (exit 1), restart-policy compose поднимает всё заново.
+# контейнер (exit ≠ 0: статус потомка через set -e, либо финальный exit 1),
+# restart-policy compose поднимает всё заново.
 #
 # wg-quick НЕ используется: он сначала пробует kernel-модуль (ip link add
 # type wireguard) и на хосте с загруженным модулем молча ушёл бы в
