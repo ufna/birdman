@@ -130,6 +130,8 @@ export const en = {
   'event.node_recovered': 'Node recovered',
   'event.node_drain': 'Node draining',
   'event.node_undrain': 'Node returned',
+  'event.node_enrolled': 'Node enrolled',
+  'event.node_cert_renewed': 'Cert renewed',
   'event.server_failed': 'Dedic failed',
   'event.server_recovered': 'Dedic recovered',
   'event.server_drain': 'Dedic draining',

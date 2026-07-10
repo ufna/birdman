@@ -36,6 +36,10 @@ const KEY_PREFIX: Record<StateDomain, string> = {
  *  источник для дропдауна фильтра, подписей event.<kind> и guard-теста. */
 export const EVENT_KINDS = [
   'node_created', 'node_quarantine', 'node_recovered', 'node_drain', 'node_undrain',
+  // mTLS agentlink v1 (docs/superpowers/specs/2026-07-10-mtls-agentlink-design.md
+  // §7): node_enrolled — первый обмен node_token→серт; node_cert_renewed —
+  // ротация клиентского серта по живой mTLS-сессии.
+  'node_enrolled', 'node_cert_renewed',
   'server_failed', 'server_recovered', 'server_drain', 'crash_loop', 'allocation_failed',
   'version_registered', 'version_disabled', 'fleet_updated', 'deploy_started',
   'deploy_node_pulled', 'deploy_activated', 'deploy_failed', 'deploy_rolled_back',
@@ -159,10 +163,12 @@ export function toneOfEventKind(kind: string): Tone {
     case 'node_recovered':
     case 'server_recovered':
     case 'node_undrain':
+    case 'node_enrolled':
     case 'deploy_activated':
     case 'agent_upgrade_succeeded':
       return 'good';
     case 'node_created':
+    case 'node_cert_renewed':
     case 'version_registered':
     case 'fleet_updated':
     case 'deploy_started':

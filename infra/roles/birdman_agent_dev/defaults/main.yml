@@ -33,6 +33,10 @@ birdman_master_admin_key_file: /etc/birdman/master-admin.key
 # node_token выдаётся POST /v1/nodes при первом прогоне и живёт ТОЛЬКО на
 # тачке (0600); агент читает его из файла (node_token_file в agent.yaml).
 birdman_node_token_file: /etc/birdman/node.token
+# Публичный CA-серт master'а (mTLS agentlink v1, дизайн §6): роль тянет его
+# через GET /v1/ca и кладёт сюда 0644 (ПУБЛИЧНЫЙ серт, не секрет). Агент
+# верифицирует по нему цепочку master'а + ServerName birdman-master.
+birdman_master_ca_file: /etc/birdman/master-ca.pem
 birdman_project: game
 birdman_public_ip: "{{ ansible_host }}"
 

@@ -115,12 +115,34 @@ groups:
 
           description: 'Агент не вышел на связь с новой версией (agent.md §7; откат — ansible).'
 
+      # CertExpiry (mTLS agentlink v1, дизайн §3/§4): любой серт линка близок к
+      # истечению. Три источника метрик:
+      #   birdman_tls_cert_expiry_timestamp_seconds{cert="ca|server"} — master (БД),
+      #   birdman_node_cert_expiry_timestamp_seconds{node}            — master (БД),
+      #   birdman_agent_cert_expiry_timestamp_seconds                 — агент (локально).
+      # $value = секунд до истечения (отрицательное → серт уже просрочен). Серии
+      # нет серта не экспортируют (absent → не стреляет). Порог — окно renewal
+      # (14д): алерт горит, только если ротация реально застряла.
+      - alert: CertExpiry
+        expr: >-
+          (birdman_tls_cert_expiry_timestamp_seconds - time()) < {{ birdman_cert_expiry_warn_seconds }}
+          or (birdman_node_cert_expiry_timestamp_seconds - time()) < {{ birdman_cert_expiry_warn_seconds }}
+          or (birdman_agent_cert_expiry_timestamp_seconds - time()) < {{ birdman_cert_expiry_warn_seconds }}
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: {% raw %}'CertExpiry: {{ $labels.instance }} {{ $labels.cert }}{{ $labels.node }} — истекает через {{ $value | humanizeDuration }}'{% endraw %}
+
+          description: 'Серт mTLS-agentlink (CA/сервер master, серт ноды, взгляд агента) истекает < порога (ops.md §1 CertExpiry). Проверь enrollment/renewal и ротацию CA.'
+
 # ---------------------------------------------------------------------------
 # MasterDown — НАМЕРЕННО не реализовано здесь. Его НЕЛЬЗЯ определить с самого
 # master/этого стека (стек живёт на той же тачке — при падении master'а/бокса
 # получим немой отказ). Нужен ВНЕШНИЙ probe (healthchecks.io / UptimeRobot /
 # blackbox_exporter ВНЕ бокса) на GET /healthz. См. TODO в ops.md §1.
 # ---------------------------------------------------------------------------
-# CertExpiry (таблица ops.md §1) — вне scope итерации 4: в v0 нет метрики
-# истечения серта (self-signed автоген master'а). AgentUpgradeFailed — выше
-# (событие agent_upgrade_failed теперь пишет master, итерация 4).
+# CertExpiry (таблица ops.md §1) — реализовано выше (mTLS agentlink v1): метрики
+# истечения сертов появились (master DB-derived + локальная у агента), правило
+# горит warning за 14д до истечения. AgentUpgradeFailed — выше (событие
+# agent_upgrade_failed пишет master, итерация 4).
