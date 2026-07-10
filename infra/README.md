@@ -8,9 +8,11 @@ infra/
   inventories/dev/hosts.yml   # birdman-dev (HOSTER_A, ОБЩИЙ бокс с чужим продом)
   playbooks/dev-node.yml      # дев-нода: master (pg+бинарь+unit) → агент (демон)
   playbooks/monitoring.yml    # наблюдаемость + ops-бэкапы (итерация 4)
+  playbooks/add-node.yml      # вторая+ нода: оверлей (хаб+спок) → агент (итерация 5)
   roles/birdman_master_dev/   # postgres в compose + master-бинарь под systemd
   roles/birdman_agent_dev/    # агент-демон + регистрация ноды (см. «Дев vs прод»)
   roles/birdman_monitoring_dev/  # VM+vmagent+vmalert+Grafana+alert-sink (compose) + pg-бэкапы
+  roles/birdman_overlay/      # изолированный WireGuard-оверлей birdman (wireguard-go в контейнере)
 ```
 
 ## Запуск
@@ -91,9 +93,40 @@ ansible-playbook playbooks/monitoring.yml
 UFW `19999/udp` (QoS echo) открывает роль `birdman_agent_dev` (единственный
 внешне-открытый порт ноды), при прогоне `dev-node.yml`.
 
+## Вторая+ нода (`add-node.yml`, итерация 5)
+
+Спека: `docs/superpowers/specs/2026-07-10-iter5-second-node-design.md`. Нода
+подключается к master по **собственному изолированному оверлею birdman**
+(WireGuard hub-and-spoke `10.77.0.0/24`, UDP 51827): userspace `wireguard-go`
+в контейнере `birdman-overlay` (host-network, NET_ADMIN, /dev/net/tun; образ
+собирается на боксе, kernel-модуль не используется). Хаб (master-бокс) несёт
+socat-форвардеры `10.77.0.1:{8444,9428,8428} → 127.0.0.1` — master/VL/VM не
+меняют ни бинда, ни конфига. По оверлею — только control-plane (agentlink,
+логи, метрики); игровой UDP и QoS — напрямую на публичный IP ноды.
+
+```sh
+(cd ../agent && ./build.sh)              # бинарь агента для новой ноды
+ansible-playbook playbooks/add-node.yml  # идемпотентно; хаб + все ноды группы
+```
+
+Добавить следующую ноду = host-блок в `inventories/dev/hosts.yml` (регион,
+`birdman_overlay_ip` из 10.77.0.0/24, `birdman_master_api_host: birdman-dev`,
+`birdman_registry_legacy: false`) + прогон. Регистрация ноды (`POST
+/v1/nodes`, `GET /v1/ca`) выполняется `delegate_to` master-бокса — admin-ключ
+его не покидает; node_token/CA приезжают на ноду copy-тасками. Агент ноды
+набирает `10.77.0.1:8444` (не-loopback ⇒ конфиг-гейт агента требует mTLS) и
+заходит Enroll-by-token с первого коннекта.
+
+⚠️ Роль агента — та же дев-роль `birdman_agent_dev`, генерализованная на
+удалённые ноды (не прод-суита ops.md §4: без hardening/vault/node_exporter).
+⚠️ Инвариант: пока на хабе живёт форвардер — `agentlink_auth: mtls` only.
+Снос оверлея: `docker compose -f /opt/birdman/overlay/compose.yml down` +
+удалить `/etc/birdman/overlay`, `/opt/birdman/overlay` + 4 UFW-правила
+`birdman-dev` (51827/udp и `in on birdman-wg0`).
+
 ## Дев vs прод
 
-- **Дев-роли** рассчитаны на общий бокс: containerd/докер уже стоят и не трогаются, никакого hardening, наружу — только UDP/TCP-порты дедиков (master строго на localhost), UFW-правила только добавляются. Всё аддитивно и легко сносится.
+- **Дев-роли** рассчитаны на общий бокс: containerd/докер уже стоят и не трогаются, никакого hardening, наружу — только UDP/TCP-порты дедиков (master строго на localhost), UFW-правила только добавляются. Всё аддитивно и легко сносится. Роль агента генерализована на удалённые ноды (итерация 5, add-node.yml) — но остаётся дев-ролью.
 - **Прод (позже, по `docs/specs/ops.md` §4)**: `inventories/production/hosts.yml` (группы master/nodes_*), роли `base` (sshd, nftables, sysctl), `containerd`, `node_exporter`/`vmagent`, `birdman_agent` (node_token из vault), `birdman_master` (реальные TLS-серты вместо `tls_insecure`), `postgres`, `victoria`; вход — `add-node.yml` («тачка одной командой»). Дев-роли в прод не переиспользуем.
 
 ## Секреты

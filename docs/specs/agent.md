@@ -65,6 +65,8 @@ UDP-echo на порту **19999**: отвечает исходным пакет
 
 ```yaml
 master_addr: "master.birdman.internal:8443"
+                            # итерация 5: удалённая нода через оверлей birdman — "10.77.0.1:8444"
+                            # (не-loopback ⇒ tls_insecure невозможен, mTLS обязателен)
 node_token: "…"            # bootstrap-токен, выдаётся при добавлении тачки (ansible)
 node_token_file: /etc/birdman/node.token  # (уточнено в v0) альтернатива node_token:
                             # секрет в отдельном файле 0600 (как registry token),
