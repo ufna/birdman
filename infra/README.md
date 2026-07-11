@@ -117,6 +117,12 @@ ansible-playbook playbooks/add-node.yml  # идемпотентно; хаб + в
 набирает `10.77.0.1:8444` (не-loopback ⇒ конфиг-гейт агента требует mTLS) и
 заходит Enroll-by-token с первого коннекта.
 
+С итерации 5.2 нода несёт **vmagent-сайдкар** (`birdman-node-vmagent`, гейт
+`birdman_node_vmagent: true` в host-блоке): скрейпит своего агента
+(`127.0.0.1:9101`) и пушит серии с лейблами `node`/`region` в центральный VM
+через оверлей (`10.77.0.1:8428`) — DiskHigh/TickDegraded видят ноды. На
+дев-боксе гейт выключен (его агента скрейпит центральный vmagent напрямую).
+
 ⚠️ Роль агента — та же дев-роль `birdman_agent_dev`, генерализованная на
 удалённые ноды (не прод-суита ops.md §4: без hardening/vault/node_exporter).
 ⚠️ Инвариант: пока на хабе живёт форвардер — `agentlink_auth: mtls` only.
