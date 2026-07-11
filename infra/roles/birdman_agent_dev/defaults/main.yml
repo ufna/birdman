@@ -59,3 +59,15 @@ birdman_master_api_host: "{{ inventory_hostname }}"
 # (SetRegistries по mTLS-линку). false = на диске ноды нет ghcr-токена
 # вообще (меньше секретов на боксе).
 birdman_registry_legacy: true
+
+# --- нодовый vmagent: пуш агентских метрик в центральный VM через оверлей
+# (итерация 5.2, спека 2026-07-11-iter5-multinode-design.md §2) ---
+# false = блок выключен целиком. На дев-боксе НЕ включать: его агент уже
+# скрейпит центральный vmagent мониторинг-роли (иначе дубли серий).
+birdman_node_vmagent: false
+birdman_node_vmagent_image: victoriametrics/vmagent:v1.102.1   # пин = мониторинг-роль
+birdman_node_vmagent_dir: /opt/birdman/vmagent                 # compose-проект
+birdman_node_vmagent_data_dir: /var/lib/birdman/vmagent        # remote-write диск-буфер
+birdman_node_vmagent_scrape_interval: 15s
+# Через оверлей: форвард хаба 8428 поднят в 5.1 (решение владельца №6).
+birdman_node_vm_remote_write_url: "http://10.77.0.1:8428/api/v1/write"
