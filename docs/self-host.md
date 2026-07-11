@@ -55,7 +55,7 @@ curl -s http://127.0.0.1:8100/healthz                 # 5. проверка: mas
   подставляется в `postgres://`-DSN как есть (`deploy/.env.example`).
 - **admin-ключ** печатается один раз в лог старта (`bootstrap admin API key
   created — store it now, it is shown exactly once`, поле `api_key`); префикс
-  `bmk_`, скоуп `admin`. Потеряешь — придётся минтить новый ключ вручную.
+  `bmk_`, скоуп `admin`. Потеряешь — восстановление только через БД (деактивировать ключи в таблице api_keys → рестарт master ре-бутстрапит новый).
 - **Панель + REST** — `http://127.0.0.1:8100`, вход в панель по этому же
   admin-ключу (или ключу со скоупом `readonly`). Порт опубликован **только на
   `127.0.0.1`** master-бокса.
@@ -102,7 +102,7 @@ admin-ключ из файла `/etc/birdman/master-admin.key` на master-бо�
 
 ```bash
 # на master-боксе: вынь bmk_… из логов и сохрани 0600
-docker compose logs master | grep 'bootstrap admin'
+cd birdman/deploy && docker compose logs master | grep 'bootstrap admin'
 umask 077 && printf '%s' 'bmk_…' | sudo tee /etc/birdman/master-admin.key >/dev/null
 sudo chmod 600 /etc/birdman/master-admin.key
 ```
@@ -156,7 +156,7 @@ Enroll-by-token: обменивает `node_token` на клиентский mTL
 
 ```bash
 KEY=bmk_…   # admin-ключ
-curl -s http://127.0.0.1:8100/v1/matches -H "Authorization: Bearer $KEY"   # ноды/сервера видны после выката версии
+curl -s http://127.0.0.1:8100/v1/nodes -H "Authorization: Bearer $KEY"   # нода видна сразу (state=active)
 ```
 
 ---
@@ -186,7 +186,7 @@ curl -s -X POST http://127.0.0.1:8100/v1/deploy -H "Authorization: Bearer $KEY" 
 > ноде нет.
 
 После флипа reconcile создаёт `buffer_ready` дедиков на ноде; дождись, пока
-сервера станут `ready` (панель «Флот» или `GET /v1/matches`).
+сервера станут `ready` (панель «Флот» или `GET /v1/servers`).
 
 **Первый матч — `mmcli`** (второй бинарь, собирается `./master/build.sh` →
 `master/dist/mmcli`; ключ со скоупом `matchmaking` или `admin`). `mmcli` заводит
@@ -241,6 +241,13 @@ Postgres) — ansible-роль `infra/roles/birdman_monitoring_dev`
 (`infra/README.md`, раздел «Наблюдаемость + ops»). Нода может пушить метрики
 своего агента в центральный VM сайдкаром-vmagent (`birdman_node_vmagent: true`
 в host-блоке).
+
+⚠️ **Третий шов v1 (честно):** `add-node.sh` пишет ноде `birdman_node_vmagent:
+true` и vector-сайдкар безусловно — если у тебя НЕТ VictoriaMetrics/VictoriaLogs
+(чистый deploy/-мастер), эти шипперы будут слать в пустоту (буферят, игре не
+мешают). Отключение: `birdman_node_vmagent: false` в host-блоке; vector-блок —
+убрать `birdman_vl_sink_url` некуда (шиппер поднимется, но сообщения останутся
+в диск-буфере) — вырезание vector целиком = прод-полировка.
 
 ---
 
