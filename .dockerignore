@@ -1,0 +1,18 @@
+# Контекст docker-сборок = корень репо (master/Dockerfile: COPY proto/ master/ panel/).
+# Исключаем всё тяжёлое/грязное — сборка герметична и быстра независимо от
+# состояния рабочего дерева (host node_modules НЕ мёржится поверх npm ci,
+# локальный stale-билд панели НЕ утекает в go:embed).
+.git
+.superpowers
+.playwright-mcp
+docs
+sdk
+infra
+deploy
+agent/dist
+master/dist
+master/internal/panelui/static
+panel/node_modules
+panel/dist
+**/.DS_Store
+*.log
