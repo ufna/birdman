@@ -15,4 +15,4 @@ master/internal/panelui/static
 panel/node_modules
 panel/dist
 **/.DS_Store
-*.log
+**/*.log
