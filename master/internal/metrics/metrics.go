@@ -53,6 +53,17 @@ func (m *Metrics) WireAgentlinkSessions(f func() (mtls, token int)) {
 	m.agentlink.sessions.Store(&f)
 }
 
+// WireAgentlinkPendingCommands connects the
+// birdman_agentlink_pending_commands{node} gauge to the hub's per-node
+// unacked-queue depths (Hub.PendingCounts). Until wired the gauge emits
+// nothing; once wired it emits ONE sample per node that currently has a
+// non-empty queue and NOTHING for the rest — a clean fleet produces no series,
+// which is what keeps the AgentlinkPendingStuck alert (min_over_time>0)
+// absent-safe (followups §3).
+func (m *Metrics) WireAgentlinkPendingCommands(f func() map[string]int) {
+	m.agentlink.pending.Store(&f)
+}
+
 // WireTLSServerCertExpiry connects the
 // birdman_tls_cert_expiry_timestamp_seconds{cert="server"} sample to the
 // in-memory server-leaf holder (main.go). The callback returns ok=false when
@@ -150,6 +161,15 @@ var (
 		"birdman_agentlink_sessions",
 		"Live agentlink sessions by auth (mtls: verified client cert; token: node_token). token==0 signals readiness for the mtls flip.",
 		[]string{"auth"}, nil)
+	// birdman_agentlink_pending_commands{node} — unacked master→agent commands
+	// still queued for a node (followups §3). Only nodes with pending>0 emit a
+	// sample; a drained queue produces NO series (never a 0), so the
+	// AgentlinkPendingStuck alert's min_over_time(...)>0 is absent-safe. node
+	// label = node_id, matching the hub's own queue keys.
+	agentlinkPendingDesc = prometheus.NewDesc(
+		"birdman_agentlink_pending_commands",
+		"Unacked master→agent commands queued per node (only nodes with a non-empty queue are reported; a drained queue emits no series).",
+		[]string{"node"}, nil)
 	tlsCertExpiryDesc = prometheus.NewDesc(
 		"birdman_tls_cert_expiry_timestamp_seconds",
 		"Unix time when the given TLS cert expires (ca: newest active internal CA — the signer; server: current gRPC server leaf).",
@@ -166,11 +186,13 @@ type agentlinkCollector struct {
 	st         *store.Store
 	log        *slog.Logger
 	sessions   atomic.Pointer[func() (mtls, token int)]
+	pending    atomic.Pointer[func() map[string]int]
 	serverCert atomic.Pointer[func() (time.Time, bool)]
 }
 
 func (c *agentlinkCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- agentlinkSessionsDesc
+	ch <- agentlinkPendingDesc
 	ch <- tlsCertExpiryDesc
 }
 
@@ -179,6 +201,14 @@ func (c *agentlinkCollector) Collect(ch chan<- prometheus.Metric) {
 		mtls, token := (*f)()
 		ch <- prometheus.MustNewConstMetric(agentlinkSessionsDesc, prometheus.GaugeValue, float64(mtls), "mtls")
 		ch <- prometheus.MustNewConstMetric(agentlinkSessionsDesc, prometheus.GaugeValue, float64(token), "token")
+	}
+	// Pending-queue depths per node (followups §3): the callback already
+	// returns ONLY nodes with a non-empty queue, so this emits nothing for a
+	// clean fleet — the AgentlinkPendingStuck alert stays absent-safe.
+	if f := c.pending.Load(); f != nil {
+		for node, n := range (*f)() {
+			ch <- prometheus.MustNewConstMetric(agentlinkPendingDesc, prometheus.GaugeValue, float64(n), node)
+		}
 	}
 	if f := c.serverCert.Load(); f != nil {
 		if notAfter, ok := (*f)(); ok {

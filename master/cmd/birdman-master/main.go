@@ -201,6 +201,10 @@ func run() error {
 	// the served leaf's expiry — external certs work too: since Go 1.23
 	// LoadX509KeyPair populates Leaf, and issueServerLeaf always does.
 	m.WireAgentlinkSessions(hub.SessionAuthCounts)
+	// Per-node unacked-command depth (followups §3): feeds
+	// birdman_agentlink_pending_commands{node} and the AgentlinkPendingStuck
+	// alert — a SetRegistries (or any command) that never drains becomes visible.
+	m.WireAgentlinkPendingCommands(hub.PendingCounts)
 	m.WireTLSServerCertExpiry(func() (time.Time, bool) {
 		if c := holder.get(); c != nil && c.Leaf != nil {
 			return c.Leaf.NotAfter, true

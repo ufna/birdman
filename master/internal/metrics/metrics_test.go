@@ -10,10 +10,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 
+	"github.com/ufna/birdman/master/internal/agentlink"
 	"github.com/ufna/birdman/master/internal/metrics"
 	"github.com/ufna/birdman/master/internal/store"
 	"github.com/ufna/birdman/master/internal/testdb"
 	"github.com/ufna/birdman/master/internal/tlsutil"
+	agentlinkv1 "github.com/ufna/birdman/proto/agentlink/v1"
 )
 
 func TestMain(m *testing.M) { os.Exit(testdb.Run(m)) }
@@ -62,6 +64,46 @@ func TestAgentlinkSessionsMetric(t *testing.T) {
 	}
 	if got := findGauge(t, m.Registry, "birdman_agentlink_sessions", map[string]string{"auth": "token"}); got != 0 {
 		t.Fatalf("sessions{auth=token} = %v, want an explicit 0 sample", got)
+	}
+}
+
+// birdman_agentlink_pending_commands{node} reads the hub's unacked-queue
+// depths on scrape via the wired callback (Hub.PendingCounts). ONLY nodes with
+// a non-empty queue emit a sample — a drained/empty queue produces NO series
+// (the snapshot never emits a 0). That is exactly what makes the
+// AgentlinkPendingStuck alert's min_over_time(...)>0 absent-safe (followups
+// §3). Enqueue → the node's series is 1; Ack → the series disappears; a second
+// node's queue is independent.
+func TestPendingCommandsGauge(t *testing.T) {
+	st := testdb.New(t)
+	m := metrics.New(st, testLog())
+	hub := agentlink.NewHub(testLog())
+	m.WireAgentlinkPendingCommands(hub.PendingCounts)
+
+	start := func(serverID string) *agentlinkv1.MasterMsg {
+		return &agentlinkv1.MasterMsg{Msg: &agentlinkv1.MasterMsg_Start{Start: &agentlinkv1.StartServer{ServerId: serverID}}}
+	}
+
+	// Non-SetRegistries commands queue regardless of any live session, so no
+	// attach is needed to build pending depth.
+	cmd1 := hub.Send("node-1", start("srv-1"))
+	hub.Send("node-2", start("srv-2"))
+
+	if got := findGauge(t, m.Registry, "birdman_agentlink_pending_commands", map[string]string{"node": "node-1"}); got != 1 {
+		t.Fatalf("pending{node=node-1} = %v, want 1", got)
+	}
+	if got := findGauge(t, m.Registry, "birdman_agentlink_pending_commands", map[string]string{"node": "node-2"}); got != 1 {
+		t.Fatalf("pending{node=node-2} = %v, want 1 (second node independent)", got)
+	}
+
+	// Ack node-1's only command: its queue drains to empty, so its series must
+	// vanish entirely (the snapshot emits no 0) while node-2 is untouched.
+	hub.Ack("node-1", cmd1)
+	if gaugeSeriesPresent(t, m.Registry, "birdman_agentlink_pending_commands", map[string]string{"node": "node-1"}) {
+		t.Fatalf("pending{node=node-1} still present after Ack — a drained queue must emit no series (0 is never emitted)")
+	}
+	if got := findGauge(t, m.Registry, "birdman_agentlink_pending_commands", map[string]string{"node": "node-2"}); got != 1 {
+		t.Fatalf("pending{node=node-2} = %v after node-1 Ack, want 1 (independent)", got)
 	}
 }
 
@@ -187,6 +229,28 @@ func findGauge(t *testing.T, reg *prometheus.Registry, name string, labels map[s
 	}
 	t.Fatalf("metric %s%v not found", name, labels)
 	return 0
+}
+
+// gaugeSeriesPresent reports whether reg has a gauge series matching name and
+// exactly the given label set — the absence check for a metric that emits no
+// sample under some states (here: a drained pending queue).
+func gaugeSeriesPresent(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) bool {
+	t.Helper()
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, met := range mf.GetMetric() {
+			if labelsMatch(met.GetLabel(), labels) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func labelsMatch(pairs []*dto.LabelPair, want map[string]string) bool {
