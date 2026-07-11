@@ -1,6 +1,6 @@
 # infra — ansible-обвязка birdman
 
-Итерации 0–1 (`docs/05-runtime-iterations.md`): дев-нода «master + агент под ним» одной командой. Ansible — целевой путь и для прода (структура — `docs/specs/ops.md` §4).
+Итерации 0–1: дев-нода «master + агент под ним» одной командой. Ansible — целевой путь и для прода (структура — `docs/specs/ops.md` §4).
 
 ```
 infra/
@@ -95,7 +95,7 @@ UFW `19999/udp` (QoS echo) открывает роль `birdman_agent_dev` (ед
 
 ## Вторая+ нода (`add-node.yml`, итерация 5)
 
-Спека: `docs/superpowers/specs/2026-07-10-iter5-second-node-design.md`. Нода
+Спека: `docs/specs/ops.md` (add-node/overlay). Нода
 подключается к master по **собственному изолированному оверлею birdman**
 (WireGuard hub-and-spoke `10.77.0.0/24`, UDP 51827): userspace `wireguard-go`
 в контейнере `birdman-overlay` (host-network, NET_ADMIN, /dev/net/tun; образ

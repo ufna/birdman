@@ -69,7 +69,7 @@ birdman_grafana_datasource_url: "http://victoriametrics:8428"   # bridge-DNS в�
 # --- маршрутизация алертов ---
 # Пусто → локальный logger-sink (пишет /var/log/birdman/alerts.log).
 # Задан → реальный prom/alertmanager с discord_configs на этот webhook.
-# Discord-webhook'а пока НЕТ (см. docs/05 «Нужно») → работает logger-путь.
+# Discord-webhook'а пока НЕТ → работает logger-путь.
 birdman_alert_discord_webhook: ""
 
 # --- пороги алертов (vmalert, ops.md §1) ---

@@ -1,8 +1,8 @@
 # birdman-master v0
 
 Флот-контроллер + Allocation API + матчмейкер v0 + deploy-менеджер +
-наблюдаемость/операционка + gRPC AgentLink — итерации 1–4 из
-`docs/05-runtime-iterations.md`. Спека: `docs/specs/master.md` (источник истины).
+наблюдаемость/операционка + gRPC AgentLink — итерации 1–4.
+Спека: `docs/specs/master.md` (источник истины).
 
 Что внутри v0:
 

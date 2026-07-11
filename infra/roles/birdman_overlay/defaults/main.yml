@@ -1,6 +1,6 @@
 ---
 # Изолированный контейнерный WireGuard-оверлей birdman
-# (спека docs/superpowers/specs/2026-07-10-iter5-second-node-design.md).
+# (спека docs/specs/ops.md — вторая+ нода / overlay).
 # Решения владельца: подсеть 10.77.0.0/24, порт 51827/udp, userspace
 # wireguard-go в контейнере — kernel-модуль НЕ используется, даже если
 # загружен на хосте (изоляция от чужого меша на общем боксе).
