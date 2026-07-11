@@ -11,4 +11,7 @@ scrape_configs:
     metrics_path: {{ job.metrics_path | default('/metrics') }}
     static_configs:
       - targets: {{ job.targets | to_json }}
+{% if job.labels is defined %}
+        labels: {{ job.labels | to_json }}
+{% endif %}
 {% endfor %}
