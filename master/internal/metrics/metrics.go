@@ -242,6 +242,9 @@ func (c *agentlinkCollector) Collect(ch chan<- prometheus.Metric) {
 					hostnames[id] = hostname
 				}
 				prows.Close()
+				if err := prows.Err(); err != nil {
+					c.log.Error("metrics: pending-commands hostname rows failed", "err", err)
+				}
 			}
 			for id, n := range counts {
 				node, ok := hostnames[id]

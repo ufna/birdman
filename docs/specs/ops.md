@@ -29,6 +29,7 @@
 | DiskHigh | disk > 85% (critical: > 92%) | warning |
 | MasterDown | внешний probe (healthchecks.io/UptimeRobot на `GET /healthz`) | critical |
 | TickDegraded | p95 tick_ms > порога игры 5м | warning |
+| AgentlinkPendingStuck | unacked-команды master→agent висят дольше `birdman_pending_stuck_for` (деф. 10м) | warning |
 | CertExpiry | mTLS/TLS серты < 14 дней | warning |
 | AgentUpgradeFailed | событие agent_upgrade_failed | critical |
 

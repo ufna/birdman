@@ -23,7 +23,7 @@ create table nodes (
   capacity_slots    int  not null,
   agent_version     text not null default '',
   state             text not null default 'active'
-                    check (state in ('active','draining','quarantine','dead')),
+                    check (state in ('active','draining','quarantine','down','dead')),
   last_heartbeat_at timestamptz,
   labels            jsonb not null default '{}',
   token_hash        text not null default '',  -- bcrypt node_token (v1: recovery-кред, обмен на серт реализован)
