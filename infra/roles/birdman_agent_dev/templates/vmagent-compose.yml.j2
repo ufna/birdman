@@ -1,0 +1,21 @@
+# {{ ansible_managed }}
+# Нодовый vmagent — push агентских метрик в центральный VM через оверлей
+# (спека 5.2 §2). host-network: скрейпит 127.0.0.1:9101; служебный HTTP —
+# только loopback (наружу ничего); remote-write уходит в туннель.
+name: birdman-node-vmagent
+
+services:
+  vmagent:
+    image: {{ birdman_node_vmagent_image }}
+    container_name: birdman-node-vmagent
+    network_mode: host
+    command:
+      - -promscrape.config=/etc/vmagent/vmagent.yaml
+      - -remoteWrite.url={{ birdman_node_vm_remote_write_url }}
+      - -remoteWrite.tmpDataPath=/vmagent-data
+      - -remoteWrite.maxDiskUsagePerURL=268435456
+      - -httpListenAddr=127.0.0.1:8429
+    volumes:
+      - /etc/birdman/vmagent.yaml:/etc/vmagent/vmagent.yaml:ro
+      - {{ birdman_node_vmagent_data_dir }}:/vmagent-data
+    restart: unless-stopped

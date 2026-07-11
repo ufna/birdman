@@ -227,3 +227,48 @@
 
 - name: Apply pending vector restart
   ansible.builtin.meta: flush_handlers
+
+# --- нодовый vmagent: метрики агента в центральный VM через оверлей (5.2).
+# Гейт birdman_node_vmagent: на дев-боксе false (центральный vmagent уже
+# скрейпит его агента — сайдкар дал бы дубли серий). ---
+
+- name: Create node vmagent directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ birdman_node_vmagent_dir }}"
+    - "{{ birdman_node_vmagent_data_dir }}"
+  when: birdman_node_vmagent | default(false) | bool
+
+- name: Install node vmagent config /etc/birdman/vmagent.yaml
+  ansible.builtin.template:
+    src: vmagent.yaml.j2
+    dest: /etc/birdman/vmagent.yaml
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart birdman-node-vmagent
+  when: birdman_node_vmagent | default(false) | bool
+
+- name: Install node vmagent compose file
+  ansible.builtin.template:
+    src: vmagent-compose.yml.j2
+    dest: "{{ birdman_node_vmagent_dir }}/compose.yml"
+    owner: root
+    group: root
+    mode: "0644"
+  when: birdman_node_vmagent | default(false) | bool
+
+- name: Start birdman-node-vmagent (docker compose, идемпотентно)
+  ansible.builtin.command:
+    cmd: docker compose -f {{ birdman_node_vmagent_dir }}/compose.yml up -d --wait
+  register: birdman_node_vmagent_up
+  changed_when: "'Started' in birdman_node_vmagent_up.stderr or 'Created' in birdman_node_vmagent_up.stderr or 'Recreated' in birdman_node_vmagent_up.stderr"
+  when: birdman_node_vmagent | default(false) | bool
+
+- name: Apply pending node vmagent restart
+  ansible.builtin.meta: flush_handlers

@@ -65,7 +65,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: {% raw %}'DiskHigh(warn): диск агента {{ $value }}%'{% endraw %}
+          summary: {% raw %}'DiskHigh(warn): диск агента ({{ $labels.node }}) {{ $value }}%'{% endraw %}
 
           description: 'Диск ноды выше warning-порога (ops.md §1 DiskHigh).'
 
@@ -75,7 +75,7 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: {% raw %}'DiskHigh(crit): диск агента {{ $value }}%'{% endraw %}
+          summary: {% raw %}'DiskHigh(crit): диск агента ({{ $labels.node }}) {{ $value }}%'{% endraw %}
 
           description: 'Диск ноды выше critical-порога — GC/прюнинг/докупить диск (ops.md §6 runbook 4).'
 

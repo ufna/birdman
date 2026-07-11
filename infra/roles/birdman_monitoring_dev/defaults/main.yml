@@ -42,6 +42,9 @@ birdman_scrape_jobs:
   - job_name: birdman-agent
     metrics_path: /metrics
     targets: ["127.0.0.1:9101"]
+    # node/region — единообразие с нодовыми vmagent'ами (5.2): правила и
+    # дашборды различают ноды по одному лейблу.
+    labels: { node: birdman-dev, region: dev }
   - job_name: birdman-master
     metrics_path: /metrics
     targets: ["127.0.0.1:8100"]
