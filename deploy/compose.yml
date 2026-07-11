@@ -34,7 +34,6 @@ services:
     volumes:
       - ./master.yaml:/etc/birdman/master.yaml:ro
       - ./secrets.key:/etc/birdman/secrets.key:ro
-      - certs:/certs            # self-signed TLS-пара agentlink (первый старт)
     command: ["-config", "/etc/birdman/master.yaml"]
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8100/healthz"]
@@ -49,4 +48,3 @@ services:
 
 volumes:
   pgdata:
-  certs:

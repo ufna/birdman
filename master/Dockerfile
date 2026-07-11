@@ -25,6 +25,5 @@ RUN go build -trimpath -ldflags '-s -w' -o /out/birdman-master ./cmd/birdman-mas
 FROM alpine:3.22
 RUN adduser -D -H -u 10001 birdman
 COPY --from=build /out/birdman-master /birdman-master
-# /certs — volume под self-signed TLS-пару agentlink (генерится при первом старте).
 ENTRYPOINT ["/birdman-master"]
 CMD ["-config", ""]

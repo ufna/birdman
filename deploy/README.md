@@ -13,7 +13,7 @@ cp .env.example .env                                  # 1. задай POSTGRES_P
 umask 077 && openssl rand -base64 32 > secrets.key    # 2. ключ шифрования секретов at-rest
 docker compose up -d --build                          # 3. собрать и запустить (postgres + master)
 docker compose logs master | grep 'bootstrap admin'   # 4. admin-ключ (bmk_…) — показан ОДИН раз, сохрани
-open http://127.0.0.1:8100                             # 5. панель + REST (только localhost хоста)
+# открой в браузере: http://127.0.0.1:8100                             # 5. панель + REST (только localhost хоста)
 ```
 `secrets.key` и admin-ключ — два секрета self-host; оба git-ignored. Потеря
 `secrets.key` = секреты в БД не расшифровать → эскроу-копию в менеджер паролей.
