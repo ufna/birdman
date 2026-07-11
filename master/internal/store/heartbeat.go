@@ -60,15 +60,17 @@ func transitionAllowed(cur, next string) bool {
 	}
 }
 
-// touchNode refreshes the lease and lifts quarantine on heartbeat return
-// (docs/specs/protocol.md §1 Lease). Returns true when the node recovered.
+// touchNode refreshes the lease and lifts quarantine or dead on heartbeat
+// return (docs/specs/protocol.md §1 Lease; dead is the итерация 5 follow-up
+// terminal — a returning live mTLS session resurrects it). Returns true when
+// the node recovered.
 func touchNode(ctx context.Context, tx pgx.Tx, nodeID string) (recovered bool, err error) {
 	var oldState, newState string
 	err = tx.QueryRow(ctx, `
 		with old as (select state from nodes where id = $1::uuid)
 		update nodes n set
 			last_heartbeat_at = now(),
-			state = case when n.state = 'quarantine' then 'active' else n.state end
+			state = case when n.state in ('quarantine','dead') then 'active' else n.state end
 		where n.id = $1::uuid
 		returning n.state, (select state from old)`, nodeID).Scan(&newState, &oldState)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -77,7 +79,7 @@ func touchNode(ctx context.Context, tx pgx.Tx, nodeID string) (recovered bool, e
 	if err != nil {
 		return false, err
 	}
-	return oldState == "quarantine" && newState == "active", nil
+	return (oldState == "quarantine" || oldState == "dead") && newState == "active", nil
 }
 
 // applyReports upserts per-server state from an agent Hello/Heartbeat

@@ -353,7 +353,7 @@ func TestQuarantineLifecycle(t *testing.T) {
 	f := testdb.Seed(t, st, "eu", 10)
 	f.InsertServer(t, f.NodeID, f.VersionID, "ready", 20001, 0)
 	f.InsertServer(t, f.NodeID, f.VersionID, "allocated", 20002, 0)
-	lease := reconcile.NewLeaseChecker(st, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})))
+	lease := reconcile.NewLeaseChecker(st, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})), 10*time.Minute)
 	ctx := context.Background()
 
 	// Fresh heartbeat → nothing happens.
@@ -512,7 +512,7 @@ func TestNodeLostDoesNotPauseCreations(t *testing.T) {
 	f := testdb.Seed(t, st, "eu", 10)
 	f.UpsertFleet(t, 3, 50)
 	r, sender := newReconciler(st)
-	lease := reconcile.NewLeaseChecker(st, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})))
+	lease := reconcile.NewLeaseChecker(st, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})), 10*time.Minute)
 	ctx := context.Background()
 
 	// Build the warm pool and make it ready.

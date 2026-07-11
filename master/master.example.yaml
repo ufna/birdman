@@ -63,6 +63,8 @@ tls:
 
 stats_rollup_interval: 2m  # период пересчёта хвоста match_stats_daily/ccu_daily (панель П2 Statistics)
 
+node_dead_after_min: 10   # quarantine дольше N минут → dead + событие node_down (heartbeat вернёт в active)
+
 matchmaking:
   tick_ms: 500          # период тика очередей
   widen_after_s: 30     # расширение на следующий по rtt регион игрока

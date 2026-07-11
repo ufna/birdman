@@ -207,3 +207,45 @@ func (s *Store) FailQuarantinedServers(ctx context.Context) (int, error) {
 	}
 	return len(failed), nil
 }
+
+// MarkDeadNodes finalizes long-silent quarantined nodes as dead
+// (node_dead_after_min, спека followups §2): оператор отличает «моргнула»
+// от «умерла». Terminal только информационно — вернувшийся heartbeat живой
+// mTLS-сессии поднимает dead → active (touchNode) с node_recovered.
+func (s *Store) MarkDeadNodes(ctx context.Context, silentFor time.Duration) (int, error) {
+	rows, err := s.Pool.Query(ctx, `
+		update nodes n set state = 'dead'
+		where n.state = 'quarantine'
+		  and n.last_heartbeat_at < now() - $1::interval
+		returning n.id::text, n.hostname,
+		          extract(epoch from now() - n.last_heartbeat_at)::int`,
+		fmt.Sprintf("%d milliseconds", silentFor.Milliseconds()))
+	if err != nil {
+		return 0, err
+	}
+	type ref struct {
+		id, hostname string
+		silentS      int
+	}
+	var dead []ref
+	for rows.Next() {
+		var r ref
+		if err := rows.Scan(&r.id, &r.hostname, &r.silentS); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		dead = append(dead, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	for _, r := range dead {
+		if err := insertEvent(ctx, s.Pool, EventNodeDown,
+			EventRef{NodeID: &r.id},
+			map[string]any{"hostname": r.hostname, "silent_for_s": r.silentS}); err != nil {
+			return 0, err
+		}
+	}
+	return len(dead), nil
+}
