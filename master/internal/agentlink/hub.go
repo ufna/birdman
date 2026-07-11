@@ -178,7 +178,7 @@ func (h *Hub) PendingCount(nodeID string) int {
 // scrape via the wired callback (main.go). Nodes with an empty queue are
 // OMITTED — the metric emits only "there is something stuck", so a clean fleet
 // produces no series at all and the AgentlinkPendingStuck alert
-// (min_over_time(...)>0) stays absent-safe.
+// (pending>0 held for `for:`) stays absent-safe.
 func (h *Hub) PendingCounts() map[string]int {
 	h.mu.Lock()
 	defer h.mu.Unlock()

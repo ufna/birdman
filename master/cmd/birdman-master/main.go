@@ -202,7 +202,7 @@ func run() error {
 	// LoadX509KeyPair populates Leaf, and issueServerLeaf always does.
 	m.WireAgentlinkSessions(hub.SessionAuthCounts)
 	// Per-node unacked-command depth (followups §3): feeds
-	// birdman_agentlink_pending_commands{node} and the AgentlinkPendingStuck
+	// birdman_agentlink_pending_commands{node,node_id} and the AgentlinkPendingStuck
 	// alert — a SetRegistries (or any command) that never drains becomes visible.
 	m.WireAgentlinkPendingCommands(hub.PendingCounts)
 	m.WireTLSServerCertExpiry(func() (time.Time, bool) {
