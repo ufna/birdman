@@ -163,49 +163,50 @@ func TestConfigSecretsKeyMissing(t *testing.T) {
 	}
 }
 
-// Iteration-5 follow-up: node_dead_after_min bounds how long a quarantined
-// node stays silent before it is finalized dead. Defaults to 10 (0/missing →
-// default), rejects < 1.
-func TestLoadNodeDeadAfterMinDefault(t *testing.T) {
+// Iteration-5 follow-up (ревизия): node_down_after_min bounds how long a
+// quarantined node stays silent before it is marked down (NOT dead — dead is
+// the manual revocation terminal). Defaults to 10 (0/missing → default),
+// rejects < 1.
+func TestLoadNodeDownAfterMinDefault(t *testing.T) {
 	withDSN(t)
 	cfg, err := Load("")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.NodeDeadAfterMin != 10 {
-		t.Fatalf("default node_dead_after_min = %d, want 10", cfg.NodeDeadAfterMin)
+	if cfg.NodeDownAfterMin != 10 {
+		t.Fatalf("default node_down_after_min = %d, want 10", cfg.NodeDownAfterMin)
 	}
 }
 
-func TestLoadNodeDeadAfterMinZeroDefaults(t *testing.T) {
+func TestLoadNodeDownAfterMinZeroDefaults(t *testing.T) {
 	withDSN(t)
-	path := writeConfig(t, "node_dead_after_min: 0\n")
+	path := writeConfig(t, "node_down_after_min: 0\n")
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.NodeDeadAfterMin != 10 {
-		t.Fatalf("node_dead_after_min: 0 → %d, want default 10", cfg.NodeDeadAfterMin)
+	if cfg.NodeDownAfterMin != 10 {
+		t.Fatalf("node_down_after_min: 0 → %d, want default 10", cfg.NodeDownAfterMin)
 	}
 }
 
-func TestLoadNodeDeadAfterMinExplicit(t *testing.T) {
+func TestLoadNodeDownAfterMinExplicit(t *testing.T) {
 	withDSN(t)
-	path := writeConfig(t, "node_dead_after_min: 5\n")
+	path := writeConfig(t, "node_down_after_min: 5\n")
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.NodeDeadAfterMin != 5 {
-		t.Fatalf("node_dead_after_min = %d, want 5", cfg.NodeDeadAfterMin)
+	if cfg.NodeDownAfterMin != 5 {
+		t.Fatalf("node_down_after_min = %d, want 5", cfg.NodeDownAfterMin)
 	}
 }
 
-func TestLoadNodeDeadAfterMinRejectsBelowOne(t *testing.T) {
+func TestLoadNodeDownAfterMinRejectsBelowOne(t *testing.T) {
 	withDSN(t)
-	path := writeConfig(t, "node_dead_after_min: -1\n")
+	path := writeConfig(t, "node_down_after_min: -1\n")
 	if _, err := Load(path); err == nil {
-		t.Fatal("Load must reject node_dead_after_min < 1")
+		t.Fatal("Load must reject node_down_after_min < 1")
 	}
 }
 

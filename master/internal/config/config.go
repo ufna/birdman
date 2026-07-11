@@ -112,12 +112,14 @@ type Config struct {
 	// duration string (e.g. "2m", "30s") — yaml.v3 parses time.Duration via
 	// time.ParseDuration natively.
 	StatsRollupInterval time.Duration `yaml:"stats_rollup_interval"`
-	// NodeDeadAfterMin is how long a quarantined node may stay silent before
-	// the lease checker finalizes it dead (итерация 5 follow-up): an
-	// informational terminal so operators/alerts tell «моргнула» (quarantine)
-	// from «умерла» (dead). A returning heartbeat still lifts dead → active.
+	// NodeDownAfterMin is how long a quarantined node may stay silent before
+	// the lease checker marks it down (итерация 5 follow-up, ревизия):
+	// operators/alerts tell «моргнула» (quarantine) from «лежит давно» (down).
+	// A heartbeat of a live agent session lifts down → active. 'dead' is NOT
+	// set here — it is the manual revocation terminal (agentlink refuses dead
+	// nodes a session), and auto-dead would lock a node out permanently.
 	// Default 10, must be >= 1.
-	NodeDeadAfterMin int `yaml:"node_dead_after_min"`
+	NodeDownAfterMin int `yaml:"node_down_after_min"`
 	// SecretsKeyFile is the path to the master's at-rest encryption key —
 	// base64 of 32 random bytes, one line, 0600 (secrets-encryption design §2).
 	// The ansible role provisions /etc/birdman/secrets.key here. Env override
@@ -215,11 +217,11 @@ func Load(path string) (Config, error) {
 	default:
 		return cfg, fmt.Errorf("agentlink_auth %q is not supported (token|mixed|mtls)", cfg.AgentlinkAuth)
 	}
-	if cfg.NodeDeadAfterMin == 0 {
-		cfg.NodeDeadAfterMin = 10
+	if cfg.NodeDownAfterMin == 0 {
+		cfg.NodeDownAfterMin = 10
 	}
-	if cfg.NodeDeadAfterMin < 1 {
-		return cfg, fmt.Errorf("node_dead_after_min must be >= 1")
+	if cfg.NodeDownAfterMin < 1 {
+		return cfg, fmt.Errorf("node_down_after_min must be >= 1")
 	}
 	return cfg, nil
 }

@@ -208,13 +208,16 @@ func (s *Store) FailQuarantinedServers(ctx context.Context) (int, error) {
 	return len(failed), nil
 }
 
-// MarkDeadNodes finalizes long-silent quarantined nodes as dead
-// (node_dead_after_min, спека followups §2): оператор отличает «моргнула»
-// от «умерла». Terminal только информационно — вернувшийся heartbeat живой
-// mTLS-сессии поднимает dead → active (touchNode) с node_recovered.
-func (s *Store) MarkDeadNodes(ctx context.Context, silentFor time.Duration) (int, error) {
+// MarkDownNodes moves long-silent quarantined nodes to 'down'
+// (node_down_after_min, спека followups §2 РЕВИЗИЯ): оператор отличает
+// «моргнула» (quarantine) от «лежит давно» (down). Deliberately NOT 'dead':
+// dead — ручная терминальная ревокация (agentlink отказывает dead-ноде во
+// всех auth-режимах), авто-dead запер бы ноду навсегда после любого аутажа
+// дольше порога. down self-heals — heartbeat живой mTLS-сессии поднимает
+// down → active (touchNode) с node_recovered.
+func (s *Store) MarkDownNodes(ctx context.Context, silentFor time.Duration) (int, error) {
 	rows, err := s.Pool.Query(ctx, `
-		update nodes n set state = 'dead'
+		update nodes n set state = 'down'
 		where n.state = 'quarantine'
 		  and n.last_heartbeat_at < now() - $1::interval
 		returning n.id::text, n.hostname,
@@ -227,25 +230,25 @@ func (s *Store) MarkDeadNodes(ctx context.Context, silentFor time.Duration) (int
 		id, hostname string
 		silentS      int
 	}
-	var dead []ref
+	var downs []ref
 	for rows.Next() {
 		var r ref
 		if err := rows.Scan(&r.id, &r.hostname, &r.silentS); err != nil {
 			rows.Close()
 			return 0, err
 		}
-		dead = append(dead, r)
+		downs = append(downs, r)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return 0, err
 	}
-	for _, r := range dead {
+	for _, r := range downs {
 		if err := insertEvent(ctx, s.Pool, EventNodeDown,
 			EventRef{NodeID: &r.id},
 			map[string]any{"hostname": r.hostname, "silent_for_s": r.silentS}); err != nil {
 			return 0, err
 		}
 	}
-	return len(dead), nil
+	return len(downs), nil
 }

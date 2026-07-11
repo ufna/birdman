@@ -253,7 +253,7 @@ func run() error {
 		go holder.rotateLoop(loopCtx, caCertPEM, caKeyPEM, hostname, cfg.TLS.ExtraSANs, log)
 	}
 	go reconcile.New(st, hub, log).Run(loopCtx, time.Second)
-	go reconcile.NewLeaseChecker(st, log, time.Duration(cfg.NodeDeadAfterMin)*time.Minute).Run(loopCtx, time.Second)
+	go reconcile.NewLeaseChecker(st, log, time.Duration(cfg.NodeDownAfterMin)*time.Minute).Run(loopCtx, time.Second)
 	go mm.Run(loopCtx)
 	// statsrollup's startup Backfill runs inside this goroutine and
 	// deliberately does not block API/gRPC serving from starting -- stats

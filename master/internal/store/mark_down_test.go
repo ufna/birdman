@@ -1,8 +1,9 @@
 package store_test
 
-// Iteration-5 follow-up: авто-dead длительно молчащих quarantine-нод + событие
-// node_down (оператор/алерты отличают «моргнула» от «умерла»), плюс
-// симметричное поднятие dead → active вернувшимся heartbeat'ом (touchNode).
+// Iteration-5 follow-up (ревизия): авто-down длительно молчащих quarantine-нод
+// + событие node_down (оператор/алерты отличают «моргнула» от «лежит давно»),
+// поднятие down → active heartbeat'ом живой сессии (touchNode), и сохранённая
+// ревокация: dead (ручной терминал) heartbeat'ом НЕ поднимается.
 
 import (
 	"context"
@@ -13,11 +14,13 @@ import (
 	"github.com/ufna/birdman/master/internal/testdb"
 )
 
-// TestMarkDeadNodes: a quarantined node silent past node_dead_after_min is
-// finalized dead with a node_down event (payload silent_for_s); the pass is
-// idempotent (no duplicate event); a node still within the threshold stays
-// quarantine; and a returning heartbeat lifts dead → active with node_recovered.
-func TestMarkDeadNodes(t *testing.T) {
+// TestMarkDownNodes: a quarantined node silent past node_down_after_min goes
+// down with a node_down event (payload silent_for_s); the pass is idempotent
+// (no duplicate event); a node still within the threshold stays quarantine; a
+// heartbeat of a live session lifts down → active with node_recovered; and a
+// manually revoked node (state 'dead') is NOT lifted by a heartbeat — the
+// revocation contract survives the auto-down feature.
+func TestMarkDownNodes(t *testing.T) {
 	st := testdb.New(t)
 	f := testdb.Seed(t, st, "eu", 10)
 	ctx := context.Background()
@@ -31,21 +34,21 @@ func TestMarkDeadNodes(t *testing.T) {
 		}
 	}
 
-	// Node A: quarantined and silent 15m > 10m threshold → dead.
+	// Node A: quarantined and silent 15m > 10m threshold → down.
 	quarantine(f.NodeID, 15*time.Minute)
 	// Node B: quarantined but only 30s silent → must stay quarantine.
 	nodeB := f.AddNode(t, "node-2", "203.0.113.11", 10)
 	quarantine(nodeB, 30*time.Second)
 
-	n, err := st.MarkDeadNodes(ctx, 10*time.Minute)
+	n, err := st.MarkDownNodes(ctx, 10*time.Minute)
 	if err != nil {
-		t.Fatalf("mark dead: %v", err)
+		t.Fatalf("mark down: %v", err)
 	}
 	if n != 1 {
-		t.Fatalf("want 1 node marked dead, got %d", n)
+		t.Fatalf("want 1 node marked down, got %d", n)
 	}
-	if got := nodeState(t, st, f.NodeID); got != "dead" {
-		t.Fatalf("node A: want dead, got %s", got)
+	if got := nodeState(t, st, f.NodeID); got != "down" {
+		t.Fatalf("node A: want down, got %s", got)
 	}
 	if got := nodeState(t, st, nodeB); got != "quarantine" {
 		t.Fatalf("node B (recent): want quarantine, got %s", got)
@@ -61,16 +64,16 @@ func TestMarkDeadNodes(t *testing.T) {
 		t.Fatalf("node_down silent_for_s = %v (ok=%v), want >= 900", down.Payload["silent_for_s"], ok)
 	}
 
-	// Idempotent: nothing new is dead, no duplicate node_down.
-	if n, err := st.MarkDeadNodes(ctx, 10*time.Minute); err != nil || n != 0 {
+	// Idempotent: nothing newly down, no duplicate node_down.
+	if n, err := st.MarkDownNodes(ctx, 10*time.Minute); err != nil || n != 0 {
 		t.Fatalf("second pass: want 0, got %d (%v)", n, err)
 	}
 	if c, _ := st.CountEvents(ctx, store.EventNodeDown); c != 1 {
 		t.Fatalf("want exactly 1 node_down event, got %d", c)
 	}
 
-	// A returning heartbeat on the dead node lifts it back to active and
-	// records node_recovered (touchNode dead → active — same contract as the
+	// A heartbeat of a live session lifts the down node back to active and
+	// records node_recovered (touchNode down → active — same contract as the
 	// quarantine → active recovery).
 	if err := st.ApplyHeartbeat(ctx, f.NodeID, nil); err != nil {
 		t.Fatalf("heartbeat: %v", err)
@@ -80,6 +83,24 @@ func TestMarkDeadNodes(t *testing.T) {
 	}
 	if c, _ := st.CountEvents(ctx, store.EventNodeRecovered); c != 1 {
 		t.Fatalf("want 1 node_recovered event, got %d", c)
+	}
+
+	// Revocation stays revoked: a manually dead node is NOT resurrected by a
+	// heartbeat (in production agentlink refuses it a session in every auth
+	// mode; even a racing in-flight heartbeat must not lift the state) and no
+	// node_recovered is emitted.
+	if _, err := st.Pool.Exec(ctx,
+		`update nodes set state = 'dead' where id = $1::uuid`, f.NodeID); err != nil {
+		t.Fatalf("revoke node: %v", err)
+	}
+	if err := st.ApplyHeartbeat(ctx, f.NodeID, nil); err != nil {
+		t.Fatalf("heartbeat on dead node: %v", err)
+	}
+	if got := nodeState(t, st, f.NodeID); got != "dead" {
+		t.Fatalf("revoked node must stay dead after a heartbeat, got %s", got)
+	}
+	if c, _ := st.CountEvents(ctx, store.EventNodeRecovered); c != 1 {
+		t.Fatalf("heartbeat on a dead node must not emit node_recovered, got %d", c)
 	}
 }
 
