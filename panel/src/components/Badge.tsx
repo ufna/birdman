@@ -35,7 +35,10 @@ const KEY_PREFIX: Record<StateDomain, string> = {
 /** Все виды событий ленты (константы EventXxx в master store/*.go). Единый
  *  источник для дропдауна фильтра, подписей event.<kind> и guard-теста. */
 export const EVENT_KINDS = [
-  'node_created', 'node_quarantine', 'node_recovered', 'node_drain', 'node_undrain',
+  // node_down (итерация 5, follow-ups): master помечает ноду недоступной, когда
+  // quarantine молчит дольше node_down_after_min — и state ноды → down, и событие
+  // ленты того же kind (store/models.go: EventNodeDown, рядом с quarantine).
+  'node_created', 'node_quarantine', 'node_down', 'node_recovered', 'node_drain', 'node_undrain',
   // mTLS agentlink v1 (docs/superpowers/specs/2026-07-10-mtls-agentlink-design.md
   // §7): node_enrolled — первый обмен node_token→серт; node_cert_renewed —
   // ротация клиентского серта по живой mTLS-сессии.
@@ -58,6 +61,7 @@ export function toneOfNodeState(state: string): Tone {
     case 'draining':
       return 'warn';
     case 'quarantine':
+    case 'down': // молчит дольше node_down_after_min — активный простой, красный как quarantine (не терминальный dead)
       return 'dead';
     case 'dead':
       return 'neutral';
@@ -151,6 +155,7 @@ export function toneOfAlertActive(active: boolean): Tone {
 export function toneOfEventKind(kind: string): Tone {
   switch (kind) {
     case 'node_quarantine':
+    case 'node_down':
     case 'server_failed':
     case 'crash_loop':
     case 'deploy_failed':

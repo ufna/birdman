@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import { I18nProvider } from '../lib/i18n';
+import { en as enMsgs } from '../lib/locales/en';
+import { ru as ruMsgs } from '../lib/locales/ru';
 import {
   EVENT_KINDS,
   StateBadge,
@@ -18,6 +20,7 @@ describe('маппинг состояний в тона', () => {
     expect(toneOfNodeState('active')).toBe('good');
     expect(toneOfNodeState('draining')).toBe('warn');
     expect(toneOfNodeState('quarantine')).toBe('dead');
+    expect(toneOfNodeState('down')).toBe('dead');
     expect(toneOfNodeState('dead')).toBe('neutral');
     expect(toneOfNodeState('???')).toBe('neutral');
   });
@@ -36,6 +39,7 @@ describe('маппинг состояний в тона', () => {
   });
   it('события', () => {
     expect(toneOfEventKind('crash_loop')).toBe('dead');
+    expect(toneOfEventKind('node_down')).toBe('dead');
     expect(toneOfEventKind('allocation_failed')).toBe('warn');
     expect(toneOfEventKind('node_recovered')).toBe('good');
     expect(toneOfEventKind('fleet_updated')).toBe('accent');
@@ -62,6 +66,17 @@ describe('StateBadge', () => {
   it('domain с неизвестным кодом → фолбэк на сам код', () => {
     en(<StateBadge state="totally_unknown_kind" tone="neutral" domain="event" />);
     expect(screen.getByText('totally_unknown_kind')).toBeTruthy();
+  });
+  it('domain=node: состояние down переводится, сырой код в title (Task 4)', () => {
+    en(<StateBadge state="down" tone="dead" domain="node" />);
+    expect(screen.getByText('Down').getAttribute('title')).toBe('down');
+  });
+});
+
+describe('подписи состояний ноды — down (Task 4)', () => {
+  it('ключ state.node.down есть в обеих локалях', () => {
+    expect('state.node.down' in enMsgs).toBe(true);
+    expect('state.node.down' in ruMsgs).toBe(true);
   });
 });
 

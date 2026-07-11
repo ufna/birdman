@@ -107,6 +107,7 @@ export const en = {
   'state.node.active': 'Active',
   'state.node.draining': 'Draining',
   'state.node.quarantine': 'Quarantine',
+  'state.node.down': 'Down',
   'state.node.dead': 'Dead',
   'state.server.creating': 'Creating',
   'state.server.ready': 'Ready',
@@ -127,6 +128,7 @@ export const en = {
   // — event-kind labels (raw code kept in the badge title; unknown → code) —
   'event.node_created': 'Node registered',
   'event.node_quarantine': 'Node quarantined',
+  'event.node_down': 'Node down',
   'event.node_recovered': 'Node recovered',
   'event.node_drain': 'Node draining',
   'event.node_undrain': 'Node returned',
