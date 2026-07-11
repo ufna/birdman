@@ -10,3 +10,7 @@ deploy/.env
 deploy/secrets.key
 # шаблон коммитим (иначе .env.* выше его проглотит):
 !deploy/.env.example
+# Доступы вне git (конвенция selfhost-v1): рабочий инвентарь и операционные
+# доступы — только локально; в репо живут hosts.example.yml + STATUS-алиасы.
+infra/inventories/dev/hosts.local.yml
+docs/ACCESS.local.md
