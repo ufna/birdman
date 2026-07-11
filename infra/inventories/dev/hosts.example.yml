@@ -1,0 +1,64 @@
+---
+# ┌────────────────────────────────────────────────────────────────────────┐
+# │ ШАБЛОН инвентаря birdman. Скопируй в hosts.local.yml (он git-ignored)    │
+# │ и подставь свои значения:                                                │
+# │     cp hosts.example.yml hosts.local.yml && $EDITOR hosts.local.yml      │
+# │ ansible.cfg уже указывает на hosts.local.yml. Конвенция selfhost-v1:     │
+# │ реальные IP/юзеры/пути ключей — ТОЛЬКО в hosts.local.yml, не в git.      │
+# │ Проще всего заводить ноды через ./add-node.sh (валидации + авто-IP).     │
+# └────────────────────────────────────────────────────────────────────────┘
+#
+# Плейсхолдеры: <MASTER_IP> <NODE_IP> <SSH_USER> <SSH_KEY_PATH> — заменить на своё.
+all:
+  children:
+    # ── Мастер-бокс: master (REST+панель :8100, agentlink :8444) + БД + мониторинг.
+    birdman_dev:
+      hosts:
+        birdman-dev:
+          ansible_host: <MASTER_IP>                    # публичный IP/хост мастер-бокса
+          ansible_user: <SSH_USER>                     # SSH-пользователь (нужен sudo)
+          ansible_ssh_private_key_file: <SSH_KEY_PATH> # напр. ~/.ssh/id_ed25519
+          # Хаб изолированного оверлея birdman (итерация 5): всегда .1 сети
+          # 10.77.0.0/24. Убери эту строку, если разворачиваешь без нашего
+          # оверлея (ноды тогда ходят на master напрямую — см. ниже birdman_use_overlay).
+          birdman_overlay_ip: 10.77.0.1
+
+    # ── Игровые ноды: по одному host-блоку на тачку. Ниже — один пример со ВСЕМИ
+    #    пер-хост переменными. Новую ноду проще добавить `./add-node.sh <имя> <ip>`.
+    birdman_nodes:
+      hosts:
+        birdman-node-1:
+          # ── Обязательные: доступ по SSH ────────────────────────────────────
+          ansible_host: <NODE_IP>                      # публичный IP ноды
+          ansible_port: 22                             # SSH-порт (опционально; дефолт 22)
+          ansible_user: <SSH_USER>                     # обычно root на выделенной ноде
+          ansible_ssh_private_key_file: <SSH_KEY_PATH> # пер-хост — ключ может отличаться
+                                                       # от мастер-бокса (это штатно)
+          # ── Обязательные: размещение и лимиты ──────────────────────────────
+          birdman_region: nl                           # регион ноды (метка флота/QoS)
+          birdman_capacity_slots: 2                    # сколько дедиков влезает на ноду
+          birdman_limits_default: { cpu_millis: 1000, mem_mb: 768 }  # лимиты 1 дедика
+          # ── Оверлей (наш дефолт): первый свободный 10.77.0.X, X≥2 ───────────
+          # overlay_ip назначает add-node.sh автоматически; вручную — следующий
+          # свободный адрес сети 10.77.0.0/24 (хаб занимает .1).
+          birdman_overlay_ip: 10.77.0.2
+          # Control-plane ноды идёт через оверлей на хаб (10.77.0.1):
+          birdman_master_addr: "10.77.0.1:8444"                # gRPC agentlink (mTLS)
+          birdman_vl_sink_url: "http://10.77.0.1:9428/insert"  # push логов дедиков в VL
+          # Хост из группы birdman_dev, у которого агентская роль возьмёт admin-ключ
+          # и дёрнет REST регистрации ноды (POST /v1/nodes). Admin-ключ НЕ едет на ноду.
+          birdman_master_api_host: birdman-dev
+          # ── Опциональные ───────────────────────────────────────────────────
+          # Легаси-pull напрямую с ghcr на ноде (нужен ghcr-токен на ноде).
+          # false (дефолт-рекомендация) = креды реестров приезжают по SetRegistries
+          # с мастера (source=master), токена на ноде нет.
+          birdman_registry_legacy: false
+          # Нодовый vmagent-сайдкар: пушит агентские метрики через оверлей на
+          # мастер (лейблы node/region). Требует поднятого мониторинг-стека.
+          birdman_node_vmagent: true
+          # ── Self-host БЕЗ нашего оверлея (сторонний проект) ─────────────────
+          # Раскомментируй, чтобы агент ходил на публичный master напрямую (строгий
+          # mTLS держит публичный линк). Тогда убери overlay_ip и задай прямой адрес:
+          # birdman_use_overlay: false
+          # birdman_master_addr: "<MASTER_IP>:8444"
+          # birdman_vl_sink_url: "http://<MASTER_IP>:9428/insert"

@@ -5,7 +5,7 @@
 ```
 infra/
   ansible.cfg                 # inventory/roles_path — запускать из infra/
-  inventories/dev/hosts.yml   # birdman-dev (HOSTER_A, ОБЩИЙ бокс с чужим продом)
+  inventories/dev/hosts.local.yml # birdman-dev (общий дев-бокс; git-ignored, из hosts.example.yml)
   playbooks/dev-node.yml      # дев-нода: master (pg+бинарь+unit) → агент (демон)
   playbooks/monitoring.yml    # наблюдаемость + ops-бэкапы (итерация 4)
   playbooks/add-node.yml      # вторая+ нода: оверлей (хаб+спок) → агент (итерация 5)
@@ -109,7 +109,7 @@ socat-форвардеры `10.77.0.1:{8444,9428,8428} → 127.0.0.1` — master
 ansible-playbook playbooks/add-node.yml  # идемпотентно; хаб + все ноды группы
 ```
 
-Добавить следующую ноду = host-блок в `inventories/dev/hosts.yml` (регион,
+Добавить следующую ноду = host-блок в `inventories/dev/hosts.local.yml` (регион,
 `birdman_overlay_ip` из 10.77.0.0/24, `birdman_master_api_host: birdman-dev`,
 `birdman_registry_legacy: false`) + прогон. Регистрация ноды (`POST
 /v1/nodes`, `GET /v1/ca`) выполняется `delegate_to` master-бокса — admin-ключ

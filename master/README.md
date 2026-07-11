@@ -112,6 +112,10 @@ default_project/join_token) — см. `master.example.yaml`; секреты в �
 
 ## Дев-запуск (docker compose)
 
+> Это **дев**-стенд (`master/dev-compose.yml`). Для **self-host** — master +
+> панель одним стеком, ввод нод, версия и первый матч — см. `deploy/` и
+> **[docs/self-host.md](../docs/self-host.md)** (от `git clone` до матча).
+
 ```sh
 docker compose -f master/dev-compose.yml up --build -d
 docker compose -f master/dev-compose.yml logs master | grep api_key   # admin-ключ, печатается ОДИН раз

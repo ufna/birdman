@@ -2,9 +2,16 @@
 # Всё аддитивно и только birdman-объекты. Хост-футпринт: контейнер + образ
 # + /etc/birdman/overlay + (хаб) UFW-правила. Снос: compose down + удалить
 # каталоги/правила — бокс байт-в-байт как был (спека §1).
+#
+# Гейт birdman_use_overlay (спека selfhost-v1): self-host БЕЗ нашего оверлея —
+# use_overlay=false → роль no-op, агент набирает master_addr напрямую (строгий
+# mTLS — гейт для этого и строился); hub-плей на таком флоте тоже no-op.
 - name: Prepare overlay (image, key, pubkey fact)
   ansible.builtin.include_tasks: prepare.yml
+  when: birdman_use_overlay | default(true) | bool
 
 - name: Bring overlay up (config, ufw, container)
   ansible.builtin.include_tasks: up.yml
-  when: not (birdman_overlay_prepare_only | bool)
+  when:
+    - birdman_use_overlay | default(true) | bool
+    - not (birdman_overlay_prepare_only | bool)

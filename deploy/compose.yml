@@ -1,0 +1,50 @@
+# Self-host birdman-master: postgres + master (панель внутри), build-from-source.
+# Квикстарт: deploy/README.md; полная инструкция: docs/self-host.md.
+#   cp .env.example .env && edit  →  umask 077 && openssl rand -base64 32 > secrets.key
+#   docker compose up -d --build  →  docker compose logs master | grep admin
+name: birdman
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set it in .env}
+      POSTGRES_DB: birdman
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    restart: unless-stopped
+
+  master:
+    build:
+      context: ..
+      dockerfile: master/Dockerfile
+    environment:
+      # dsn собирается из .env — единственный секрет в env; остальное в master.yaml
+      BIRDMAN_DSN: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/birdman?sslmode=disable
+    ports:
+      - "127.0.0.1:8100:8100"   # REST+панель: только localhost хоста — наружу
+                                # через reverse-proxy/туннель (docs/self-host.md)
+      - "8444:8444"             # gRPC agentlink для нод: наружу, защита — строгий
+                                # mTLS (agentlink_auth: mtls в master.yaml)
+    volumes:
+      - ./master.yaml:/etc/birdman/master.yaml:ro
+      - ./secrets.key:/etc/birdman/secrets.key:ro
+    command: ["-config", "/etc/birdman/master.yaml"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8100/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
