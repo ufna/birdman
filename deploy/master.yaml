@@ -1,0 +1,21 @@
+# Конфиг birdman-master для self-host (docs/self-host.md). dsn приходит
+# env-переменной BIRDMAN_DSN из compose (.env) — здесь его нет.
+
+listen_api: ":8100"    # REST+панель; наружу хоста публикуется только 127.0.0.1 (compose)
+listen_grpc: ":8444"   # gRPC agentlink (всегда TLS); ноды ходят сюда напрямую
+
+# Строгий mTLS с первого дня: token-only Hello отвергается, ноды заходят
+# Enroll-by-token → клиентский серт (внутренняя CA в Postgres).
+agentlink_auth: mtls
+
+# Ключ шифрования секретов at-rest (обязателен, fail-loud):
+#   umask 077 && openssl rand -base64 32 > secrets.key
+# Эскроу-копию — в менеджер паролей (restore-runbook: docs/specs/ops.md §5).
+secrets_key_file: "/etc/birdman/secrets.key"
+
+# Наблюдаемость (опционально): свои VictoriaMetrics/VictoriaLogs — укажи URL,
+# и панель получит графики/логи. Пусто → эти вкладки отвечают 503, всё
+# остальное работает. Референс стека: infra/roles/birdman_monitoring_dev.
+# metrics:
+#   victoriametrics_url: "http://127.0.0.1:8428"
+#   victorialogs_url: "http://127.0.0.1:9428"

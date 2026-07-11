@@ -6,3 +6,7 @@
 node_modules/
 dist/
 bin/
+deploy/.env
+deploy/secrets.key
+# шаблон коммитим (иначе .env.* выше его проглотит):
+!deploy/.env.example
