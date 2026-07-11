@@ -112,7 +112,7 @@ export const ru: Record<MessageKey, string> = {
   // — подписи видов событий (сырой код — в title бейджа; неизвестный → код) —
   'event.node_created': 'Тачка зарегистрирована',
   'event.node_quarantine': 'Тачка в карантине',
-  'event.node_down': 'Нода недоступна',
+  'event.node_down': 'Тачка недоступна',
   'event.node_recovered': 'Тачка восстановлена',
   'event.node_drain': 'Тачка опустошается',
   'event.node_undrain': 'Тачка возвращена',
