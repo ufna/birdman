@@ -1,6 +1,6 @@
 # birdman-agent
 
-Нода-агент birdman, **итерации 1–4** (`docs/05-runtime-iterations.md`): демон `run` под управлением master (gRPC AgentLink) + локальный `run-once` из итерации 0. Спеки: `docs/specs/agent.md`, `docs/specs/protocol.md` §1–2.
+Нода-агент birdman, **итерации 1–4**: демон `run` под управлением master (gRPC AgentLink) + локальный `run-once` из итерации 0. Спеки: `docs/specs/agent.md`, `docs/specs/protocol.md` §1–2.
 
 Что внутри: gRPC bidi-линк с master (Hello с восстановленной картой, heartbeat 2с c NodeStats, команды Start/Stop/Allocate/PrePull/DrainServer c `Ack{cmd_id}` и идемпотентностью, реконнект с бэкоффом 1с→30с), восстановление карты серверов из containerd-labels после рестарта (живые дедики агент-рестарт переживают), ensure/pull образа (включая приватный GHCR), пул host-портов, запуск контейнера (host network, cgroup-лимиты, env-контракт `BIRDMAN_*`, ro bind-mount per-server каталога с сокетом), UDS-сервер liba-протокола (NDJSON), стейт-машина `pulling → starting → ready → allocated → draining → stopped|failed`, grace 30с до `ready`, shim-side логи дедика (`cio.LogFile` — переживают рестарт агента), graceful stop по SIGTERM (дедиков не трогает).
 

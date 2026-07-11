@@ -1,6 +1,6 @@
 # Спека: архитектура
 
-> Контекст решений: `../03-implementation-roadmap.md` (§1), `../04-agones-vs-native.html`, план — `../05-runtime-iterations.md`.
+> Контекст решений: свой рантайм (master + agent + SDK) вместо Agones+K8s — решение 07.2026.
 
 ## Компоненты
 
