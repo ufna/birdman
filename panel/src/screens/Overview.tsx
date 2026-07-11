@@ -95,8 +95,18 @@ function OverviewBody({
             </>
           }
           detail={
-            stats.nodesQuarantine > 0 ? (
-              <span className="font-medium text-dead">{t('ov.inQuarantine', { count: stats.nodesQuarantine })}</span>
+            stats.nodesQuarantine > 0 || stats.nodesDown > 0 ? (
+              // Два отдельных красных чипа: карантин и down живут одновременно
+              // (часть тачек молчит дольше node_down_after_min и уже деградировала).
+              <>
+                {stats.nodesQuarantine > 0 && (
+                  <span className="font-medium text-dead">{t('ov.inQuarantine', { count: stats.nodesQuarantine })}</span>
+                )}
+                {stats.nodesQuarantine > 0 && stats.nodesDown > 0 && <span className="text-muted"> · </span>}
+                {stats.nodesDown > 0 && (
+                  <span className="font-medium text-dead">{t('ov.down', { count: stats.nodesDown })}</span>
+                )}
+              </>
             ) : (
               t('ov.allActive')
             )
@@ -166,6 +176,7 @@ interface Stats {
   nodesActive: number;
   nodesTotal: number;
   nodesQuarantine: number;
+  nodesDown: number;
   fleetVersions: { region: string; semver: string; extra: number }[];
 }
 
@@ -211,6 +222,9 @@ function computeStats(nodes: NodeInfo[], servers: GameServer[], versions: Versio
     nodesActive: nodes.filter((n) => n.state === 'active').length,
     nodesTotal: nodes.length,
     nodesQuarantine: nodes.filter((n) => n.state === 'quarantine').length,
+    // Карантин дольше node_down_after_min → мастер деградирует ноду в `down`;
+    // считаем отдельно, чтобы красная сводка не гасла, когда стало хуже.
+    nodesDown: nodes.filter((n) => n.state === 'down').length,
     fleetVersions,
   };
 }

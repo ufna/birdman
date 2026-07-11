@@ -281,6 +281,7 @@ export const ru: Record<MessageKey, string> = {
   'ov.noReady': 'нет ready-дедиков',
   'ov.nodes': 'Тачки',
   'ov.inQuarantine': '{count} в карантине',
+  'ov.down': '{count} недоступн.',
   'ov.allActive': 'все активны',
   'ov.fleetVersion': 'Версия флита',
   'ov.noLiveDedics': 'нет живых дедиков',

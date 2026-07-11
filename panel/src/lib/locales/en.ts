@@ -297,6 +297,7 @@ export const en = {
   'ov.noReady': 'no ready dedics',
   'ov.nodes': 'Nodes',
   'ov.inQuarantine': '{count} in quarantine',
+  'ov.down': '{count} down',
   'ov.allActive': 'all active',
   'ov.fleetVersion': 'Fleet version',
   'ov.noLiveDedics': 'no live dedics',
