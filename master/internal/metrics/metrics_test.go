@@ -67,15 +67,22 @@ func TestAgentlinkSessionsMetric(t *testing.T) {
 	}
 }
 
-// birdman_agentlink_pending_commands{node} reads the hub's unacked-queue
-// depths on scrape via the wired callback (Hub.PendingCounts). ONLY nodes with
-// a non-empty queue emit a sample — a drained/empty queue produces NO series
-// (the snapshot never emits a 0). That is exactly what makes the
-// AgentlinkPendingStuck alert's min_over_time(...)>0 absent-safe (followups
-// §3). Enqueue → the node's series is 1; Ack → the series disappears; a second
-// node's queue is independent.
+// birdman_agentlink_pending_commands{node,node_id} reads the hub's
+// unacked-queue depths on scrape via the wired callback (Hub.PendingCounts,
+// keyed by node_id) and resolves each id to the node's hostname for the node
+// label — the stack convention (heartbeat/cert-expiry gauges use hostname
+// too); node_id carries the exact uuid and keeps labelsets unique should two
+// hostnames ever collide. ONLY nodes with a non-empty queue emit a sample — a
+// drained/empty queue produces NO series (the snapshot never emits a 0), so
+// the AgentlinkPendingStuck alert (pending>0 held for `for:`) is absent-safe
+// (followups §3, ревизия). Enqueue → the node's series is 1; Ack → the series
+// disappears; a second node is independent; an id that no longer resolves
+// (node row deleted, queue still alive) falls back to node=<uuid>.
 func TestPendingCommandsGauge(t *testing.T) {
 	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 8) // hostname node-1, uuid f.NodeID
+	node2 := f.AddNode(t, "node-2", "203.0.113.11", 8)
+
 	m := metrics.New(st, testLog())
 	hub := agentlink.NewHub(testLog())
 	m.WireAgentlinkPendingCommands(hub.PendingCounts)
@@ -85,25 +92,35 @@ func TestPendingCommandsGauge(t *testing.T) {
 	}
 
 	// Non-SetRegistries commands queue regardless of any live session, so no
-	// attach is needed to build pending depth.
-	cmd1 := hub.Send("node-1", start("srv-1"))
-	hub.Send("node-2", start("srv-2"))
+	// attach is needed to build pending depth. Hub keys = node uuids.
+	cmd1 := hub.Send(f.NodeID, start("srv-1"))
+	hub.Send(node2, start("srv-2"))
 
-	if got := findGauge(t, m.Registry, "birdman_agentlink_pending_commands", map[string]string{"node": "node-1"}); got != 1 {
-		t.Fatalf("pending{node=node-1} = %v, want 1", got)
+	if got := findGauge(t, m.Registry, "birdman_agentlink_pending_commands", map[string]string{"node": "node-1", "node_id": f.NodeID}); got != 1 {
+		t.Fatalf("pending{node=node-1} = %v, want 1 (node label must be the hostname, node_id the uuid)", got)
 	}
-	if got := findGauge(t, m.Registry, "birdman_agentlink_pending_commands", map[string]string{"node": "node-2"}); got != 1 {
+	if got := findGauge(t, m.Registry, "birdman_agentlink_pending_commands", map[string]string{"node": "node-2", "node_id": node2}); got != 1 {
 		t.Fatalf("pending{node=node-2} = %v, want 1 (second node independent)", got)
 	}
 
 	// Ack node-1's only command: its queue drains to empty, so its series must
 	// vanish entirely (the snapshot emits no 0) while node-2 is untouched.
-	hub.Ack("node-1", cmd1)
-	if gaugeSeriesPresent(t, m.Registry, "birdman_agentlink_pending_commands", map[string]string{"node": "node-1"}) {
+	hub.Ack(f.NodeID, cmd1)
+	if gaugeSeriesPresent(t, m.Registry, "birdman_agentlink_pending_commands", map[string]string{"node": "node-1", "node_id": f.NodeID}) {
 		t.Fatalf("pending{node=node-1} still present after Ack — a drained queue must emit no series (0 is never emitted)")
 	}
-	if got := findGauge(t, m.Registry, "birdman_agentlink_pending_commands", map[string]string{"node": "node-2"}); got != 1 {
+	if got := findGauge(t, m.Registry, "birdman_agentlink_pending_commands", map[string]string{"node": "node-2", "node_id": node2}); got != 1 {
 		t.Fatalf("pending{node=node-2} = %v after node-1 Ack, want 1 (independent)", got)
+	}
+
+	// Fallback: node-2's row is deleted from nodes while its queue still holds
+	// the command — the id no longer resolves to a hostname, so the node label
+	// falls back to the uuid (the alert stays absent-safe, but never blind).
+	if _, err := st.Pool.Exec(t.Context(), `delete from nodes where id = $1::uuid`, node2); err != nil {
+		t.Fatalf("delete node-2 row: %v", err)
+	}
+	if got := findGauge(t, m.Registry, "birdman_agentlink_pending_commands", map[string]string{"node": node2, "node_id": node2}); got != 1 {
+		t.Fatalf("pending{node=<uuid>} = %v after node row deletion, want 1 (fallback node label = uuid)", got)
 	}
 }
 

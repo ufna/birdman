@@ -79,6 +79,10 @@ birdman_disk_warn_pct: 85
 birdman_disk_crit_pct: 92
 birdman_ready_empty_for: "3m"          # BufferEmpty: ready==0 держится столько
 birdman_tick_degraded_for: "5m"
+# AgentlinkPendingStuck: непустая очередь unacked-команд master→agent держится
+# дольше этого порога (Ack/реплей опустошают её за секунды; при дренаже серия
+# исчезает по staleness и pending-состояние алерта сбрасывается само).
+birdman_pending_stuck_for: "10m"
 # CertExpiry (mTLS agentlink v1): предупреждаем, когда любой серт (CA/сервер
 # master'а, клиентский серт ноды, локальный взгляд агента) истекает раньше чем
 # через это окно. 14д = renewal-окно клиентских сертов (дизайн §1). Само окно
