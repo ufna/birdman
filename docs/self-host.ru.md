@@ -1,0 +1,314 @@
+<!-- NB: bilingual pair — правишь один, правь второй (self-host.md ↔ self-host.ru.md). -->
+# birdman self-host: от `git clone` до первого матча
+
+English: [self-host.md](self-host.md)
+
+End-to-end инструкция для **стороннего проекта**: поднять master, ввести первую
+игровую ноду, выкатить версию билда и получить первый матч. Каждый сниппет
+проверяем против кода веток self-host. Квикстарты, на которые опирается этот
+документ: `deploy/README.md` (master), `infra/README.md` (ноды/ansible),
+`master/README.md` (REST API + `mmcli`).
+
+---
+
+## 0. Что это и что нужно
+
+birdman — лёгкий рантайм дедиков **без Kubernetes**: `master` (матчмейкер +
+контроллер флота + REST + встроенная админ-панель), `agent` на игровых нодах
+(поверх containerd) и SDK в самом дедике. Linux-only, session-based (одноразовые
+матчи, не персистентные миры).
+
+Топология self-host:
+
+- **master-бокс** — один хост с Docker: master + Postgres (стек `deploy/`).
+  Наружу торчит только gRPC-порт нод (`8444`, строгий mTLS); REST и панель
+  слушают `127.0.0.1`.
+- **игровые ноды** — по одной тачке на регион/ёмкость; вводятся с операторской
+  машины через `infra/add-node.sh` (ansible). На ноде нужен Docker + containerd.
+
+Требования:
+
+- **master-бокс**: Docker + Docker Compose v2 (`docker compose version`), доступ
+  наружу к порту `8444`, публичный IP.
+- **операторская машина** (откуда вводишь ноды): `git`, `ansible-core`,
+  `python3` + `PyYAML`, SSH-доступ к master-боксу и к нодам.
+- **нода**: Docker + containerd, SSH-доступ, открытые наружу игровые порты.
+
+> v1 self-host собирает master **из исходников** (`docker compose … --build`).
+> Публичного образа пока нет — образ `birdman-master` вкомпилирует панель через
+> `go:embed`, так что self-host получает продукт целиком (см. `master/Dockerfile`).
+
+---
+
+## 1. Master: поднять стек `deploy/`
+
+Всё — из каталога `deploy/` клона репозитория:
+
+```bash
+git clone <repo-url> birdman && cd birdman/deploy
+
+cp .env.example .env                                  # 1. задай POSTGRES_PASSWORD (не оставляй change-me)
+umask 077 && openssl rand -base64 32 > secrets.key    # 2. ключ шифрования секретов at-rest
+docker compose up -d --build                          # 3. собрать и запустить (postgres + master)
+docker compose logs master | grep 'bootstrap admin'   # 4. admin-ключ (bmk_…) — показан ОДИН раз, сохрани
+curl -s http://127.0.0.1:8100/healthz                 # 5. проверка: master отвечает (панель на том же адресе)
+```
+
+- **POSTGRES_PASSWORD** — без URL-спецсимволов (`/ @ # ? :`): пароль
+  подставляется в `postgres://`-DSN как есть (`deploy/.env.example`).
+- **admin-ключ** печатается один раз в лог старта (`bootstrap admin API key
+  created — store it now, it is shown exactly once`, поле `api_key`); префикс
+  `bmk_`, скоуп `admin`. Потеряешь — восстановление только через БД (деактивировать ключи в таблице api_keys → рестарт master ре-бутстрапит новый).
+- **Панель + REST** — `http://127.0.0.1:8100`, вход в панель по этому же
+  admin-ключу (или ключу со скоупом `readonly`). Порт опубликован **только на
+  `127.0.0.1`** master-бокса.
+
+**Наружу панель/REST — через reverse-proxy или SSH-туннель.** compose
+публикует `8100` на `127.0.0.1` намеренно; чтобы открыть панель админу, поставь
+перед ней reverse-proxy с TLS и аутентификацией, либо ходи туннелем:
+
+```bash
+ssh -L 8100:127.0.0.1:8100 <user>@<MASTER_PUB_IP>   # затем http://127.0.0.1:8100 у себя
+```
+
+**Два секрета self-host, оба git-ignored** (`deploy/.env`, `deploy/secrets.key`):
+
+- `secrets.key` — ключ шифрования секретов в БД at-rest. Потеря = секреты в БД
+  не расшифровать. **Эскроу-копию — в менеджер паролей** (`deploy/master.yaml`,
+  runbook восстановления: `docs/specs/ops.md §5`).
+- `.env` с паролем Postgres.
+
+Конфиг master — `deploy/master.yaml` (без секретов; DSN приезжает env-переменной
+`BIRDMAN_DSN` из compose). `agentlink_auth: mtls` включён с первого дня.
+
+---
+
+## 2. Первая нода: `infra/add-node.sh`
+
+На **операторской машине** (тот же клон):
+
+```bash
+cd birdman/infra
+cp inventories/dev/hosts.example.yml inventories/dev/hosts.local.yml
+```
+
+`hosts.local.yml` git-ignored — реальные IP/юзеры/ключи только в нём (конвенция
+self-host: доступы вне git). Открой файл и в группе `birdman_dev` пропиши хост
+`birdman-dev` = твой master-бокс (`ansible_host`, `ansible_user`,
+`ansible_ssh_private_key_file`).
+
+**Регистрация ноды идёт через master-бокс** (`delegate_to`): роль агента читает
+admin-ключ из файла `/etc/birdman/master-admin.key` на master-боксе и дёргает
+`POST /v1/nodes` на его же `127.0.0.1:8100`. Admin-ключ ноду не покидает. Значит
+на master-боксе нужно **положить admin-ключ в файл** (стек `deploy/` его туда не
+кладёт — он в логах compose):
+
+```bash
+# на master-боксе: вынь bmk_… из логов и сохрани 0600
+cd birdman/deploy && docker compose logs master | grep 'bootstrap admin'
+umask 077 && printf '%s' 'bmk_…' | sudo tee /etc/birdman/master-admin.key >/dev/null
+sudo chmod 600 /etc/birdman/master-admin.key
+```
+
+Дальше — два пути ввода ноды.
+
+### Путь A — прямой линк (рекомендуется для стека `deploy/`)
+
+Стек `deploy/` не поднимает наш WireGuard-оверлей, поэтому агент ходит на
+публичный `8444` master-бокса напрямую; публичный линк держит **строгий mTLS**
+(не-loopback `master_addr` ⇒ конфиг-гейт агента требует mTLS). Отключи оверлей
+на всём флоте — добавь в `hosts.local.yml` под `all: vars:` строку
+`birdman_use_overlay: false` (тогда хаб-плей становится no-op) и убери у
+`birdman-dev` строку `birdman_overlay_ip: 10.77.0.1`.
+
+Введи ноду:
+
+```bash
+./add-node.sh node-eu-1 203.0.113.7 \
+  --no-overlay --master-addr <MASTER_PUB_IP>:8444 \
+  --region eu --user root --key ~/.ssh/id_ed25519
+```
+
+Что делает скрипт: валидирует ввод, дописывает host-блок в `hosts.local.yml`
+(`birdman_use_overlay: false` + прямой `birdman_master_addr`), показывает diff,
+после подтверждения прогоняет `ansible-playbook playbooks/add-node.yml`. Агент
+поднимается демоном, регистрируется (`POST /v1/nodes` → одноразовый
+`node_token`, 0600, только на ноде), тянет CA мастера (`GET /v1/ca`) и заходит
+Enroll-by-token: обменивает `node_token` на клиентский mTLS-серт.
+
+Полезные флаги (`./add-node.sh -h`): `--port` (SSH-порт), `--slots`
+(дедиков на ноду, деф. 2), `--dry-run` (только напечатать блок, ничего не
+менять), `-y/--yes` (без подтверждения записи).
+
+```bash
+./add-node.sh node-eu-1 203.0.113.7 --no-overlay --master-addr 203.0.113.1:8444 --dry-run
+```
+
+### Путь B — через наш оверлей (внутренний дефолт birdman)
+
+Дефолт `add-node.sh` (без `--no-overlay`) назначает ноде overlay-IP
+`10.77.0.X` (X≥2) и направляет control-plane на хаб `10.77.0.1:8444`. Этот путь
+требует, чтобы на master-боксе **был поднят WireGuard-хаб** (изолированный
+оверлей birdman, `10.77.0.0/24`, UDP `51827`) — его ставит ansible-роль
+`birdman_overlay`, а не стек `deploy/`. Это конфигурация, в которой birdman
+работает у себя (несколько нод за оверлеем). Детали хаба/сноса —
+`infra/README.md` (раздел «Вторая+ нода»). Для свежего self-host на стеке
+`deploy/` бери Путь A.
+
+Проверка после ввода (в панели «Флот» или REST на master-боксе):
+
+```bash
+KEY=bmk_…   # admin-ключ
+curl -s http://127.0.0.1:8100/v1/nodes -H "Authorization: Bearer $KEY"   # нода видна сразу (state=active)
+```
+
+---
+
+## 3. Версия билда, флот и первый матч
+
+Все REST-вызовы — с admin-ключом на master-боксе (`127.0.0.1:8100`) или через
+туннель из §1. `KEY=bmk_…`.
+
+```bash
+# 1. зарегистрировать версию билда (образ игры)
+curl -s -X POST http://127.0.0.1:8100/v1/versions -H "Authorization: Bearer $KEY" \
+  -d '{"project":"game","semver":"1.0.0","image_ref":"ghcr.io/org/game:1.0.0","channel":"staging"}'
+
+# 2. включить warm pool региона (совпадает с --region ноды из §2)
+curl -s -X PUT http://127.0.0.1:8100/v1/fleets/eu -H "Authorization: Bearer $KEY" \
+  -d '{"project":"game","buffer_ready":2}'
+
+# 3. мягкий деплой версии: prepull образа всем нодам → атомарный флип в active
+curl -s -X POST http://127.0.0.1:8100/v1/deploy -H "Authorization: Bearer $KEY" \
+  -d '{"version_id":"<version_id из шага 1>"}'
+```
+
+> Образ игры нода тянет по кредам реестра, которые master раздаёт нодам
+> (`SetRegistries` по mTLS-линку; заводятся в панели, раздел «Реестры»).
+> `add-node.sh` пишет ноде `birdman_registry_legacy: false` — токена реестра на
+> ноде нет.
+
+После флипа reconcile создаёт `buffer_ready` дедиков на ноде; дождись, пока
+сервера станут `ready` (панель «Флот» или `GET /v1/servers`).
+
+**Первый матч — `mmcli`** (второй бинарь, собирается `./master/build.sh` →
+`master/dist/mmcli`; ключ со скоупом `matchmaking` или `admin`). `mmcli` заводит
+тикет, long-poll'ит его и печатает `host:port` при матче.
+
+⚠️ **Порядок флагов**: `--master`/`--key` — глобальные, идут **до** подкоманды
+`request`; `--player`/`--version`/`--region`/`--measure`/`--project`/`--timeout`
+— **после** `request`.
+
+```bash
+# rtt регионов задаёшь вручную (NAME:RTT_MS, повторяемо):
+mmcli --master http://127.0.0.1:8100 --key $KEY request \
+  --player p1 --version 1.0.0 --region eu:5
+# → JSON результата + строка "203.0.113.7:20001" при матче
+```
+
+Либо дать `mmcli` **измерить** rtt самому — UDP-пробы по `GET /v1/qos`
+(приёмочный замер; в проде rtt меряет клиент игры). С `--measure` регион можно
+не задавать:
+
+```bash
+mmcli --master http://127.0.0.1:8100 --key $KEY request \
+  --player p1 --version 1.0.0 --measure
+# опционально: --probes 5 --probe-timeout 700ms
+```
+
+Exit-коды `mmcli`: `0` — matched, `1` — иной терминальный статус/ошибка, `2` —
+usage. Два `mmcli request` с разными `--player` в одном регионе получают один
+`host:port` и `match_id` — это и есть первый матч.
+
+Прямая аллокация без матчмейкера (для интеграции своего бэкенда) —
+`POST /v1/allocate {project,region,match_id}` (идемпотентно по `match_id`,
+`409 no_capacity` при отсутствии ёмкости). Полный REST — `master/README.md`.
+
+---
+
+## 4. Наблюдаемость (опционально)
+
+Панель показывает графики/логи, если указать URL **своих** VictoriaMetrics /
+VictoriaLogs. Раскомментируй в `deploy/master.yaml`:
+
+```yaml
+metrics:
+  victoriametrics_url: "http://127.0.0.1:8428"
+  victorialogs_url: "http://127.0.0.1:9428"
+```
+
+Пусто → вкладки метрик/логов отвечают `503`, всё остальное работает.
+
+Референс стека мониторинга (VM + vmagent + vmalert + Grafana + бэкапы
+Postgres) — ansible-роль `infra/roles/birdman_monitoring_dev`
+(`infra/README.md`, раздел «Наблюдаемость + ops»). Нода может пушить метрики
+своего агента в центральный VM сайдкаром-vmagent (`birdman_node_vmagent: true`
+в host-блоке); свой VM — укажи `birdman_node_vm_remote_write_url: "http://<VM_HOST>:8428/api/v1/write"` там же (дефолт роли бьёт в наш оверлей-хаб).
+
+⚠️ **Третий шов v1 (честно):** `add-node.sh` пишет ноде `birdman_node_vmagent:
+true` и vector-сайдкар безусловно — если у тебя НЕТ VictoriaMetrics/VictoriaLogs
+(чистый deploy/-мастер), эти шипперы будут слать в пустоту (буферят, игре не
+мешают). Отключение: `birdman_node_vmagent: false` в host-блоке; vector-блок —
+убрать `birdman_vl_sink_url` некуда (шиппер поднимется, но сообщения останутся
+в диск-буфере) — вырезание vector целиком = прод-полировка.
+
+---
+
+## 5. Вывод ноды и снос
+
+**Дренаж ноды** (перестать класть новые матчи, дать текущим доиграть):
+
+```bash
+curl -s -X POST http://127.0.0.1:8100/v1/nodes/<node_id>/drain   -H "Authorization: Bearer $KEY"
+curl -s -X POST http://127.0.0.1:8100/v1/nodes/<node_id>/undrain -H "Authorization: Bearer $KEY"   # вернуть в строй
+```
+
+**Снос оверлея** (если Путь B — на КАЖДОМ боксе оверлея):
+
+```bash
+docker compose -f /opt/birdman/overlay/compose.yml down
+sudo rm -rf /etc/birdman/overlay /opt/birdman/overlay
+docker rmi birdman-overlay:local
+```
+
+UFW-правила оверлея (только на хабе): 4 правила с комментарием флота (`51827/udp`
+и `in on birdman-wg0`). Осознанный вывод ноды из оверлея — прогон add-node.yml с
+`-e birdman_overlay_allow_peer_removal=true` (иначе `-l`-гейт бережёт живой peer).
+
+**Снос master-стека** (удаляет БД ; bind-файлы .env/secrets.key остаются на диске — удали руками):
+
+```bash
+cd birdman/deploy && docker compose down -v    # -v сносит том Postgres и secrets
+```
+
+---
+
+## 6. Безопасность: что торчит наружу
+
+| Порт | Где | Наружу | Защита |
+|---|---|---|---|
+| `8444/tcp` | master-бокс | **да** | строгий mTLS (token-only Hello отвергается; Enroll-by-token → клиентский серт) |
+| `8100` | master-бокс | **нет** — только `127.0.0.1` | наружу лишь через reverse-proxy/туннель |
+| `20000–20050` tcp+udp | каждая нода | **да** | игровой трафик дедиков (UFW additive) |
+| `19999/udp` | каждая нода | **да** | QoS-echo (единственный внешне-открытый служебный порт ноды) |
+| `51827/udp` | хаб оверлея | да, если Путь B | WireGuard изолированного оверлея `10.77.0.0/24` |
+
+Секреты и где они живут:
+
+- **`secrets.key`** (master-бокс, `deploy/`, git-ignored, `0600`) — ключ
+  шифрования секретов в БД at-rest. **Эскроу-копию в менеджер паролей**; потеря =
+  секреты в БД не расшифровать.
+- **admin-ключ** (`bmk_…`, скоуп `admin`) — печатается один раз при старте.
+  Хранить как секрет; на master-боксе живёт в `/etc/birdman/master-admin.key`
+  (`0600`, для регистрации нод).
+- **`node_token`** — одноразовый, выдаётся `POST /v1/nodes`, живёт `0600` только
+  на ноде; агент обменивает его на клиентский mTLS-серт при первом коннекте.
+- **`POSTGRES_PASSWORD`** (`deploy/.env`, git-ignored).
+
+Всё остальное (overlay-адреса `10.77.0.0/24`, WG-порт `51827`, игровые
+`20000–20050`/`19999`) — не секреты: RFC1918 или публичные по дизайну.
+
+---
+
+**Дальше:** REST API целиком — `master/README.md`; устройство нод/ansible и
+оверлея — `infra/README.md`; операционка/бэкапы/restore — `docs/specs/ops.md`.
