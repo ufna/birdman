@@ -70,7 +70,7 @@ valid_ipv4 "$ip" || die "неверный формат IP: '$ip' (пример: 
 [[ "$slots" =~ ^[0-9]+$ ]] && [ "$slots" -ge 1 ] || die "слотов должно быть ≥1: '$slots'"
 if [ "$overlay" -eq 0 ]; then
   [ -n "$master_addr" ] || die "--no-overlay требует --master-addr <PUB_IP>:8444"
-  [[ "$master_addr" == *:* ]] || die "--master-addr в формате host:port (напр. 203.0.113.1:8444)"
+  [[ "$master_addr" =~ ^[^:[:space:]]+:[0-9]+$ ]] || die "--master-addr в формате host:port (напр. 203.0.113.1:8444)"
 fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -198,6 +198,10 @@ if ! ansible-inventory -i "$tmp" --list >/dev/null 2>"$tmp_dir/inv.err"; then
   sed 's/^/  /' "$tmp_dir/inv.err" >&2 || true
   die "ansible-inventory отверг результат вставки — файл не изменён"
 fi
+# членство, не только парсабельность: нода обязана оказаться хостом инвентаря
+# (деградировавшая структура группы может молча посадить блок мимо hosts:)
+ansible-inventory -i "$tmp" --host "$name" >/dev/null 2>&1 \
+  || die "нода '$name' не видна инвентарю после вставки — файл не изменён (сверься с hosts.example.yml)"
 
 printf '── diff (hosts.local.yml) ──\n'
 diff -u "$hosts_file" "$tmp" || true
