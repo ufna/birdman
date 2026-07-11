@@ -4,6 +4,7 @@
 //
 //	mmcli --master http://HOST:8100 --key KEY request \
 //	      --player p1 --version 1.0.0 --region eu:5 [--region us:80] \
+//	      [--measure [--probes 5] [--probe-timeout 700ms]] \
 //	      [--project game] [--timeout 120s]
 //
 // Exit codes: 0 matched, 1 any other terminal status or error, 2 bad usage.
@@ -58,7 +59,7 @@ func main() {
 }
 
 func usage(fs *flag.FlagSet) {
-	fmt.Fprintln(os.Stderr, "usage: mmcli --master URL --key KEY request --player P --version 1.0.0 --region NAME:RTT [--region ...] [--project SLUG] [--timeout 120s]")
+	fmt.Fprintln(os.Stderr, "usage: mmcli --master URL --key KEY request --player P --version 1.0.0 --region NAME:RTT [--region ...] [--measure [--probes 5] [--probe-timeout 700ms]] [--project SLUG] [--timeout 120s]")
 	if fs != nil {
 		fs.PrintDefaults()
 	}
@@ -91,15 +92,31 @@ func runRequest(master, key string, args []string) int {
 	timeout := fs.Duration("timeout", 120*time.Second, "overall wait for a match")
 	var regions regionFlags
 	fs.Var(&regions, "region", "region with measured rtt as NAME:RTT_MS (repeatable)")
+	measure := fs.Bool("measure", false, "measure region rtt via GET /v1/qos UDP echo probes")
+	probes := fs.Int("probes", 5, "probes per endpoint with --measure")
+	probeTimeout := fs.Duration("probe-timeout", 700*time.Millisecond, "per-probe echo timeout with --measure")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if *player == "" || *version == "" || len(regions) == 0 {
+	if *player == "" || *version == "" || (len(regions) == 0 && !*measure) {
 		usage(fs)
 		return 2
 	}
 
 	c := &client{base: strings.TrimRight(master, "/"), key: key}
+
+	if *measure {
+		measured, err := measureRegions(c, *probes, *probeTimeout)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "mmcli: measure:", err)
+			return 1
+		}
+		regions = regionFlags(mergeRegions(regions, measured))
+		if len(regions) == 0 {
+			fmt.Fprintln(os.Stderr, "mmcli: measure: ни один регион не ответил на пробы")
+			return 1
+		}
+	}
 
 	// 1. Create the ticket.
 	body := map[string]any{
