@@ -2,7 +2,12 @@
 # Добавление игровой ноды birdman «одной командой» (спека iter5 §4; форма
 # acceptance ops.md §108/§133):
 #   ansible-playbook playbooks/add-node.yml
-# Идемпотентен; следующая нода = host-блок в inventories/dev/hosts.yml + прогон.
+# Идемпотентен; следующая нода = host-блок в inventories/dev/hosts.local.yml
+# (из hosts.example.yml) + прогон. Проще всего — ./add-node.sh <имя> <ip>.
+#
+# self-host БЕЗ нашего оверлея: задай ноде birdman_use_overlay: false (или
+# -e) — overlay-роль и хаб-плей становятся no-op, агент идёт на master_addr
+# напрямую (строгий mTLS держит публичный линк).
 #
 # ⚠️ -l/--limit: хаб (birdman-dev) обязан попадать в лимит вместе с новой
 # нодой — конфиг хаба собирает peer-блоки из фактов нод ЭТОГО прогона;
