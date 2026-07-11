@@ -6,8 +6,8 @@
 #
 # Подключается первой таской hub-ветки up.yml (include_tasks со
 # when: birdman_overlay_mode == 'hub'), поэтому режим здесь не проверяется.
-# Приёмка — рендер-обвязка .superpowers/sdd/render-harness/render-guard.yml,
-# исполняющая ЭТОТ файл напрямую (реальный up.yml тянет compose/ufw).
+# Приёмка — локальная рендер-обвязка (вне репо), исполняющая ЭТОТ файл
+# напрямую (реальный up.yml тянет compose/ufw).
 - name: "Guard — read current hub config (файла может не быть: свежий хаб / staged)"
   ansible.builtin.slurp:
     src: "{{ birdman_overlay_conf_dir }}/wg.conf"
