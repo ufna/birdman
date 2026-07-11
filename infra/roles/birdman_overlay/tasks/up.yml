@@ -1,4 +1,11 @@
 ---
+# -l-guard: до рендера хаб-конфига падаем, если этот прогон молча выбил бы
+# из wg.conf живой peer (нода без pubkey-факта, чей /32 уже в конфиге).
+# Логика вынесена в guard.yml — исполняется рендер-обвязкой напрямую.
+- name: Guard against silently dropping live hub peers (-l-guard, только хаб)
+  ansible.builtin.include_tasks: guard.yml
+  when: birdman_overlay_mode == 'hub'
+
 - name: Render WireGuard config (peers/port; без секретов, но 0600 — defensive)
   ansible.builtin.template:
     src: wg.conf.j2

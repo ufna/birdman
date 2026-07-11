@@ -1,0 +1,47 @@
+---
+# -l-guard (спека followups §4): прогон без pubkey-факта ноды, чей peer УЖЕ
+# живёт в конфиге хаба, молча выбил бы её из control-plane — шаблон рендерит
+# «peer пропущен» вместо [Peer]-блока (wg.conf.j2). Свежий хаб и staged-прогон
+# до ввода нод легальны: файла нет / нужного /32 в нём ещё нет.
+#
+# Подключается первой таской hub-ветки up.yml (include_tasks со
+# when: birdman_overlay_mode == 'hub'), поэтому режим здесь не проверяется.
+# Приёмка — рендер-обвязка .superpowers/sdd/render-harness/render-guard.yml,
+# исполняющая ЭТОТ файл напрямую (реальный up.yml тянет compose/ufw).
+- name: "Guard — read current hub config (файла может не быть: свежий хаб / staged)"
+  ansible.builtin.slurp:
+    src: "{{ birdman_overlay_conf_dir }}/wg.conf"
+  register: birdman_overlay_cur_conf
+  failed_when: false
+
+- name: Guard — decode current hub config to text ('' если файла нет)
+  ansible.builtin.set_fact:
+    birdman_overlay_cur_conf_text: "{{ (birdman_overlay_cur_conf.content | b64decode) if (birdman_overlay_cur_conf.content is defined) else '' }}"
+    birdman_overlay_dropped_peers: []
+
+# dropped = ноды birdman_nodes без pubkey-факта (вне этого прогона), чей /32
+# уже стоит в живом wg.conf. Аккумулятор по циклу вместо хрупкой jinja-цепочки:
+# каждый when-match дописывает ноду в список (порядок условий = short-circuit).
+- name: Guard — collect live peers this run would silently drop
+  ansible.builtin.set_fact:
+    birdman_overlay_dropped_peers: "{{ birdman_overlay_dropped_peers + [item] }}"
+  loop: "{{ groups['birdman_nodes'] | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  when:
+    - hostvars[item].birdman_overlay_pubkey is not defined
+    - hostvars[item].birdman_overlay_ip is defined
+    - (hostvars[item].birdman_overlay_ip ~ '/32') in birdman_overlay_cur_conf_text
+
+- name: Guard — assert no live peer is silently dropped from hub config
+  ansible.builtin.assert:
+    that: >-
+      (birdman_overlay_dropped_peers | length == 0)
+      or (birdman_overlay_allow_peer_removal | default(false) | bool)
+    fail_msg: >-
+      Прогон удалил бы живые peers из конфига хаба:
+      {{ birdman_overlay_dropped_peers | join(', ') }}.
+      Включи эти ноды в прогон (без -l или полным списком) либо подтверди
+      осознанный вывод ноды: -e birdman_overlay_allow_peer_removal=true
+    success_msg: "Guard OK — живые peers конфига хаба сохранены."
+    quiet: true
