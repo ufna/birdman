@@ -270,46 +270,79 @@ func TestReconcileRespectsMaxServers(t *testing.T) {
 	}
 }
 
-// First-fit: the node with more used slots receives the new server (dense
-// packing, docs/specs/master.md §2).
-func TestReconcileFirstFitDensePacking(t *testing.T) {
+// Спред с follow-ups итерации 5 (анти-аффинити, спека §1) сделал наименее
+// занятую ноду первой — bin-pack (busier-node-first) отменён (см.
+// TestReconcilePlacementSpreads). Здесь фиксируем комплементарную клаузу
+// u.used < capacity_slots: нода на ПОЛНОЙ ёмкости исключается из размещения,
+// даже когда спред предпочёл бы её (у неё меньше used) — буфер уходит на ноду
+// со свободным слотом (раньше это была часть 2 dense-packing-теста).
+func TestReconcilePlacementSkipsFullNode(t *testing.T) {
 	st := testdb.New(t)
-	f := testdb.Seed(t, st, "eu", 10)
-	nodeB := f.AddNode(t, "node-2", "203.0.113.11", 10)
-	// node-1 is busier: two allocated servers.
+	f := testdb.Seed(t, st, "eu", 2)                    // node A, capacity 2
+	nodeB := f.AddNode(t, "node-2", "203.0.113.11", 10) // node B, capacity 10
+	// node A is full (2/2) and, by used count, the spread-preferred node;
+	// node B carries more (3 used) but still has free slots.
 	f.InsertServer(t, f.NodeID, f.VersionID, "allocated", 20001, 0)
 	f.InsertServer(t, f.NodeID, f.VersionID, "allocated", 20002, 0)
-	f.UpsertFleet(t, 1, 50)
+	f.InsertServer(t, nodeB, f.VersionID, "allocated", 20003, 0)
+	f.InsertServer(t, nodeB, f.VersionID, "allocated", 20004, 0)
+	f.InsertServer(t, nodeB, f.VersionID, "allocated", 20005, 0)
+	f.UpsertFleet(t, 2, 50)
 	r, sender := newReconciler(st)
 
 	if err := r.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	cmds := sender.take()
-	if len(cmds) != 1 || cmds[0].Msg.GetStart() == nil {
-		t.Fatalf("want 1 StartServer, got %+v", cmds)
+	starts := map[string]int{}
+	for _, c := range sender.take() {
+		if c.Msg.GetStart() != nil {
+			starts[c.NodeID]++
+		}
 	}
-	if cmds[0].NodeID != f.NodeID {
-		t.Fatalf("dense packing: want busier node %s, got %s (empty %s)", f.NodeID, cmds[0].NodeID, nodeB)
+	// The full node A (used=2=capacity) is excluded even though spread would
+	// pick it first; both buffer servers land on node B.
+	if starts[nodeB] != 2 || starts[f.NodeID] != 0 {
+		t.Fatalf("full node A must be skipped, buffer must land on node B, got %+v", starts)
+	}
+}
+
+// TestReconcilePlacementSpreads: анти-аффинити размещения буфера (спека
+// follow-ups итерации 5 §1). Два активных узла региона (по 2 слота).
+// buffer_ready=2 → по одному creating на каждом узле (спред), а не 2+0 на
+// одном: смерть любого узла теряет минимум ready. buffer_ready=3 → третий
+// слот идёт на менее занятый узел (2+1), но заведомо не 3+0.
+func TestReconcilePlacementSpreads(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 2)                   // node A, capacity 2
+	nodeB := f.AddNode(t, "node-2", "203.0.113.11", 2) // node B, capacity 2
+	f.UpsertFleet(t, 2, 4)                             // buffer 2, max 4
+	r, _ := newReconciler(st)
+	ctx := context.Background()
+
+	// buffer 2 over two empty nodes → one warm server on each (anti-affinity),
+	// never 2+0 on a single node.
+	if err := r.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if per := placedPerNode(t, f); per[f.NodeID] != 1 || per[nodeB] != 1 {
+		t.Fatalf("buffer 2 must spread 1+1 across nodes, got %+v", per)
 	}
 
-	// Fill node-1 to capacity → next servers go to node-2.
-	for i := 0; i < 7; i++ {
-		f.InsertServer(t, f.NodeID, f.VersionID, "allocated", int32(20100+i), 0)
-	}
-	buffer := int32(2)
-	if _, err := st.UpsertFleet(context.Background(), store.UpsertFleetParams{
-		Project: f.Project, Region: f.Region, ActiveVersion: &f.VersionID, BufferReady: &buffer,
-	}); err != nil {
+	// Grow the buffer to 3: the extra server lands on the less-busy node →
+	// 2+1, never 3+0 (and each node caps at 2 slots anyway).
+	f.UpsertFleet(t, 3, 4)
+	if err := r.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.RunOnce(context.Background()); err != nil {
-		t.Fatal(err)
+	per := placedPerNode(t, f)
+	if per[f.NodeID]+per[nodeB] != 3 {
+		t.Fatalf("buffer 3 must place 3 warm servers, got %+v", per)
 	}
-	for _, c := range sender.take() {
-		if c.Msg.GetStart() != nil && c.NodeID != nodeB {
-			t.Fatalf("full node must overflow to node-2, got %s", c.NodeID)
-		}
+	if per[f.NodeID] == 3 || per[nodeB] == 3 {
+		t.Fatalf("buffer must not pile 3+0 on one node, got %+v", per)
+	}
+	if per[f.NodeID] < 1 || per[nodeB] < 1 {
+		t.Fatalf("both nodes must carry buffer, got %+v", per)
 	}
 }
 
@@ -834,4 +867,28 @@ func nodeState(t *testing.T, st *store.Store, nodeID string) string {
 		t.Fatal(err)
 	}
 	return state
+}
+
+// placedPerNode counts warm-pool servers (creating+ready) per node for the
+// fixture project — the buffer's physical spread across the region.
+func placedPerNode(t *testing.T, f *testdb.Fixture) map[string]int {
+	t.Helper()
+	rows, err := f.St.Pool.Query(context.Background(), `
+		select s.node_id::text, count(*)::int from servers s
+		join projects p on p.id = s.project_id
+		where p.slug = $1 and s.state in ('creating','ready') group by 1`, f.Project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var node string
+		var n int
+		if err := rows.Scan(&node, &n); err != nil {
+			t.Fatal(err)
+		}
+		out[node] = n
+	}
+	return out
 }
