@@ -41,3 +41,9 @@ birdman_overlay_container: birdman-overlay
 
 # Комментарий UFW-правил хаба — по нему находим/сносим свои правила.
 birdman_ufw_comment: birdman-dev
+
+# Подтверждение осознанного удаления peer'а из конфига хаба (вывод ноды):
+# без него прогон, в котором нода есть в существующем wg.conf, но нет её
+# pubkey-факта (-l без этой ноды), падает assert'ом (tasks/guard.yml, спека
+# followups §4). true → guard пропускает удаление живого peer'а.
+birdman_overlay_allow_peer_removal: false

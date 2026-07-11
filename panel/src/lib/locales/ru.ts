@@ -91,6 +91,7 @@ export const ru: Record<MessageKey, string> = {
   'state.node.active': 'Активна',
   'state.node.draining': 'Опустошается',
   'state.node.quarantine': 'Карантин',
+  'state.node.down': 'Недоступна',
   'state.node.dead': 'Мертва',
   'state.server.creating': 'Создаётся',
   'state.server.ready': 'Готов',
@@ -111,6 +112,7 @@ export const ru: Record<MessageKey, string> = {
   // — подписи видов событий (сырой код — в title бейджа; неизвестный → код) —
   'event.node_created': 'Тачка зарегистрирована',
   'event.node_quarantine': 'Тачка в карантине',
+  'event.node_down': 'Тачка недоступна',
   'event.node_recovered': 'Тачка восстановлена',
   'event.node_drain': 'Тачка опустошается',
   'event.node_undrain': 'Тачка возвращена',
@@ -279,6 +281,7 @@ export const ru: Record<MessageKey, string> = {
   'ov.noReady': 'нет ready-дедиков',
   'ov.nodes': 'Тачки',
   'ov.inQuarantine': '{count} в карантине',
+  'ov.down': '{count} недоступн.',
   'ov.allActive': 'все активны',
   'ov.fleetVersion': 'Версия флита',
   'ov.noLiveDedics': 'нет живых дедиков',

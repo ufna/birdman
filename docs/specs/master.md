@@ -23,7 +23,7 @@ create table nodes (
   capacity_slots    int  not null,
   agent_version     text not null default '',
   state             text not null default 'active'
-                    check (state in ('active','draining','quarantine','dead')),
+                    check (state in ('active','draining','quarantine','down','dead')),
   last_heartbeat_at timestamptz,
   labels            jsonb not null default '{}',
   token_hash        text not null default '',  -- bcrypt node_token (v1: recovery-кред, обмен на серт реализован)
@@ -133,14 +133,16 @@ desired  = fleet_configs (active_version + версии в окне мульти
 observed = servers where state in (creating, ready) group by version
 for each version в окне:
   deficit = buffer - count(creating+ready) → создать deficit серверов:
-      node = first-fit: active-нода региона с максимумом занятых слотов,
-             где free_slots > 0 и heartbeat свежий            -- плотная упаковка
+      node = спред: наименее занятая active-нода региона первой,
+             где free_slots > 0 и heartbeat свежий            -- анти-аффинити
       insert servers(state='creating') + команда агенту StartServer
   surplus (только у deprecated-версий или при buffer↓) → reap старейших ready
 failed-сервера: слот освобождается сам (insert нового сделает дефицит)
 crash-loop: ≥3 failed одной версии на одной тачке за 10 мин → стоп созданий
             этой пары (version,node) на 15 мин + event crash_loop
 ```
+
+**Размещение буфера — анти-аффинити (follow-ups итерации 5 §1):** дефицит раскладывается на наименее занятые active-ноды региона первыми (`order by used asc`), растягивая warm-буфер по железу; нода на полной ёмкости (`used = capacity_slots`) из размещения исключается вовсе. Плотная упаковка (bin-pack, busier-node-first) **отвергнута учением 5.2** — спред снижает blast-radius отказа одной ноды (buffer_ready=2 над двумя пустыми нодами → 1+1, а не 2+0).
 
 Создание сервера — это команда агенту; переход `creating → ready` делает только heartbeat от агента (после `ready` от liba). (Уточнено в v0: `creating` без прогресса от агента дольше 120с → `failed` + событие — самолечение после потери StartServer/рестарта master; репорт `pulling` от агента обновляет `updated_at` и таймер не срабатывает.)
 

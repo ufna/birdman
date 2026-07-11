@@ -173,6 +173,24 @@ func (h *Hub) PendingCount(nodeID string) int {
 	return 0
 }
 
+// PendingCounts snapshots unacked-queue depths per node for the
+// birdman_agentlink_pending_commands gauge (followups §3). Read on every
+// scrape via the wired callback (main.go). Nodes with an empty queue are
+// OMITTED — the metric emits only "there is something stuck", so a clean fleet
+// produces no series at all and the AgentlinkPendingStuck alert
+// (pending>0 held for `for:`) stays absent-safe.
+func (h *Hub) PendingCounts() map[string]int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make(map[string]int)
+	for id, q := range h.queues {
+		if len(q.pending) > 0 {
+			out[id] = len(q.pending)
+		}
+	}
+	return out
+}
+
 // attach registers a new session for the node, replacing (and terminating)
 // any previous one, and replays all pending commands into it. If preface is
 // non-nil (built by the caller from a fresh store.ListRegistryCreds read) it

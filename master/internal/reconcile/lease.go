@@ -11,15 +11,20 @@ import (
 // LeaseChecker enforces node liveness (docs/specs/protocol.md §1 Lease):
 // heartbeat older than 10s → quarantine (excluded from allocation and
 // placement); 20s more of silence → the node's servers become failed and the
-// buffer is re-created on live nodes. A returning heartbeat flips the node
-// back to active (handled in store.ApplyHeartbeat).
+// buffer is re-created on live nodes; third step — a node quarantined for
+// downAfter (node_down_after_min, итерация 5 follow-up) → down + node_down,
+// so operators/alerts tell a blip from a long outage. down self-heals: a
+// heartbeat of a live agent session flips the node back to active from
+// quarantine or down (handled in store.ApplyHeartbeat). 'dead' — the manual
+// revocation terminal — is never set here.
 type LeaseChecker struct {
-	st  *store.Store
-	log *slog.Logger
+	st        *store.Store
+	log       *slog.Logger
+	downAfter time.Duration
 }
 
-func NewLeaseChecker(st *store.Store, log *slog.Logger) *LeaseChecker {
-	return &LeaseChecker{st: st, log: log}
+func NewLeaseChecker(st *store.Store, log *slog.Logger, downAfter time.Duration) *LeaseChecker {
+	return &LeaseChecker{st: st, log: log, downAfter: downAfter}
 }
 
 func (l *LeaseChecker) Run(ctx context.Context, interval time.Duration) {
@@ -47,6 +52,11 @@ func (l *LeaseChecker) RunOnce(ctx context.Context) error {
 		return err
 	} else if n > 0 {
 		l.log.Warn("lease: servers failed on silent nodes", "count", n)
+	}
+	if n, err := l.st.MarkDownNodes(ctx, l.downAfter); err != nil {
+		return err
+	} else if n > 0 {
+		l.log.Warn("lease: nodes marked down (long silence)", "count", n)
 	}
 	return nil
 }

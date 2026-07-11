@@ -75,7 +75,8 @@ func (s *Store) DeprecatedWindowVersion(ctx context.Context, projectID string) (
 // per version:
 //
 //	deficit  = target - count(creating+ready of version)  → insert
-//	           servers(creating) on first-fit nodes (densest packing);
+//	           servers(creating) spread onto the least-busy nodes first
+//	           (anti-affinity, follow-ups итерации 5 §1);
 //	surplus  = ready of version beyond target             → draining + stop.
 //
 // Versions outside the window (registered/disabled/older): ready → draining +
@@ -167,6 +168,10 @@ func (s *Store) PlanFleet(ctx context.Context, f FleetConfig, dep *Version, paus
 		}
 		for range deficit {
 			var nodeID string
+			// Наименее занятая нода первой — спред буфера по региону
+			// (анти-аффинити): смерть любой ноды теряет минимум ready.
+			// Bin-pack (used desc) отвергнут учением 5.2 D5 — смерть «полной»
+			// ноды мигрировала весь буфер разом.
 			err := tx.QueryRow(ctx, `
 				select n.id::text
 				from nodes n
@@ -179,7 +184,7 @@ func (s *Store) PlanFleet(ctx context.Context, f FleetConfig, dep *Version, paus
 				  and n.last_heartbeat_at > now() - interval '10 seconds'
 				  and u.used < n.capacity_slots
 				  and not (n.id::text = any($3::text[]))
-				order by u.used desc, n.created_at
+				order by u.used asc, n.created_at
 				limit 1`,
 				f.ProjectID, f.Region, paused).Scan(&nodeID)
 			if errors.Is(err, pgx.ErrNoRows) {

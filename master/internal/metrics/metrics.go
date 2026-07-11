@@ -53,6 +53,19 @@ func (m *Metrics) WireAgentlinkSessions(f func() (mtls, token int)) {
 	m.agentlink.sessions.Store(&f)
 }
 
+// WireAgentlinkPendingCommands connects the
+// birdman_agentlink_pending_commands{node,node_id} gauge to the hub's
+// per-node unacked-queue depths (Hub.PendingCounts, keyed by node_id; the
+// collector resolves each id to the node's hostname for the node label on
+// scrape). Until wired the gauge emits nothing; once wired it emits ONE
+// sample per node that currently has a non-empty queue and NOTHING for the
+// rest — a clean fleet produces no series, which is what keeps the
+// AgentlinkPendingStuck alert (pending>0 held for `for:`) absent-safe
+// (followups §3, ревизия).
+func (m *Metrics) WireAgentlinkPendingCommands(f func() map[string]int) {
+	m.agentlink.pending.Store(&f)
+}
+
 // WireTLSServerCertExpiry connects the
 // birdman_tls_cert_expiry_timestamp_seconds{cert="server"} sample to the
 // in-memory server-leaf holder (main.go). The callback returns ok=false when
@@ -150,6 +163,22 @@ var (
 		"birdman_agentlink_sessions",
 		"Live agentlink sessions by auth (mtls: verified client cert; token: node_token). token==0 signals readiness for the mtls flip.",
 		[]string{"auth"}, nil)
+	// birdman_agentlink_pending_commands{node,node_id} — unacked master→agent
+	// commands still queued for a node (followups §3, ревизия). node = the
+	// node's hostname (stack convention — heartbeat/cert-expiry gauges above
+	// use hostname too, so rules and dashboards join nodes on one label),
+	// resolved from the hub's node_id key on scrape; when the id no longer
+	// resolves (node row deleted, queue still alive) node falls back to the
+	// uuid — the alert stays absent-safe, never blind. node_id = the exact
+	// uuid: precise identification, and it keeps labelsets unique (Gather
+	// would fail on duplicates) should two hostnames ever collide. Only nodes
+	// with pending>0 emit a sample; a drained queue produces NO series (never
+	// a 0), so AgentlinkPendingStuck (pending>0 held for `for:`) resets via
+	// staleness on drain.
+	agentlinkPendingDesc = prometheus.NewDesc(
+		"birdman_agentlink_pending_commands",
+		"Unacked master→agent commands queued per node (node=hostname, node_id=uuid; only nodes with a non-empty queue are reported; a drained queue emits no series).",
+		[]string{"node", "node_id"}, nil)
 	tlsCertExpiryDesc = prometheus.NewDesc(
 		"birdman_tls_cert_expiry_timestamp_seconds",
 		"Unix time when the given TLS cert expires (ca: newest active internal CA — the signer; server: current gRPC server leaf).",
@@ -166,19 +195,65 @@ type agentlinkCollector struct {
 	st         *store.Store
 	log        *slog.Logger
 	sessions   atomic.Pointer[func() (mtls, token int)]
+	pending    atomic.Pointer[func() map[string]int]
 	serverCert atomic.Pointer[func() (time.Time, bool)]
 }
 
 func (c *agentlinkCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- agentlinkSessionsDesc
+	ch <- agentlinkPendingDesc
 	ch <- tlsCertExpiryDesc
 }
 
 func (c *agentlinkCollector) Collect(ch chan<- prometheus.Metric) {
+	// One scrape-scoped DB budget for the whole collector (pending hostnames
+	// below + CA expiry at the bottom) — same 3s discipline as dbCollector.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
 	if f := c.sessions.Load(); f != nil {
 		mtls, token := (*f)()
 		ch <- prometheus.MustNewConstMetric(agentlinkSessionsDesc, prometheus.GaugeValue, float64(mtls), "mtls")
 		ch <- prometheus.MustNewConstMetric(agentlinkSessionsDesc, prometheus.GaugeValue, float64(token), "token")
+	}
+	// Pending-queue depths per node (followups §3, ревизия): the callback
+	// already returns ONLY nodes with a non-empty queue (keyed by node_id), so
+	// a clean fleet emits nothing — and costs zero extra queries. Otherwise
+	// one query resolves ids to hostnames for the node label (stack
+	// convention); an id that misses (node row deleted, queue still alive) or
+	// a failed query falls back to node=<uuid> — absent-safe, never blind.
+	if f := c.pending.Load(); f != nil {
+		if counts := (*f)(); len(counts) > 0 {
+			ids := make([]string, 0, len(counts))
+			for id := range counts {
+				ids = append(ids, id)
+			}
+			hostnames := make(map[string]string, len(ids))
+			if prows, err := c.st.Pool.Query(ctx, `
+				select id::text, hostname from nodes where id = any($1::uuid[])`, ids); err != nil {
+				c.log.Error("metrics: pending-commands hostname query failed", "err", err)
+			} else {
+				for prows.Next() {
+					var id, hostname string
+					if err := prows.Scan(&id, &hostname); err != nil {
+						c.log.Error("metrics: pending-commands hostname scan failed", "err", err)
+						break
+					}
+					hostnames[id] = hostname
+				}
+				prows.Close()
+				if err := prows.Err(); err != nil {
+					c.log.Error("metrics: pending-commands hostname rows failed", "err", err)
+				}
+			}
+			for id, n := range counts {
+				node, ok := hostnames[id]
+				if !ok {
+					node = id
+				}
+				ch <- prometheus.MustNewConstMetric(agentlinkPendingDesc, prometheus.GaugeValue, float64(n), node, id)
+			}
+		}
 	}
 	if f := c.serverCert.Load(); f != nil {
 		if notAfter, ok := (*f)(); ok {
@@ -190,8 +265,6 @@ func (c *agentlinkCollector) Collect(ch chan<- prometheus.Metric) {
 	// CA expiry: the newest active row is the signer (same choice as
 	// store.loadActiveCA). No row yet (first boot hasn't ensured the CA) —
 	// emit nothing.
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
 	var caExpiry float64
 	err := c.st.Pool.QueryRow(ctx, `
 		select extract(epoch from not_after) from internal_ca

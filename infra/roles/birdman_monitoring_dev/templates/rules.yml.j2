@@ -19,6 +19,22 @@ groups:
 
           description: 'Нода молчит > порога; сработал карантин (ops.md §1 NodeDown).'
 
+      # Очередь agentlink не пустеет: pending>0 держится дольше
+      # {{ birdman_pending_stuck_for }} при живом линке — Ack/реплей опустошают
+      # её за секунды, значит нода залипла или команда отвергается. Метрика
+      # эмитится только при pending>0: при дренаже серия исчезает (staleness),
+      # expr перестаёт матчиться и pending-состояние алерта сбрасывается —
+      # нет серии = нет алерта (absent-безопасно).
+      - alert: AgentlinkPendingStuck
+        expr: birdman_agentlink_pending_commands > 0
+        for: {{ birdman_pending_stuck_for }}
+        labels:
+          severity: warning
+        annotations:
+          summary: {% raw %}'AgentlinkPendingStuck: node {{ $labels.node }} держит {{ $value }} unacked-команд дольше порога'{% endraw %}
+
+          description: 'Очередь команд master→agent не пустеет (спека followups §3).'
+
       # BufferEmpty (1/2): ready-буфер региона опустел и держится.
       # ВНИМАНИЕ: если master перестаёт экспортировать ready-серию региона
       # (0 серий вместо явного 0), sum by(region) не вернёт 0 — на этот случай

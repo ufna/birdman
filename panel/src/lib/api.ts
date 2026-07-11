@@ -17,7 +17,7 @@ export interface NodeInfo {
   public_ip: string;
   capacity_slots: number;
   agent_version: string;
-  state: 'active' | 'draining' | 'quarantine' | 'dead';
+  state: 'active' | 'draining' | 'quarantine' | 'down' | 'dead';
   last_heartbeat_at?: string;
   created_at: string;
 }

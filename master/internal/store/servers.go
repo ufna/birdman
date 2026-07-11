@@ -207,3 +207,48 @@ func (s *Store) FailQuarantinedServers(ctx context.Context) (int, error) {
 	}
 	return len(failed), nil
 }
+
+// MarkDownNodes moves long-silent quarantined nodes to 'down'
+// (node_down_after_min, спека followups §2 РЕВИЗИЯ): оператор отличает
+// «моргнула» (quarantine) от «лежит давно» (down). Deliberately NOT 'dead':
+// dead — ручная терминальная ревокация (agentlink отказывает dead-ноде во
+// всех auth-режимах), авто-dead запер бы ноду навсегда после любого аутажа
+// дольше порога. down self-heals — heartbeat живой mTLS-сессии поднимает
+// down → active (touchNode) с node_recovered.
+func (s *Store) MarkDownNodes(ctx context.Context, silentFor time.Duration) (int, error) {
+	rows, err := s.Pool.Query(ctx, `
+		update nodes n set state = 'down'
+		where n.state = 'quarantine'
+		  and n.last_heartbeat_at < now() - $1::interval
+		returning n.id::text, n.hostname,
+		          extract(epoch from now() - n.last_heartbeat_at)::int`,
+		fmt.Sprintf("%d milliseconds", silentFor.Milliseconds()))
+	if err != nil {
+		return 0, err
+	}
+	type ref struct {
+		id, hostname string
+		silentS      int
+	}
+	var downs []ref
+	for rows.Next() {
+		var r ref
+		if err := rows.Scan(&r.id, &r.hostname, &r.silentS); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		downs = append(downs, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	for _, r := range downs {
+		if err := insertEvent(ctx, s.Pool, EventNodeDown,
+			EventRef{NodeID: &r.id},
+			map[string]any{"hostname": r.hostname, "silent_for_s": r.silentS}); err != nil {
+			return 0, err
+		}
+	}
+	return len(downs), nil
+}

@@ -89,6 +89,7 @@ type ServerReport struct {
 const (
 	EventNodeCreated       = "node_created"
 	EventNodeQuarantine    = "node_quarantine"
+	EventNodeDown          = "node_down" // quarantine дольше node_down_after_min → down (итерация 5 follow-up; dead = ручная ревокация, не отсюда)
 	EventNodeRecovered     = "node_recovered"
 	EventNodeDrain         = "node_drain"   // admin drained a node (итерация 4)
 	EventNodeUndrain       = "node_undrain" // admin lifted a node drain (итерация 4)

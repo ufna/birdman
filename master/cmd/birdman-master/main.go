@@ -201,6 +201,10 @@ func run() error {
 	// the served leaf's expiry — external certs work too: since Go 1.23
 	// LoadX509KeyPair populates Leaf, and issueServerLeaf always does.
 	m.WireAgentlinkSessions(hub.SessionAuthCounts)
+	// Per-node unacked-command depth (followups §3): feeds
+	// birdman_agentlink_pending_commands{node,node_id} and the AgentlinkPendingStuck
+	// alert — a SetRegistries (or any command) that never drains becomes visible.
+	m.WireAgentlinkPendingCommands(hub.PendingCounts)
 	m.WireTLSServerCertExpiry(func() (time.Time, bool) {
 		if c := holder.get(); c != nil && c.Leaf != nil {
 			return c.Leaf.NotAfter, true
@@ -253,7 +257,7 @@ func run() error {
 		go holder.rotateLoop(loopCtx, caCertPEM, caKeyPEM, hostname, cfg.TLS.ExtraSANs, log)
 	}
 	go reconcile.New(st, hub, log).Run(loopCtx, time.Second)
-	go reconcile.NewLeaseChecker(st, log).Run(loopCtx, time.Second)
+	go reconcile.NewLeaseChecker(st, log, time.Duration(cfg.NodeDownAfterMin)*time.Minute).Run(loopCtx, time.Second)
 	go mm.Run(loopCtx)
 	// statsrollup's startup Backfill runs inside this goroutine and
 	// deliberately does not block API/gRPC serving from starting -- stats
