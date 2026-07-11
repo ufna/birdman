@@ -240,7 +240,7 @@ metrics:
 Postgres) — ansible-роль `infra/roles/birdman_monitoring_dev`
 (`infra/README.md`, раздел «Наблюдаемость + ops»). Нода может пушить метрики
 своего агента в центральный VM сайдкаром-vmagent (`birdman_node_vmagent: true`
-в host-блоке).
+в host-блоке); свой VM — укажи `birdman_node_vm_remote_write_url: "http://<VM_HOST>:8428/api/v1/write"` там же (дефолт роли бьёт в наш оверлей-хаб).
 
 ⚠️ **Третий шов v1 (честно):** `add-node.sh` пишет ноде `birdman_node_vmagent:
 true` и vector-сайдкар безусловно — если у тебя НЕТ VictoriaMetrics/VictoriaLogs
@@ -272,7 +272,7 @@ UFW-правила оверлея (только на хабе): 4 правила
 и `in on birdman-wg0`). Осознанный вывод ноды из оверлея — прогон add-node.yml с
 `-e birdman_overlay_allow_peer_removal=true` (иначе `-l`-гейт бережёт живой peer).
 
-**Снос master-стека** (удаляет БД и secrets-том):
+**Снос master-стека** (удаляет БД ; bind-файлы .env/secrets.key остаются на диске — удали руками):
 
 ```bash
 cd birdman/deploy && docker compose down -v    # -v сносит том Postgres и secrets

@@ -129,7 +129,7 @@ for gv in children.values():
             used_ips.add(str(oip))
 
 if name in names:
-    die("нода '%s' уже существует в hosts.local.yml" % name, 3)
+    die("нода '%s' уже существует в hosts.local.yml — для повторного прогона: ansible-playbook playbooks/add-node.yml" % name, 3)
 
 overlay_ip = None
 if overlay:

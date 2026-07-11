@@ -22,5 +22,5 @@ docker compose logs master | grep 'bootstrap admin'   # 4. admin-ключ (bmk_�
 
 ## Снос
 ```bash
-docker compose down -v    # -v удаляет ВСЁ, включая том Postgres (базу) и secrets-том
+docker compose down -v    # -v удаляет ВСЁ, включая том Postgres (базу); bind-файлы .env/secrets.key остаются на диске — удали руками
 ```
