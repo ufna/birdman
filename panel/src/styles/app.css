@@ -199,6 +199,9 @@ body {
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
 ::-webkit-scrollbar-thumb {
   background: var(--scrollbar-thumb);
   border-radius: 8px;
@@ -216,11 +219,16 @@ body {
   background-clip: padding-box;
 }
 
-/* Firefox / стандарт. */
-* {
-  scrollbar-width: thin;
-  scrollbar-color: var(--scrollbar-thumb) transparent;
-}
-*:hover {
-  scrollbar-color: var(--scrollbar-thumb-hover) transparent;
+/* Стандартные свойства — только там, где НЕТ webkit-псевдо (Chromium≥121 /
+ * Safari≥18.2 глушат ::-webkit-scrollbar-* при не-auto scrollbar-*): Firefox
+ * не парсит webkit-селектор в @supports → идёт сюда; Chrome/Safari парсят →
+ * пропускают этот блок и оставляют webkit-капсулу выше. */
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) transparent;
+  }
+  *:hover {
+    scrollbar-color: var(--scrollbar-thumb-hover) transparent;
+  }
 }
