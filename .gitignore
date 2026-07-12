@@ -14,3 +14,6 @@ deploy/secrets.key
 # доступы — только локально; в репо живут hosts.example.yml + STATUS-алиасы.
 infra/inventories/dev/hosts.local.yml
 docs/ACCESS.local.md
+# Процессные доки superpowers переехали в приватный спутник (birdman-internal) —
+# защита от случайного трека в публичный репо.
+docs/superpowers/

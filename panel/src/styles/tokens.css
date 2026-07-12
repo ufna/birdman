@@ -30,6 +30,8 @@
   --dead: #b3402e;
   --dead-bg: #f7e4e0;
   --mark: #fff3ec; /* акцентная подложка (active nav, allocated) */
+  --scrollbar-thumb: color-mix(in srgb, var(--muted) 22%, transparent); /* скроллбар: покой (почти невидим) */
+  --scrollbar-thumb-hover: color-mix(in srgb, var(--muted) 55%, transparent); /* скроллбар: hover-reveal */
   --cat-1: #2a78d6;
   --cat-2: #1baf7a;
   --cat-3: #4a3aa7;
@@ -57,6 +59,8 @@
     --dead: #e58270;
     --dead-bg: #3a211c;
     --mark: #33231a;
+    --scrollbar-thumb: color-mix(in srgb, var(--muted) 22%, transparent);
+    --scrollbar-thumb-hover: color-mix(in srgb, var(--muted) 55%, transparent);
     --cat-1: #3987e5;
     --cat-2: #199e70;
     --cat-3: #9085e9;
@@ -84,6 +88,8 @@
   --dead: #b3402e;
   --dead-bg: #f7e4e0;
   --mark: #fff3ec;
+  --scrollbar-thumb: color-mix(in srgb, var(--muted) 22%, transparent);
+  --scrollbar-thumb-hover: color-mix(in srgb, var(--muted) 55%, transparent);
   --cat-1: #2a78d6;
   --cat-2: #1baf7a;
   --cat-3: #4a3aa7;
@@ -110,6 +116,8 @@
   --dead: #e58270;
   --dead-bg: #3a211c;
   --mark: #33231a;
+  --scrollbar-thumb: color-mix(in srgb, var(--muted) 22%, transparent);
+  --scrollbar-thumb-hover: color-mix(in srgb, var(--muted) 55%, transparent);
   --cat-1: #3987e5;
   --cat-2: #199e70;
   --cat-3: #9085e9;
