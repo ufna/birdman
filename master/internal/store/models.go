@@ -114,6 +114,10 @@ const (
 	EventAgentUpgradeSucceeded = "agent_upgrade_succeeded" // node re-Hello'd with target version
 	EventAgentUpgradeFailed    = "agent_upgrade_failed"    // no re-Hello with target version in time
 
+	// Backups v1: прогон бекапа упал (pg_dump/ротация/S3) либо несовпадение
+	// major-версий pg_dump и сервера. payload: {kind, error}.
+	EventBackupFailed = "backup_failed"
+
 	// API-key admin actions (П2 Access screen, docs/specs/master.md §6). The
 	// audit payload carries key_id/name/scopes — never the secret.
 	EventAPIKeyCreated = "apikey_created" // POST /v1/apikeys
