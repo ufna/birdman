@@ -199,10 +199,12 @@ func TestRESTFlow(t *testing.T) {
 		t.Fatalf("fleet with unknown version: want 400, got %d", code)
 	}
 
-	// Allocation: empty pool → 409 no_capacity with the exact error shape.
+	// Allocation: empty pool → 409 no_capacity with the exact error shape. env is
+	// explicit here — an env-less allocate against zero ready servers can't resolve
+	// a sole env and would answer env_required instead (environments v1 §3).
 	matchID := uuid.NewString()
 	code, body = alloc.do("POST", "/v1/allocate", map[string]any{
-		"project": "game", "region": "eu", "match_id": matchID,
+		"project": "game", "env": "dev", "region": "eu", "match_id": matchID,
 	})
 	if code != 409 || body["error"] != "no_capacity" {
 		t.Fatalf("allocate empty: want 409 no_capacity, got %d %v", code, body)
@@ -230,9 +232,10 @@ func TestRESTFlow(t *testing.T) {
 	if port := body["port"].(float64); int(port) != 22222 {
 		t.Fatalf("allocate port: %v", body)
 	}
-	// Idempotent repeat over REST.
+	// Idempotent repeat over REST (the server is already claimed, so no ready
+	// server remains for a sole-env resolve — name the env explicitly).
 	code, body2 := alloc.do("POST", "/v1/allocate", map[string]any{
-		"project": "game", "region": "eu", "match_id": matchID,
+		"project": "game", "env": "dev", "region": "eu", "match_id": matchID,
 	})
 	if code != 200 || body2["server_id"] != serverID {
 		t.Fatalf("idempotent allocate: %d %v", code, body2)

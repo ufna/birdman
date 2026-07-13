@@ -196,6 +196,7 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 
 type allocateRequest struct {
 	Project   string  `json:"project"`
+	Env       string  `json:"env,omitempty"`
 	Region    string  `json:"region"`
 	VersionID *string `json:"version_id"`
 	MatchID   string  `json:"match_id"`
@@ -226,9 +227,33 @@ func (s *Server) handleAllocate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Environment resolution (environments v1 §3, I4): explicit field → the sole
+	// env with ready servers in the region → 409 env_required. A global allocate
+	// key must not claim a server of a random env.
+	env := req.Env
+	if env == "" {
+		resolved, err := s.st.SoleEnvWithReady(r.Context(), req.Project, req.Region)
+		if errors.Is(err, store.ErrConflict) {
+			s.m.AllocFailures.WithLabelValues("bad_request").Inc()
+			writeError(w, http.StatusConflict, "env_required", err.Error())
+			return
+		}
+		if err != nil {
+			s.m.AllocFailures.WithLabelValues("internal").Inc()
+			storeError(w, err)
+			return
+		}
+		env = resolved
+	}
+	// Enforcement (environments v1 §5): a bound key may allocate only in its own
+	// (project, env); a global key passes.
+	if !s.requireBinding(w, r, req.Project, env) {
+		return
+	}
+
 	// players_expected 0 = unknown: the external matchmaker behind this API
 	// does not report the match size (spec'd request shape, master.md §3).
-	alloc, err := s.st.Allocate(r.Context(), req.Project, req.Region, req.VersionID, req.MatchID, 0)
+	alloc, err := s.st.Allocate(r.Context(), req.Project, env, req.Region, req.VersionID, req.MatchID, 0)
 	switch {
 	case errors.Is(err, store.ErrNoCapacity):
 		s.m.AllocFailures.WithLabelValues("no_capacity").Inc()

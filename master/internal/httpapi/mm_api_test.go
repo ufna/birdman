@@ -261,9 +261,11 @@ func TestQoSEndpoint(t *testing.T) {
 		t.Fatalf("qos endpoint: %v", ep)
 	}
 
-	// A silent node drops off the list.
+	// A silent node drops off the list. env is explicit here: with no active node
+	// left, an env-less QoS can't resolve a sole env and would answer env_required
+	// (environments v1 §3) rather than an empty list.
 	f.SetHeartbeatAge(t, f.NodeID, time.Minute)
-	code, body = anon.do("GET", "/v1/qos", nil)
+	code, body = anon.do("GET", "/v1/qos?env=dev", nil)
 	if code != 200 || len(body["qos"].([]any)) != 0 {
 		t.Fatalf("stale node still listed: %d %v", code, body)
 	}

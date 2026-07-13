@@ -29,7 +29,7 @@ func TestAllocateSendsAllocateServer(t *testing.T) {
 	serverID := f.InsertServer(t, f.NodeID, f.VersionID, "ready", 20001, 0)
 	matchID := uuid.NewString()
 
-	alloc, err := st.Allocate(ctx, "game", "eu", nil, matchID, 2)
+	alloc, err := st.Allocate(ctx, "game", "dev", "eu", nil, matchID, 2)
 	if err != nil {
 		t.Fatalf("allocate: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestAllocateSendsAllocateServer(t *testing.T) {
 
 	// Idempotent repeat: same server back, no duplicate command (the hub
 	// already tracks the pending one).
-	again, err := st.Allocate(ctx, "game", "eu", nil, matchID, 2)
+	again, err := st.Allocate(ctx, "game", "dev", "eu", nil, matchID, 2)
 	if err != nil || again.ServerID != alloc.ServerID {
 		t.Fatalf("repeat: %+v, %v", again, err)
 	}
@@ -60,7 +60,7 @@ func TestAllocateSendsAllocateServer(t *testing.T) {
 	}
 
 	// no_capacity → no command.
-	if _, err := st.Allocate(ctx, "game", "eu", nil, uuid.NewString(), 2); !errors.Is(err, store.ErrNoCapacity) {
+	if _, err := st.Allocate(ctx, "game", "dev", "eu", nil, uuid.NewString(), 2); !errors.Is(err, store.ErrNoCapacity) {
 		t.Fatalf("want no_capacity, got %v", err)
 	}
 	if cmds := rec.Take(); len(cmds) != 0 {
@@ -79,7 +79,7 @@ func TestMatchLifecycleRunningFinished(t *testing.T) {
 
 	serverID := f.InsertServer(t, f.NodeID, f.VersionID, "ready", 20001, 0)
 	matchID := uuid.NewString()
-	if _, err := st.Allocate(ctx, "game", "eu", nil, matchID, 2); err != nil {
+	if _, err := st.Allocate(ctx, "game", "dev", "eu", nil, matchID, 2); err != nil {
 		t.Fatalf("allocate: %v", err)
 	}
 	if err := st.RecordMatch(ctx, matchID, "game", "eu", serverID, f.VersionID); err != nil {
@@ -165,7 +165,7 @@ func TestMatchStartCreatesRowAndAbortedResult(t *testing.T) {
 
 	serverID := f.InsertServer(t, f.NodeID, f.VersionID, "ready", 20001, 0)
 	matchID := uuid.NewString()
-	if _, err := st.Allocate(ctx, "game", "eu", nil, matchID, 0); err != nil {
+	if _, err := st.Allocate(ctx, "game", "dev", "eu", nil, matchID, 0); err != nil {
 		t.Fatalf("allocate: %v", err)
 	}
 
@@ -197,7 +197,7 @@ func TestServerFailureAbortsMatch(t *testing.T) {
 
 	serverID := f.InsertServer(t, f.NodeID, f.VersionID, "ready", 20001, 0)
 	matchID := uuid.NewString()
-	if _, err := st.Allocate(ctx, "game", "eu", nil, matchID, 2); err != nil {
+	if _, err := st.Allocate(ctx, "game", "dev", "eu", nil, matchID, 2); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.ApplyServerEvent(ctx, f.NodeID, serverID, "match_start", matchID); err != nil {
@@ -225,7 +225,7 @@ func TestNodeLostFailuresExcludedAndMatchResurrects(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		id := f.InsertServer(t, f.NodeID, f.VersionID, "ready", int32(20001+i), 0)
 		mid := uuid.NewString()
-		if _, err := st.Allocate(ctx, "game", "eu", nil, mid, 2); err != nil {
+		if _, err := st.Allocate(ctx, "game", "dev", "eu", nil, mid, 2); err != nil {
 			t.Fatal(err)
 		}
 		if err := st.ApplyServerEvent(ctx, f.NodeID, id, "match_start", mid); err != nil {

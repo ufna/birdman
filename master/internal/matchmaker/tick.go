@@ -131,13 +131,15 @@ func (mm *Matchmaker) matchProject(ctx context.Context, project, env string, tks
 				verFor[c.Region] = c
 			}
 		}
-		mm.matchBucket(ctx, project, size, list, verFor, now)
+		mm.matchBucket(ctx, project, env, size, list, verFor, now)
 	}
 	return nil
 }
 
-// matchBucket forms and allocates matches inside one (project, compat-bucket).
-func (mm *Matchmaker) matchBucket(ctx context.Context, project string, size int,
+// matchBucket forms and allocates matches inside one (project, env,
+// compat-bucket). Allocation is scoped to env (environments v1 §3): candidates
+// are already env-scoped, and Allocate claims a server of this env only.
+func (mm *Matchmaker) matchBucket(ctx context.Context, project, env string, size int,
 	list []qt, verFor map[string]store.RegionVersion, now time.Time) {
 
 	pool := make(map[string]qt, len(list))
@@ -153,7 +155,7 @@ func (mm *Matchmaker) matchBucket(ctx context.Context, project string, size int,
 		}
 		ver := verFor[region]
 		matchID := uuid.NewString()
-		alloc, err := mm.st.Allocate(ctx, project, region, &ver.VersionID, matchID, int32(len(group)))
+		alloc, err := mm.st.Allocate(ctx, project, env, region, &ver.VersionID, matchID, int32(len(group)))
 		if errors.Is(err, store.ErrNoCapacity) {
 			// Tickets stay queued; the warm pool catches up via reconcile and
 			// the next tick retries. Feeds the BufferEmpty alert (ops.md §1).

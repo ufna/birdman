@@ -22,13 +22,16 @@ type Allocation struct {
 	Port     int32  `json:"port"`
 }
 
-// claimSQL is the exact claim statement from docs/specs/master.md §3.
-// $1 project_id, $2 version_id (nullable), $3 region, $4 match_id.
+// claimSQL is the claim statement from docs/specs/master.md §3, scoped to the
+// environment (environments v1 §3 — a global allocate key must not claim a
+// server of a random env). The env is taken from the server row itself
+// (s.env, invariant I6), never joined from the node.
+// $1 project_id, $2 version_id (nullable), $3 region, $4 match_id, $5 env.
 const claimSQL = `
 with c as (
   select s.id from servers s
   join nodes n on n.id = s.node_id
-  where s.project_id = $1 and s.state = 'ready'
+  where s.project_id = $1 and s.state = 'ready' and s.env = $5
     and s.version_id = coalesce($2, s.version_id)
     and n.region = $3 and n.state = 'active'
     and n.last_heartbeat_at > now() - interval '10 seconds'
@@ -50,7 +53,7 @@ returning id, node_id, port`
 // on reconnect); the idempotent repeat does not re-send — the pending command
 // is already tracked by the hub. playersExpected 0 = unknown (external
 // matchmaker via REST does not report it).
-func (s *Store) Allocate(ctx context.Context, project, region string, versionID *string, matchID string, playersExpected int32) (Allocation, error) {
+func (s *Store) Allocate(ctx context.Context, project, env, region string, versionID *string, matchID string, playersExpected int32) (Allocation, error) {
 	var projectID string
 	err := s.Pool.QueryRow(ctx, `select id::text from projects where slug = $1`, project).Scan(&projectID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -69,7 +72,7 @@ func (s *Store) Allocate(ctx context.Context, project, region string, versionID 
 
 	var serverID, nodeID uuid.UUID
 	var port int32
-	err = s.Pool.QueryRow(ctx, claimSQL, projectID, versionID, region, matchID).
+	err = s.Pool.QueryRow(ctx, claimSQL, projectID, versionID, region, matchID, env).
 		Scan(&serverID, &nodeID, &port)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Allocation{}, ErrNoCapacity
@@ -115,6 +118,48 @@ func (s *Store) notifyAllocated(nodeID, serverID, matchID string, playersExpecte
 			PlayersExpected: playersExpected,
 		},
 	}})
+}
+
+// SoleEnvWithReady returns the single environment of a project that currently
+// has a ready server on a live node in the region — the /v1/allocate env
+// fallback when the request names none (environments v1 §3, I4). The env is the
+// server's own (s.env, invariant I6). ErrConflict when zero or several envs
+// qualify (the request must then name env explicitly → 409). Node liveness
+// mirrors claimSQL so a resolved env is actually claimable.
+func (s *Store) SoleEnvWithReady(ctx context.Context, project, region string) (string, error) {
+	rows, err := s.Pool.Query(ctx, `
+		select distinct s.env
+		from servers s
+		join nodes n on n.id = s.node_id
+		join projects p on p.id = s.project_id
+		where p.slug = $1 and s.state = 'ready'
+		  and n.region = $2 and n.state = 'active'
+		  and n.last_heartbeat_at > now() - interval '10 seconds'
+		order by s.env
+		limit 2`, project, region)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	var envs []string
+	for rows.Next() {
+		var env string
+		if err := rows.Scan(&env); err != nil {
+			return "", err
+		}
+		envs = append(envs, env)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	switch len(envs) {
+	case 0:
+		return "", fmt.Errorf("no environment of project %s has ready servers in %s: %w", project, region, ErrConflict)
+	case 1:
+		return envs[0], nil
+	default:
+		return "", fmt.Errorf("several environments of project %s have ready servers in %s, env is required: %w", project, region, ErrConflict)
+	}
 }
 
 func (s *Store) findByMatch(ctx context.Context, projectID, matchID string) (Allocation, bool, error) {

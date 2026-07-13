@@ -580,7 +580,7 @@ func TestCleanMatchCycleDoesNotFeedCrashLoop(t *testing.T) {
 
 		// Match: allocate → start → end → clean exit (stopped report).
 		matchID := uuid.NewString()
-		if _, err := st.Allocate(ctx, "game", "eu", nil, matchID, 2); err != nil {
+		if _, err := st.Allocate(ctx, "game", "dev", "eu", nil, matchID, 2); err != nil {
 			t.Fatalf("cycle %d: allocate: %v", cycle, err)
 		}
 		if err := st.ApplyServerEvent(ctx, f.NodeID, serverID, "match_start", matchID); err != nil {

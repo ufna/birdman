@@ -78,15 +78,18 @@ type QoSEndpoint struct {
 	UDPPort int32  `json:"udp_port"`
 }
 
-// ListQoSEndpoints returns ping targets for GET /v1/qos: active nodes with a
-// fresh heartbeat (<30s — the NodeDown alert threshold, docs/specs/ops.md §1).
-func (s *Store) ListQoSEndpoints(ctx context.Context) ([]QoSEndpoint, error) {
+// ListQoSEndpoints returns ping targets for GET /v1/qos: active nodes of one
+// project's environment with a fresh heartbeat (<30s — the NodeDown alert
+// threshold, docs/specs/ops.md §1). Scoping to (project, env) keeps a client
+// pinging only the nodes it will actually be matched onto (environments v1 §3).
+func (s *Store) ListQoSEndpoints(ctx context.Context, project, env string) ([]QoSEndpoint, error) {
 	rows, err := s.Pool.Query(ctx, `
 		select distinct n.region, host(n.public_ip)
-		from nodes n
-		where n.state = 'active'
+		from nodes n join projects p on p.id = n.project_id
+		where p.slug = $1 and n.env = $2
+		  and n.state = 'active'
 		  and n.last_heartbeat_at > now() - interval '30 seconds'
-		order by 1, 2`)
+		order by 1, 2`, project, env)
 	if err != nil {
 		return nil, err
 	}
