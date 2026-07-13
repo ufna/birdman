@@ -86,6 +86,8 @@ func New(st *store.Store, m *metrics.Metrics, mm *matchmaker.Matchmaker, dep *de
 	s.mux.HandleFunc("GET /v1/versions", s.requireScope(ScopeReadonly, s.handleListVersions))
 	s.mux.HandleFunc("POST /v1/deploy", s.requireScope(ScopeDeploy, s.handleDeploy))
 	s.mux.HandleFunc("POST /v1/rollback", s.requireScope(ScopeDeploy, s.handleRollback))
+	// Promote a version into another environment (environments v1 §4, deploy.go).
+	s.mux.HandleFunc("POST /v1/promote", s.requireScope(ScopeDeploy, s.handlePromote))
 	s.mux.HandleFunc("PUT /v1/fleets/{region}", s.requireScope(ScopeAdmin, s.handleUpsertFleet))
 	s.mux.HandleFunc("PUT /v1/projects/{slug}", s.requireScope(ScopeAdmin, s.handleUpsertProject))
 	// Environments CRUD (environments v1 §2, environments.go). List is readonly;

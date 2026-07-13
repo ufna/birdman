@@ -108,7 +108,12 @@ const (
 	EventCrashLoop         = "crash_loop"
 	EventAllocationFailed  = "allocation_failed"
 	EventVersionRegistered = "version_registered"
-	EventFleetUpdated      = "fleet_updated"
+	// EventVersionPromoted — версия создана промоутом между окружениями
+	// (environments v1 §4, POST /v1/promote). Payload {project, semver, from_env,
+	// to_env, image_ref}; provenance promoted_from пишется в саму строку версии.
+	// Пишется только на insert-пути промоута (идемпотентный реюз не дублирует).
+	EventVersionPromoted = "version_promoted"
+	EventFleetUpdated    = "fleet_updated"
 
 	// Deploy manager (итерация 3, docs/specs/master.md §5).
 	EventDeployStarted    = "deploy_started"     // version → prepulling, PrePull sent

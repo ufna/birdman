@@ -94,6 +94,120 @@ func (s *Store) ListVersions(ctx context.Context) ([]Version, error) {
 	return out, rows.Err()
 }
 
+// PromoteVersion promotes a version into another environment (POST /v1/promote,
+// environments v1 §4): a NEW version in toEnv carrying the SAME project/semver/
+// image_ref and provenance promoted_from = source. Idempotent (I7): if toEnv
+// already holds that semver with the SAME image_ref in state `registered`, that
+// row is reused (a re-promote after «deploy did not start» must not dead-end the
+// operator); a different image_ref → ErrConflict; a non-registered state →
+// ErrConflict («already …»). Promote into the source's own env → ErrConflict.
+// An unknown toEnv → a plain «no such environment» error (mapped to 400 like
+// CreateVersion — a typo'd env is client input, not ErrNotFound/ErrConflict). A
+// missing source version → ErrNotFound.
+//
+// The transaction covers ONLY the version row; the deploy is async — the caller
+// runs the normal deploy pipeline (dep.Deploy) afterwards, so the version stays
+// registered and retryable even when that deploy later fails (e.g. no fleet yet).
+func (s *Store) PromoteVersion(ctx context.Context, versionID, toEnv string) (Version, error) {
+	if toEnv == "" {
+		return Version{}, fmt.Errorf("to_env is required")
+	}
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return Version{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	// Источник под замком: сериализует конкурентные промоуты одной версии и не
+	// даёт ей измениться, пока считаем provenance (сам источник не мутируем).
+	var src Version
+	err = tx.QueryRow(ctx, `
+		select v.id::text, v.project_id::text, p.slug, v.semver, v.image_ref, v.env, v.state
+		from versions v join projects p on p.id = v.project_id
+		where v.id = $1::uuid
+		for update of v`, versionID).
+		Scan(&src.ID, &src.ProjectID, &src.Project, &src.Semver, &src.ImageRef, &src.Env, &src.State)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Version{}, fmt.Errorf("version %s: %w", versionID, ErrNotFound)
+	}
+	if err != nil {
+		return Version{}, err
+	}
+
+	// Промоут в тот же env бессмыслен (та же строка) — конфликт.
+	if toEnv == src.Env {
+		return Version{}, fmt.Errorf("version %s is already in environment %s: %w", src.Semver, toEnv, ErrConflict)
+	}
+	// Целевой env обязан существовать; несуществующий → понятная ошибка (→400,
+	// паритет CreateVersion), НЕ ErrConflict/ErrNotFound. Проверка в tx видит
+	// dev/prod, засеянные ensureProject для нового проекта в этой же транзакции.
+	var envExists bool
+	if err := tx.QueryRow(ctx,
+		`select exists(select 1 from environments where project_id = $1::uuid and name = $2)`,
+		src.ProjectID, toEnv).Scan(&envExists); err != nil {
+		return Version{}, err
+	}
+	if !envExists {
+		return Version{}, fmt.Errorf("no such environment %s/%s", src.Project, toEnv)
+	}
+
+	// Идемпотентность (I7): уже есть версия (project, toEnv, semver)? Реюз строго
+	// при том же image_ref И state=registered; иначе — конфликт.
+	var ex Version
+	err = tx.QueryRow(ctx, `
+		select v.id::text, v.image_ref, v.state, v.created_at, v.promoted_from::text
+		from versions v
+		where v.project_id = $1::uuid and v.env = $2 and v.semver = $3
+		for update of v`, src.ProjectID, toEnv, src.Semver).
+		Scan(&ex.ID, &ex.ImageRef, &ex.State, &ex.CreatedAt, &ex.PromotedFrom)
+	switch {
+	case err == nil:
+		if ex.ImageRef != src.ImageRef {
+			return Version{}, fmt.Errorf("version %s/%s already exists in %s with a different image_ref: %w", src.Project, src.Semver, toEnv, ErrConflict)
+		}
+		if ex.State != "registered" {
+			return Version{}, fmt.Errorf("version %s/%s is already %s in %s: %w", src.Project, src.Semver, ex.State, toEnv, ErrConflict)
+		}
+		// Реюз той же строки — без нового события (idempotent no-op, паритет
+		// BeginDeploy); деплой запустит хендлер отдельно.
+		if err := tx.Commit(ctx); err != nil {
+			return Version{}, err
+		}
+		ex.ProjectID, ex.Project, ex.Semver, ex.Env = src.ProjectID, src.Project, src.Semver, toEnv
+		return ex, nil
+	case errors.Is(err, pgx.ErrNoRows):
+		// Новой строки нет — создаём с provenance ниже.
+	default:
+		return Version{}, err
+	}
+
+	var v Version
+	err = tx.QueryRow(ctx, `
+		insert into versions (project_id, semver, image_ref, env, promoted_from)
+		values ($1::uuid, $2, $3, $4, $5::uuid)
+		returning id::text, state, created_at`,
+		src.ProjectID, src.Semver, src.ImageRef, toEnv, src.ID).
+		Scan(&v.ID, &v.State, &v.CreatedAt)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		// Гонка: параллельный промоут занял semver между select и insert.
+		return Version{}, fmt.Errorf("version %s/%s (%s): %w", src.Project, src.Semver, toEnv, ErrConflict)
+	}
+	if err != nil {
+		return Version{}, err
+	}
+	v.ProjectID, v.Project, v.Semver, v.ImageRef, v.Env = src.ProjectID, src.Project, src.Semver, src.ImageRef, toEnv
+	v.PromotedFrom = &src.ID
+	if err := insertEvent(ctx, tx, EventVersionPromoted, EventRef{VersionID: &v.ID},
+		map[string]any{"project": src.Project, "semver": src.Semver, "from_env": src.Env, "to_env": toEnv, "image_ref": src.ImageRef}); err != nil {
+		return Version{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Version{}, err
+	}
+	return v, nil
+}
+
 // GetVersion returns one version by id.
 func (s *Store) GetVersion(ctx context.Context, id string) (Version, error) {
 	var v Version
