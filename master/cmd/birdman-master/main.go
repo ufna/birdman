@@ -245,7 +245,10 @@ func run() error {
 		// After every successful POST/DELETE /v1/registries, refresh every
 		// connected agent's in-memory credential set (docs/superpowers/specs/
 		// 2026-07-09-registries-design.md §2, T3).
-		WithRegistriesHook(agentlinkSvc.BroadcastRegistries)
+		WithRegistriesHook(agentlinkSvc.BroadcastRegistries).
+		// Backups v1 (design §4): manual run-now via the runner, and the
+		// "test connection" button verifying the saved S3 config.
+		WithBackups(backupRunner, func(ctx context.Context) error { return backup.TestS3(ctx, st) })
 	api := &http.Server{
 		Addr:              cfg.ListenAPI,
 		Handler:           apiHandler,
