@@ -2,6 +2,7 @@ package matchmaker_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -245,9 +246,9 @@ func TestUpdateRequired(t *testing.T) {
 	}
 
 	// Active version swap to 2.0.0 → the queued 1.0.x ticket becomes stale.
-	v2 := f.AddVersion(t, "2.0.0")
+	v2 := f.AddVersion(t, "2.0.0", "dev")
 	if _, err := st.UpsertFleet(context.Background(), store.UpsertFleetParams{
-		Project: f.Project, Region: f.Region, ActiveVersion: &v2,
+		Project: f.Project, Env: f.Env, Region: f.Region, ActiveVersion: &v2,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +289,7 @@ func TestWidenAcrossRegions(t *testing.T) {
 	}
 	f.SetHeartbeatAge(t, usNode.ID, 0)
 	if _, err := st.UpsertFleet(ctx, store.UpsertFleetParams{
-		Project: "game", Region: "us", ActiveVersion: &f.VersionID,
+		Project: "game", Env: f.Env, Region: "us", ActiveVersion: &f.VersionID,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -482,7 +483,7 @@ func TestWindowRoutesClientsByCompat(t *testing.T) {
 	st := testdb.New(t)
 	f := testdb.Seed(t, st, "eu", 10) // 1.0.0 active via fleet
 	f.UpsertFleet(t, 2, 50)
-	v2 := f.AddVersion(t, "1.1.0")
+	v2 := f.AddVersion(t, "1.1.0", "dev")
 	deprecateAndActivate(t, st, v2) // active 1.1.0, deprecated 1.0.0
 
 	oldSrv := f.InsertServer(t, f.NodeID, f.VersionID, "ready", 20001, 0)
@@ -520,7 +521,7 @@ func TestWindowUpdateRequiredOnlyWhenNoLiveVersion(t *testing.T) {
 	st := testdb.New(t)
 	f := testdb.Seed(t, st, "eu", 10)
 	f.UpsertFleet(t, 2, 50)
-	v2 := f.AddVersion(t, "1.1.0")
+	v2 := f.AddVersion(t, "1.1.0", "dev")
 	deprecateAndActivate(t, st, v2)
 	mm := newMM(t, st, matchmaker.Config{})
 
@@ -555,7 +556,7 @@ func TestCompatOverridesRouteOldClients(t *testing.T) {
 	st := testdb.New(t)
 	f := testdb.Seed(t, st, "eu", 10) // 1.0.0
 	f.UpsertFleet(t, 2, 50)
-	v2 := f.AddVersion(t, "1.1.0")
+	v2 := f.AddVersion(t, "1.1.0", "dev")
 	deprecateAndActivate(t, st, v2)
 	// Only the new version has capacity: without the override old clients
 	// would wait for a 1.0.0 server forever.
@@ -627,6 +628,142 @@ func TestCompatOverrideSplitsBuckets(t *testing.T) {
 	if g2.Status != matchmaker.StatusMatched || g3.Status != matchmaker.StatusMatched ||
 		g2.Match.MatchID != g3.Match.MatchID {
 		t.Fatalf("same-bucket clients must match: %s / %s", g2.Status, g3.Status)
+	}
+}
+
+// --- environments v1 §3 (env resolution / candidate isolation / anti-dup) ---
+
+// seedProdEnv adds a prod node (moved from the default dev), a prod version, a
+// prod fleet and one ready prod server in the fixture's region — the second env
+// half of a two-env stand.
+func seedProdEnv(t *testing.T, st *store.Store, f *testdb.Fixture, semver string, port int32) (nodeID, versionID, serverID string) {
+	t.Helper()
+	ctx := context.Background()
+	nodeID = f.AddNode(t, "node-prod-"+semver, "203.0.113.30", 10)
+	if _, err := st.SetNodeEnv(ctx, nodeID, "prod"); err != nil {
+		t.Fatalf("move node to prod: %v", err)
+	}
+	versionID = f.AddVersion(t, semver, "prod")
+	buffer, maxServers := int32(2), int32(50)
+	if _, err := st.UpsertFleet(ctx, store.UpsertFleetParams{
+		Project: f.Project, Env: "prod", Region: f.Region, ActiveVersion: &versionID,
+		BufferReady: &buffer, MaxServers: &maxServers,
+	}); err != nil {
+		t.Fatalf("prod fleet: %v", err)
+	}
+	serverID = f.InsertServer(t, nodeID, versionID, "ready", port, 0)
+	return nodeID, versionID, serverID
+}
+
+// A dev ticket lands on the dev fleet's server and a prod ticket on the prod
+// one: candidate sets are scoped to the ticket's env, and allocation claims a
+// server of that env only (never the other env's ready server in the same
+// region).
+func TestEnvCandidateIsolation(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10)
+	ctx := context.Background()
+	if _, err := st.SetProjectMatchSize(ctx, "game", 1); err != nil { // single-player matches keep the test compact
+		t.Fatal(err)
+	}
+	f.UpsertFleet(t, 2, 50)
+	devSrv := f.InsertServer(t, f.NodeID, f.VersionID, "ready", 20001, 0)
+	// ОДИНАКОВЫЙ semver в обоих env (unique (project, env, semver) это разрешает,
+	// T5-m3): компат-гейт больше НЕ разводит тикеты по версии — единственное, что
+	// удерживает dev-тикет от prod-сервера, это env-скоупинг кандидатов. С разными
+	// semver (было dev 1.0.0 / prod 2.0.0) регрессия скоупинга маскировалась бы
+	// компатом, и тест проходил бы вхолостую.
+	_, prodV, prodSrv := seedProdEnv(t, st, f, "1.0.0", 20002)
+
+	mm := newMM(t, st, matchmaker.Config{})
+	tDev, err := mm.Submit(ctx, matchmaker.SubmitParams{
+		Env: "dev", PlayerID: "d1", ClientVersion: "1.0.0", Regions: regions("eu", 10),
+	})
+	if err != nil {
+		t.Fatalf("dev submit: %v", err)
+	}
+	tProd, err := mm.Submit(ctx, matchmaker.SubmitParams{
+		Env: "prod", PlayerID: "p1", ClientVersion: "1.0.0", Regions: regions("eu", 10),
+	})
+	if err != nil {
+		t.Fatalf("prod submit: %v", err)
+	}
+	runOnce(t, mm)
+
+	gDev, gProd := get(t, mm, tDev.ID), get(t, mm, tProd.ID)
+	if gDev.Status != matchmaker.StatusMatched || gDev.Match.Port != 20001 {
+		t.Fatalf("dev ticket must land on the dev server 20001: %s %+v", gDev.Status, gDev.Match)
+	}
+	if gProd.Status != matchmaker.StatusMatched || gProd.Match.Port != 20002 {
+		t.Fatalf("prod ticket must land on the prod server 20002: %s %+v", gProd.Status, gProd.Match)
+	}
+	assertServerVersion(t, st, devSrv, f.VersionID)
+	assertServerVersion(t, st, prodSrv, prodV)
+}
+
+// Anti-dup is keyed by (project, env, player): the same player may hold one
+// ticket per env at once, and a re-submit cancels only the same-env predecessor
+// (environments v1 §3, M6).
+func TestAntiDupIsPerEnv(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10)
+	f.UpsertFleet(t, 2, 50) // dev fleet → dev tickets are compatible and stay queued
+	ctx := context.Background()
+	mm := newMM(t, st, matchmaker.Config{})
+
+	tDev, err := mm.Submit(ctx, matchmaker.SubmitParams{
+		Env: "dev", PlayerID: "p1", ClientVersion: "1.0.0", Regions: regions("eu", 10),
+	})
+	if err != nil {
+		t.Fatalf("dev submit: %v", err)
+	}
+	tProd, err := mm.Submit(ctx, matchmaker.SubmitParams{
+		Env: "prod", PlayerID: "p1", ClientVersion: "1.0.0", Regions: regions("eu", 10),
+	})
+	if err != nil {
+		t.Fatalf("prod submit: %v", err)
+	}
+	if g := get(t, mm, tDev.ID); g.Status != matchmaker.StatusQueued {
+		t.Fatalf("dev ticket: want queued, got %s", g.Status)
+	}
+	if g := get(t, mm, tProd.ID); g.Status != matchmaker.StatusQueued {
+		t.Fatalf("prod ticket of the same player must coexist: got %s", g.Status)
+	}
+
+	// Re-submit in dev cancels only the dev predecessor; prod survives.
+	tDev2, err := mm.Submit(ctx, matchmaker.SubmitParams{
+		Env: "dev", PlayerID: "p1", ClientVersion: "1.0.0", Regions: regions("eu", 10),
+	})
+	if err != nil {
+		t.Fatalf("dev re-submit: %v", err)
+	}
+	if g := get(t, mm, tDev.ID); g.Status != matchmaker.StatusCancelled {
+		t.Fatalf("old dev ticket must cancel: got %s", g.Status)
+	}
+	if g := get(t, mm, tProd.ID); g.Status != matchmaker.StatusQueued {
+		t.Fatalf("prod ticket must survive the dev re-submit: got %s", g.Status)
+	}
+	if g := get(t, mm, tDev2.ID); g.Status != matchmaker.StatusQueued {
+		t.Fatalf("new dev ticket: want queued, got %s", g.Status)
+	}
+}
+
+// With no explicit env and several environments carrying active nodes the sole-
+// env fallback is ambiguous → the ticket is rejected (env is required).
+func TestEnvRequiredWhenAmbiguous(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10) // dev node, active + fresh
+	ctx := context.Background()
+	prodNode := f.AddNode(t, "node-prod", "203.0.113.30", 10)
+	if _, err := st.SetNodeEnv(ctx, prodNode, "prod"); err != nil { // now two envs have active nodes
+		t.Fatal(err)
+	}
+
+	mm := newMM(t, st, matchmaker.Config{})
+	if _, err := mm.Submit(ctx, matchmaker.SubmitParams{
+		PlayerID: "p1", ClientVersion: "1.0.0", Regions: regions("eu", 10),
+	}); !errors.Is(err, matchmaker.ErrInvalid) {
+		t.Fatalf("ambiguous env must be rejected as invalid, got %v", err)
 	}
 }
 

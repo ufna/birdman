@@ -39,7 +39,7 @@ func mmServer(t *testing.T, st *store.Store, cfg matchmaker.Config) *httptest.Se
 
 func mmKey(t *testing.T, st *store.Store) string {
 	t.Helper()
-	_, key, err := st.CreateAPIKey(t.Context(), "client", []string{httpapi.ScopeMatchmaking})
+	_, key, err := st.CreateAPIKey(t.Context(), store.CreateAPIKeyParams{Name: "client", Scopes: []string{httpapi.ScopeMatchmaking}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestMatchmakingREST(t *testing.T) {
 	if code, _ := anon.do("POST", "/v1/matchmaking/tickets", ticketBody("p1", "1.0.0", "eu", 10)); code != 401 {
 		t.Fatalf("anon ticket: want 401, got %d", code)
 	}
-	_, roKey, err := st.CreateAPIKey(t.Context(), "ro", []string{httpapi.ScopeReadonly})
+	_, roKey, err := st.CreateAPIKey(t.Context(), store.CreateAPIKeyParams{Name: "ro", Scopes: []string{httpapi.ScopeReadonly}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,9 +261,11 @@ func TestQoSEndpoint(t *testing.T) {
 		t.Fatalf("qos endpoint: %v", ep)
 	}
 
-	// A silent node drops off the list.
+	// A silent node drops off the list. env is explicit here: with no active node
+	// left, an env-less QoS can't resolve a sole env and would answer env_required
+	// (environments v1 §3) rather than an empty list.
 	f.SetHeartbeatAge(t, f.NodeID, time.Minute)
-	code, body = anon.do("GET", "/v1/qos", nil)
+	code, body = anon.do("GET", "/v1/qos?env=dev", nil)
 	if code != 200 || len(body["qos"].([]any)) != 0 {
 		t.Fatalf("stale node still listed: %d %v", code, body)
 	}
@@ -278,7 +280,7 @@ func TestProjectMatchSize(t *testing.T) {
 	f.InsertServer(t, f.NodeID, f.VersionID, "ready", 20001, 0)
 	ts := mmServer(t, st, matchmaker.Config{})
 
-	_, adminKey, err := st.CreateAPIKey(t.Context(), "admin", []string{httpapi.ScopeAdmin})
+	_, adminKey, err := st.CreateAPIKey(t.Context(), store.CreateAPIKeyParams{Name: "admin", Scopes: []string{httpapi.ScopeAdmin}})
 	if err != nil {
 		t.Fatal(err)
 	}

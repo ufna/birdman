@@ -42,8 +42,8 @@ func TestNodeDrainUndrainAPI(t *testing.T) {
 	t.Cleanup(ts.Close)
 	ctx := t.Context()
 
-	_, adminKey, _ := st.CreateAPIKey(ctx, "admin", []string{httpapi.ScopeAdmin})
-	_, roKey, _ := st.CreateAPIKey(ctx, "ro", []string{httpapi.ScopeReadonly})
+	_, adminKey, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "admin", Scopes: []string{httpapi.ScopeAdmin}})
+	_, roKey, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ro", Scopes: []string{httpapi.ScopeReadonly}})
 	admin := &client{t: t, base: ts.URL, key: adminKey}
 	ro := &client{t: t, base: ts.URL, key: roKey}
 
@@ -101,7 +101,7 @@ func TestAgentUpgradeAPI(t *testing.T) {
 	t.Cleanup(ts.Close)
 	ctx := t.Context()
 
-	_, adminKey, _ := st.CreateAPIKey(ctx, "admin", []string{httpapi.ScopeAdmin})
+	_, adminKey, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "admin", Scopes: []string{httpapi.ScopeAdmin}})
 	admin := &client{t: t, base: ts.URL, key: adminKey}
 
 	sha := "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" // sha256("")
@@ -147,7 +147,7 @@ func TestMetricsQueryProxy(t *testing.T) {
 	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, vm.URL, "", log))
 	t.Cleanup(ts.Close)
 	ctx := t.Context()
-	_, roKey, _ := st.CreateAPIKey(ctx, "ro", []string{httpapi.ScopeReadonly})
+	_, roKey, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ro", Scopes: []string{httpapi.ScopeReadonly}})
 	ro := &client{t: t, base: ts.URL, key: roKey}
 
 	code, body := ro.do("GET", "/v1/metrics/query?query=birdman_players_online", nil)
@@ -200,7 +200,7 @@ func TestLogsQueryProxy(t *testing.T) {
 	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", vl.URL, log))
 	t.Cleanup(ts.Close)
 	ctx := t.Context()
-	_, roKey, _ := st.CreateAPIKey(ctx, "ro", []string{httpapi.ScopeReadonly})
+	_, roKey, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ro", Scopes: []string{httpapi.ScopeReadonly}})
 	ro := &client{t: t, base: ts.URL, key: roKey}
 
 	// 1) passthrough + default limit.
@@ -312,7 +312,7 @@ func TestServerLogsProxy(t *testing.T) {
 	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, sender, router, "", "", log))
 	t.Cleanup(ts.Close)
 	ctx := t.Context()
-	_, roKey, _ := st.CreateAPIKey(ctx, "ro", []string{httpapi.ScopeReadonly})
+	_, roKey, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ro", Scopes: []string{httpapi.ScopeReadonly}})
 
 	req, _ := http.NewRequest("GET", ts.URL+"/v1/servers/"+serverID+"/logs", nil)
 	req.Header.Set("Authorization", "Bearer "+roKey)

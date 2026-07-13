@@ -42,7 +42,7 @@ func apiServerRec(t *testing.T, st *store.Store) (*httptest.Server, *testdb.Comm
 
 func scopedKey(t *testing.T, st *store.Store, name string, scopes ...string) string {
 	t.Helper()
-	_, key, err := st.CreateAPIKey(t.Context(), name, scopes)
+	_, key, err := st.CreateAPIKey(t.Context(), store.CreateAPIKeyParams{Name: name, Scopes: scopes})
 	if err != nil {
 		t.Fatal(err)
 	}

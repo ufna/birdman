@@ -18,6 +18,7 @@ const maxWait = 30 * time.Second
 
 type submitTicketRequest struct {
 	Project       string                  `json:"project,omitempty"`
+	Env           string                  `json:"env,omitempty"`
 	PlayerID      string                  `json:"player_id"`
 	ClientVersion string                  `json:"client_version"`
 	Regions       []matchmaker.RegionPing `json:"regions"`
@@ -37,8 +38,24 @@ func (s *Server) handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 			"matchmaking rate limit: 5 rps per player_id")
 		return
 	}
+	// Binding (environments v1 §3/§5): a bound key defaults AND constrains both
+	// project and env; an explicit field that disagrees with the binding is
+	// refused (403) here, so the matchmaker never learns about keys. A global key
+	// passes its request fields through unchanged (sole-project/sole-env resolve
+	// downstream in Submit).
+	project := bindProject(r, req.Project)
+	env := req.Env
+	if env == "" {
+		if key, ok := keyFromContext(r.Context()); ok && key.Env != nil {
+			env = *key.Env
+		}
+	}
+	if !s.requireBinding(w, r, project, env) {
+		return
+	}
 	t, err := s.mm.Submit(r.Context(), matchmaker.SubmitParams{
-		Project:       req.Project,
+		Project:       project,
+		Env:           env,
 		PlayerID:      req.PlayerID,
 		ClientVersion: req.ClientVersion,
 		Regions:       req.Regions,
@@ -114,7 +131,36 @@ func (s *Server) handleCancelTicket(w http.ResponseWriter, r *http.Request) {
 // The UDP echo responder on nodes ships with the agent in iteration 4; the
 // endpoint already returns the correct host list of live nodes.
 func (s *Server) handleQoS(w http.ResponseWriter, r *http.Request) {
-	eps, err := s.st.ListQoSEndpoints(r.Context())
+	// Public endpoint: project and env are optional query params (environments
+	// v1 §3, M8). project falls back to the sole project; env to the sole
+	// environment with active nodes — ambiguous env → 400 env_required.
+	project := r.URL.Query().Get("project")
+	if project == "" {
+		var err error
+		project, err = s.st.SoleProjectSlug(r.Context())
+		if err != nil {
+			storeError(w, err)
+			return
+		}
+	}
+	env := r.URL.Query().Get("env")
+	if env == "" {
+		// Зеркалим allocate-путь (T5-m1): только ErrConflict (ноль/несколько env с
+		// активными нодами) → 400 env_required; реальный сбой БД идёт в storeError,
+		// а не маскируется под env_required.
+		resolved, err := s.st.SoleEnvWithActiveNodes(r.Context(), project)
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusBadRequest, "env_required",
+				"env is required (zero or several environments have active nodes)")
+			return
+		}
+		if err != nil {
+			storeError(w, err)
+			return
+		}
+		env = resolved
+	}
+	eps, err := s.st.ListQoSEndpoints(r.Context(), project, env)
 	if err != nil {
 		storeError(w, err)
 		return

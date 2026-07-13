@@ -44,19 +44,20 @@ func DeprecatedBuffer(bufferReady int32) int32 {
 	return 2
 }
 
-// DeprecatedWindowVersion returns the project's deprecated version still in
-// the multi-version window (there is at most one by construction — older
-// ones are disabled on flip), or nil. The window is closed by
+// DeprecatedWindowVersion returns the (project, env)'s deprecated version still
+// in the multi-version window (there is at most one by construction — older
+// ones are disabled on flip), or nil. Env-scoped (C1): each environment keeps
+// its own single-active + single-deprecated window. The window is closed by
 // DisableExpiredDeprecated (reap_ttl_min).
-func (s *Store) DeprecatedWindowVersion(ctx context.Context, projectID string) (*Version, error) {
+func (s *Store) DeprecatedWindowVersion(ctx context.Context, projectID, env string) (*Version, error) {
 	var v Version
 	err := s.Pool.QueryRow(ctx, `
-		select v.id::text, v.project_id::text, v.semver, v.image_ref, v.channel, v.state, v.created_at, v.deprecated_at
+		select v.id::text, v.project_id::text, v.semver, v.image_ref, v.env, v.state, v.created_at, v.deprecated_at
 		from versions v
-		where v.project_id = $1::uuid and v.state = 'deprecated'
+		where v.project_id = $1::uuid and v.env = $2 and v.state = 'deprecated'
 		order by v.deprecated_at desc nulls last
-		limit 1`, projectID).
-		Scan(&v.ID, &v.ProjectID, &v.Semver, &v.ImageRef, &v.Channel, &v.State, &v.CreatedAt, &v.DeprecatedAt)
+		limit 1`, projectID, env).
+		Scan(&v.ID, &v.ProjectID, &v.Semver, &v.ImageRef, &v.Env, &v.State, &v.CreatedAt, &v.DeprecatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -96,9 +97,11 @@ func (s *Store) PlanFleet(ctx context.Context, f FleetConfig, dep *Version, paus
 	}
 	defer tx.Rollback(ctx)
 
+	// Lock ключ per (project, env, region) — M3: dev- и prod-проходы одного
+	// региона не сериализуются друг об друга (независимые флоты).
 	if err := tx.QueryRow(ctx,
 		`select pg_try_advisory_xact_lock(hashtextextended($1, 42))`,
-		f.ProjectID+":"+f.Region).Scan(&locked); err != nil {
+		f.ProjectID+":"+f.Env+":"+f.Region).Scan(&locked); err != nil {
 		return nil, nil, nil, false, err
 	}
 	if !locked {
@@ -114,11 +117,11 @@ func (s *Store) PlanFleet(ctx context.Context, f FleetConfig, dep *Version, paus
 		update servers set state = 'draining', updated_at = now()
 		where id in (
 			select s.id from servers s join nodes n on n.id = s.node_id
-			where s.project_id = $1::uuid and n.region = $2
+			where s.project_id = $1::uuid and n.region = $2 and s.env = $3
 			  and n.state <> 'active' and s.state = 'ready'
 		)
 		returning id::text, node_id::text`,
-		f.ProjectID, f.Region)
+		f.ProjectID, f.Region, f.Env)
 	if err != nil {
 		return nil, nil, nil, true, err
 	}
@@ -139,9 +142,9 @@ func (s *Store) PlanFleet(ctx context.Context, f FleetConfig, dep *Version, paus
 	var total int32
 	if err := tx.QueryRow(ctx, `
 		select count(*) from servers s join nodes n on n.id = s.node_id
-		where s.project_id = $1::uuid and n.region = $2
+		where s.project_id = $1::uuid and n.region = $2 and s.env = $3
 		  and s.state in ('creating','ready','allocated','draining')`,
-		f.ProjectID, f.Region).Scan(&total); err != nil {
+		f.ProjectID, f.Region, f.Env).Scan(&total); err != nil {
 		return nil, nil, nil, true, err
 	}
 
@@ -181,12 +184,13 @@ func (s *Store) PlanFleet(ctx context.Context, f FleetConfig, dep *Version, paus
 					  and s.state in ('creating','ready','allocated','draining')
 				) u on true
 				where n.project_id = $1::uuid and n.region = $2 and n.state = 'active'
+				  and n.env = $4
 				  and n.last_heartbeat_at > now() - interval '10 seconds'
 				  and u.used < n.capacity_slots
 				  and not (n.id::text = any($3::text[]))
 				order by u.used asc, n.created_at
 				limit 1`,
-				f.ProjectID, f.Region, paused).Scan(&nodeID)
+				f.ProjectID, f.Region, paused, f.Env).Scan(&nodeID)
 			if errors.Is(err, pgx.ErrNoRows) {
 				break // no capacity in the region right now
 			}
@@ -194,11 +198,13 @@ func (s *Store) PlanFleet(ctx context.Context, f FleetConfig, dep *Version, paus
 				return nil, nil, nil, true, err
 			}
 			var serverID string
+			// I6: servers.env проставляется явно из флота (env исполнения), а не
+			// join'ом к ноде — перевод ноды между env не переписывает историю.
 			if err := tx.QueryRow(ctx, `
-				insert into servers (project_id, node_id, version_id, state, port)
-				values ($1::uuid, $2::uuid, $3::uuid, 'creating', 0)
+				insert into servers (project_id, node_id, version_id, state, port, env)
+				values ($1::uuid, $2::uuid, $3::uuid, 'creating', 0, $4)
 				returning id::text`,
-				f.ProjectID, nodeID, w.versionID).Scan(&serverID); err != nil {
+				f.ProjectID, nodeID, w.versionID, f.Env).Scan(&serverID); err != nil {
 				return nil, nil, nil, true, err
 			}
 			starts = append(starts, PlannedStart{ServerID: serverID, NodeID: nodeID, ImageRef: w.imageRef})
@@ -211,12 +217,12 @@ func (s *Store) PlanFleet(ctx context.Context, f FleetConfig, dep *Version, paus
 				where id in (
 					select s.id from servers s join nodes n on n.id = s.node_id
 					where s.project_id = $1::uuid and n.region = $2
-					  and s.version_id = $3::uuid and s.state = 'ready'
+					  and s.version_id = $3::uuid and s.state = 'ready' and s.env = $5
 					order by s.created_at
 					limit $4
 				)
 				returning id::text, node_id::text`,
-				f.ProjectID, f.Region, w.versionID, surplus)
+				f.ProjectID, f.Region, w.versionID, surplus, f.Env)
 			if err != nil {
 				return nil, nil, nil, true, err
 			}
@@ -224,16 +230,17 @@ func (s *Store) PlanFleet(ctx context.Context, f FleetConfig, dep *Version, paus
 		}
 	}
 
-	// Ready servers of versions outside the window get reaped.
+	// Ready servers of versions outside the window get reaped — env-scoped (C1),
+	// else a dev pass reaps a prod fleet's ready servers of the same region.
 	more, err := drainServers(ctx, tx, `
 		update servers set state = 'draining', updated_at = now()
 		where id in (
 			select s.id from servers s join nodes n on n.id = s.node_id
 			where s.project_id = $1::uuid and n.region = $2
-			  and not (s.version_id::text = any($3::text[])) and s.state = 'ready'
+			  and not (s.version_id::text = any($3::text[])) and s.state = 'ready' and s.env = $4
 		)
 		returning id::text, node_id::text`,
-		f.ProjectID, f.Region, windowIDs)
+		f.ProjectID, f.Region, windowIDs, f.Env)
 	if err != nil {
 		return nil, nil, nil, true, err
 	}
@@ -248,9 +255,9 @@ func (s *Store) PlanFleet(ctx context.Context, f FleetConfig, dep *Version, paus
 		from nodes n, versions v
 		where n.id = s.node_id and v.id = s.version_id
 		  and s.project_id = $1::uuid and n.region = $2
-		  and not (s.version_id::text = any($3::text[])) and s.state = 'allocated'
+		  and not (s.version_id::text = any($3::text[])) and s.state = 'allocated' and s.env = $4
 		returning s.id::text, s.node_id::text, s.version_id::text, s.match_id::text, v.semver`,
-		f.ProjectID, f.Region, windowIDs)
+		f.ProjectID, f.Region, windowIDs, f.Env)
 	if err != nil {
 		return nil, nil, nil, true, err
 	}

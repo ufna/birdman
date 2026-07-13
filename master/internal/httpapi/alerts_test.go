@@ -11,6 +11,7 @@ import (
 	"github.com/ufna/birdman/master/internal/httpapi"
 	"github.com/ufna/birdman/master/internal/matchmaker"
 	"github.com/ufna/birdman/master/internal/metrics"
+	"github.com/ufna/birdman/master/internal/store"
 	"github.com/ufna/birdman/master/internal/testdb"
 )
 
@@ -49,7 +50,7 @@ func TestAlertsEndpoints(t *testing.T) {
 	mm := matchmaker.New(st, m, matchmaker.Config{}, log)
 	dep := deploy.New(deploy.Options{Store: st, Sender: &testdb.CommandRecorder{}, Log: log})
 	ctx := t.Context()
-	_, roSecret, _ := st.CreateAPIKey(ctx, "ro", []string{httpapi.ScopeReadonly})
+	_, roSecret, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ro", Scopes: []string{httpapi.ScopeReadonly}})
 
 	vm := fakeVmalert(t)
 
@@ -123,7 +124,7 @@ func TestAlertsUnconfigured(t *testing.T) {
 	mm := matchmaker.New(st, m, matchmaker.Config{}, log)
 	dep := deploy.New(deploy.Options{Store: st, Sender: &testdb.CommandRecorder{}, Log: log})
 	ctx := t.Context()
-	_, roSecret, _ := st.CreateAPIKey(ctx, "ro", []string{httpapi.ScopeReadonly})
+	_, roSecret, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ro", Scopes: []string{httpapi.ScopeReadonly}})
 
 	// vmalert URL empty, log path points at a nonexistent file.
 	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", "", log).

@@ -54,8 +54,8 @@ func TestStatsEndpoints(t *testing.T) {
 	insertFinishedMatch(t, f, srv, "eu", 10, 120, 90) // 30 min, peak 10
 	insertFinishedMatch(t, f, srv, "eu", 6, 60, 40)   // 20 min, peak 6
 
-	_, roSecret, _ := st.CreateAPIKey(ctx, "ro", []string{httpapi.ScopeReadonly})
-	_, mmSecret, _ := st.CreateAPIKey(ctx, "mm", []string{httpapi.ScopeMatchmaking})
+	_, roSecret, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ro", Scopes: []string{httpapi.ScopeReadonly}})
+	_, mmSecret, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "mm", Scopes: []string{httpapi.ScopeMatchmaking}})
 	ro := &client{t: t, base: ts.URL, key: roSecret}
 	mmc := &client{t: t, base: ts.URL, key: mmSecret}
 
@@ -127,7 +127,7 @@ func TestStatsEmpty(t *testing.T) {
 	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", "", log))
 	t.Cleanup(ts.Close)
 	ctx := t.Context()
-	_, roSecret, _ := st.CreateAPIKey(ctx, "ro", []string{httpapi.ScopeReadonly})
+	_, roSecret, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ro", Scopes: []string{httpapi.ScopeReadonly}})
 	ro := &client{t: t, base: ts.URL, key: roSecret}
 
 	code, body := ro.do("GET", "/v1/stats/overview?days=3", nil)
@@ -178,7 +178,7 @@ func newStatsAPI(t *testing.T) (ts *httptest.Server, st *store.Store, f *testdb.
 	dep := deploy.New(deploy.Options{Store: st, Sender: &testdb.CommandRecorder{}, Log: log})
 	ts = httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", "", log))
 	t.Cleanup(ts.Close)
-	_, roSecret, err := st.CreateAPIKey(t.Context(), "ro", []string{httpapi.ScopeReadonly})
+	_, roSecret, err := st.CreateAPIKey(t.Context(), store.CreateAPIKeyParams{Name: "ro", Scopes: []string{httpapi.ScopeReadonly}})
 	if err != nil {
 		t.Fatalf("create ro api key: %v", err)
 	}
@@ -242,8 +242,8 @@ func seedStatsRollupWindow(t *testing.T, st *store.Store, f *testdb.Fixture) tim
 	now := time.Now().UTC()
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 
-	v110 := f.AddVersion(t, "1.1.0")
-	v200 := f.AddVersion(t, "2.0.0")
+	v110 := f.AddVersion(t, "1.1.0", "dev")
+	v200 := f.AddVersion(t, "2.0.0", "dev")
 	srv100 := f.InsertServer(t, f.NodeID, f.VersionID, "reaped", 21001, 0)
 	srv110 := f.InsertServer(t, f.NodeID, v110, "reaped", 21002, 0)
 	srv200 := f.InsertServer(t, f.NodeID, v200, "reaped", 21003, 0)
@@ -579,7 +579,7 @@ func TestStatsOccupancyBoundary(t *testing.T) {
 	// only safely in the past if the test happens to run after that hour
 	// UTC, otherwise store.StatMatchesOverlapping's started_at < now bound
 	// excludes it from the live tail.
-	v2 := f.AddVersion(t, "2.0.0")
+	v2 := f.AddVersion(t, "2.0.0", "dev")
 	srvNormal := f.InsertServer(t, f.NodeID, v2, "reaped", 21302, 0)
 	insertStatMatchAt(t, st, srvNormal, "eu-boundary", 3,
 		now.Add(-3*time.Minute), now.Add(-2*time.Minute), endAt(now.Add(-1*time.Minute)))

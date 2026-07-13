@@ -25,7 +25,21 @@ func ensureProject(ctx context.Context, tx pgx.Tx, slug string) (string, error) 
 		insert into projects (slug) values ($1)
 		on conflict (slug) do update set slug = excluded.slug
 		returning id::text`, slug).Scan(&id)
-	return id, err
+	if err != nil {
+		return "", err
+	}
+	// Environments v1: каждый проект получает dev+prod при первом упоминании
+	// (design §1). Это load-bearing — nodes/versions/fleets ссылаются на
+	// environments по FK (project_id, env), а новая нода/версия/флот входят как
+	// dev, поэтому строка environments dev обязана существовать в этой же tx до
+	// их вставки. dev: auto_deploy, keep=20; prod: production, keep=∞.
+	if _, err := tx.Exec(ctx, `
+		insert into environments (project_id, name, production, auto_deploy, retention_keep)
+		values ($1::uuid, 'dev', false, true, 20), ($1::uuid, 'prod', true, false, 0)
+		on conflict (project_id, name) do nothing`, id); err != nil {
+		return "", err
+	}
+	return id, nil
 }
 
 type CreateNodeParams struct {
@@ -76,10 +90,10 @@ func (s *Store) CreateNode(ctx context.Context, p CreateNodeParams) (Node, strin
 	err = tx.QueryRow(ctx, `
 		insert into nodes (project_id, region, hostname, public_ip, capacity_slots, labels, token_hash)
 		values ($1::uuid, $2, $3, $4::inet, $5, $6::jsonb, $7)
-		returning id::text, project_id::text, region, hostname, host(public_ip),
+		returning id::text, project_id::text, region, env, hostname, host(public_ip),
 		          capacity_slots, agent_version, state, created_at`,
 		projectID, p.Region, p.Hostname, p.PublicIP, p.CapacitySlots, string(labels), string(hash)).
-		Scan(&n.ID, &n.ProjectID, &n.Region, &n.Hostname, &n.PublicIP,
+		Scan(&n.ID, &n.ProjectID, &n.Region, &n.Env, &n.Hostname, &n.PublicIP,
 			&n.CapacitySlots, &n.AgentVersion, &n.State, &n.CreatedAt)
 	if err != nil {
 		return Node{}, "", err
@@ -128,12 +142,12 @@ func (s *Store) GetNode(ctx context.Context, id string) (Node, error) {
 	var n Node
 	var labels []byte
 	err := s.Pool.QueryRow(ctx, `
-		select n.id::text, n.project_id::text, p.slug, n.region, n.hostname, host(n.public_ip),
+		select n.id::text, n.project_id::text, p.slug, n.region, n.env, n.hostname, host(n.public_ip),
 		       n.capacity_slots, n.agent_version, n.state, n.last_heartbeat_at, n.labels, n.created_at,
 		       n.cert_serial, n.cert_not_after, n.enrolled_at
 		from nodes n join projects p on p.id = n.project_id
 		where n.id = $1::uuid`, id).
-		Scan(&n.ID, &n.ProjectID, &n.Project, &n.Region, &n.Hostname, &n.PublicIP,
+		Scan(&n.ID, &n.ProjectID, &n.Project, &n.Region, &n.Env, &n.Hostname, &n.PublicIP,
 			&n.CapacitySlots, &n.AgentVersion, &n.State, &n.LastHeartbeatAt, &labels, &n.CreatedAt,
 			&n.CertSerial, &n.CertNotAfter, &n.EnrolledAt)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -204,10 +218,79 @@ func (s *Store) setNodeDrain(ctx context.Context, id string, drain bool) (Node, 
 	return s.GetNode(ctx, id)
 }
 
+// SetNodeEnv moves a node to another environment (PATCH /v1/nodes/{id} {env},
+// environments v1 §2). Allowed in ANY state except `dead`, and only when the
+// node carries no live servers (state in creating/ready/allocated/draining) —
+// otherwise ErrConflict. The target env must exist for the node's project.
+// Emits node_env_changed {from, to} on an actual change; idempotent when the
+// env is unchanged. A moved node does NOT rewrite history — servers/matches keep
+// their own env column (invariant I6).
+func (s *Store) SetNodeEnv(ctx context.Context, nodeID, env string) (Node, error) {
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return Node{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	var projectID, cur, state string
+	err = tx.QueryRow(ctx,
+		`select project_id::text, env, state from nodes where id = $1::uuid for update`, nodeID).
+		Scan(&projectID, &cur, &state)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Node{}, fmt.Errorf("node %s: %w", nodeID, ErrNotFound)
+	}
+	if err != nil {
+		return Node{}, err
+	}
+	if state == "dead" {
+		return Node{}, fmt.Errorf("cannot change env of a dead node %s: %w", nodeID, ErrConflict)
+	}
+
+	// Target env must exist for this project (nodes_env_fk would also reject the
+	// write, but this gives a clean 404 instead of a 500).
+	var envExists bool
+	if err := tx.QueryRow(ctx,
+		`select exists(select 1 from environments where project_id = $1::uuid and name = $2)`,
+		projectID, env).Scan(&envExists); err != nil {
+		return Node{}, err
+	}
+	if !envExists {
+		return Node{}, fmt.Errorf("environment %s: %w", env, ErrNotFound)
+	}
+
+	// A node with live servers cannot be moved — its running dedics belong to
+	// the current env (drain first). reaped/failed servers do not block.
+	var live bool
+	if err := tx.QueryRow(ctx, `
+		select exists(select 1 from servers
+		              where node_id = $1::uuid
+		                and state in ('creating','ready','allocated','draining'))`,
+		nodeID).Scan(&live); err != nil {
+		return Node{}, err
+	}
+	if live {
+		return Node{}, fmt.Errorf("node %s has live servers, drain it first: %w", nodeID, ErrConflict)
+	}
+
+	if env != cur {
+		if _, err := tx.Exec(ctx, `update nodes set env = $2 where id = $1::uuid`, nodeID, env); err != nil {
+			return Node{}, err
+		}
+		if err := insertEvent(ctx, tx, EventNodeEnvChanged, EventRef{NodeID: &nodeID},
+			map[string]any{"from": cur, "to": env}); err != nil {
+			return Node{}, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Node{}, err
+	}
+	return s.GetNode(ctx, nodeID)
+}
+
 // ListNodes returns all nodes with project slugs.
 func (s *Store) ListNodes(ctx context.Context) ([]Node, error) {
 	rows, err := s.Pool.Query(ctx, `
-		select n.id::text, n.project_id::text, p.slug, n.region, n.hostname, host(n.public_ip),
+		select n.id::text, n.project_id::text, p.slug, n.region, n.env, n.hostname, host(n.public_ip),
 		       n.capacity_slots, n.agent_version, n.state, n.last_heartbeat_at, n.labels, n.created_at,
 		       n.cert_serial, n.cert_not_after, n.enrolled_at
 		from nodes n join projects p on p.id = n.project_id
@@ -220,7 +303,7 @@ func (s *Store) ListNodes(ctx context.Context) ([]Node, error) {
 	for rows.Next() {
 		var n Node
 		var labels []byte
-		if err := rows.Scan(&n.ID, &n.ProjectID, &n.Project, &n.Region, &n.Hostname, &n.PublicIP,
+		if err := rows.Scan(&n.ID, &n.ProjectID, &n.Project, &n.Region, &n.Env, &n.Hostname, &n.PublicIP,
 			&n.CapacitySlots, &n.AgentVersion, &n.State, &n.LastHeartbeatAt, &labels, &n.CreatedAt,
 			&n.CertSerial, &n.CertNotAfter, &n.EnrolledAt); err != nil {
 			return nil, err

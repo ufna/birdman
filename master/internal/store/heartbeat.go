@@ -293,9 +293,11 @@ func (s *Store) ApplyServerEvent(ctx context.Context, nodeID, serverID, kind, de
 	case "match_start":
 		// Upsert keeps whoever came first consistent: the matchmaker's
 		// RecordMatch (pending) or this event (REST-allocate path has no row).
+		// env — из строки СЕРВЕРА (s.env, инвариант I6), а не из migration-default
+		// 'dev': REST-путь без RecordMatch иначе записал бы prod-матч как dev (W-I1).
 		if _, err := tx.Exec(ctx, `
-			insert into matches (id, project_id, server_id, version_id, region, state, started_at)
-			select s.match_id, s.project_id, s.id, s.version_id, n.region, 'running', now()
+			insert into matches (id, project_id, server_id, version_id, region, env, state, started_at)
+			select s.match_id, s.project_id, s.id, s.version_id, n.region, s.env, 'running', now()
 			from servers s join nodes n on n.id = s.node_id
 			where s.id = $1::uuid and s.match_id is not null
 			on conflict (id) do update

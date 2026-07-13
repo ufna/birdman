@@ -102,7 +102,7 @@ func (r *Reconciler) RunOnce(ctx context.Context) error {
 }
 
 func (r *Reconciler) reconcileFleet(ctx context.Context, f store.FleetConfig) error {
-	dep, err := r.st.DeprecatedWindowVersion(ctx, f.ProjectID)
+	dep, err := r.st.DeprecatedWindowVersion(ctx, f.ProjectID, f.Env)
 	if err != nil {
 		return err
 	}
@@ -126,7 +126,10 @@ func (r *Reconciler) reconcileFleet(ctx context.Context, f store.FleetConfig) er
 			Msg: &agentlinkv1.MasterMsg_Start{Start: &agentlinkv1.StartServer{
 				ServerId: p.ServerID,
 				ImageRef: p.ImageRef,
-				Port:     0, // agent picks from its pool
+				// BIRDMAN_ENV — игровой сервер знает своё окружение (конфиги/
+				// аналитика). Заполнение существующего map-поля, ноль диффов proto.
+				Env:  map[string]string{"BIRDMAN_ENV": f.Env},
+				Port: 0, // agent picks from its pool
 			}},
 		})
 		r.log.Info("reconcile: start server",

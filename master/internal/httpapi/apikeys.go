@@ -30,6 +30,11 @@ func (s *Server) handleListAPIKeys(w http.ResponseWriter, r *http.Request) {
 type createAPIKeyRequest struct {
 	Name   string   `json:"name"`
 	Scopes []string `json:"scopes"`
+	// Optional (project, env) binding (environments v1 §5) — strictly a pair.
+	// Both empty → a global key (the pre-env default). The store validates parity,
+	// admin-incompatibility and existence; every error maps to 400.
+	Project string `json:"project,omitempty"`
+	Env     string `json:"env,omitempty"`
 }
 
 func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
@@ -57,14 +62,29 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	slices.Sort(scopes)
 	scopes = slices.Compact(scopes)
 
-	key, secret, err := s.st.CreateAPIKey(r.Context(), req.Name, scopes)
+	// Binding is optional and strictly a pair — an empty field means "unset" (a
+	// global key). The store validates parity/admin-incompatibility/existence.
+	var project, env *string
+	if req.Project != "" {
+		project = &req.Project
+	}
+	if req.Env != "" {
+		env = &req.Env
+	}
+	key, secret, err := s.st.CreateAPIKey(r.Context(), store.CreateAPIKeyParams{
+		Name: req.Name, Scopes: scopes, Project: project, Env: env,
+	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	// Audit event — no secret in the payload.
-	if err := s.st.InsertEvent(r.Context(), store.EventAPIKeyCreated, store.EventRef{},
-		map[string]any{"key_id": key.ID, "name": key.Name, "scopes": key.Scopes}); err != nil {
+	// Audit event — no secret in the payload; binding recorded when present.
+	payload := map[string]any{"key_id": key.ID, "name": key.Name, "scopes": key.Scopes}
+	if key.Project != nil {
+		payload["project"] = *key.Project
+		payload["env"] = *key.Env
+	}
+	if err := s.st.InsertEvent(r.Context(), store.EventAPIKeyCreated, store.EventRef{}, payload); err != nil {
 		s.log.Error("apikey: create event write failed", "key_id", key.ID, "err", err)
 	}
 	// The secret is shown exactly once; only its bcrypt hash is persisted.

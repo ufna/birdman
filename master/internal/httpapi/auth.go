@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"crypto/sha256"
+	"fmt"
 	"net/http"
 	"slices"
 	"strings"
@@ -48,9 +49,10 @@ func newAuthenticator(st *store.Store) *authenticator {
 
 // authenticate resolves the request to an API key: `Authorization: Bearer`
 // first, then the panel session cookie (session.go). viaCookie tells
-// requireScope to apply the CSRF check. bcrypt verification results are
-// cached (sha256(token) → scopes) so hot paths like /v1/allocate stay well
-// under the 50ms SLO.
+// requireScope to apply the CSRF check. bcrypt verification results are cached
+// (sha256(token) → the whole store.APIKey, the (project, env) binding included,
+// so binding reaches enforcement through the cache too) — hot paths like
+// /v1/allocate stay well under the 50ms SLO.
 func (a *authenticator) authenticate(r *http.Request) (key store.APIKey, viaCookie, ok bool) {
 	h := r.Header.Get("Authorization")
 	token, ok := strings.CutPrefix(h, "Bearer ")
@@ -132,4 +134,55 @@ func (s *Server) requireScope(scope string, h http.HandlerFunc) http.HandlerFunc
 		}
 		h(w, r.WithContext(context.WithValue(r.Context(), apiKeyCtxKey, key)))
 	}
+}
+
+// keyAllowed reports whether a key may act on the (project, env) target
+// (environments v1 §5). A global key (Project nil — the pre-env default, and the
+// only shape an admin key can take) is allowed everywhere; a bound key must
+// match the target pair exactly.
+func keyAllowed(key store.APIKey, project, env string) bool {
+	if key.Project == nil {
+		return true
+	}
+	return *key.Project == project && key.Env != nil && *key.Env == env
+}
+
+// requireBinding enforces the request key's (project, env) binding against a
+// target on the deploy surface (environments v1 §5 — versions/deploy/rollback/
+// fleets). It returns true when the request may proceed; otherwise it writes the
+// 403 and returns false. A global/admin key always passes. The key is the one
+// requireScope stashed in the context; an absent key (a wiring impossibility on
+// a scoped route) is treated as unbound and passes — the scope gate already ran.
+func (s *Server) requireBinding(w http.ResponseWriter, r *http.Request, project, env string) bool {
+	key, _ := keyFromContext(r.Context())
+	if keyAllowed(key, project, env) {
+		return true
+	}
+	// Полупара (Project задан, Env nil) недостижима при живом CHECK
+	// api_keys_binding_all_or_nothing, но достижима по схеме — не разыменовываем
+	// key.Env вслепую, иначе форматирование 403 паникнет (w11). key.Project здесь
+	// гарантированно не nil: для глобального ключа keyAllowed вернул бы true.
+	keyEnv := "<nil>"
+	if key.Env != nil {
+		keyEnv = *key.Env
+	}
+	writeError(w, http.StatusForbidden, "forbidden",
+		fmt.Sprintf("key is bound to %s/%s", *key.Project, keyEnv))
+	return false
+}
+
+// bindProject resolves the project a request acts on when the field is optional:
+// an explicit value wins; otherwise a bound key contributes its own project
+// (environments v1 §5 — a bound key defaults project, not only validates it), so
+// CI keyed to one project can omit it. A global key with no explicit project
+// yields "" unchanged (the sole-project / ensureProject conventions apply
+// downstream).
+func bindProject(r *http.Request, project string) string {
+	if project != "" {
+		return project
+	}
+	if key, ok := keyFromContext(r.Context()); ok && key.Project != nil {
+		return *key.Project
+	}
+	return project
 }

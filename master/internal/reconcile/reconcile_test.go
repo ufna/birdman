@@ -89,6 +89,11 @@ func TestReconcileCreatesBuffer(t *testing.T) {
 		if start.GetPort() != 0 {
 			t.Fatalf("agent must pick the port, got %d", start.GetPort())
 		}
+		// BIRDMAN_ENV прокинут в дедик из env флота (environments v1): сервер
+		// знает своё окружение. Фикстура живёт в dev.
+		if got := start.GetEnv()["BIRDMAN_ENV"]; got != "dev" {
+			t.Fatalf("StartServer must carry BIRDMAN_ENV=dev, got %q", got)
+		}
 	}
 	if states := f.ServerStates(t); states["creating"] != 3 {
 		t.Fatalf("want 3 creating servers, got %+v", states)
@@ -480,11 +485,11 @@ func TestStuckCreatingFailsByTimeout(t *testing.T) {
 func TestStaleVersionReaped(t *testing.T) {
 	st := testdb.New(t)
 	f := testdb.Seed(t, st, "eu", 10)
-	v2 := f.AddVersion(t, "2.0.0")
+	v2 := f.AddVersion(t, "2.0.0", "dev")
 	f.InsertServer(t, f.NodeID, f.VersionID, "ready", 20001, 0) // old version, ready
 	buffer, maxServers := int32(0), int32(50)
 	if _, err := st.UpsertFleet(context.Background(), store.UpsertFleetParams{
-		Project: f.Project, Region: f.Region, ActiveVersion: &v2,
+		Project: f.Project, Env: f.Env, Region: f.Region, ActiveVersion: &v2,
 		BufferReady: &buffer, MaxServers: &maxServers,
 	}); err != nil {
 		t.Fatal(err)
@@ -580,7 +585,7 @@ func TestCleanMatchCycleDoesNotFeedCrashLoop(t *testing.T) {
 
 		// Match: allocate → start → end → clean exit (stopped report).
 		matchID := uuid.NewString()
-		if _, err := st.Allocate(ctx, "game", "eu", nil, matchID, 2); err != nil {
+		if _, err := st.Allocate(ctx, "game", "dev", "eu", nil, matchID, 2); err != nil {
 			t.Fatalf("cycle %d: allocate: %v", cycle, err)
 		}
 		if err := st.ApplyServerEvent(ctx, f.NodeID, serverID, "match_start", matchID); err != nil {
@@ -644,7 +649,7 @@ func TestWindowKeepsBothBuffers(t *testing.T) {
 	st := testdb.New(t)
 	f := testdb.Seed(t, st, "eu", 20)
 	f.UpsertFleet(t, 3, 50) // active 1.0.0, buffer 3
-	v2 := f.AddVersion(t, "1.1.0")
+	v2 := f.AddVersion(t, "1.1.0", "dev")
 	flipActive(t, st, v2) // 1.0.0 → deprecated
 	r, sender := newReconciler(st)
 
@@ -680,11 +685,11 @@ func TestWindowDeprecatedSurplusStopped(t *testing.T) {
 	f := testdb.Seed(t, st, "eu", 20)
 	buffer := int32(0)
 	if _, err := st.UpsertFleet(context.Background(), store.UpsertFleetParams{
-		Project: f.Project, Region: f.Region, ActiveVersion: &f.VersionID, BufferReady: &buffer,
+		Project: f.Project, Env: f.Env, Region: f.Region, ActiveVersion: &f.VersionID, BufferReady: &buffer,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	v2 := f.AddVersion(t, "1.1.0")
+	v2 := f.AddVersion(t, "1.1.0", "dev")
 	flipActive(t, st, v2)
 
 	// buffer_ready 0 → deprecated target min(2,0)=0: every ready v1 goes.
@@ -722,12 +727,12 @@ func TestWindowReapTTLDrainsLiveMatch(t *testing.T) {
 	f := testdb.Seed(t, st, "eu", 20)
 	buffer, maxServers, reapTTL := int32(1), int32(50), int32(30)
 	if _, err := st.UpsertFleet(context.Background(), store.UpsertFleetParams{
-		Project: f.Project, Region: f.Region, ActiveVersion: &f.VersionID,
+		Project: f.Project, Env: f.Env, Region: f.Region, ActiveVersion: &f.VersionID,
 		BufferReady: &buffer, MaxServers: &maxServers, ReapTTLMin: &reapTTL,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	v2 := f.AddVersion(t, "1.1.0")
+	v2 := f.AddVersion(t, "1.1.0", "dev")
 	flipActive(t, st, v2)
 	ctx := context.Background()
 

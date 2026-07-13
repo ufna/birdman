@@ -89,7 +89,7 @@ func TestDeployPrepullThenFlip(t *testing.T) {
 	f := testdb.Seed(t, st, "eu", 10) // version 1.0.0
 	nodeB := f.AddNode(t, "node-2", "203.0.113.11", 10)
 	f.UpsertFleet(t, 2, 50) // active 1.0.0
-	v2 := f.AddVersion(t, "1.1.0")
+	v2 := f.AddVersion(t, "1.1.0", "dev")
 	m, rec, obs := newManager(t, st, time.Minute)
 	ctx := context.Background()
 
@@ -163,7 +163,7 @@ func TestDeployIdempotentWhilePrepulling(t *testing.T) {
 	st := testdb.New(t)
 	f := testdb.Seed(t, st, "eu", 10)
 	f.UpsertFleet(t, 2, 50)
-	v2 := f.AddVersion(t, "1.1.0")
+	v2 := f.AddVersion(t, "1.1.0", "dev")
 	m, rec, _ := newManager(t, st, time.Minute)
 	ctx := context.Background()
 
@@ -183,7 +183,7 @@ func TestDeployIdempotentWhilePrepulling(t *testing.T) {
 	}
 
 	// A different version of the same project cannot start meanwhile.
-	v3 := f.AddVersion(t, "1.2.0")
+	v3 := f.AddVersion(t, "1.2.0", "dev")
 	if _, err := m.Deploy(ctx, v3); !errors.Is(err, store.ErrDeployInProgress) {
 		t.Fatalf("want ErrDeployInProgress, got %v", err)
 	}
@@ -195,7 +195,7 @@ func TestDeployTimeoutAborts(t *testing.T) {
 	st := testdb.New(t)
 	f := testdb.Seed(t, st, "eu", 10)
 	f.UpsertFleet(t, 2, 50)
-	v2 := f.AddVersion(t, "1.1.0")
+	v2 := f.AddVersion(t, "1.1.0", "dev")
 	m, _, obs := newManager(t, st, 50*time.Millisecond)
 	ctx := context.Background()
 
@@ -230,7 +230,7 @@ func TestDeployPullFailedAborts(t *testing.T) {
 	st := testdb.New(t)
 	f := testdb.Seed(t, st, "eu", 10)
 	f.UpsertFleet(t, 2, 50)
-	v2 := f.AddVersion(t, "1.1.0")
+	v2 := f.AddVersion(t, "1.1.0", "dev")
 	m, _, _ := newManager(t, st, time.Minute)
 	ctx := context.Background()
 
@@ -254,7 +254,7 @@ func TestDeployRejections(t *testing.T) {
 	m, _, _ := newManager(t, st, time.Minute)
 	ctx := context.Background()
 
-	v2 := f.AddVersion(t, "1.1.0")
+	v2 := f.AddVersion(t, "1.1.0", "dev")
 	if _, err := m.Deploy(ctx, v2); !errors.Is(err, store.ErrNoFleet) {
 		t.Fatalf("no fleet: want ErrNoFleet, got %v", err)
 	}
@@ -291,9 +291,9 @@ func TestDeployChainDisablesOlderDeprecated(t *testing.T) {
 		}
 	}
 
-	v2 := f.AddVersion(t, "1.1.0")
+	v2 := f.AddVersion(t, "1.1.0", "dev")
 	deployAll(v2) // 1.0.0 → deprecated
-	v3 := f.AddVersion(t, "1.2.0")
+	v3 := f.AddVersion(t, "1.2.0", "dev")
 	deployAll(v3) // 1.1.0 → deprecated, 1.0.0 → disabled
 
 	if got := versionState(t, st, f.VersionID); got != "disabled" {
@@ -313,12 +313,12 @@ func TestRollback(t *testing.T) {
 	st := testdb.New(t)
 	f := testdb.Seed(t, st, "eu", 10)
 	f.UpsertFleet(t, 2, 50)
-	v2 := f.AddVersion(t, "1.1.0")
+	v2 := f.AddVersion(t, "1.1.0", "dev")
 	m, rec, _ := newManager(t, st, time.Minute)
 	ctx := context.Background()
 
 	// Nothing deprecated yet → rollback refused.
-	if _, err := m.Rollback(ctx, "game", nil); !errors.Is(err, store.ErrVersionState) {
+	if _, err := m.Rollback(ctx, "game", "dev", nil); !errors.Is(err, store.ErrVersionState) {
 		t.Fatalf("premature rollback: want ErrVersionState, got %v", err)
 	}
 
@@ -328,7 +328,7 @@ func TestRollback(t *testing.T) {
 	report(m, f.NodeID, "ghcr.io/example/game-server:1.1.0", "pulled")
 	rec.Take() // drop the prepull
 
-	res, err := m.Rollback(ctx, "game", nil)
+	res, err := m.Rollback(ctx, "game", "dev", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +352,7 @@ func TestRollback(t *testing.T) {
 	}
 
 	// Unknown region is rejected without flipping anything.
-	if _, err := m.Rollback(ctx, "game", []string{"mars"}); !errors.Is(err, store.ErrNotFound) {
+	if _, err := m.Rollback(ctx, "game", "dev", []string{"mars"}); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("bad region rollback: want ErrNotFound, got %v", err)
 	}
 	if got := versionState(t, st, f.VersionID); got != "active" {
@@ -366,7 +366,7 @@ func TestResumeAfterRestart(t *testing.T) {
 	st := testdb.New(t)
 	f := testdb.Seed(t, st, "eu", 10)
 	f.UpsertFleet(t, 2, 50)
-	v2 := f.AddVersion(t, "1.1.0")
+	v2 := f.AddVersion(t, "1.1.0", "dev")
 	ctx := context.Background()
 
 	m1, _, _ := newManager(t, st, time.Minute)
@@ -393,7 +393,7 @@ func TestDeployNoNodesActivatesImmediately(t *testing.T) {
 	f := testdb.Seed(t, st, "eu", 10)
 	f.UpsertFleet(t, 2, 50)
 	f.SetHeartbeatAge(t, f.NodeID, time.Hour) // node long dead
-	v2 := f.AddVersion(t, "1.1.0")
+	v2 := f.AddVersion(t, "1.1.0", "dev")
 	m, _, _ := newManager(t, st, time.Minute)
 
 	stt, err := m.Deploy(context.Background(), v2)

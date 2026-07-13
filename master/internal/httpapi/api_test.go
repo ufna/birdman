@@ -93,19 +93,19 @@ func TestRESTFlow(t *testing.T) {
 	t.Cleanup(ts.Close)
 	ctx := t.Context()
 
-	_, adminKey, err := st.CreateAPIKey(ctx, "admin", []string{httpapi.ScopeAdmin})
+	_, adminKey, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "admin", Scopes: []string{httpapi.ScopeAdmin}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, roKey, err := st.CreateAPIKey(ctx, "ro", []string{httpapi.ScopeReadonly})
+	_, roKey, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ro", Scopes: []string{httpapi.ScopeReadonly}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, deployKey, err := st.CreateAPIKey(ctx, "ci", []string{httpapi.ScopeDeploy})
+	_, deployKey, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ci", Scopes: []string{httpapi.ScopeDeploy}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, allocKey, err := st.CreateAPIKey(ctx, "mm", []string{httpapi.ScopeAllocate})
+	_, allocKey, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "mm", Scopes: []string{httpapi.ScopeAllocate}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +162,7 @@ func TestRESTFlow(t *testing.T) {
 	// Versions.
 	code, body = deploy.do("POST", "/v1/versions", map[string]any{
 		"project": "game", "semver": "1.0.0",
-		"image_ref": "ghcr.io/example/game:1.0.0", "channel": "prod",
+		"image_ref": "ghcr.io/example/game:1.0.0", "env": "dev",
 	})
 	if code != 201 {
 		t.Fatalf("create version: %d %v", code, body)
@@ -170,7 +170,7 @@ func TestRESTFlow(t *testing.T) {
 	versionID := body["version"].(map[string]any)["id"].(string)
 	if code, _ = deploy.do("POST", "/v1/versions", map[string]any{
 		"project": "game", "semver": "1.0.0",
-		"image_ref": "ghcr.io/example/game:1.0.0", "channel": "prod",
+		"image_ref": "ghcr.io/example/game:1.0.0", "env": "dev",
 	}); code != 409 {
 		t.Fatalf("duplicate version: want 409, got %d", code)
 	}
@@ -178,23 +178,33 @@ func TestRESTFlow(t *testing.T) {
 		t.Fatalf("list versions: %d %v", code, body)
 	}
 
-	// Fleet config.
+	// Fleet config (env обязателен — I3).
 	code, body = admin.do("PUT", "/v1/fleets/eu", map[string]any{
-		"project": "game", "active_version": versionID, "buffer_ready": 2,
+		"project": "game", "env": "dev", "active_version": versionID, "buffer_ready": 2,
 	})
 	if code != 200 {
 		t.Fatalf("upsert fleet: %d %v", code, body)
 	}
+	// env отсутствует → 400 (без фоллбека).
 	if code, _ = admin.do("PUT", "/v1/fleets/eu", map[string]any{
-		"project": "game", "active_version": uuid.NewString(),
-	}); code != 404 {
-		t.Fatalf("fleet with unknown version: want 404, got %d", code)
+		"project": "game", "active_version": versionID,
+	}); code != 400 {
+		t.Fatalf("fleet without env: want 400, got %d", code)
+	}
+	// active_version не из (project, env) → понятный 400 (составной FK C3), не
+	// 500 и не 404 (design §2/§10).
+	if code, _ = admin.do("PUT", "/v1/fleets/eu", map[string]any{
+		"project": "game", "env": "dev", "active_version": uuid.NewString(),
+	}); code != 400 {
+		t.Fatalf("fleet with unknown version: want 400, got %d", code)
 	}
 
-	// Allocation: empty pool → 409 no_capacity with the exact error shape.
+	// Allocation: empty pool → 409 no_capacity with the exact error shape. env is
+	// explicit here — an env-less allocate against zero ready servers can't resolve
+	// a sole env and would answer env_required instead (environments v1 §3).
 	matchID := uuid.NewString()
 	code, body = alloc.do("POST", "/v1/allocate", map[string]any{
-		"project": "game", "region": "eu", "match_id": matchID,
+		"project": "game", "env": "dev", "region": "eu", "match_id": matchID,
 	})
 	if code != 409 || body["error"] != "no_capacity" {
 		t.Fatalf("allocate empty: want 409 no_capacity, got %d %v", code, body)
@@ -222,9 +232,10 @@ func TestRESTFlow(t *testing.T) {
 	if port := body["port"].(float64); int(port) != 22222 {
 		t.Fatalf("allocate port: %v", body)
 	}
-	// Idempotent repeat over REST.
+	// Idempotent repeat over REST (the server is already claimed, so no ready
+	// server remains for a sole-env resolve — name the env explicitly).
 	code, body2 := alloc.do("POST", "/v1/allocate", map[string]any{
-		"project": "game", "region": "eu", "match_id": matchID,
+		"project": "game", "env": "dev", "region": "eu", "match_id": matchID,
 	})
 	if code != 200 || body2["server_id"] != serverID {
 		t.Fatalf("idempotent allocate: %d %v", code, body2)

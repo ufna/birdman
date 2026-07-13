@@ -49,8 +49,8 @@ func backupsServer(t *testing.T, runner httpapi.BackupRunner, s3TestErr error) (
 	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", "", log).WithBackups(runner, s3Test))
 	t.Cleanup(ts.Close)
 	ctx := t.Context()
-	_, adminSecret, _ := st.CreateAPIKey(ctx, "admin", []string{httpapi.ScopeAdmin})
-	_, roSecret, _ := st.CreateAPIKey(ctx, "ro", []string{httpapi.ScopeReadonly})
+	_, adminSecret, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "admin", Scopes: []string{httpapi.ScopeAdmin}})
+	_, roSecret, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ro", Scopes: []string{httpapi.ScopeReadonly}})
 	admin := &client{t: t, base: ts.URL, key: adminSecret}
 	ro := &client{t: t, base: ts.URL, key: roSecret}
 	return st, admin, ro

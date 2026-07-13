@@ -29,9 +29,9 @@ func caTestServer(t *testing.T) (*store.Store, *client, *client, *client) {
 	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", "", log))
 	t.Cleanup(ts.Close)
 	ctx := t.Context()
-	_, adminKey, _ := st.CreateAPIKey(ctx, "admin", []string{httpapi.ScopeAdmin})
-	_, roKey, _ := st.CreateAPIKey(ctx, "ro", []string{httpapi.ScopeReadonly})
-	_, deployKey, _ := st.CreateAPIKey(ctx, "ci", []string{httpapi.ScopeDeploy})
+	_, adminKey, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "admin", Scopes: []string{httpapi.ScopeAdmin}})
+	_, roKey, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ro", Scopes: []string{httpapi.ScopeReadonly}})
+	_, deployKey, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ci", Scopes: []string{httpapi.ScopeDeploy}})
 	admin := &client{t: t, base: ts.URL, key: adminKey}
 	ro := &client{t: t, base: ts.URL, key: roKey}
 	deploy := &client{t: t, base: ts.URL, key: deployKey}

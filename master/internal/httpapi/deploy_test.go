@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/ufna/birdman/master/internal/deploy"
@@ -34,15 +35,15 @@ func TestDeployAndRollbackEndpoints(t *testing.T) {
 	st := testdb.New(t)
 	f := testdb.Seed(t, st, "eu", 10)
 	f.UpsertFleet(t, 2, 50)
-	v2 := f.AddVersion(t, "1.1.0")
+	v2 := f.AddVersion(t, "1.1.0", "dev")
 	ts, dep, rec := deployServer(t, st)
 	ctx := t.Context()
 
-	_, deployKey, err := st.CreateAPIKey(ctx, "ci", []string{httpapi.ScopeDeploy})
+	_, deployKey, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ci", Scopes: []string{httpapi.ScopeDeploy}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, roKey, err := st.CreateAPIKey(ctx, "ro", []string{httpapi.ScopeReadonly})
+	_, roKey, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ro", Scopes: []string{httpapi.ScopeReadonly}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,5 +116,95 @@ func TestDeployAndRollbackEndpoints(t *testing.T) {
 	// Unknown region → 404, nothing flipped.
 	if code, _ := ci.do("POST", "/v1/rollback", map[string]any{"region": "mars"}); code != 404 {
 		t.Fatalf("bad region rollback: want 404, got %d", code)
+	}
+}
+
+// POST /v1/rollback env-resolve (env v1 §3, I3): env обязателен, когда у проекта
+// >1 env с deprecated-окном (иначе sole-fallback); явный env скоупит откат.
+func TestRollbackEnvResolve(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10) // dev node, dev version 1.0.0
+	ts, _, _ := deployServer(t, st)
+	ctx := t.Context()
+
+	setState := func(id, state string) {
+		t.Helper()
+		if _, err := st.Pool.Exec(ctx,
+			`update versions set state=$2, deprecated_at = case when $2='deprecated' then now() else deprecated_at end where id = $1::uuid`,
+			id, state); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// dev: active 1.1.0, deprecated 1.0.0 — полное окно отката в dev.
+	devActive := f.AddVersion(t, "1.1.0", "dev")
+	if _, err := st.UpsertFleet(ctx, store.UpsertFleetParams{
+		Project: "game", Env: "dev", Region: "eu", ActiveVersion: &devActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	setState(devActive, "active")
+	setState(f.VersionID, "deprecated")
+
+	// prod: нода + active 2.1.0 + deprecated 2.0.0 — окно отката в prod.
+	prodNode := f.AddNode(t, "node-prod", "203.0.113.30", 10)
+	if _, err := st.SetNodeEnv(ctx, prodNode, "prod"); err != nil {
+		t.Fatal(err)
+	}
+	prodDep := f.AddVersion(t, "2.0.0", "prod")
+	prodActive := f.AddVersion(t, "2.1.0", "prod")
+	if _, err := st.UpsertFleet(ctx, store.UpsertFleetParams{
+		Project: "game", Env: "prod", Region: "eu", ActiveVersion: &prodActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	setState(prodActive, "active")
+	setState(prodDep, "deprecated")
+
+	_, deployKey, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ci", Scopes: []string{httpapi.ScopeDeploy}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ci := &client{t: t, base: ts.URL, key: deployKey}
+
+	// Оба env имеют deprecated-окно, env не задан → 409 env_required.
+	code, body := ci.do("POST", "/v1/rollback", map[string]any{})
+	if code != 409 {
+		t.Fatalf("ambiguous rollback: want 409, got %d %v", code, body)
+	}
+	if detail, _ := body["detail"].(string); !strings.Contains(detail, "env is required") {
+		t.Fatalf("409 detail must name the ambiguity, got %q", detail)
+	}
+
+	// Явный env=prod → откат ИМЕННО prod (2.0.0 → active), dev не тронут.
+	code, body = ci.do("POST", "/v1/rollback", map[string]any{"env": "prod"})
+	if code != 200 {
+		t.Fatalf("explicit-env rollback: want 200, got %d %v", code, body)
+	}
+	if v, err := st.GetVersion(ctx, prodDep); err != nil || v.State != "active" {
+		t.Fatalf("prod deprecated must be rolled back to active: %+v %v", v, err)
+	}
+	if v, err := st.GetVersion(ctx, prodActive); err != nil || v.State != "deprecated" {
+		t.Fatalf("prod active must be demoted: %+v %v", v, err)
+	}
+	// dev нетронут: 1.1.0 всё ещё active, 1.0.0 всё ещё deprecated.
+	if v, err := st.GetVersion(ctx, devActive); err != nil || v.State != "active" {
+		t.Fatalf("dev active must survive prod rollback: %+v %v", v, err)
+	}
+	if v, err := st.GetVersion(ctx, f.VersionID); err != nil || v.State != "deprecated" {
+		t.Fatalf("dev deprecated must survive prod rollback: %+v %v", v, err)
+	}
+
+	// Откат прод НЕ закрыл прод-окно (свап active↔deprecated: теперь deprecated
+	// стал 2.1.0). Закроем прод-окно явно (disable) — окно останется только в dev.
+	setState(prodActive, "disabled")
+
+	// Теперь deprecated-окно только в dev → env не задан → sole-fallback, 200.
+	code, body = ci.do("POST", "/v1/rollback", map[string]any{})
+	if code != 200 {
+		t.Fatalf("sole-env rollback: want 200, got %d %v", code, body)
+	}
+	if v, err := st.GetVersion(ctx, f.VersionID); err != nil || v.State != "active" {
+		t.Fatalf("dev deprecated must roll back under sole-fallback: %+v %v", v, err)
 	}
 }
