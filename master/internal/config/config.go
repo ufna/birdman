@@ -89,6 +89,14 @@ type Alerts struct {
 	LogPath string `yaml:"log_path"`
 }
 
+// Backups — исполнение бекапов master'ом (Backups v1). Настройки политики
+// (интервал/ретеншны/S3) живут в БД и правятся из панели; здесь только
+// деплой-концерны: куда писать дампы и где pg_dump.
+type Backups struct {
+	Dir        string `yaml:"dir"`          // каталог дампов, деф. /var/lib/birdman/backups
+	PgDumpPath string `yaml:"pg_dump_path"` // бинарь pg_dump, деф. "pg_dump" (PATH)
+}
+
 type Config struct {
 	DSN        string `yaml:"dsn"`
 	ListenAPI  string `yaml:"listen_api"`
@@ -120,6 +128,10 @@ type Config struct {
 	// nodes a session), and auto-dead would lock a node out permanently.
 	// Default 10, must be >= 1.
 	NodeDownAfterMin int `yaml:"node_down_after_min"`
+	// Backups holds deploy-time backup concerns (Backups v1); the policy
+	// (interval/retentions/S3) lives in the DB (backup_settings), edited from
+	// the panel — see the Backups type.
+	Backups Backups `yaml:"backups"`
 	// SecretsKeyFile is the path to the master's at-rest encryption key —
 	// base64 of 32 random bytes, one line, 0600 (secrets-encryption design §2).
 	// The ansible role provisions /etc/birdman/secrets.key here. Env override
@@ -153,6 +165,7 @@ func defaults() Config {
 			TicketTTLS:  120,
 		},
 		StatsRollupInterval: 2 * time.Minute,
+		Backups:             Backups{Dir: "/var/lib/birdman/backups", PgDumpPath: "pg_dump"},
 	}
 }
 
@@ -222,6 +235,12 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.NodeDownAfterMin < 1 {
 		return cfg, fmt.Errorf("node_down_after_min must be >= 1")
+	}
+	if cfg.Backups.Dir == "" {
+		cfg.Backups.Dir = "/var/lib/birdman/backups"
+	}
+	if cfg.Backups.PgDumpPath == "" {
+		cfg.Backups.PgDumpPath = "pg_dump"
 	}
 	return cfg, nil
 }

@@ -1,9 +1,9 @@
 ---
 # Дев-роль наблюдаемости + ops (итерация 4). Всё аддитивно и только
 # birdman-объекты (общий дев-бокс): свой compose-проект birdman-monitoring,
-# свои файлы в /etc/birdman/monitoring, свои systemd-юниты бэкапа.
+# свои файлы в /etc/birdman/monitoring.
 - name: Monitoring stack (VictoriaMetrics + vmagent + vmalert + Grafana + alert sink)
   ansible.builtin.import_tasks: monitoring.yml
 
-- name: Postgres backups (pg_dump timer + restore-drill)
+- name: Postgres backups (restore-drill + снос legacy-таймера, Backups v1)
   ansible.builtin.import_tasks: backups.yml

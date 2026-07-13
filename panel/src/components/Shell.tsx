@@ -17,7 +17,7 @@ import { useCriticalAlerts } from '../lib/useCriticalAlerts';
 import type { CriticalAlerts } from '../lib/useCriticalAlerts';
 import { Brand } from './ui';
 
-type NavIcon = 'overview' | 'fleet' | 'matches' | 'deploys' | 'events' | 'stats' | 'cost' | 'alerts' | 'logs' | 'access';
+type NavIcon = 'overview' | 'fleet' | 'matches' | 'deploys' | 'events' | 'stats' | 'cost' | 'alerts' | 'logs' | 'backups' | 'access';
 
 export interface NavItem {
   path: string;
@@ -39,6 +39,7 @@ const NAV_ITEMS: NavItem[] = [
   // Логи v1: readonly-видимый флит-поиск по VictoriaLogs — БЕЗ adminOnly
   // (в отличие от /access ниже), см. navItemsFor.
   { path: '/logs', key: 'nav.logs', icon: 'logs' },
+  { path: '/backups', key: 'nav.backups', icon: 'backups', adminOnly: true },
   { path: '/access', key: 'nav.access', icon: 'access', adminOnly: true },
 ];
 
@@ -117,6 +118,7 @@ function NavGlyph({ icon }: { icon: NavIcon }) {
     cost: <path d="M12 3a4 9 0 0 0 0 18 4 9 0 0 0 0-18Zm-8 6h16M4 15h16" />,
     alerts: <path d="M12 4a5 5 0 0 0-5 5c0 5-2 6-2 6h14s-2-1-2-6a5 5 0 0 0-5-5Zm-2 15a2 2 0 0 0 4 0" />,
     logs: <path d="M10 4a6 6 0 1 0 0 12 6 6 0 0 0 0-12Z M17 17l4 4" />,
+    backups: <path d="M12 3c3.9 0 7 1.3 7 3s-3.1 3-7 3-7-1.3-7-3 3.1-3 7-3ZM5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6" />,
     access: <path d="M14 7a4 4 0 1 0-3.5 6L9 14.5l1.5 1.5L9 17.5l1.5 1.5L13 16l-1.5-1.5.9-.9A4 4 0 0 0 14 7Zm.5 2.5h.01" />,
   };
   return (

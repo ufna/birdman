@@ -36,6 +36,7 @@ services:
       - "8444:8444"   # gRPC AgentLink
     volumes:
       - certs:/certs  # self-signed dev TLS pair, генерируется при первом старте
+      - backups:/var/lib/birdman/backups   # дампы Backups v1 — иначе уходят в writable layer
     depends_on:
       postgres:
         condition: service_healthy
@@ -44,3 +45,4 @@ services:
 volumes:
   pgdata:
   certs:
+  backups:

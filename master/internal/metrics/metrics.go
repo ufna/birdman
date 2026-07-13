@@ -159,6 +159,35 @@ var (
 		"birdman_node_cert_expiry_timestamp_seconds",
 		"Unix time when the node's agentlink client cert expires (nodes.cert_not_after); absent until the node enrolls.",
 		[]string{"node"}, nil)
+	// Backups v1 (docs/superpowers/specs/2026-07-13-backups-admin-v1-design.md
+	// §5): every series is derived from backup_settings/backup_runs on scrape
+	// (dbCollector.Collect), so it survives a master restart with nothing held
+	// in process memory.
+	backupEnabledDesc = prometheus.NewDesc("birdman_backup_enabled",
+		"Whether scheduled backups are enabled (backup_settings).", nil, nil)
+	backupIntervalDesc = prometheus.NewDesc("birdman_backup_interval_seconds",
+		"Configured backup interval.", nil, nil)
+	backupLastSuccessDesc = prometheus.NewDesc("birdman_backup_last_success_timestamp_seconds",
+		"Unix time of the last successful backup run (0 = never).", nil, nil)
+	// last_error — rotation-immune основа алерта BackupFailed (Задача 6):
+	// max(started_at) по error-строкам не зависит от ротации истории в
+	// пределах окна алерта (1ч — свежая ошибка не успевает выпасть из 200
+	// сохраняемых прогонов; после 200 подряд ok-прогонов строка ошибки
+	// ротируется и гейдж падает на 0), в отличие от increase(runs_total) —
+	// см. комментарий у backupRunsDesc ниже.
+	backupLastErrorDesc = prometheus.NewDesc("birdman_backup_last_error_timestamp_seconds",
+		"Unix time of the last failed backup run (0 = never).", nil, nil)
+	backupLastSizeDesc = prometheus.NewDesc("birdman_backup_last_size_bytes",
+		"Size of the last successful dump.", nil, nil)
+	backupS3LastSuccessDesc = prometheus.NewDesc("birdman_backup_s3_last_success_timestamp_seconds",
+		"Unix time of the last successful S3 upload (0 = never).", nil, nil)
+	// runs_total — count(*) по ЖИВЫМ строкам backup_runs: PruneBackupRuns(200)
+	// со временем УМЕНЬШАЕТ значение, для Prometheus это counter reset →
+	// rate()/increase() поверх этой серии дают ложные срабатывания (в т.ч.
+	// ложный BackupFailed). Алерты на ней НЕ строить — для алертов есть
+	// last_error_timestamp выше; эта серия — наблюдаемость (панель/дашборды).
+	backupRunsDesc = prometheus.NewDesc("birdman_backup_runs_total",
+		"Finished backup runs by result (count over live backup_runs rows; history rotation may lower it — do not alert on rate/increase, use last_error_timestamp).", []string{"result"}, nil)
 	agentlinkSessionsDesc = prometheus.NewDesc(
 		"birdman_agentlink_sessions",
 		"Live agentlink sessions by auth (mtls: verified client cert; token: node_token). token==0 signals readiness for the mtls flip.",
@@ -293,6 +322,13 @@ func (c *dbCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- playersOnlineDesc
 	ch <- capacitySlotsDesc
 	ch <- nodeCertExpiryDesc
+	ch <- backupEnabledDesc
+	ch <- backupIntervalDesc
+	ch <- backupLastSuccessDesc
+	ch <- backupLastErrorDesc
+	ch <- backupLastSizeDesc
+	ch <- backupS3LastSuccessDesc
+	ch <- backupRunsDesc
 }
 
 func (c *dbCollector) Collect(ch chan<- prometheus.Metric) {
@@ -361,6 +397,67 @@ func (c *dbCollector) Collect(ch chan<- prometheus.Metric) {
 		nrows.Close()
 	}
 
+	// Backups v1 (design §5): all seven series are DB-derived so they outlive a
+	// master restart. Each query logs-and-continues like the blocks above — one
+	// failure never blanks the others.
+	var bEnabled bool
+	var bIntervalH int
+	if err := c.st.Pool.QueryRow(ctx,
+		`select enabled, interval_hours from backup_settings where id`).
+		Scan(&bEnabled, &bIntervalH); err != nil {
+		c.log.Error("metrics: backup_settings query failed", "err", err)
+	} else {
+		ch <- prometheus.MustNewConstMetric(backupEnabledDesc, prometheus.GaugeValue, b2f(bEnabled))
+		ch <- prometheus.MustNewConstMetric(backupIntervalDesc, prometheus.GaugeValue, float64(bIntervalH)*3600)
+	}
+	var lastOK, lastErr, lastS3 float64
+	var lastSize int64
+	if err := c.st.Pool.QueryRow(ctx, `
+		select coalesce(extract(epoch from max(started_at) filter (where result='ok')), 0),
+		       coalesce(extract(epoch from max(started_at) filter (where result='error')), 0),
+		       coalesce(extract(epoch from max(started_at) filter (where result='ok' and s3_uploaded)), 0),
+		       coalesce((select size_bytes from backup_runs where result='ok' order by started_at desc, id desc limit 1), 0)
+		from backup_runs`).Scan(&lastOK, &lastErr, &lastS3, &lastSize); err != nil {
+		c.log.Error("metrics: backup_runs query failed", "err", err)
+	} else {
+		ch <- prometheus.MustNewConstMetric(backupLastSuccessDesc, prometheus.GaugeValue, lastOK)
+		ch <- prometheus.MustNewConstMetric(backupLastErrorDesc, prometheus.GaugeValue, lastErr)
+		ch <- prometheus.MustNewConstMetric(backupS3LastSuccessDesc, prometheus.GaugeValue, lastS3)
+		ch <- prometheus.MustNewConstMetric(backupLastSizeDesc, prometheus.GaugeValue, float64(lastSize))
+	}
+	// runs_total: count(*) по живым строкам — ротация истории (PruneBackupRuns)
+	// уменьшает значение, для Prometheus это reset; алерты строятся НЕ здесь
+	// (см. комментарий у backupRunsDesc). Ошибка чтения посреди итерации —
+	// скипаем ОБЕ серии целиком (как logs-and-continue у соседей): частично
+	// заполненные counts эмитили бы ложный «reset» ok=0/error=0.
+	if brows, err := c.st.Pool.Query(ctx,
+		`select result, count(*) from backup_runs where result in ('ok','error') group by result`); err != nil {
+		c.log.Error("metrics: backup runs count failed", "err", err)
+	} else {
+		counts := map[string]float64{"ok": 0, "error": 0}
+		var readErr error
+		for brows.Next() {
+			var res string
+			var n float64
+			if err := brows.Scan(&res, &n); err != nil {
+				readErr = err
+				break
+			}
+			counts[res] = n
+		}
+		brows.Close()
+		if readErr == nil {
+			readErr = brows.Err()
+		}
+		if readErr != nil {
+			c.log.Error("metrics: backup runs count read failed", "err", readErr)
+		} else {
+			for _, res := range []string{"ok", "error"} {
+				ch <- prometheus.MustNewConstMetric(backupRunsDesc, prometheus.CounterValue, counts[res], res)
+			}
+		}
+	}
+
 	rows, err := c.st.Pool.Query(ctx, `
 		select s.state, n.region, v.semver, count(*)
 		from servers s
@@ -413,4 +510,12 @@ func (c *dbCollector) Collect(ch chan<- prometheus.Metric) {
 				float64(n), project, state)
 		}
 	}
+}
+
+// b2f maps a bool to the Prometheus 1/0 gauge convention.
+func b2f(b bool) float64 {
+	if b {
+		return 1
+	}
+	return 0
 }

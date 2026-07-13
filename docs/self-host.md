@@ -287,7 +287,25 @@ cd birdman/deploy && docker compose down -v    # -v wipes the Postgres volume an
 
 ---
 
-## 6. Security: what's exposed externally
+## 6. Backups
+
+Backups are on by default: the master dumps its Postgres (`pg_dump -Fc`) every
+6 hours into `/var/lib/birdman/backups` (the `backups` volume of the
+`deploy/` stack) and keeps the latest 14 dumps. Schedule, retention and an
+optional S3-compatible offsite (Backblaze B2 / Wasabi / AWS / MinIO) are
+configured in the panel: **Backups** tab — set endpoint/bucket/keys, press
+*Test connection*, then *Run now* to verify end-to-end. Both retentions count
+dumps, not days.
+
+Restore: stop the master, `pg_restore -d birdman --clean --if-exists <dump>`
+against your Postgres, start the master. Dumps carry reversible secrets only
+as AEAD ciphertext; the encryption key `secrets.key` never leaves the host —
+keep its escrow copy separately (see §1). Step-by-step recovery runbook:
+`docs/specs/ops.md §5`.
+
+---
+
+## 7. Security: what's exposed externally
 
 | Port | Where | External | Protection |
 |---|---|---|---|

@@ -49,6 +49,12 @@ type Server struct {
 	// called. T3 wires it to broadcast a fresh SetRegistries snapshot to
 	// connected agents (docs/superpowers/specs/2026-07-09-registries-design.md §2).
 	onRegistriesChanged func(context.Context)
+
+	// backups + backupS3Test back the Backups v1 write routes (backups.go),
+	// wired by WithBackups. Both nil-safe: an unwired runner/s3-test answers 503
+	// (the read routes GET settings/runs work regardless — they hit the store).
+	backups      BackupRunner
+	backupS3Test func(context.Context) error
 }
 
 func New(st *store.Store, m *metrics.Metrics, mm *matchmaker.Matchmaker, dep *deploy.Manager, sender CommandSender, logs *agentlink.LogRouter, vmURL, vlURL string, log *slog.Logger) *Server {
@@ -97,6 +103,13 @@ func New(st *store.Store, m *metrics.Metrics, mm *matchmaker.Matchmaker, dep *de
 	s.mux.HandleFunc("POST /v1/registries", s.requireScope(ScopeAdmin, s.handleCreateRegistry))
 	s.mux.HandleFunc("PATCH /v1/registries/{id}", s.requireScope(ScopeAdmin, s.handlePatchRegistry))
 	s.mux.HandleFunc("DELETE /v1/registries/{id}", s.requireScope(ScopeAdmin, s.handleDeleteRegistry))
+	// Backups v1 (П4 Admin/Backups, backups.go) — policy is secret-adjacent, so
+	// admin scope on every route, including the reads.
+	s.mux.HandleFunc("GET /v1/backups/settings", s.requireScope(ScopeAdmin, s.handleGetBackupSettings))
+	s.mux.HandleFunc("PATCH /v1/backups/settings", s.requireScope(ScopeAdmin, s.handlePatchBackupSettings))
+	s.mux.HandleFunc("GET /v1/backups/runs", s.requireScope(ScopeAdmin, s.handleListBackupRuns))
+	s.mux.HandleFunc("POST /v1/backups/run", s.requireScope(ScopeAdmin, s.handleRunBackup))
+	s.mux.HandleFunc("POST /v1/backups/s3/test", s.requireScope(ScopeAdmin, s.handleTestBackupS3))
 	s.mux.HandleFunc("GET /v1/stats/overview", s.requireScope(ScopeReadonly, s.handleStatsOverview))
 	s.mux.HandleFunc("GET /v1/stats/cost", s.requireScope(ScopeReadonly, s.handleStatsCost))
 	s.mux.HandleFunc("GET /v1/alerts/rules", s.requireScope(ScopeReadonly, s.handleAlertRules))
@@ -145,6 +158,18 @@ func (s *Server) WithAlertsSources(vmalertURL, alertsLogPath string) *Server {
 // simply not called. Returns s for chaining.
 func (s *Server) WithRegistriesHook(fn func(context.Context)) *Server {
 	s.onRegistriesChanged = fn
+	return s
+}
+
+// WithBackups wires the Backups v1 runner (manual run-now) and the s3-test
+// callback (backups.go). Kept a setter rather than a New parameter, like
+// WithAlertsSources/WithRegistriesHook, so the existing New signature and its
+// call sites stay untouched. Both are nil-safe: POST /v1/backups/run and
+// /v1/backups/s3/test answer 503 until wired, while the GET reads work off the
+// store regardless. Returns s for chaining.
+func (s *Server) WithBackups(r BackupRunner, s3Test func(context.Context) error) *Server {
+	s.backups = r
+	s.backupS3Test = s3Test
 	return s
 }
 

@@ -15,7 +15,8 @@ import (
 const secretsEncryptLockKey = "birdman:secrets:encrypt"
 
 // EncryptExistingSecrets encrypts any legacy plaintext registries.token /
-// internal_ca.key_pem rows in place and returns how many rows it rewrote
+// internal_ca.key_pem / backup_settings.s3_secret_key rows in place and returns
+// how many rows it rewrote
 // (design §3). The master calls it once at startup, immediately after Open and
 // BEFORE the first secret read (EnsureInternalCA) — so a database written by a
 // pre-encryption build is upgraded before the strict read paths would reject
@@ -47,23 +48,39 @@ func (s *Store) EncryptExistingSecrets(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	nS3, err := encryptColumn(ctx, tx, s.codec, "backup_settings", "s3_secret_key", "backup_settings.s3_secret_key")
+	if err != nil {
+		return 0, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, err
 	}
-	return nTok + nKey, nil
+	return nTok + nKey + nS3, nil
 }
 
 // encryptColumn encrypts every legacy plaintext value in table.col (rows whose
-// value is not already a birdman:v1: envelope) under aad, returning how many
-// rows it rewrote. table/col/aad are hard-coded call-site constants
-// (registries.token, internal_ca.key_pem) — never user input, so the fmt-built
-// SQL has no injection surface. It buffers the scanned rows before issuing any
-// UPDATE: pgx runs one statement at a time per tx connection, so the SELECT
-// cursor must be drained before the UPDATEs on the same tx. `for update` locks
-// the scanned rows (belt-and-suspenders alongside the advisory lock).
+// value is not already a birdman:v1: envelope AND is not empty) under aad,
+// returning how many rows it rewrote. table/col/aad are hard-coded call-site
+// constants (registries.token, internal_ca.key_pem,
+// backup_settings.s3_secret_key) — never user input, so the fmt-built SQL has
+// no injection surface. The UPDATE matches on id::text — the same form the
+// SELECT returns — so it fits both the uuid PKs (registries, internal_ca) and
+// the boolean singleton PK of backup_settings; the earlier id = $2::uuid cast
+// crashed on the latter (boolean = uuid) when an operator hand-tampered the
+// column via psql. It buffers the scanned rows before issuing any UPDATE:
+// pgx runs one statement at a time per tx connection, so the SELECT cursor must
+// be drained before the UPDATEs on the same tx. `for update` locks the scanned
+// rows (belt-and-suspenders alongside the advisory lock).
+//
+// The empty-value skip in the WHERE is load-bearing for backup_settings: its
+// singleton row seeds s3_secret_key to an empty string (no secret configured),
+// and wrapping that empty value in an envelope would make it non-empty and flip
+// has_s3_secret (the not-empty check on the column) wrongly true.
+// registries.token / internal_ca.key_pem never hold an empty value, so the skip
+// is a no-op for them.
 func encryptColumn(ctx context.Context, tx pgx.Tx, codec *secrets.Codec, table, col, aad string) (int, error) {
 	rows, err := tx.Query(ctx, fmt.Sprintf(
-		`select id::text, %s from %s where %s not like 'birdman:v1:%%' for update`, col, table, col))
+		`select id::text, %s from %s where %s not like 'birdman:v1:%%' and %s <> '' for update`, col, table, col, col))
 	if err != nil {
 		return 0, err
 	}
@@ -88,7 +105,7 @@ func encryptColumn(ctx context.Context, tx pgx.Tx, codec *secrets.Codec, table, 
 			return 0, err
 		}
 		if _, err := tx.Exec(ctx,
-			fmt.Sprintf(`update %s set %s = $1 where id = $2::uuid`, table, col), env, p.id); err != nil {
+			fmt.Sprintf(`update %s set %s = $1 where id::text = $2`, table, col), env, p.id); err != nil {
 			return 0, err
 		}
 	}

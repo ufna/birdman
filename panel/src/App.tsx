@@ -17,6 +17,7 @@ import { Stats } from './screens/Stats';
 import { Cost } from './screens/Cost';
 import { Alerts } from './screens/Alerts';
 import { Logs } from './screens/Logs';
+import { Backups } from './screens/Backups';
 import { Access } from './screens/Access';
 
 export default function App() {
@@ -93,6 +94,9 @@ function Routed() {
     <Alerts />
   ) : path.startsWith('/logs') ? (
     <Logs />
+  ) : path.startsWith('/backups') ? (
+    // Бекапы — admin-only: не-admin по прямому URL уводим на Обзор (в нав его нет).
+    mayAdmin ? <Backups /> : <Overview />
   ) : path.startsWith('/access') ? (
     // Доступ — admin-only: не-admin по прямому URL уводим на Обзор (в нав его нет).
     mayAdmin ? <Access /> : <Overview />

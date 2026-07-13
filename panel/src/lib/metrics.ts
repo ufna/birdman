@@ -362,7 +362,7 @@ export function formatMetric(v: number | null, unit: Unit): string {
   }
 }
 
-function formatBytes(n: number): string {
+export function formatBytes(n: number): string {
   const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
   let v = n;
   let i = 0;

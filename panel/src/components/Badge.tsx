@@ -52,6 +52,8 @@ export const EVENT_KINDS = [
   // but had no label here — cheap backfill alongside the three new kinds.
   // registry_updated — PATCH-правка записи (registries v2 design §2).
   'registry_upserted', 'registry_updated', 'registry_removed', 'apikey_created', 'apikey_revoked', 'apikey_purged',
+  // Backups v1 (2026-07-13-backups-admin-v1-design.md §2): прогон упал.
+  'backup_failed',
 ] as const;
 
 export function toneOfNodeState(state: string): Tone {
@@ -160,6 +162,7 @@ export function toneOfEventKind(kind: string): Tone {
     case 'crash_loop':
     case 'deploy_failed':
     case 'agent_upgrade_failed':
+    case 'backup_failed':
       return 'dead';
     case 'allocation_failed':
     case 'node_drain':
