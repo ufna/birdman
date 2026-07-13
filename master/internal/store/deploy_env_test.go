@@ -3,7 +3,10 @@ package store_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
+
+	"github.com/google/uuid"
 
 	"github.com/ufna/birdman/master/internal/store"
 	"github.com/ufna/birdman/master/internal/testdb"
@@ -127,7 +130,7 @@ func TestBeginDeployBusyPerEnv(t *testing.T) {
 	}
 
 	// prod-деплой НЕ блокируется dev-prepulling.
-	res, err := st.BeginDeploy(ctx, prodV)
+	res, err := st.BeginDeploy(ctx, prodV, store.BeginDeployOpts{})
 	if err != nil {
 		t.Fatalf("prod BeginDeploy must not be blocked by a dev prepull: %v", err)
 	}
@@ -137,7 +140,7 @@ func TestBeginDeployBusyPerEnv(t *testing.T) {
 
 	// Позитивный контроль: второй dev-деплой всё ещё блокируется своим env.
 	devV2 := f.AddVersion(t, "1.2.0", "dev")
-	if _, err := st.BeginDeploy(ctx, devV2); !errors.Is(err, store.ErrDeployInProgress) {
+	if _, err := st.BeginDeploy(ctx, devV2, store.BeginDeployOpts{}); !errors.Is(err, store.ErrDeployInProgress) {
 		t.Fatalf("second dev deploy must be blocked within env: got %v", err)
 	}
 }
@@ -258,5 +261,133 @@ func TestEnvsWithDeprecated(t *testing.T) {
 	}
 	if len(envs) != 2 || envs[0] != "dev" || envs[1] != "prod" {
 		t.Fatalf("both deprecated: want [dev prod], got %v", envs)
+	}
+}
+
+// TestPromoteVersion — идемпотентный промоут между окружениями (spec §4, I7):
+// новая версия в to_env с тем же project/semver/image_ref и provenance
+// promoted_from; повторный промоут пока registered → реюз той же строки; иной
+// image_ref / не-registered state → ErrConflict; тот же env → ErrConflict;
+// несуществующий to_env → понятная ошибка (не sentinel); нет источника →
+// ErrNotFound. Событие version_promoted — только на insert-пути.
+func TestPromoteVersion(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10) // dev version 1.0.0, image ghcr.io/example/game-server:1.0.0
+	ctx := context.Background()
+	const devImage = "ghcr.io/example/game-server:1.0.0"
+
+	// dev 1.0.0 → prod: НОВАЯ версия, тот же image_ref/semver, promoted_from=источник.
+	promoted, err := st.PromoteVersion(ctx, f.VersionID, "prod")
+	if err != nil {
+		t.Fatalf("promote dev→prod: %v", err)
+	}
+	if promoted.ID == f.VersionID {
+		t.Fatalf("promote must create a NEW version row, got the source id %s", promoted.ID)
+	}
+	if promoted.Env != "prod" || promoted.Semver != "1.0.0" ||
+		promoted.ImageRef != devImage || promoted.State != "registered" {
+		t.Fatalf("promoted version fields: %+v", promoted)
+	}
+	if promoted.PromotedFrom == nil || *promoted.PromotedFrom != f.VersionID {
+		t.Fatalf("promoted_from must point at the source %s, got %v", f.VersionID, promoted.PromotedFrom)
+	}
+
+	// Повторный промоут пока prod-версия registered → та же строка (idempotent), НЕ дубль.
+	again, err := st.PromoteVersion(ctx, f.VersionID, "prod")
+	if err != nil {
+		t.Fatalf("idempotent re-promote: %v", err)
+	}
+	if again.ID != promoted.ID {
+		t.Fatalf("re-promote must reuse the same row: want %s, got %s", promoted.ID, again.ID)
+	}
+	var cnt int
+	if err := st.Pool.QueryRow(ctx, `
+		select count(*) from versions v join projects p on p.id = v.project_id
+		where p.slug = 'game' and v.env = 'prod' and v.semver = '1.0.0'`).Scan(&cnt); err != nil {
+		t.Fatal(err)
+	}
+	if cnt != 1 {
+		t.Fatalf("re-promote must not duplicate: prod 1.0.0 count = %d", cnt)
+	}
+
+	// Событие version_promoted записано РОВНО раз (insert-путь, не на реюзе), с
+	// provenance-пейлоадом {project, semver, from_env, to_env, image_ref}.
+	if n, err := st.CountEvents(ctx, store.EventVersionPromoted); err != nil || n != 1 {
+		t.Fatalf("version_promoted: want exactly 1 (insert only, not on reuse), got %d (err %v)", n, err)
+	}
+	evs, err := st.ListEvents(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, e := range evs {
+		if e.Kind != store.EventVersionPromoted {
+			continue
+		}
+		found = true
+		if e.Payload["project"] != "game" || e.Payload["semver"] != "1.0.0" ||
+			e.Payload["from_env"] != "dev" || e.Payload["to_env"] != "prod" ||
+			e.Payload["image_ref"] != devImage {
+			t.Fatalf("version_promoted payload: %v", e.Payload)
+		}
+		if e.VersionID == nil || *e.VersionID != promoted.ID {
+			t.Fatalf("version_promoted must ref the new version %s, got %v", promoted.ID, e.VersionID)
+		}
+	}
+	if !found {
+		t.Fatal("version_promoted event not written")
+	}
+
+	// Промоут в ТОТ ЖЕ env → ErrConflict «already in».
+	_, err = st.PromoteVersion(ctx, f.VersionID, "dev")
+	if !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("promote to same env: want ErrConflict, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "already in") {
+		t.Fatalf("same-env conflict must say «already in», got %q", err.Error())
+	}
+
+	// Несуществующий to_env → понятная ошибка «no such environment» (→400 в API),
+	// НЕ ErrConflict и НЕ ErrNotFound (паритет CreateVersion).
+	_, err = st.PromoteVersion(ctx, f.VersionID, "staging")
+	if err == nil || errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("unknown to_env: want a plain «no such environment» error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "no such environment") {
+		t.Fatalf("unknown to_env error must say «no such environment», got %q", err.Error())
+	}
+
+	// semver занят в prod ДРУГИМ image_ref → ErrConflict.
+	devV3 := f.AddVersion(t, "3.0.0", "dev") // image ghcr.io/example/game-server:3.0.0
+	if _, err := st.CreateVersion(ctx, store.CreateVersionParams{
+		Project: "game", Semver: "3.0.0", ImageRef: "ghcr.io/example/other:3.0.0", Env: "prod",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.PromoteVersion(ctx, devV3, "prod")
+	if !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("semver occupied by a different image_ref: want ErrConflict, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "different image_ref") {
+		t.Fatalf("conflict must mention the image_ref mismatch, got %q", err.Error())
+	}
+
+	// Существующая prod-версия в НЕ-registered state → ErrConflict «already <state>».
+	if _, err := st.Pool.Exec(ctx,
+		`update versions set state = 'active' where id = $1::uuid`, promoted.ID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.PromoteVersion(ctx, f.VersionID, "prod")
+	if !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("promote onto a non-registered version: want ErrConflict, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "already active") {
+		t.Fatalf("conflict must say «already active», got %q", err.Error())
+	}
+
+	// Несуществующая исходная версия → ErrNotFound.
+	_, err = st.PromoteVersion(ctx, uuid.NewString(), "prod")
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("unknown source version: want ErrNotFound, got %v", err)
 	}
 }

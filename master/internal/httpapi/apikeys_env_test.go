@@ -98,6 +98,15 @@ func TestAPIKeyBindingEnforcement(t *testing.T) {
 	ts, _, _ := deployServer(t, st)
 	ctx := t.Context()
 
+	// Isolate key-binding enforcement from the W2 dev auto-deploy: with
+	// auto_deploy on (the dev seed default), registering a dev version below would
+	// occupy the dev deploy slot and turn the positive manual-deploy control into
+	// a 409. Auto-deploy has its own matrix (deploy/autodeploy_test.go).
+	autoOff := false
+	if _, err := st.PatchEnvironment(ctx, "game", "dev", store.EnvironmentPatch{AutoDeploy: &autoOff}); err != nil {
+		t.Fatalf("disable dev auto_deploy: %v", err)
+	}
+
 	mkKey := func(name string, scopes []string, project, env *string) string {
 		t.Helper()
 		_, secret, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{

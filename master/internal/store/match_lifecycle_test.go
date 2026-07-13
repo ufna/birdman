@@ -68,6 +68,32 @@ func TestAllocateSendsAllocateServer(t *testing.T) {
 	}
 }
 
+// M-5: the allocation idempotency fast-path (findByMatch) is env-scoped. The
+// same match_id in a different env must NOT hand back the first env's server —
+// it misses the fast-path and falls through to the normal claim (here prod has
+// no ready servers → no_capacity, rather than leaking the dev server).
+func TestAllocateIdempotencyEnvScoped(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10) // project game (dev+prod seeded), dev node
+	ctx := context.Background()
+
+	devSrv := f.InsertServer(t, f.NodeID, f.VersionID, "ready", 20001, 0)
+	matchID := uuid.NewString()
+
+	// Claim the dev server under match_id in env=dev.
+	a, err := st.Allocate(ctx, "game", "dev", "eu", nil, matchID, 0)
+	if err != nil || a.ServerID != devSrv {
+		t.Fatalf("dev allocate: %+v %v (want %s)", a, err, devSrv)
+	}
+
+	// SAME match_id, env=prod: the fast-path must not return the dev server. prod
+	// has no ready servers → the normal claim path lands on no_capacity (before the
+	// env-scope fix findByMatch would have leaked the dev server here).
+	if _, err := st.Allocate(ctx, "game", "prod", "eu", nil, matchID, 0); !errors.Is(err, store.ErrNoCapacity) {
+		t.Fatalf("cross-env reuse of match_id must miss the fast-path and hit no_capacity, got %v", err)
+	}
+}
+
 // Full happy path of the matchmaker route: pending (RecordMatch) →
 // match_start → running with started_at → players peak from heartbeats →
 // match_end completed → finished; the one-shot dedik exits 0, its stopped

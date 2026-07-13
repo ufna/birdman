@@ -77,6 +77,11 @@ func (s *Store) UpsertFleet(ctx context.Context, p UpsertFleetParams) (FleetConf
 		}
 		return FleetConfig{}, fmt.Errorf("active_version %s is not a version of %s/%s: %w", av, p.Project, p.Env, ErrNotFound)
 	}
+	// Гонка с DELETE env между in-tx пре-чеком и insert'ом: fleet_env_fk (23503)
+	// → внятный «no such environment» (400), а не сырой 500 (w5).
+	if mapped := mapEnvFKViolation(err, p.Project, p.Env); mapped != nil {
+		return FleetConfig{}, mapped
+	}
 	if err != nil {
 		return FleetConfig{}, err
 	}

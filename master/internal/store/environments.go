@@ -99,6 +99,31 @@ func (s *Store) GetEnvironment(ctx context.Context, project, name string) (Envir
 	return e, err
 }
 
+// AutoDeployEnvironments lists every environment (across all projects) with
+// auto_deploy set — the set the deploy manager walks on Resume to restart each
+// forward-only chain after a master restart (environments v1 §4).
+func (s *Store) AutoDeployEnvironments(ctx context.Context) ([]Environment, error) {
+	rows, err := s.Pool.Query(ctx, `
+		select e.project_id::text, p.slug, e.name, e.production, e.auto_deploy, e.retention_keep, e.created_at
+		from environments e join projects p on p.id = e.project_id
+		where e.auto_deploy
+		order by p.slug, e.name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Environment
+	for rows.Next() {
+		var e Environment
+		if err := rows.Scan(&e.ProjectID, &e.Project, &e.Name, &e.Production,
+			&e.AutoDeploy, &e.RetentionKeep, &e.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 // CreateEnvironment adds an environment (POST /v1/environments). Guardrails:
 // name shape/reserved (§1 CHECK), production⇒!auto_deploy (§2). Duplicate →
 // ErrConflict. The project is created on first reference (ensureProject seeds

@@ -13,6 +13,8 @@ import (
 //
 //	POST /v1/deploy   {version_id}               → 202 prepulling | 200 active
 //	POST /v1/rollback {project?, env?, region?}  → 200 rolled back (seconds)
+//	POST /v1/promote  {version_id, to_env}       → 202 prepulling | 200 active
+//	                                               (environments v1 §4)
 
 type deployRequest struct {
 	VersionID string `json:"version_id"`
@@ -100,6 +102,20 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
 	if !s.requireBinding(w, r, project, env) {
 		return
 	}
+	// w8: явный env обязан существовать. Иначе несуществующий env доходил бы до
+	// RollbackTarget и всплывал вводящим в заблуждение 409 «нет deprecated-версии»
+	// (ErrVersionState) — типо в имени env это 400. Sole-fallback-путь (env
+	// выведен из EnvsWithDeprecated) заведомо существует, его не перепроверяем.
+	if req.Env != "" {
+		if _, err := s.st.GetEnvironment(r.Context(), project, env); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				writeError(w, http.StatusBadRequest, "bad_request", "no such environment "+project+"/"+env)
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+	}
 	var regions []string
 	if req.Region != "" {
 		regions = []string{req.Region}
@@ -114,6 +130,75 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
 		"regions":    res.Regions,
 		"old_semver": res.PrevSemver,
 	}})
+}
+
+type promoteRequest struct {
+	VersionID string `json:"version_id"`
+	ToEnv     string `json:"to_env"`
+}
+
+// handlePromote promotes a version into another environment and kicks off the
+// normal deploy pipeline (environments v1 §4). Idempotent: a re-promote reuses
+// the registered target version (store.PromoteVersion) instead of dead-ending on
+// a semver conflict. Enforcement target is the PROMOTE target — (source project,
+// to_env) — so a key bound to the source env cannot push into another env.
+func (s *Server) handlePromote(w http.ResponseWriter, r *http.Request) {
+	var req promoteRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if _, err := uuid.Parse(req.VersionID); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "version_id must be a version id (uuid)")
+		return
+	}
+	if req.ToEnv == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "to_env is required")
+		return
+	}
+	// Load the source first (its project is the enforcement target with to_env),
+	// so a wrong-env bound key is refused (403) without side effects; an unknown
+	// version stays a 404.
+	src, err := s.st.GetVersion(r.Context(), req.VersionID)
+	if err != nil {
+		deployError(w, err)
+		return
+	}
+	if !s.requireBinding(w, r, src.Project, req.ToEnv) {
+		return
+	}
+	promoted, err := s.st.PromoteVersion(r.Context(), req.VersionID, req.ToEnv)
+	if err != nil {
+		promoteError(w, err)
+		return
+	}
+	// Deploy is async and separate from the promote transaction: the version is
+	// already committed, so a failing deploy here (e.g. no fleet yet) still lets
+	// the operator retry the promote idempotently.
+	st, err := s.dep.Deploy(r.Context(), promoted.ID)
+	if err != nil {
+		deployError(w, err)
+		return
+	}
+	code := http.StatusOK // already active (idempotent repeat)
+	if st.State == "prepulling" {
+		code = http.StatusAccepted // flip happens when all nodes report pulled
+	}
+	writeJSON(w, code, map[string]any{"version": promoted, "deploy": st})
+}
+
+// promoteError maps PromoteVersion sentinels onto HTTP responses. Unlike
+// deployError, a plain (non-sentinel) error — «no such environment …» — is a
+// 400 bad_request, consistent with CreateVersion/W1 (a typo'd to_env is client
+// input, not a 500).
+func promoteError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		writeError(w, http.StatusNotFound, "not_found", err.Error())
+	case errors.Is(err, store.ErrConflict):
+		writeError(w, http.StatusConflict, "conflict", err.Error())
+	default:
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+	}
 }
 
 // deployError maps deploy store sentinels onto HTTP responses.

@@ -242,6 +242,38 @@ func TestAllocateBoundKeyDefaultsEnv(t *testing.T) {
 	}
 }
 
+// T5: env-less allocate carrying a version_id resolves env from the version
+// itself (GetVersion → env) BEFORE the sole-with-ready fallback. Both envs have
+// ready servers here, so sole-with-ready alone would answer 409 env_required —
+// but the prod version_id pins env=prod unambiguously → 200 with the prod server.
+func TestAllocateEnvlessResolvesEnvFromVersion(t *testing.T) {
+	st := testdb.New(t)
+	f := twoEnvStand(t, st)
+	f.InsertServer(t, f.NodeID, f.VersionID, "ready", 20001, 0) // dev ready server
+	prodNode := prodNodeID(t, st, "203.0.113.30")
+	prodV := versionID(t, st, "game", "prod", "2.0.0")
+	prodSrv := f.InsertServer(t, prodNode, prodV, "ready", 20002, 0)
+	ts, _, _ := deployServer(t, st)
+	ctx := t.Context()
+
+	_, secret, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{
+		Name: "alloc", Scopes: []string{httpapi.ScopeAllocate},
+	})
+	if err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	globalAlloc := &client{t: t, base: ts.URL, key: secret}
+
+	// No env field, ready servers in BOTH envs, but version_id is a prod version →
+	// env resolves to prod → 200 with the prod server (not 409 env_required).
+	code, body := globalAlloc.do("POST", "/v1/allocate", map[string]any{
+		"project": "game", "region": "eu", "version_id": prodV, "match_id": uuid.NewString(),
+	})
+	if code != 200 || body["server_id"] != prodSrv {
+		t.Fatalf("env-less allocate with prod version_id: want 200 prod server, got %d %v", code, body)
+	}
+}
+
 // Env-less allocate over an EMPTY pool (zero ready servers in the region) is
 // no_capacity, not env_required: SoleEnvWithReady returns ErrNoCapacity for the
 // 0-env case and the handler answers 409 {"error":"no_capacity"} — as before the

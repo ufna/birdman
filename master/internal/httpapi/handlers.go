@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/ufna/birdman/master/internal/deploy"
 	"github.com/ufna/birdman/master/internal/store"
 )
 
@@ -112,7 +113,19 @@ func (s *Server) handleCreateVersion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"version": v})
+	resp := map[string]any{"version": v}
+	// Авто-деплой dev-потока (environments v1 §4): регистрация в auto_deploy-env
+	// немедленно гонит цепочку «только вперёд». TryAutoDeploy сам no-op'ит на
+	// не-auto env (prod → AutoDeployNoop), поэтому зовём безусловно и добавляем
+	// поле лишь на реальном авто-пути. Синхронно, как ручной deploy: BeginDeploy
+	// быстрый, а prepull-Send неблокирующий.
+	switch s.dep.TryAutoDeploy(r.Context(), project, req.Env) {
+	case deploy.AutoDeployStarted:
+		resp["auto_deploy"] = "started"
+	case deploy.AutoDeployQueued:
+		resp["auto_deploy"] = "queued"
+	}
+	writeJSON(w, http.StatusCreated, resp)
 }
 
 func (s *Server) handleListVersions(w http.ResponseWriter, r *http.Request) {
@@ -246,6 +259,25 @@ func (s *Server) handleAllocate(w http.ResponseWriter, r *http.Request) {
 		if key, ok := keyFromContext(r.Context()); ok && key.Env != nil {
 			env = *key.Env
 		}
+	}
+	// version_id несёт своё окружение (T5): env-less allocate с явной версией
+	// резолвит env ИЗ НЕЁ (GetVersion → env) ДО sole-with-ready — версия
+	// однозначно указывает env, гадать по готовому пулу незачем (и это не 409
+	// env_required там, где версия уже всё сказала). Неизвестная версия → та же
+	// нехватка ёмкости, что и claim по несуществующей версии (no_capacity), не
+	// сбивающая контракт на 404/500.
+	if env == "" && req.VersionID != nil {
+		v, err := s.st.GetVersion(r.Context(), *req.VersionID)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			s.writeAllocNoCapacity(w, r, req)
+			return
+		case err != nil:
+			s.m.AllocFailures.WithLabelValues("internal").Inc()
+			storeError(w, err)
+			return
+		}
+		env = v.Env
 	}
 	if env == "" {
 		resolved, err := s.st.SoleEnvWithReady(r.Context(), req.Project, req.Region)

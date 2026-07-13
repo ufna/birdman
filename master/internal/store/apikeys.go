@@ -119,6 +119,14 @@ func (s *Store) CreateAPIKey(ctx context.Context, p CreateAPIKeyParams) (APIKey,
 		returning id::text, name, scopes, project_id::text, env, created_at, revoked_at`,
 		p.Name, string(hash), p.Scopes, projectID, p.Env).
 		Scan(&k.ID, &k.Name, &k.Scopes, &k.ProjectID, &k.Env, &k.CreatedAt, &k.RevokedAt)
+	// Гонка с DELETE env между пре-чеком и insert'ом (только для bound-ключа —
+	// у глобального project_id/env суть NULL, api_keys_env_fk на них молчит):
+	// 23503 → внятный «no such environment» (400), а не сырой 500 (w5).
+	if bound {
+		if mapped := mapEnvFKViolation(err, *p.Project, *p.Env); mapped != nil {
+			return APIKey{}, "", mapped
+		}
+	}
 	if err != nil {
 		return APIKey{}, "", err
 	}

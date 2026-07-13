@@ -119,6 +119,73 @@ func TestDeployAndRollbackEndpoints(t *testing.T) {
 	}
 }
 
+// w7: прямой rollback без deprecated-окна → 409. Явный существующий env=dev с
+// активной версией, но БЕЗ deprecated → RollbackTarget отдаёт ErrVersionState,
+// хендлер маппит в 409 conflict (не 400/500), с внятным «no deprecated version».
+func TestRollbackNoDeprecatedVersion(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10) // dev version 1.0.0 (registered), dev+prod seeded
+	f.UpsertFleet(t, 2, 50)
+	ts, _, _ := deployServer(t, st)
+	ctx := t.Context()
+
+	_, deployKey, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ci", Scopes: []string{httpapi.ScopeDeploy}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ci := &client{t: t, base: ts.URL, key: deployKey}
+
+	code, body := ci.do("POST", "/v1/rollback", map[string]any{"env": "dev"})
+	if code != 409 {
+		t.Fatalf("rollback without a deprecated window: want 409, got %d %v", code, body)
+	}
+	if d, _ := body["detail"].(string); !strings.Contains(d, "no deprecated version") {
+		t.Fatalf("409 must explain the empty rollback window, got %q", d)
+	}
+}
+
+// w13: allow-сторона привязки для отката — ключ bound(game,dev) откатывает
+// dev-окно в своём env → 200 (пара к enforcement-403 в mm_env_test). Именно
+// привязка пропускает откат в свой env, версия 1.0.0 снова active.
+func TestRollbackBoundKeyInOwnEnv(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10) // dev version 1.0.0
+	ts, _, _ := deployServer(t, st)
+	ctx := t.Context()
+
+	// dev-окно: active 1.1.0, deprecated 1.0.0.
+	devActive := f.AddVersion(t, "1.1.0", "dev")
+	if _, err := st.UpsertFleet(ctx, store.UpsertFleetParams{
+		Project: "game", Env: "dev", Region: "eu", ActiveVersion: &devActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `update versions set state='active' where id=$1::uuid`, devActive); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx,
+		`update versions set state='deprecated', deprecated_at=now() where id=$1::uuid`, f.VersionID); err != nil {
+		t.Fatal(err)
+	}
+
+	game, dev := "game", "dev"
+	_, boundSecret, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{
+		Name: "ci-dev", Scopes: []string{httpapi.ScopeDeploy}, Project: &game, Env: &dev,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundDev := &client{t: t, base: ts.URL, key: boundSecret}
+
+	code, body := boundDev.do("POST", "/v1/rollback", map[string]any{"env": "dev"})
+	if code != 200 {
+		t.Fatalf("bound-dev rollback in its own env: want 200, got %d %v", code, body)
+	}
+	if v, err := st.GetVersion(ctx, f.VersionID); err != nil || v.State != "active" {
+		t.Fatalf("dev deprecated must roll back to active: %+v %v", v, err)
+	}
+}
+
 // POST /v1/rollback env-resolve (env v1 §3, I3): env обязателен, когда у проекта
 // >1 env с deprecated-окном (иначе sole-fallback); явный env скоупит откат.
 func TestRollbackEnvResolve(t *testing.T) {
@@ -206,5 +273,56 @@ func TestRollbackEnvResolve(t *testing.T) {
 	}
 	if v, err := st.GetVersion(ctx, f.VersionID); err != nil || v.State != "active" {
 		t.Fatalf("dev deprecated must roll back under sole-fallback: %+v %v", v, err)
+	}
+}
+
+// w14: HTTP-шов авто-деплоя (handlers.go:122-128). POST /v1/versions в
+// auto_deploy-env (dev из сида) с флотом и живой нодой немедленно гонит цепочку
+// «только вперёд»: ответ 201 несёт "auto_deploy":"started" И fake sender получил
+// PrePull. Вторая регистрация, пока первый деплой ещё in-flight (prepulling,
+// никто не отчитался pulled), второй старт НЕ запускает — 201 c
+// "auto_deploy":"queued". Пинит связку «вызов TryAutoDeploy + switch по исходу»:
+// без этого блока поле auto_deploy пропадает и PrePull не уходит, а прежняя
+// suite остаётся зелёной.
+func TestCreateVersionAutoDeployOverHTTP(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10) // dev auto_deploy, живая нода, версия 1.0.0
+	f.UpsertFleet(t, 2, 50)           // флот dev/eu — цель прогрева PrePull
+	ts, _, rec := deployServer(t, st)
+	ctx := t.Context()
+
+	_, deployKey, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ci", Scopes: []string{httpapi.ScopeDeploy}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ci := &client{t: t, base: ts.URL, key: deployKey}
+
+	// Первая регистрация в dev: цепочка стартует немедленно → 201 + "started".
+	code, body := ci.do("POST", "/v1/versions", map[string]any{
+		"project": "game", "semver": "1.1.0",
+		"image_ref": "ghcr.io/example/game-server:1.1.0", "env": "dev",
+	})
+	if code != 201 || body["auto_deploy"] != "started" {
+		t.Fatalf("register in auto_deploy env: want 201 auto_deploy=started, got %d %v", code, body)
+	}
+	// Тот же синхронный вызов уже отправил PrePull живой ноде флота.
+	var prepulled bool
+	for _, c := range rec.Take() {
+		if p := c.Msg.GetPrepull(); p != nil && c.NodeID == f.NodeID {
+			prepulled = true
+		}
+	}
+	if !prepulled {
+		t.Fatal("auto-deploy must dispatch a PrePull to the live fleet node")
+	}
+
+	// Вторая регистрация, пока деплой 1.1.0 ещё in-flight (prepulling, отчёта
+	// pulled не было): второй старт занят busy-проверкой → 201 + "queued".
+	code, body = ci.do("POST", "/v1/versions", map[string]any{
+		"project": "game", "semver": "1.2.0",
+		"image_ref": "ghcr.io/example/game-server:1.2.0", "env": "dev",
+	})
+	if code != 201 || body["auto_deploy"] != "queued" {
+		t.Fatalf("register while a deploy is in flight: want 201 auto_deploy=queued, got %d %v", code, body)
 	}
 }
