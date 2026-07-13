@@ -80,4 +80,4 @@ docker compose logs master | grep 'bootstrap admin'   # 4. admin-ключ (bmk_�
 
 ## Лицензия
 
-[MIT](LICENSE) © 2026 Vladimir Alyamkin.
+[MIT](LICENSE) © 2026 ufna.

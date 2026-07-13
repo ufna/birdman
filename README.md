@@ -80,4 +80,4 @@ Code comments occasionally reference internal design notes (`docs/superpowers/..
 
 ## License
 
-[MIT](LICENSE) © 2026 Vladimir Alyamkin.
+[MIT](LICENSE) © 2026 ufna.
