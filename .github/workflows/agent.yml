@@ -10,6 +10,9 @@ on:
     paths:
       - 'agent/**'
       - '.github/workflows/agent.yml'
+  # Ручной прогон тестов (без публикаций — у агента их нет): удобно для
+  # заполнения бейджа/переиспытания без изменения agent/**.
+  workflow_dispatch:
 
 permissions:
   contents: read
