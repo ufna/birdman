@@ -114,6 +114,7 @@ func (s *Server) handleListVersions(w http.ResponseWriter, r *http.Request) {
 
 type upsertFleetRequest struct {
 	Project       string  `json:"project"`
+	Env           string  `json:"env"`
 	ActiveVersion *string `json:"active_version"`
 	BufferReady   *int32  `json:"buffer_ready"`
 	MaxServers    *int32  `json:"max_servers"`
@@ -125,6 +126,11 @@ func (s *Server) handleUpsertFleet(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	// env обязателен (I3) — внешних потребителей PUT /v1/fleets нет, без фоллбека.
+	if req.Env == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "env is required")
+		return
+	}
 	if req.ActiveVersion != nil {
 		if _, err := uuid.Parse(*req.ActiveVersion); err != nil {
 			writeError(w, http.StatusBadRequest, "bad_request", "active_version must be a version id (uuid)")
@@ -133,16 +139,17 @@ func (s *Server) handleUpsertFleet(w http.ResponseWriter, r *http.Request) {
 	}
 	f, err := s.st.UpsertFleet(r.Context(), store.UpsertFleetParams{
 		Project:       req.Project,
+		Env:           req.Env,
 		Region:        r.PathValue("region"),
 		ActiveVersion: req.ActiveVersion,
 		BufferReady:   req.BufferReady,
 		MaxServers:    req.MaxServers,
 		ReapTTLMin:    req.ReapTTLMin,
 	})
-	if errors.Is(err, store.ErrNotFound) {
-		storeError(w, err)
-		return
-	}
+	// Bad env / active_version не из (project, env) — это некорректный ввод PUT,
+	// а не отсутствующий ресурс: понятный 400 (design §2/§10, FK-ошибки → 400,
+	// не 500 и не 404). active_version-ошибка несёт ErrNotFound-семантику на
+	// уровне store, но на HTTP это 400.
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return

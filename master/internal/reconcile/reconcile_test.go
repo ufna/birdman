@@ -484,7 +484,7 @@ func TestStaleVersionReaped(t *testing.T) {
 	f.InsertServer(t, f.NodeID, f.VersionID, "ready", 20001, 0) // old version, ready
 	buffer, maxServers := int32(0), int32(50)
 	if _, err := st.UpsertFleet(context.Background(), store.UpsertFleetParams{
-		Project: f.Project, Region: f.Region, ActiveVersion: &v2,
+		Project: f.Project, Env: f.Env, Region: f.Region, ActiveVersion: &v2,
 		BufferReady: &buffer, MaxServers: &maxServers,
 	}); err != nil {
 		t.Fatal(err)
@@ -680,7 +680,7 @@ func TestWindowDeprecatedSurplusStopped(t *testing.T) {
 	f := testdb.Seed(t, st, "eu", 20)
 	buffer := int32(0)
 	if _, err := st.UpsertFleet(context.Background(), store.UpsertFleetParams{
-		Project: f.Project, Region: f.Region, ActiveVersion: &f.VersionID, BufferReady: &buffer,
+		Project: f.Project, Env: f.Env, Region: f.Region, ActiveVersion: &f.VersionID, BufferReady: &buffer,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -722,7 +722,7 @@ func TestWindowReapTTLDrainsLiveMatch(t *testing.T) {
 	f := testdb.Seed(t, st, "eu", 20)
 	buffer, maxServers, reapTTL := int32(1), int32(50), int32(30)
 	if _, err := st.UpsertFleet(context.Background(), store.UpsertFleetParams{
-		Project: f.Project, Region: f.Region, ActiveVersion: &f.VersionID,
+		Project: f.Project, Env: f.Env, Region: f.Region, ActiveVersion: &f.VersionID,
 		BufferReady: &buffer, MaxServers: &maxServers, ReapTTLMin: &reapTTL,
 	}); err != nil {
 		t.Fatal(err)

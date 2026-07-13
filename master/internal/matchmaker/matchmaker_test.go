@@ -247,7 +247,7 @@ func TestUpdateRequired(t *testing.T) {
 	// Active version swap to 2.0.0 → the queued 1.0.x ticket becomes stale.
 	v2 := f.AddVersion(t, "2.0.0", "dev")
 	if _, err := st.UpsertFleet(context.Background(), store.UpsertFleetParams{
-		Project: f.Project, Region: f.Region, ActiveVersion: &v2,
+		Project: f.Project, Env: f.Env, Region: f.Region, ActiveVersion: &v2,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +288,7 @@ func TestWidenAcrossRegions(t *testing.T) {
 	}
 	f.SetHeartbeatAge(t, usNode.ID, 0)
 	if _, err := st.UpsertFleet(ctx, store.UpsertFleetParams{
-		Project: "game", Region: "us", ActiveVersion: &f.VersionID,
+		Project: "game", Env: f.Env, Region: "us", ActiveVersion: &f.VersionID,
 	}); err != nil {
 		t.Fatal(err)
 	}

@@ -94,13 +94,15 @@ func (f *Fixture) SetHeartbeatAge(t *testing.T, nodeID string, age time.Duration
 	}
 }
 
-// InsertServer inserts a server row directly (bypassing reconcile).
+// InsertServer inserts a server row directly (bypassing reconcile). servers.env
+// is derived from the node's env (environments v1, I6): a server runs in its
+// node's environment.
 func (f *Fixture) InsertServer(t *testing.T, nodeID, versionID, state string, port int32, age time.Duration) string {
 	t.Helper()
 	var id string
 	err := f.St.Pool.QueryRow(context.Background(), `
-		insert into servers (project_id, node_id, version_id, state, port, created_at, updated_at)
-		select n.project_id, n.id, $2::uuid, $3, $4, now() - $5::interval, now() - $5::interval
+		insert into servers (project_id, node_id, version_id, state, port, env, created_at, updated_at)
+		select n.project_id, n.id, $2::uuid, $3, $4, n.env, now() - $5::interval, now() - $5::interval
 		from nodes n where n.id = $1::uuid
 		returning id::text`,
 		nodeID, versionID, state, port, fmt.Sprintf("%d milliseconds", age.Milliseconds())).Scan(&id)
@@ -108,6 +110,14 @@ func (f *Fixture) InsertServer(t *testing.T, nodeID, versionID, state string, po
 		t.Fatalf("insert server: %v", err)
 	}
 	return id
+}
+
+// InsertServerOn inserts a ready/allocated/… server on a specific node+version
+// (port 0, age 0), env taken from the node — a compact helper for cross-env
+// reconcile tests (environments v1 §3, C1).
+func (f *Fixture) InsertServerOn(t *testing.T, nodeID, versionID, state string) string {
+	t.Helper()
+	return f.InsertServer(t, nodeID, versionID, state, 0, 0)
 }
 
 // MarkFailed flips a server to failed with updated_at = now()-age, writing
@@ -134,11 +144,14 @@ func (f *Fixture) MarkFailed(t *testing.T, serverID string, age time.Duration) {
 	}
 }
 
-// UpsertFleet sets the fleet config for the fixture project/region.
-func (f *Fixture) UpsertFleet(t *testing.T, buffer, maxServers int32) {
+// UpsertFleet sets the fleet config for the fixture project/env/region and
+// returns the reconcile-ready FleetConfig (active image ref joined in), so
+// tests can feed it straight to PlanFleet.
+func (f *Fixture) UpsertFleet(t *testing.T, buffer, maxServers int32) store.FleetConfig {
 	t.Helper()
 	_, err := f.St.UpsertFleet(context.Background(), store.UpsertFleetParams{
 		Project:       f.Project,
+		Env:           f.Env,
 		Region:        f.Region,
 		ActiveVersion: &f.VersionID,
 		BufferReady:   &buffer,
@@ -147,6 +160,25 @@ func (f *Fixture) UpsertFleet(t *testing.T, buffer, maxServers int32) {
 	if err != nil {
 		t.Fatalf("upsert fleet: %v", err)
 	}
+	return f.FleetConfig(t, f.Env, f.Region)
+}
+
+// FleetConfig returns the reconcile-ready FleetConfig (as ListFleetConfigs
+// produces it, active image ref joined in) for the fixture project's
+// (env, region).
+func (f *Fixture) FleetConfig(t *testing.T, env, region string) store.FleetConfig {
+	t.Helper()
+	fleets, err := f.St.ListFleetConfigs(context.Background())
+	if err != nil {
+		t.Fatalf("list fleet configs: %v", err)
+	}
+	for _, fc := range fleets {
+		if fc.Project == f.Project && fc.Env == env && fc.Region == region {
+			return fc
+		}
+	}
+	t.Fatalf("fleet %s/%s/%s not found", f.Project, env, region)
+	return store.FleetConfig{}
 }
 
 // ServerStates returns state → count for the fixture project.

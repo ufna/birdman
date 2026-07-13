@@ -178,17 +178,25 @@ func TestRESTFlow(t *testing.T) {
 		t.Fatalf("list versions: %d %v", code, body)
 	}
 
-	// Fleet config.
+	// Fleet config (env обязателен — I3).
 	code, body = admin.do("PUT", "/v1/fleets/eu", map[string]any{
-		"project": "game", "active_version": versionID, "buffer_ready": 2,
+		"project": "game", "env": "dev", "active_version": versionID, "buffer_ready": 2,
 	})
 	if code != 200 {
 		t.Fatalf("upsert fleet: %d %v", code, body)
 	}
+	// env отсутствует → 400 (без фоллбека).
 	if code, _ = admin.do("PUT", "/v1/fleets/eu", map[string]any{
-		"project": "game", "active_version": uuid.NewString(),
-	}); code != 404 {
-		t.Fatalf("fleet with unknown version: want 404, got %d", code)
+		"project": "game", "active_version": versionID,
+	}); code != 400 {
+		t.Fatalf("fleet without env: want 400, got %d", code)
+	}
+	// active_version не из (project, env) → понятный 400 (составной FK C3), не
+	// 500 и не 404 (design §2/§10).
+	if code, _ = admin.do("PUT", "/v1/fleets/eu", map[string]any{
+		"project": "game", "env": "dev", "active_version": uuid.NewString(),
+	}); code != 400 {
+		t.Fatalf("fleet with unknown version: want 400, got %d", code)
 	}
 
 	// Allocation: empty pool → 409 no_capacity with the exact error shape.
