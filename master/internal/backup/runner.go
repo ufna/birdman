@@ -133,30 +133,45 @@ func (r *Runner) RunNow(ctx context.Context) error {
 }
 
 // runOnce — один прогон: версия → дамп → ротация → S3 → финализация строки
-// истории. Ошибка любого шага фиксируется в backup_runs + событием
-// backup_failed; возвращается наружу для логов/тестов.
+// истории. Ошибка любого шага фиксируется fail-loud: событием backup_failed
+// и (когда строка истории уже создана) error-строкой в backup_runs;
+// возвращается наружу для логов/тестов.
 func (r *Runner) runOnce(ctx context.Context, kind string) error {
 	ctx, cancel := context.WithTimeout(ctx, runTimeout)
 	defer cancel()
 
-	s, err := r.st.GetBackupSettings(ctx)
-	if err != nil {
-		return err
-	}
-	runID, err := r.st.InsertBackupRun(ctx, kind)
-	if err != nil {
-		return err
-	}
+	// runID == 0, пока строка истории не создана: ранние ошибки (settings,
+	// insert) фиксируются только событием — финализировать ещё нечего.
+	var runID int64
 	fail := func(cause error) error {
+		// Записи исхода — через отвязанный ctx с собственным коротким
+		// таймаутом: фиксация ошибки обязана переживать отмену/таймаут
+		// самого прогона (runTimeout, остановка loopCtx), иначе строка
+		// навсегда остаётся 'running', а событие backup_failed теряется —
+		// fail-loud гас ровно в целевом классе отказов (ревью Task 2).
+		// defer в замыкании корректен: fail() зовётся максимум раз на прогон.
+		fctx, fcancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+		defer fcancel()
 		msg := cause.Error()
-		if err := r.st.FinishBackupRun(ctx, runID, "error", 0, false, msg); err != nil {
-			r.log.Error("backup: finish(error) failed", "err", err)
+		if runID != 0 {
+			if err := r.st.FinishBackupRun(fctx, runID, "error", 0, false, msg); err != nil {
+				r.log.Error("backup: finish(error) failed", "err", err)
+			}
 		}
-		if err := r.st.InsertEvent(ctx, store.EventBackupFailed, store.EventRef{},
+		if err := r.st.InsertEvent(fctx, store.EventBackupFailed, store.EventRef{},
 			map[string]any{"kind": kind, "error": msg}); err != nil {
 			r.log.Error("backup: event insert failed", "err", err)
 		}
 		return cause
+	}
+
+	s, err := r.st.GetBackupSettings(ctx)
+	if err != nil {
+		return fail(err)
+	}
+	runID, err = r.st.InsertBackupRun(ctx, kind)
+	if err != nil {
+		return fail(err)
 	}
 
 	if err := r.checkVersions(ctx); err != nil {

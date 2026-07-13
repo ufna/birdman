@@ -139,6 +139,47 @@ func TestRunOnceVersionMismatch(t *testing.T) {
 	}
 }
 
+// TestRunOnceRecordsFailureOnDeadContext — fail-loud обязан переживать
+// отмену/таймаут самого прогона (runTimeout, остановка loopCtx): упавший
+// прогон оставляет либо error-строку, либо (если строка не успела
+// создаться — первые DB-вызовы runOnce идут по боевому ctx и падают
+// раньше fail()) хотя бы событие backup_failed. Ни одна строка не
+// залипает в 'running'.
+func TestRunOnceRecordsFailureOnDeadContext(t *testing.T) {
+	st := testdb.New(t)
+	r, _ := newTestRunner(t, st, "ok", 16)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // прогон стартует с уже мёртвым ctx
+	if err := r.runOnce(ctx, "manual"); err == nil {
+		t.Fatal("runOnce on dead ctx must return an error")
+	}
+
+	// Читаем живым ctx — проверяется состояние БД, а не сам мёртвый ctx.
+	runs, err := st.ListBackupRuns(context.Background(), 5)
+	if err != nil {
+		t.Fatalf("runs: %v", err)
+	}
+	for _, run := range runs {
+		if run.Result != "error" {
+			t.Fatalf("run row stuck in %q (want error or no row at all): %+v", run.Result, run)
+		}
+	}
+	events, err := st.ListEvents(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	found := false
+	for _, e := range events {
+		if e.Kind == store.EventBackupFailed {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("backup_failed event not emitted on dead ctx")
+	}
+}
+
 func TestRunNowBusy(t *testing.T) {
 	st := testdb.New(t)
 	r, _ := newTestRunner(t, st, "ok", 16)
