@@ -270,6 +270,63 @@ func TestAutoDeployResumeContinuesChain(t *testing.T) {
 	}
 }
 
+// v5: a version that was ATTEMPTED and then aborted (prepull failed/timeout →
+// back to `registered`) must NOT be re-attacked after a master restart. The bug:
+// Resume rebuilt the forward-only marker from version STATE (newest non-
+// registered), but an abort returns the version to `registered`, so the attempt
+// was forgotten — a fresh Resume re-picked and re-deployed the same failed build,
+// once per restart. The fix reconstructs the marker from deploy_started EVENTS,
+// so the attempt is remembered even after the rollback to registered.
+//
+// Burst of two versions; the chain rolls the newest (vB); it fails (abort →
+// registered); nothing newer exists → the chain stops. A fresh Manager + Resume
+// must leave vB alone: exactly one deploy_started, still registered, no prepull.
+func TestAutoDeployResumeDoesNotRetryFailedVersion(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10) // dev auto_deploy, version 1.0.0, node
+	f.UpsertFleet(t, 2, 50)
+	ctx := context.Background()
+
+	m1, _, _ := newManager(t, st, time.Minute)
+	// Burst: two near-simultaneous registrations, no TryAutoDeploy between them.
+	vA := f.AddVersion(t, "1.1.0", "dev")
+	vB := f.AddVersion(t, "1.2.0", "dev") // newest → the chain's target
+	_ = vA
+
+	// One chain pass rolls the newest registered = vB (1.0.0 and vA skipped).
+	if out := m1.TryAutoDeploy(ctx, "game", "dev"); out != deploy.AutoDeployStarted {
+		t.Fatalf("burst head must start a deploy, got %v", out)
+	}
+	if got := versionState(t, st, vB); got != "prepulling" {
+		t.Fatalf("vB must be prepulling, got %s", got)
+	}
+
+	// vB fails → abort → back to registered; nothing newer → the chain stops.
+	report(m1, f.NodeID, mustVersion(t, st, vB).ImageRef, "failed")
+	if got := versionState(t, st, vB); got != "registered" {
+		t.Fatalf("aborted vB must be back to registered, got %s", got)
+	}
+	if n := deployStartedCount(t, st, vB); n != 1 {
+		t.Fatalf("vB attempted exactly once before the restart, got %d", n)
+	}
+
+	// "Restart": a fresh manager (empty memory) + Resume. The marker must rebuild
+	// PAST vB from its deploy_started event, otherwise vB is re-attacked.
+	m2, rec2, _ := newManager(t, st, time.Minute)
+	if err := m2.Resume(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := versionState(t, st, vB); got != "registered" {
+		t.Fatalf("vB must NOT be re-attacked after resume, got %s", got)
+	}
+	if n := deployStartedCount(t, st, vB); n != 1 {
+		t.Fatalf("vB must stay attempted exactly once across the restart, got %d deploy_started", n)
+	}
+	if pp := prepullsTo(rec2); len(pp) != 0 {
+		t.Fatalf("resume must not prepull anything (nothing newer than the failed head), got %+v", pp)
+	}
+}
+
 // Recovery of a version left `prepulling` with no in-memory job (the master
 // died right after BeginDeploy, before/at PrePullTargets): Resume re-arms it
 // with a fresh prepull fan-out and it completes normally.

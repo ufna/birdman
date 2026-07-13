@@ -260,6 +260,25 @@ func (s *Server) handleAllocate(w http.ResponseWriter, r *http.Request) {
 			env = *key.Env
 		}
 	}
+	// version_id несёт своё окружение (T5): env-less allocate с явной версией
+	// резолвит env ИЗ НЕЁ (GetVersion → env) ДО sole-with-ready — версия
+	// однозначно указывает env, гадать по готовому пулу незачем (и это не 409
+	// env_required там, где версия уже всё сказала). Неизвестная версия → та же
+	// нехватка ёмкости, что и claim по несуществующей версии (no_capacity), не
+	// сбивающая контракт на 404/500.
+	if env == "" && req.VersionID != nil {
+		v, err := s.st.GetVersion(r.Context(), *req.VersionID)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			s.writeAllocNoCapacity(w, r, req)
+			return
+		case err != nil:
+			s.m.AllocFailures.WithLabelValues("internal").Inc()
+			storeError(w, err)
+			return
+		}
+		env = v.Env
+	}
 	if env == "" {
 		resolved, err := s.st.SoleEnvWithReady(r.Context(), req.Project, req.Region)
 		switch {

@@ -95,7 +95,7 @@ func (r *Reconciler) RunOnce(ctx context.Context) error {
 		}
 		if err := r.reconcileFleet(ctx, f); err != nil {
 			r.log.Error("reconcile: fleet pass failed",
-				"project", f.Project, "region", f.Region, "err", err)
+				"project", f.Project, "env", f.Env, "region", f.Region, "err", err)
 		}
 	}
 	return nil

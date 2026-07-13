@@ -44,8 +44,11 @@ where id = (select id from c)
 returning id, node_id, port`
 
 // Allocate atomically claims one ready server (FOR UPDATE SKIP LOCKED).
-// Idempotent by match_id: a repeated request returns the same server, backed
-// by the partial unique index on servers(match_id).
+// Idempotent by match_id WITHIN an environment (environments v1 §3, M-5): a
+// repeated request in the same env returns the same server (partial unique index
+// on servers(match_id)); the same match_id aimed at ANOTHER env misses the
+// fast-path and takes the normal claim, so a global match_id can never hand back
+// a server of the wrong env.
 //
 // After a fresh claim the node's agent receives AllocateServer (итерация 2,
 // protocol.md §1): the agent forwards `allocated{match_id, players_expected}`
@@ -63,8 +66,8 @@ func (s *Store) Allocate(ctx context.Context, project, env, region string, versi
 		return Allocation{}, err
 	}
 
-	// Idempotency fast path: the match already holds a server.
-	if a, ok, err := s.findByMatch(ctx, projectID, matchID); err != nil {
+	// Idempotency fast path: the match already holds a server IN THIS ENV.
+	if a, ok, err := s.findByMatch(ctx, projectID, env, matchID); err != nil {
 		return Allocation{}, err
 	} else if ok {
 		return a, nil
@@ -81,7 +84,7 @@ func (s *Store) Allocate(ctx context.Context, project, env, region string, versi
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 		// Lost the idempotency race: another request with the same match_id
 		// claimed a server between our fast path and the claim.
-		if a, ok, err := s.findByMatch(ctx, projectID, matchID); err != nil {
+		if a, ok, err := s.findByMatch(ctx, projectID, env, matchID); err != nil {
 			return Allocation{}, err
 		} else if ok {
 			return a, nil
@@ -166,13 +169,17 @@ func (s *Store) SoleEnvWithReady(ctx context.Context, project, region string) (s
 	}
 }
 
-func (s *Store) findByMatch(ctx context.Context, projectID, matchID string) (Allocation, bool, error) {
+// findByMatch resolves the server a match already holds, scoped to (project,
+// env) — the env filter (environments v1 §3, M-5) keeps the globally-unique
+// match_id from returning a server of a different environment on the idempotency
+// fast-path; s.env is the server's own env (invariant I6).
+func (s *Store) findByMatch(ctx context.Context, projectID, env, matchID string) (Allocation, bool, error) {
 	var a Allocation
 	err := s.Pool.QueryRow(ctx, `
 		select s.id::text, host(n.public_ip), s.port
 		from servers s join nodes n on n.id = s.node_id
-		where s.project_id = $1::uuid and s.match_id = $2::uuid`,
-		projectID, matchID).Scan(&a.ServerID, &a.Host, &a.Port)
+		where s.project_id = $1::uuid and s.env = $2 and s.match_id = $3::uuid`,
+		projectID, env, matchID).Scan(&a.ServerID, &a.Host, &a.Port)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Allocation{}, false, nil
 	}

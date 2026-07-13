@@ -218,9 +218,16 @@ func (mm *Matchmaker) Submit(ctx context.Context, p SubmitParams) (Ticket, error
 	// ticket must name one (409-shaped, surfaced as bad_request here).
 	env := p.Env
 	if env == "" {
+		// Только ErrConflict от sole-fallback (ноль или несколько env с живыми
+		// нодами — двусмысленность) — это клиентская «env обязателен» (ErrInvalid →
+		// 400). Любая другая ошибка (сбой БД и т.п.) идёт НАРУЖУ как есть (→500):
+		// иначе временный сбой стора маскировался бы под невалидный тикет (M-2).
 		env, err = mm.st.SoleEnvWithActiveNodes(ctx, project)
-		if err != nil {
+		if errors.Is(err, store.ErrConflict) {
 			return Ticket{}, fmt.Errorf("%w: env is required (zero or several environments have active nodes)", ErrInvalid)
+		}
+		if err != nil {
+			return Ticket{}, err
 		}
 	} else if _, err := mm.st.GetEnvironment(ctx, project, env); err != nil {
 		return Ticket{}, err

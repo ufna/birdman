@@ -207,9 +207,11 @@ func (m *Manager) startJob(ctx context.Context, v store.Version) (Status, error)
 // (before serving), in three ordered phases (environments v1 §4):
 //
 //	A. rebuild the auto-deploy forward-only marker for every auto_deploy env
-//	   (newest non-registered version) — BEFORE re-arming, so a re-armed prepull
-//	   that activates immediately (no live nodes) already sees the marker and
-//	   cannot pick a version older than the one just resumed;
+//	   (newest version with a deploy_started event — so an aborted attempt that
+//	   is back to `registered` is still remembered, follow-up v5) — BEFORE
+//	   re-arming, so a re-armed prepull that activates immediately (no live nodes)
+//	   already sees the marker and cannot pick a version older than the one just
+//	   resumed;
 //	B. re-arm prepull jobs left in flight — this also recovers a version stuck
 //	   `prepulling` with no in-memory job (PrePullTargets errored post-BeginDeploy):
 //	   it gets a fresh fan-out + timeout;
@@ -222,7 +224,10 @@ func (m *Manager) Resume(ctx context.Context) error {
 		return err
 	}
 	for _, e := range autoEnvs {
-		mk, ok, err := m.st.NewestNonRegisteredMarker(ctx, e.ProjectID, e.Name)
+		// Маркер восстанавливаем по СОБЫТИЯМ deploy_started, а не по состоянию:
+		// abort возвращает упавшую версию в registered, и признак «не registered»
+		// её забывал — Resume ре-атаковал бы её по разу на рестарт (follow-up v5).
+		mk, ok, err := m.st.NewestAttemptedMarker(ctx, e.ProjectID, e.Name)
 		if err != nil {
 			return err
 		}

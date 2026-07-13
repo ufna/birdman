@@ -120,6 +120,62 @@ func TestPromoteBindingEnforcement(t *testing.T) {
 	}
 }
 
+// v1: промоут в несуществующий to_env → 400 (не 500). Пинит конвенцию
+// promoteError: обычная (не-sentinel) ошибка «no such environment» это
+// bad_request, а НЕ internal — унификация promoteError под deployError-500
+// вернула бы 500 на опечатку в to_env, и этот тест такое поймает.
+func TestPromoteUnknownEnv(t *testing.T) {
+	st := testdb.New(t)
+	f, _ := promoteStand(t, st)
+	ts, _, _ := deployServer(t, st)
+	ctx := t.Context()
+
+	_, deployKey, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ci", Scopes: []string{httpapi.ScopeDeploy}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ci := &client{t: t, base: ts.URL, key: deployKey}
+
+	code, body := ci.do("POST", "/v1/promote", map[string]any{"version_id": f.VersionID, "to_env": "ghost"})
+	if code != 400 {
+		t.Fatalf("promote to unknown env: want 400, got %d %v", code, body)
+	}
+	if d, _ := body["detail"].(string); !strings.Contains(d, "no such environment") {
+		t.Fatalf("400 must say «no such environment», got %q", d)
+	}
+}
+
+// v2: allow-сторона матрицы привязки — ключ bound(game,prod) МОЖЕТ промоутить
+// dev-версию в prod (цель промоута — ЦЕЛЕВОЙ env prod, совпал с привязкой);
+// обычный deploy-пайплайн стартует → 202, prod-версия с provenance.
+func TestPromoteBoundKeyIntoItsEnv(t *testing.T) {
+	st := testdb.New(t)
+	f, _ := promoteStand(t, st)
+	ts, _, _ := deployServer(t, st)
+	ctx := t.Context()
+
+	game, prod := "game", "prod"
+	_, boundSecret, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{
+		Name: "ci-prod", Scopes: []string{httpapi.ScopeDeploy}, Project: &game, Env: &prod,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundProd := &client{t: t, base: ts.URL, key: boundSecret}
+
+	code, body := boundProd.do("POST", "/v1/promote", map[string]any{"version_id": f.VersionID, "to_env": "prod"})
+	if code != 202 {
+		t.Fatalf("bound(prod) promote dev→prod: want 202, got %d %v", code, body)
+	}
+	ver, _ := body["version"].(map[string]any)
+	if ver == nil || ver["env"] != "prod" || ver["promoted_from"] != f.VersionID {
+		t.Fatalf("promoted version body: %v", body["version"])
+	}
+	if dp, _ := body["deploy"].(map[string]any); dp == nil || dp["state"] != "prepulling" {
+		t.Fatalf("deploy state: want prepulling, got %v", body["deploy"])
+	}
+}
+
 // Идемпотентность спасает после отказа деплоя: prod без флота → 409 no_fleet, но
 // prod-версия уже создана (tx промоута отдельна от деплоя); повтор НЕ 409-semver,
 // а снова доходит до деплоя; появился флот → 202.

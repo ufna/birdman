@@ -79,6 +79,11 @@ func (s *Store) CreateVersion(ctx context.Context, p CreateVersionParams) (Versi
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 		return Version{}, fmt.Errorf("version %s/%s (%s): %w", p.Project, p.Semver, p.Env, ErrConflict)
 	}
+	// Гонка с DELETE env между in-tx пре-чеком и insert'ом: versions_env_fk (23503)
+	// → внятный «no such environment» (400), а не сырой 500 (w5).
+	if mapped := mapEnvFKViolation(err, p.Project, p.Env); mapped != nil {
+		return Version{}, mapped
+	}
 	if err != nil {
 		return Version{}, err
 	}
@@ -293,6 +298,44 @@ func (s *Store) NewestNonRegisteredMarker(ctx context.Context, projectID, env st
 		limit 1`, projectID, env).Scan(&mk.CreatedAt, &mk.ID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return CreatedID{}, false, nil
+	}
+	if err != nil {
+		return CreatedID{}, false, err
+	}
+	return mk, true, nil
+}
+
+// NewestAttemptedMarker reconstructs the auto-deploy «только вперёд»
+// last_attempted marker for (project, env) after a master restart: the
+// (created_at, id) of the newest version that was EVER put in flight — i.e.
+// carries a deploy_started event (join events by version_id). Unlike
+// NewestNonRegisteredMarker, which reads version STATE, this remembers an
+// attempt even after an abort rolled the version back to `registered` (prepull
+// timeout / failed pull): the deploy_started event survives, so Resume no longer
+// forgets the failed build and re-attacks it once per restart (environments v1
+// §4, follow-up v5). Manual deploys write deploy_started too, so the marker stays
+// consistent with them.
+//
+// Falls back to NewestNonRegisteredMarker when NO version was ever attempted
+// (no deploy_started event) — a version made active/deprecated purely by a
+// bootstrap PUT /v1/fleets active_version, or pre-event historical data, still
+// anchors the marker. The bool is false only when both are empty (nothing
+// attempted and everything registered → the zero marker stands).
+func (s *Store) NewestAttemptedMarker(ctx context.Context, projectID, env string) (CreatedID, bool, error) {
+	var mk CreatedID
+	err := s.Pool.QueryRow(ctx, `
+		select v.created_at, v.id::text
+		from versions v
+		where v.project_id = $1::uuid and v.env = $2
+		  and exists (select 1 from events e
+		              where e.version_id = v.id and e.kind = $3)
+		order by v.created_at desc, v.id::text desc
+		limit 1`, projectID, env, EventDeployStarted).Scan(&mk.CreatedAt, &mk.ID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Никого не деплоили (нет ни одного deploy_started) — падаем на прежний
+		// признак «версия покинула registered»: bootstrap-через-флот или
+		// доисторические (до-событийные) данные всё ещё держат маркер.
+		return s.NewestNonRegisteredMarker(ctx, projectID, env)
 	}
 	if err != nil {
 		return CreatedID{}, false, err
