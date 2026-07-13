@@ -148,9 +148,19 @@ func TestBackupsS3Test(t *testing.T) {
 	}
 }
 
-// TestBackupsRunsList: GET /v1/backups/runs returns the history newest-first.
+// TestBackupsRunsList: GET /v1/backups/runs returns the history newest-first;
+// an empty history is exactly {"runs":[]} — an array, never null.
 func TestBackupsRunsList(t *testing.T) {
 	st, admin, _ := backupsServer(t, &fakeBackupRunner{}, nil)
+
+	// Empty history FIRST: the shape must be "runs":[] (not null) — the panel
+	// (Task 5) iterates the array without a null guard, so emptyNotNull is
+	// load-bearing here. Raw-substring assert pins the exact wire form.
+	code, raw := admin.doRaw("GET", "/v1/backups/runs")
+	if code != 200 || !strings.Contains(string(raw), `"runs":[]`) {
+		t.Fatalf(`empty runs must be "runs":[] (not null): %d %s`, code, raw)
+	}
+
 	id, _ := st.InsertBackupRun(context.Background(), "manual")
 	_ = st.FinishBackupRun(context.Background(), id, "ok", 42, false, "")
 	code, body := admin.do("GET", "/v1/backups/runs?limit=10", nil)
