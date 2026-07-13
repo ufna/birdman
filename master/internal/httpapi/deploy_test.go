@@ -275,3 +275,54 @@ func TestRollbackEnvResolve(t *testing.T) {
 		t.Fatalf("dev deprecated must roll back under sole-fallback: %+v %v", v, err)
 	}
 }
+
+// w14: HTTP-шов авто-деплоя (handlers.go:122-128). POST /v1/versions в
+// auto_deploy-env (dev из сида) с флотом и живой нодой немедленно гонит цепочку
+// «только вперёд»: ответ 201 несёт "auto_deploy":"started" И fake sender получил
+// PrePull. Вторая регистрация, пока первый деплой ещё in-flight (prepulling,
+// никто не отчитался pulled), второй старт НЕ запускает — 201 c
+// "auto_deploy":"queued". Пинит связку «вызов TryAutoDeploy + switch по исходу»:
+// без этого блока поле auto_deploy пропадает и PrePull не уходит, а прежняя
+// suite остаётся зелёной.
+func TestCreateVersionAutoDeployOverHTTP(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10) // dev auto_deploy, живая нода, версия 1.0.0
+	f.UpsertFleet(t, 2, 50)           // флот dev/eu — цель прогрева PrePull
+	ts, _, rec := deployServer(t, st)
+	ctx := t.Context()
+
+	_, deployKey, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ci", Scopes: []string{httpapi.ScopeDeploy}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ci := &client{t: t, base: ts.URL, key: deployKey}
+
+	// Первая регистрация в dev: цепочка стартует немедленно → 201 + "started".
+	code, body := ci.do("POST", "/v1/versions", map[string]any{
+		"project": "game", "semver": "1.1.0",
+		"image_ref": "ghcr.io/example/game-server:1.1.0", "env": "dev",
+	})
+	if code != 201 || body["auto_deploy"] != "started" {
+		t.Fatalf("register in auto_deploy env: want 201 auto_deploy=started, got %d %v", code, body)
+	}
+	// Тот же синхронный вызов уже отправил PrePull живой ноде флота.
+	var prepulled bool
+	for _, c := range rec.Take() {
+		if p := c.Msg.GetPrepull(); p != nil && c.NodeID == f.NodeID {
+			prepulled = true
+		}
+	}
+	if !prepulled {
+		t.Fatal("auto-deploy must dispatch a PrePull to the live fleet node")
+	}
+
+	// Вторая регистрация, пока деплой 1.1.0 ещё in-flight (prepulling, отчёта
+	// pulled не было): второй старт занят busy-проверкой → 201 + "queued".
+	code, body = ci.do("POST", "/v1/versions", map[string]any{
+		"project": "game", "semver": "1.2.0",
+		"image_ref": "ghcr.io/example/game-server:1.2.0", "env": "dev",
+	})
+	if code != 201 || body["auto_deploy"] != "queued" {
+		t.Fatalf("register while a deploy is in flight: want 201 auto_deploy=queued, got %d %v", code, body)
+	}
+}

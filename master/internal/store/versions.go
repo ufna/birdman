@@ -218,6 +218,13 @@ func (s *Store) PromoteVersion(ctx context.Context, versionID, toEnv string) (Ve
 		// Гонка: параллельный промоут занял semver между select и insert.
 		return Version{}, fmt.Errorf("version %s/%s (%s): %w", src.Project, src.Semver, toEnv, ErrConflict)
 	}
+	// Гонка с DELETE целевого env между in-tx пре-чеком и insert'ом: versions_env_fk
+	// (23503). Детектим тем же mapEnvFKViolation, но возвращаем ПЛОСКУЮ (не-ErrNotFound)
+	// «no such environment» — точь-в-точь как пре-чек выше: promoteError отдаёт её как
+	// 400 (опечатка/гонка to_env — ввод клиента), а не 404 от завёрнутого ErrNotFound.
+	if mapEnvFKViolation(err, src.Project, toEnv) != nil {
+		return Version{}, fmt.Errorf("no such environment %s/%s", src.Project, toEnv)
+	}
 	if err != nil {
 		return Version{}, err
 	}

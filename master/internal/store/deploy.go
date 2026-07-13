@@ -20,7 +20,7 @@ var (
 	// ErrVersionState — the version is in a state that forbids the operation
 	// (deploy of a disabled version, rollback without a deprecated one, ...).
 	ErrVersionState = errors.New("version_state")
-	// ErrDeployInProgress — another version of the project is prepulling.
+	// ErrDeployInProgress — another version of the (project, env) is prepulling.
 	ErrDeployInProgress = errors.New("deploy_in_progress")
 	// ErrNoFleet — the project has no fleet_configs rows, nothing to deploy to.
 	ErrNoFleet = errors.New("no_fleet")
@@ -111,7 +111,9 @@ func (s *Store) BeginDeploy(ctx context.Context, versionID string, opts BeginDep
 		`update versions set state = 'prepulling' where id = $1::uuid`, v.ID); err != nil {
 		return BeginDeployResult{}, err
 	}
-	payload := map[string]any{"project": v.Project, "semver": v.Semver, "image_ref": v.ImageRef}
+	// env в payload (environments v1 §3): без него deploy_started невидим в
+	// пер-env фильтре событий (W4) — событие несёт окружение прямо в теле.
+	payload := map[string]any{"project": v.Project, "env": v.Env, "semver": v.Semver, "image_ref": v.ImageRef}
 	if opts.Auto {
 		// Авто-путь «только вперёд» (environments v1 §4): помечаем событие и
 		// сколько промежуточных registered-билдов этот прыжок пропустил.
