@@ -22,6 +22,12 @@ type qt struct {
 	regions []RegionPing
 }
 
+// projectEnv keys the per-tick match pass: tickets are grouped and candidates
+// resolved per (project, env) — a dev and a prod ticket of the same project have
+// different candidate sets and allocate onto different fleets (environments
+// v1 §3).
+type projectEnv struct{ project, env string }
+
 // RunOnce performs a single matchmaking pass (master.md §4):
 //
 //	expire TTL → per project: drop update_required tickets →
@@ -32,16 +38,17 @@ type qt struct {
 func (mm *Matchmaker) RunOnce(ctx context.Context) error {
 	now := time.Now()
 
-	// Pass 1 (locked): TTL, janitor, snapshot of queued tickets per project.
+	// Pass 1 (locked): TTL, janitor, snapshot of queued tickets per (project, env).
 	mm.mu.Lock()
-	queued := map[string][]qt{}
+	queued := map[projectEnv][]qt{}
 	depth := map[string]int{}
 	for id, t := range mm.tickets {
 		switch {
 		case t.status == StatusQueued && now.Sub(t.createdAt) > mm.cfg.TicketTTL:
 			mm.finalize(t, StatusExpired, nil, now)
 		case t.status == StatusQueued:
-			queued[t.project] = append(queued[t.project], qt{
+			pe := projectEnv{t.project, t.env}
+			queued[pe] = append(queued[pe], qt{
 				id: t.id, player: t.playerID, bucket: t.bucket,
 				version: t.clientVersion, created: t.createdAt, regions: t.regions,
 			})
@@ -61,18 +68,18 @@ func (mm *Matchmaker) RunOnce(ctx context.Context) error {
 	}
 	mm.mu.Unlock()
 
-	// Pass 2 (unlocked): match per project.
+	// Pass 2 (unlocked): match per (project, env).
 	var errs []error
-	for project, tks := range queued {
-		if err := mm.matchProject(ctx, project, tks, now); err != nil {
-			mm.log.Error("mm: project pass failed", "project", project, "err", err)
+	for pe, tks := range queued {
+		if err := mm.matchProject(ctx, pe.project, pe.env, tks, now); err != nil {
+			mm.log.Error("mm: project pass failed", "project", pe.project, "env", pe.env, "err", err)
 			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
 }
 
-func (mm *Matchmaker) matchProject(ctx context.Context, project string, tks []qt, now time.Time) error {
+func (mm *Matchmaker) matchProject(ctx context.Context, project, env string, tks []qt, now time.Time) error {
 	proj, err := mm.st.GetProject(ctx, project)
 	if err != nil {
 		return err
@@ -81,7 +88,7 @@ func (mm *Matchmaker) matchProject(ctx context.Context, project string, tks []qt
 	if size < 1 {
 		size = 1
 	}
-	candidates, err := mm.st.ActiveRegionVersions(ctx, project)
+	candidates, err := mm.st.ActiveRegionVersions(ctx, project, env)
 	if err != nil {
 		return err
 	}

@@ -281,7 +281,7 @@ func TestAllocateFilters(t *testing.T) {
 		t.Fatalf("wrong region: want no_capacity, got %v", err)
 	}
 	// Version filter mismatch.
-	v2 := f.AddVersion(t, "2.0.0")
+	v2 := f.AddVersion(t, "2.0.0", "dev")
 	if _, err := st.Allocate(ctx, "game", "eu", &v2, uuid.NewString(), 0); !errors.Is(err, store.ErrNoCapacity) {
 		t.Fatalf("version mismatch: want no_capacity, got %v", err)
 	}

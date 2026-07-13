@@ -71,6 +71,8 @@ func New(st *store.Store, m *metrics.Metrics, mm *matchmaker.Matchmaker, dep *de
 	s.mux.HandleFunc("GET /v1/nodes", s.requireScope(ScopeReadonly, s.handleListNodes))
 	s.mux.HandleFunc("POST /v1/nodes/{id}/drain", s.requireScope(ScopeAdmin, s.handleDrainNode))
 	s.mux.HandleFunc("POST /v1/nodes/{id}/undrain", s.requireScope(ScopeAdmin, s.handleUndrainNode))
+	// Move a node to another environment (environments v1 §2, environments.go).
+	s.mux.HandleFunc("PATCH /v1/nodes/{id}", s.requireScope(ScopeAdmin, s.handleSetNodeEnv))
 	// Public internal-CA cert bundle (mTLS agentlink v1, ca.go) — ansible
 	// delivers it to nodes; cert-only, the CA key cannot leak (design §5).
 	s.mux.HandleFunc("GET /v1/ca", s.requireScope(ScopeReadonly, s.handleGetCA))
@@ -86,6 +88,12 @@ func New(st *store.Store, m *metrics.Metrics, mm *matchmaker.Matchmaker, dep *de
 	s.mux.HandleFunc("POST /v1/rollback", s.requireScope(ScopeDeploy, s.handleRollback))
 	s.mux.HandleFunc("PUT /v1/fleets/{region}", s.requireScope(ScopeAdmin, s.handleUpsertFleet))
 	s.mux.HandleFunc("PUT /v1/projects/{slug}", s.requireScope(ScopeAdmin, s.handleUpsertProject))
+	// Environments CRUD (environments v1 §2, environments.go). List is readonly;
+	// create/patch/delete are admin.
+	s.mux.HandleFunc("GET /v1/environments", s.requireScope(ScopeReadonly, s.handleListEnvironments))
+	s.mux.HandleFunc("POST /v1/environments", s.requireScope(ScopeAdmin, s.handleCreateEnvironment))
+	s.mux.HandleFunc("PATCH /v1/environments/{project}/{name}", s.requireScope(ScopeAdmin, s.handlePatchEnvironment))
+	s.mux.HandleFunc("DELETE /v1/environments/{project}/{name}", s.requireScope(ScopeAdmin, s.handleDeleteEnvironment))
 	s.mux.HandleFunc("GET /v1/events", s.requireScope(ScopeReadonly, s.handleListEvents))
 	s.mux.HandleFunc("GET /v1/events/stream", s.requireScope(ScopeReadonly, s.handleEventsStream))
 	s.mux.HandleFunc("GET /v1/matches", s.requireScope(ScopeReadonly, s.handleListMatches))

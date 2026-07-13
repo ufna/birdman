@@ -34,7 +34,7 @@ func TestDeployAndRollbackEndpoints(t *testing.T) {
 	st := testdb.New(t)
 	f := testdb.Seed(t, st, "eu", 10)
 	f.UpsertFleet(t, 2, 50)
-	v2 := f.AddVersion(t, "1.1.0")
+	v2 := f.AddVersion(t, "1.1.0", "dev")
 	ts, dep, rec := deployServer(t, st)
 	ctx := t.Context()
 

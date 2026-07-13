@@ -18,6 +18,7 @@ const maxWait = 30 * time.Second
 
 type submitTicketRequest struct {
 	Project       string                  `json:"project,omitempty"`
+	Env           string                  `json:"env,omitempty"`
 	PlayerID      string                  `json:"player_id"`
 	ClientVersion string                  `json:"client_version"`
 	Regions       []matchmaker.RegionPing `json:"regions"`
@@ -39,6 +40,7 @@ func (s *Server) handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 	}
 	t, err := s.mm.Submit(r.Context(), matchmaker.SubmitParams{
 		Project:       req.Project,
+		Env:           req.Env,
 		PlayerID:      req.PlayerID,
 		ClientVersion: req.ClientVersion,
 		Regions:       req.Regions,

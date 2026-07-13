@@ -51,6 +51,7 @@ type Result struct {
 type Ticket struct {
 	ID            string       `json:"ticket_id"`
 	Project       string       `json:"project"`
+	Env           string       `json:"env"`
 	PlayerID      string       `json:"player_id"`
 	ClientVersion string       `json:"client_version"`
 	Regions       []RegionPing `json:"regions"`
@@ -98,6 +99,7 @@ func (c Config) withDefaults() Config {
 type ticket struct {
 	id            string
 	project       string
+	env           string
 	playerID      string
 	clientVersion string
 	bucket        string // MajorMinor(clientVersion)
@@ -110,7 +112,10 @@ type ticket struct {
 	done       chan struct{} // closed once, on leaving queued
 }
 
-func (t *ticket) playerKey() string { return t.project + "\x00" + t.playerID }
+// playerKey is the anti-dup key: (project, env, player). A new ticket for the
+// same player in the same env cancels the previous one; two envs of a player
+// are independent (environments v1 §3, M6).
+func (t *ticket) playerKey() string { return t.project + "\x00" + t.env + "\x00" + t.playerID }
 
 func (t *ticket) snapshot() Ticket {
 	regions := make([]RegionPing, len(t.regions))
@@ -121,7 +126,7 @@ func (t *ticket) snapshot() Ticket {
 		match = &m
 	}
 	return Ticket{
-		ID: t.id, Project: t.project, PlayerID: t.playerID,
+		ID: t.id, Project: t.project, Env: t.env, PlayerID: t.playerID,
 		ClientVersion: t.clientVersion, Regions: regions,
 		Status: t.status, CreatedAt: t.createdAt, Match: match,
 	}
@@ -168,6 +173,7 @@ func (mm *Matchmaker) Run(ctx context.Context) {
 
 type SubmitParams struct {
 	Project       string
+	Env           string // окружение тикета (опционально); резолв — §3
 	PlayerID      string
 	ClientVersion string
 	Regions       []RegionPing
@@ -206,9 +212,24 @@ func (mm *Matchmaker) Submit(ctx context.Context, p SubmitParams) (Ticket, error
 		return Ticket{}, err
 	}
 
+	// Environment resolution (environments v1 §3): an explicit env is validated;
+	// otherwise fall back to the project's sole env with live nodes (a
+	// single-env stand needs no env field). Zero or several such envs → the
+	// ticket must name one (409-shaped, surfaced as bad_request here).
+	env := p.Env
+	if env == "" {
+		env, err = mm.st.SoleEnvWithActiveNodes(ctx, project)
+		if err != nil {
+			return Ticket{}, fmt.Errorf("%w: env is required (zero or several environments have active nodes)", ErrInvalid)
+		}
+	} else if _, err := mm.st.GetEnvironment(ctx, project, env); err != nil {
+		return Ticket{}, err
+	}
+
 	// Version gate at submit time; re-checked every tick for queued tickets
-	// (an active version swap must not strand incompatible clients).
-	candidates, err := mm.st.ActiveRegionVersions(ctx, project)
+	// (an active version swap must not strand incompatible clients). Candidates
+	// are scoped to the ticket's env.
+	candidates, err := mm.st.ActiveRegionVersions(ctx, project, env)
 	if err != nil {
 		return Ticket{}, err
 	}
@@ -219,7 +240,7 @@ func (mm *Matchmaker) Submit(ctx context.Context, p SubmitParams) (Ticket, error
 
 	now := time.Now()
 	t := &ticket{
-		id: uuid.NewString(), project: project, playerID: p.PlayerID,
+		id: uuid.NewString(), project: project, env: env, playerID: p.PlayerID,
 		clientVersion: p.ClientVersion, bucket: bucket, regions: regions,
 		createdAt: now, status: status, done: make(chan struct{}),
 	}

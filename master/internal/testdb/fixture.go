@@ -14,13 +14,15 @@ type Fixture struct {
 	St        *store.Store
 	Project   string
 	Region    string
+	Env       string // окружение фикстуры (environments v1): всё живёт в dev
 	NodeID    string
 	NodeToken string
 	VersionID string
 }
 
 // Seed creates project "game", one active node with a fresh heartbeat and a
-// registered version 1.0.0.
+// registered version 1.0.0 in the seeded dev environment (environments v1:
+// ensureProject seeds dev+prod, the node/version enter as dev).
 func Seed(t *testing.T, st *store.Store, region string, capacity int32) *Fixture {
 	t.Helper()
 	ctx := context.Background()
@@ -38,12 +40,12 @@ func Seed(t *testing.T, st *store.Store, region string, capacity int32) *Fixture
 		Project:  "game",
 		Semver:   "1.0.0",
 		ImageRef: "ghcr.io/example/game-server:1.0.0",
-		Channel:  "prod",
+		Env:      "dev",
 	})
 	if err != nil {
 		t.Fatalf("create version: %v", err)
 	}
-	f := &Fixture{St: st, Project: "game", Region: region, NodeID: node.ID, NodeToken: token, VersionID: v.ID}
+	f := &Fixture{St: st, Project: "game", Region: region, Env: "dev", NodeID: node.ID, NodeToken: token, VersionID: v.ID}
 	f.SetHeartbeatAge(t, node.ID, 0)
 	return f
 }
@@ -65,14 +67,15 @@ func (f *Fixture) AddNode(t *testing.T, hostname, ip string, capacity int32) str
 	return node.ID
 }
 
-// AddVersion registers another version for the project.
-func (f *Fixture) AddVersion(t *testing.T, semver string) string {
+// AddVersion registers another version for the project in the given env
+// (environments v1: pass "dev" to preserve v0 single-env behaviour).
+func (f *Fixture) AddVersion(t *testing.T, semver, env string) string {
 	t.Helper()
 	v, err := f.St.CreateVersion(context.Background(), store.CreateVersionParams{
 		Project:  f.Project,
 		Semver:   semver,
 		ImageRef: "ghcr.io/example/game-server:" + semver,
-		Channel:  "prod",
+		Env:      env,
 	})
 	if err != nil {
 		t.Fatalf("add version: %v", err)

@@ -76,7 +76,7 @@ type createVersionRequest struct {
 	Project  string `json:"project"`
 	Semver   string `json:"semver"`
 	ImageRef string `json:"image_ref"`
-	Channel  string `json:"channel"`
+	Env      string `json:"env"`
 }
 
 func (s *Server) handleCreateVersion(w http.ResponseWriter, r *http.Request) {
@@ -88,7 +88,7 @@ func (s *Server) handleCreateVersion(w http.ResponseWriter, r *http.Request) {
 		Project:  req.Project,
 		Semver:   req.Semver,
 		ImageRef: req.ImageRef,
-		Channel:  req.Channel,
+		Env:      req.Env,
 	})
 	if errors.Is(err, store.ErrConflict) {
 		storeError(w, err)

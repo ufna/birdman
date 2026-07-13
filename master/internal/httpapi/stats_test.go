@@ -242,8 +242,8 @@ func seedStatsRollupWindow(t *testing.T, st *store.Store, f *testdb.Fixture) tim
 	now := time.Now().UTC()
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 
-	v110 := f.AddVersion(t, "1.1.0")
-	v200 := f.AddVersion(t, "2.0.0")
+	v110 := f.AddVersion(t, "1.1.0", "dev")
+	v200 := f.AddVersion(t, "2.0.0", "dev")
 	srv100 := f.InsertServer(t, f.NodeID, f.VersionID, "reaped", 21001, 0)
 	srv110 := f.InsertServer(t, f.NodeID, v110, "reaped", 21002, 0)
 	srv200 := f.InsertServer(t, f.NodeID, v200, "reaped", 21003, 0)
@@ -579,7 +579,7 @@ func TestStatsOccupancyBoundary(t *testing.T) {
 	// only safely in the past if the test happens to run after that hour
 	// UTC, otherwise store.StatMatchesOverlapping's started_at < now bound
 	// excludes it from the live tail.
-	v2 := f.AddVersion(t, "2.0.0")
+	v2 := f.AddVersion(t, "2.0.0", "dev")
 	srvNormal := f.InsertServer(t, f.NodeID, v2, "reaped", 21302, 0)
 	insertStatMatchAt(t, st, srvNormal, "eu-boundary", 3,
 		now.Add(-3*time.Minute), now.Add(-2*time.Minute), endAt(now.Add(-1*time.Minute)))

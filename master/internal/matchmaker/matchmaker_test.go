@@ -245,7 +245,7 @@ func TestUpdateRequired(t *testing.T) {
 	}
 
 	// Active version swap to 2.0.0 → the queued 1.0.x ticket becomes stale.
-	v2 := f.AddVersion(t, "2.0.0")
+	v2 := f.AddVersion(t, "2.0.0", "dev")
 	if _, err := st.UpsertFleet(context.Background(), store.UpsertFleetParams{
 		Project: f.Project, Region: f.Region, ActiveVersion: &v2,
 	}); err != nil {
@@ -482,7 +482,7 @@ func TestWindowRoutesClientsByCompat(t *testing.T) {
 	st := testdb.New(t)
 	f := testdb.Seed(t, st, "eu", 10) // 1.0.0 active via fleet
 	f.UpsertFleet(t, 2, 50)
-	v2 := f.AddVersion(t, "1.1.0")
+	v2 := f.AddVersion(t, "1.1.0", "dev")
 	deprecateAndActivate(t, st, v2) // active 1.1.0, deprecated 1.0.0
 
 	oldSrv := f.InsertServer(t, f.NodeID, f.VersionID, "ready", 20001, 0)
@@ -520,7 +520,7 @@ func TestWindowUpdateRequiredOnlyWhenNoLiveVersion(t *testing.T) {
 	st := testdb.New(t)
 	f := testdb.Seed(t, st, "eu", 10)
 	f.UpsertFleet(t, 2, 50)
-	v2 := f.AddVersion(t, "1.1.0")
+	v2 := f.AddVersion(t, "1.1.0", "dev")
 	deprecateAndActivate(t, st, v2)
 	mm := newMM(t, st, matchmaker.Config{})
 
@@ -555,7 +555,7 @@ func TestCompatOverridesRouteOldClients(t *testing.T) {
 	st := testdb.New(t)
 	f := testdb.Seed(t, st, "eu", 10) // 1.0.0
 	f.UpsertFleet(t, 2, 50)
-	v2 := f.AddVersion(t, "1.1.0")
+	v2 := f.AddVersion(t, "1.1.0", "dev")
 	deprecateAndActivate(t, st, v2)
 	// Only the new version has capacity: without the override old clients
 	// would wait for a 1.0.0 server forever.

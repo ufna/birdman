@@ -7,6 +7,7 @@ type Node struct {
 	ProjectID       string         `json:"project_id"`
 	Project         string         `json:"project"`
 	Region          string         `json:"region"`
+	Env             string         `json:"env"` // окружение ноды (environments v1); новые ноды входят как dev
 	Hostname        string         `json:"hostname"`
 	PublicIP        string         `json:"public_ip"`
 	CapacitySlots   int32          `json:"capacity_slots"`
@@ -28,12 +29,16 @@ type Version struct {
 	Project   string    `json:"project"`
 	Semver    string    `json:"semver"`
 	ImageRef  string    `json:"image_ref"`
-	Channel   string    `json:"channel"`
+	Env       string    `json:"env"` // окружение версии (environments v1); заменило прежний лейбл (staging→dev, prod→prod)
 	State     string    `json:"state"`
 	CreatedAt time.Time `json:"created_at"`
 	// DeprecatedAt is set when the deploy manager demotes the version
 	// active → deprecated; reap_ttl_min counts from it (итерация 3).
 	DeprecatedAt *time.Time `json:"deprecated_at,omitempty"`
+	// PromotedFrom — provenance версии, созданной промоутом dev→prod (env v1,
+	// §4): id исходной версии; nil для обычной регистрации. W1 только протягивает
+	// колонку — сам промоут появляется в W2.
+	PromotedFrom *string `json:"promoted_from,omitempty"`
 }
 
 type Server struct {
@@ -54,6 +59,7 @@ type Server struct {
 type FleetConfig struct {
 	ProjectID     string  `json:"project_id"`
 	Project       string  `json:"project"`
+	Env           string  `json:"env"` // окружение флота (environments v1); PK теперь (project, env, region)
 	Region        string  `json:"region"`
 	ActiveVersion *string `json:"active_version,omitempty"`
 	// Denormalized from versions for reconcile convenience.
@@ -93,6 +99,10 @@ const (
 	EventNodeRecovered     = "node_recovered"
 	EventNodeDrain         = "node_drain"   // admin drained a node (итерация 4)
 	EventNodeUndrain       = "node_undrain" // admin lifted a node drain (итерация 4)
+	// EventNodeEnvChanged — нода переведена в другое окружение (environments v1,
+	// PATCH /v1/nodes/{id} {env}). Payload {from, to}. Разрешён только пустой
+	// ноде в любом стейте, кроме dead (§2).
+	EventNodeEnvChanged = "node_env_changed"
 	EventServerFailed      = "server_failed"
 	EventServerRecovered   = "server_recovered"
 	EventCrashLoop         = "crash_loop"

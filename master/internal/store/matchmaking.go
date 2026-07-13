@@ -6,30 +6,33 @@ import (
 
 // RegionVersion is one allocatable (region, server version) candidate the
 // matchmaker checks client compatibility against (docs/specs/master.md §4,
-// docs/specs/ops.md §3). A region's candidate set, preference-ordered:
-//   - rank 0 — the region's fleet_configs.active_version: what the fleet
-//     actually runs (any channel: dev setups deploy staging builds);
-//   - rank 1 — project versions with state='active', channel='prod'
-//     (the spec'd rule);
-//   - rank 2 — versions with state='deprecated': the multi-version window
-//     (итерация 3, master.md §5) — old clients keep matching onto them until
-//     the version is disabled, but a client covered by an active version
+// docs/specs/ops.md §3). Candidates are scoped to the ticket's environment
+// (environments v1 §3). A region's candidate set, preference-ordered:
+//   - rank 0 — the region's fleet_configs.active_version for this env: what the
+//     fleet actually runs;
+//   - rank 1 — versions with state='deprecated' in this env: the multi-version
+//     window (итерация 3, master.md §5) — old clients keep matching onto them
+//     until the version is disabled, but a client covered by an active version
 //     never lands here (the matchmaker takes the first compatible candidate).
 //
-// Disabled versions are never candidates.
+// The old rank-1 rule (state='active' with the prod label) died together with
+// the retired version label: the fleet active_version (rank 0) already covers
+// what the env runs. Disabled versions are never candidates.
 type RegionVersion struct {
 	Region    string
 	VersionID string
 	Semver    string
-	Rank      int // 0 fleet-active, 1 active, 2 deprecated (window)
+	Rank      int // 0 fleet-active, 1 deprecated (window)
 }
 
 // Deprecated reports whether the candidate is a multi-version-window one.
-func (rv RegionVersion) Deprecated() bool { return rv.Rank >= 2 }
+func (rv RegionVersion) Deprecated() bool { return rv.Rank >= 1 }
 
-// ActiveRegionVersions returns matchmaking version candidates per region for
-// a project, preference-ordered (rank asc, newest first within a rank).
-func (s *Store) ActiveRegionVersions(ctx context.Context, project string) ([]RegionVersion, error) {
+// ActiveRegionVersions returns matchmaking version candidates per region for a
+// project's environment, preference-ordered (rank asc, newest first within a
+// rank). Both the fleet-active and the deprecated-window candidates are scoped
+// to env — a dev ticket never sees prod versions and vice versa.
+func (s *Store) ActiveRegionVersions(ctx context.Context, project, env string) ([]RegionVersion, error) {
 	rows, err := s.Pool.Query(ctx, `
 		select region, version_id, semver, min(rank)
 		from (
@@ -38,25 +41,18 @@ func (s *Store) ActiveRegionVersions(ctx context.Context, project string) ([]Reg
 			from fleet_configs f
 			join projects p on p.id = f.project_id
 			join versions v on v.id = f.active_version
-			where p.slug = $1
+			where p.slug = $1 and f.env = $2
 			union all
 			select f.region, v.id::text, v.semver, 1, v.created_at
 			from fleet_configs f
 			join projects p on p.id = f.project_id
 			join versions v on v.project_id = p.id
-			     and v.channel = 'prod' and v.state = 'active'
-			where p.slug = $1
-			union all
-			select f.region, v.id::text, v.semver, 2, v.created_at
-			from fleet_configs f
-			join projects p on p.id = f.project_id
-			join versions v on v.project_id = p.id
-			     and v.state = 'deprecated'
-			where p.slug = $1
+			     and v.state = 'deprecated' and v.env = $2
+			where p.slug = $1 and f.env = $2
 		) t
 		group by region, version_id, semver
 		order by region, min(rank), max(created_at) desc`,
-		project)
+		project, env)
 	if err != nil {
 		return nil, err
 	}

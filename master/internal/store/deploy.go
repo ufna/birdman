@@ -47,11 +47,11 @@ func (s *Store) BeginDeploy(ctx context.Context, versionID string) (BeginDeployR
 
 	var v Version
 	err = tx.QueryRow(ctx, `
-		select v.id::text, v.project_id::text, p.slug, v.semver, v.image_ref, v.channel, v.state, v.created_at, v.deprecated_at
+		select v.id::text, v.project_id::text, p.slug, v.semver, v.image_ref, v.env, v.state, v.created_at, v.deprecated_at
 		from versions v join projects p on p.id = v.project_id
 		where v.id = $1::uuid
 		for update of v`, versionID).
-		Scan(&v.ID, &v.ProjectID, &v.Project, &v.Semver, &v.ImageRef, &v.Channel, &v.State, &v.CreatedAt, &v.DeprecatedAt)
+		Scan(&v.ID, &v.ProjectID, &v.Project, &v.Semver, &v.ImageRef, &v.Env, &v.State, &v.CreatedAt, &v.DeprecatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return BeginDeployResult{}, fmt.Errorf("version %s: %w", versionID, ErrNotFound)
 	}
@@ -190,11 +190,11 @@ func (s *Store) ActivateVersion(ctx context.Context, versionID, fromState, event
 
 	var v Version
 	err = tx.QueryRow(ctx, `
-		select v.id::text, v.project_id::text, p.slug, v.semver, v.image_ref, v.channel, v.state, v.created_at, v.deprecated_at
+		select v.id::text, v.project_id::text, p.slug, v.semver, v.image_ref, v.env, v.state, v.created_at, v.deprecated_at
 		from versions v join projects p on p.id = v.project_id
 		where v.id = $1::uuid
 		for update of v`, versionID).
-		Scan(&v.ID, &v.ProjectID, &v.Project, &v.Semver, &v.ImageRef, &v.Channel, &v.State, &v.CreatedAt, &v.DeprecatedAt)
+		Scan(&v.ID, &v.ProjectID, &v.Project, &v.Semver, &v.ImageRef, &v.Env, &v.State, &v.CreatedAt, &v.DeprecatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ActivateResult{}, fmt.Errorf("version %s: %w", versionID, ErrNotFound)
 	}
@@ -219,7 +219,7 @@ func (s *Store) ActivateVersion(ctx context.Context, versionID, fromState, event
 		       or (state = 'registered' and id in (
 		             select active_version from fleet_configs
 		             where project_id = $1::uuid and active_version is not null)))
-		returning id::text, semver, image_ref, channel, created_at`,
+		returning id::text, semver, image_ref, env, created_at`,
 		v.ProjectID, v.ID)
 	if err != nil {
 		return ActivateResult{}, err
@@ -227,7 +227,7 @@ func (s *Store) ActivateVersion(ctx context.Context, versionID, fromState, event
 	keep := []string{v.ID}
 	for demoteRows.Next() {
 		var old Version
-		if err := demoteRows.Scan(&old.ID, &old.Semver, &old.ImageRef, &old.Channel, &old.CreatedAt); err != nil {
+		if err := demoteRows.Scan(&old.ID, &old.Semver, &old.ImageRef, &old.Env, &old.CreatedAt); err != nil {
 			demoteRows.Close()
 			return ActivateResult{}, err
 		}
@@ -333,12 +333,12 @@ func (s *Store) ActivateVersion(ctx context.Context, versionID, fromState, event
 func (s *Store) RollbackTarget(ctx context.Context, project string) (Version, error) {
 	var v Version
 	err := s.Pool.QueryRow(ctx, `
-		select v.id::text, v.project_id::text, p.slug, v.semver, v.image_ref, v.channel, v.state, v.created_at, v.deprecated_at
+		select v.id::text, v.project_id::text, p.slug, v.semver, v.image_ref, v.env, v.state, v.created_at, v.deprecated_at
 		from versions v join projects p on p.id = v.project_id
 		where p.slug = $1 and v.state = 'deprecated'
 		order by v.deprecated_at desc nulls last
 		limit 1`, project).
-		Scan(&v.ID, &v.ProjectID, &v.Project, &v.Semver, &v.ImageRef, &v.Channel, &v.State, &v.CreatedAt, &v.DeprecatedAt)
+		Scan(&v.ID, &v.ProjectID, &v.Project, &v.Semver, &v.ImageRef, &v.Env, &v.State, &v.CreatedAt, &v.DeprecatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Version{}, fmt.Errorf("project %s has no deprecated version to roll back to: %w", project, ErrVersionState)
 	}
@@ -349,7 +349,7 @@ func (s *Store) RollbackTarget(ctx context.Context, project string) (Version, er
 // resume after a master restart (the in-memory prepull tracking is lost).
 func (s *Store) PrepullingVersions(ctx context.Context) ([]Version, error) {
 	rows, err := s.Pool.Query(ctx, `
-		select v.id::text, v.project_id::text, p.slug, v.semver, v.image_ref, v.channel, v.state, v.created_at, v.deprecated_at
+		select v.id::text, v.project_id::text, p.slug, v.semver, v.image_ref, v.env, v.state, v.created_at, v.deprecated_at
 		from versions v join projects p on p.id = v.project_id
 		where v.state = 'prepulling'
 		order by v.created_at`)
@@ -360,7 +360,7 @@ func (s *Store) PrepullingVersions(ctx context.Context) ([]Version, error) {
 	var out []Version
 	for rows.Next() {
 		var v Version
-		if err := rows.Scan(&v.ID, &v.ProjectID, &v.Project, &v.Semver, &v.ImageRef, &v.Channel, &v.State, &v.CreatedAt, &v.DeprecatedAt); err != nil {
+		if err := rows.Scan(&v.ID, &v.ProjectID, &v.Project, &v.Semver, &v.ImageRef, &v.Env, &v.State, &v.CreatedAt, &v.DeprecatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, v)
@@ -380,14 +380,14 @@ func (s *Store) DisableExpiredDeprecated(ctx context.Context) ([]Version, error)
 		  and v.deprecated_at + make_interval(mins => coalesce((
 		        select max(f.reap_ttl_min) from fleet_configs f
 		        where f.project_id = v.project_id), 0)) < now()
-		returning v.id::text, v.project_id::text, v.semver, v.image_ref, v.channel, v.created_at, v.deprecated_at`)
+		returning v.id::text, v.project_id::text, v.semver, v.image_ref, v.env, v.created_at, v.deprecated_at`)
 	if err != nil {
 		return nil, err
 	}
 	var out []Version
 	for rows.Next() {
 		var v Version
-		if err := rows.Scan(&v.ID, &v.ProjectID, &v.Semver, &v.ImageRef, &v.Channel, &v.CreatedAt, &v.DeprecatedAt); err != nil {
+		if err := rows.Scan(&v.ID, &v.ProjectID, &v.Semver, &v.ImageRef, &v.Env, &v.CreatedAt, &v.DeprecatedAt); err != nil {
 			rows.Close()
 			return nil, err
 		}

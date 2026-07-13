@@ -51,12 +51,12 @@ func DeprecatedBuffer(bufferReady int32) int32 {
 func (s *Store) DeprecatedWindowVersion(ctx context.Context, projectID string) (*Version, error) {
 	var v Version
 	err := s.Pool.QueryRow(ctx, `
-		select v.id::text, v.project_id::text, v.semver, v.image_ref, v.channel, v.state, v.created_at, v.deprecated_at
+		select v.id::text, v.project_id::text, v.semver, v.image_ref, v.env, v.state, v.created_at, v.deprecated_at
 		from versions v
 		where v.project_id = $1::uuid and v.state = 'deprecated'
 		order by v.deprecated_at desc nulls last
 		limit 1`, projectID).
-		Scan(&v.ID, &v.ProjectID, &v.Semver, &v.ImageRef, &v.Channel, &v.State, &v.CreatedAt, &v.DeprecatedAt)
+		Scan(&v.ID, &v.ProjectID, &v.Semver, &v.ImageRef, &v.Env, &v.State, &v.CreatedAt, &v.DeprecatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

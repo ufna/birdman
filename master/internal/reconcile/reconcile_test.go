@@ -480,7 +480,7 @@ func TestStuckCreatingFailsByTimeout(t *testing.T) {
 func TestStaleVersionReaped(t *testing.T) {
 	st := testdb.New(t)
 	f := testdb.Seed(t, st, "eu", 10)
-	v2 := f.AddVersion(t, "2.0.0")
+	v2 := f.AddVersion(t, "2.0.0", "dev")
 	f.InsertServer(t, f.NodeID, f.VersionID, "ready", 20001, 0) // old version, ready
 	buffer, maxServers := int32(0), int32(50)
 	if _, err := st.UpsertFleet(context.Background(), store.UpsertFleetParams{
@@ -644,7 +644,7 @@ func TestWindowKeepsBothBuffers(t *testing.T) {
 	st := testdb.New(t)
 	f := testdb.Seed(t, st, "eu", 20)
 	f.UpsertFleet(t, 3, 50) // active 1.0.0, buffer 3
-	v2 := f.AddVersion(t, "1.1.0")
+	v2 := f.AddVersion(t, "1.1.0", "dev")
 	flipActive(t, st, v2) // 1.0.0 → deprecated
 	r, sender := newReconciler(st)
 
@@ -684,7 +684,7 @@ func TestWindowDeprecatedSurplusStopped(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	v2 := f.AddVersion(t, "1.1.0")
+	v2 := f.AddVersion(t, "1.1.0", "dev")
 	flipActive(t, st, v2)
 
 	// buffer_ready 0 → deprecated target min(2,0)=0: every ready v1 goes.
@@ -727,7 +727,7 @@ func TestWindowReapTTLDrainsLiveMatch(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	v2 := f.AddVersion(t, "1.1.0")
+	v2 := f.AddVersion(t, "1.1.0", "dev")
 	flipActive(t, st, v2)
 	ctx := context.Background()
 

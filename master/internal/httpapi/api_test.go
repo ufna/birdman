@@ -162,7 +162,7 @@ func TestRESTFlow(t *testing.T) {
 	// Versions.
 	code, body = deploy.do("POST", "/v1/versions", map[string]any{
 		"project": "game", "semver": "1.0.0",
-		"image_ref": "ghcr.io/example/game:1.0.0", "channel": "prod",
+		"image_ref": "ghcr.io/example/game:1.0.0", "env": "dev",
 	})
 	if code != 201 {
 		t.Fatalf("create version: %d %v", code, body)
@@ -170,7 +170,7 @@ func TestRESTFlow(t *testing.T) {
 	versionID := body["version"].(map[string]any)["id"].(string)
 	if code, _ = deploy.do("POST", "/v1/versions", map[string]any{
 		"project": "game", "semver": "1.0.0",
-		"image_ref": "ghcr.io/example/game:1.0.0", "channel": "prod",
+		"image_ref": "ghcr.io/example/game:1.0.0", "env": "dev",
 	}); code != 409 {
 		t.Fatalf("duplicate version: want 409, got %d", code)
 	}
