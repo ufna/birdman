@@ -295,6 +295,56 @@ export interface RegistryPatch {
   note?: string;
 }
 
+// --- Бекапы (Backups v1, GET/PATCH /v1/backups/settings, GET /v1/backups/runs,
+// POST /v1/backups/run, POST /v1/backups/s3/test; admin-only). Дампы Postgres
+// силами master: расписание + локальный ретеншн + S3-оффсайт. s3_secret_key
+// write-only: PATCH его принимает, но GET его никогда не возвращает — вместо
+// секрета отдаётся флаг has_s3_secret (задан ли он).
+
+export interface BackupSettings {
+  enabled: boolean;
+  interval_hours: number;
+  retention_local: number;
+  s3_enabled: boolean;
+  s3_endpoint: string;
+  s3_region: string;
+  s3_bucket: string;
+  s3_prefix: string;
+  s3_access_key: string;
+  has_s3_secret: boolean;
+  retention_s3: number;
+  updated_at: string;
+}
+
+/** Тело PATCH /v1/backups/settings: только изменённые поля. s3_secret_key
+ *  write-only — не задан = секрет цел (keep); задан = ротация. */
+export interface BackupSettingsPatch {
+  enabled?: boolean;
+  interval_hours?: number;
+  retention_local?: number;
+  s3_enabled?: boolean;
+  s3_endpoint?: string;
+  s3_region?: string;
+  s3_bucket?: string;
+  s3_prefix?: string;
+  s3_access_key?: string;
+  s3_secret_key?: string; // write-only: не задан = keep
+  retention_s3?: number;
+}
+
+/** Прогон бекапа из истории (GET /v1/backups/runs). result=running — ещё идёт
+ *  (finished_at=null, size_bytes=null); error — текст ошибки (пустой, если ок). */
+export interface BackupRun {
+  id: number;
+  started_at: string;
+  finished_at: string | null;
+  kind: 'scheduled' | 'manual';
+  result: 'running' | 'ok' | 'error';
+  size_bytes: number | null;
+  s3_uploaded: boolean;
+  error: string;
+}
+
 export class ApiError extends Error {
   constructor(
     public readonly status: number,
@@ -437,6 +487,20 @@ export const api = {
   patchRegistry: (id: string, body: RegistryPatch) =>
     request<{ registry: RegistryInfo }>('PATCH', `/v1/registries/${encodeURIComponent(id)}`, body).then((r) => r.registry),
   deleteRegistry: (id: string) => request<void>('DELETE', `/v1/registries/${encodeURIComponent(id)}`),
+
+  // --- Бекапы (admin-only) ---
+
+  getBackupSettings: () =>
+    request<{ settings: BackupSettings }>('GET', '/v1/backups/settings').then((r) => r.settings),
+  /** PATCH только изменённых полей; s3_secret_key задаём лишь при ротации. */
+  patchBackupSettings: (body: BackupSettingsPatch) =>
+    request<{ settings: BackupSettings }>('PATCH', '/v1/backups/settings', body).then((r) => r.settings),
+  listBackupRuns: (limit = 50) =>
+    request<{ runs: BackupRun[] }>('GET', `/v1/backups/runs${qs({ limit })}`).then((r) => r.runs),
+  /** Ручной прогон: 202 {started:true} | 409 conflict (прогон уже идёт). */
+  runBackupNow: () => request<{ started: boolean }>('POST', '/v1/backups/run'),
+  /** Проверка СОХРАНЁННОЙ S3-конфигурации: 200 {ok:true} | 400 s3_test_failed. */
+  testBackupS3: () => request<{ ok: boolean }>('POST', '/v1/backups/s3/test'),
 };
 
 /**
