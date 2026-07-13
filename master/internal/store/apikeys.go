@@ -21,11 +21,23 @@ var ErrLastAdminKey = errors.New("last_admin_key")
 // APIKey is one row of api_keys. The secret is never stored (only bcrypt of it)
 // and never lives on this struct. CreatedAt/RevokedAt are filled by the
 // management reads (List/Revoke/Create); they stay zero on the auth hot path,
-// which is fine — that path only reads ID/Name/Scopes.
+// which is fine — that path only reads ID/Name/Scopes and the binding.
+//
+// Binding (environments v1 §5): the (ProjectID, Project, Env) triple is the
+// optional key binding. All nil → a global key: the pre-env default, allowed on
+// every surface (existing keys keep working). All set → a key scoped to exactly
+// one (project, env) on the deploy/matchmaking/allocate surfaces. Project is the
+// slug (for display and enforcement), ProjectID the uuid. Parity is a DB CHECK
+// (api_keys_binding_all_or_nothing) and revalidated on create; an admin key is
+// never bound (rejected on create). AuthAPIKey and ListAPIKeys fill the triple;
+// Revoke/Purge leave it nil (their callers only audit id/name).
 type APIKey struct {
 	ID        string     `json:"id"`
 	Name      string     `json:"name"`
 	Scopes    []string   `json:"scopes"`
+	ProjectID *string    `json:"project_id,omitempty"`
+	Project   *string    `json:"project,omitempty"`
+	Env       *string    `json:"env,omitempty"`
 	CreatedAt time.Time  `json:"created_at"`
 	RevokedAt *time.Time `json:"revoked_at"`
 }
@@ -38,11 +50,59 @@ func (s *Store) CountActiveAPIKeys(ctx context.Context) (int, error) {
 	return n, err
 }
 
-// CreateAPIKey mints a key with the given scopes and returns the bearer
-// secret — shown exactly once.
-func (s *Store) CreateAPIKey(ctx context.Context, name string, scopes []string) (APIKey, string, error) {
-	if name == "" || len(scopes) == 0 {
+// CreateAPIKeyParams is the input to CreateAPIKey. Project/Env are the optional
+// binding (environments v1 §5): both nil → a global key (the pre-env default);
+// both set → a key bound to that (project, env) pair. A half-set pair, a binding
+// on the admin scope, or a binding to a non-existent project/env is rejected
+// with a clear error (the API maps every CreateAPIKey error to 400).
+type CreateAPIKeyParams struct {
+	Name    string
+	Scopes  []string
+	Project *string // project slug of the binding; nil → global
+	Env     *string // environment name of the binding; nil → global
+}
+
+// CreateAPIKey mints a key with the given scopes (and optional (project, env)
+// binding) and returns the bearer secret — shown exactly once.
+func (s *Store) CreateAPIKey(ctx context.Context, p CreateAPIKeyParams) (APIKey, string, error) {
+	if p.Name == "" || len(p.Scopes) == 0 {
 		return APIKey{}, "", fmt.Errorf("name and scopes are required")
+	}
+	// Binding is all-or-nothing (mirrors api_keys_binding_all_or_nothing) —
+	// validate in code so the operator gets a clear message, not a raw CHECK.
+	if (p.Project == nil) != (p.Env == nil) {
+		return APIKey{}, "", fmt.Errorf("project and env must be set together: a key is either bound to a (project, env) pair or global")
+	}
+	bound := p.Project != nil
+	// A binding is incompatible with the admin scope (environments v1 §5, I8):
+	// admin is platform-wide, scoping it to a single env is contradictory.
+	if bound && slices.Contains(p.Scopes, "admin") {
+		return APIKey{}, "", fmt.Errorf("an admin-scoped key cannot be bound to a project/env")
+	}
+	var projectID *string
+	if bound {
+		// Resolve the slug to an id explicitly — NOT ensureProject: a binding to a
+		// project that does not exist is a 400, never an implicit project creation.
+		var pid string
+		err := s.Pool.QueryRow(ctx,
+			`select id::text from projects where slug = $1`, *p.Project).Scan(&pid)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return APIKey{}, "", fmt.Errorf("no such project %q: %w", *p.Project, ErrNotFound)
+		}
+		if err != nil {
+			return APIKey{}, "", err
+		}
+		// The env must exist for the project (clean error instead of the FK's 23503).
+		var envExists bool
+		if err := s.Pool.QueryRow(ctx,
+			`select exists(select 1 from environments where project_id = $1::uuid and name = $2)`,
+			pid, *p.Env).Scan(&envExists); err != nil {
+			return APIKey{}, "", err
+		}
+		if !envExists {
+			return APIKey{}, "", fmt.Errorf("no such environment %s/%s", *p.Project, *p.Env)
+		}
+		projectID = &pid
 	}
 	secret, err := newSecret()
 	if err != nil {
@@ -54,13 +114,15 @@ func (s *Store) CreateAPIKey(ctx context.Context, name string, scopes []string) 
 	}
 	var k APIKey
 	err = s.Pool.QueryRow(ctx, `
-		insert into api_keys (name, hash, scopes)
-		values ($1, $2, $3)
-		returning id::text, name, scopes, created_at, revoked_at`, name, string(hash), scopes).
-		Scan(&k.ID, &k.Name, &k.Scopes, &k.CreatedAt, &k.RevokedAt)
+		insert into api_keys (name, hash, scopes, project_id, env)
+		values ($1, $2, $3, $4::uuid, $5)
+		returning id::text, name, scopes, project_id::text, env, created_at, revoked_at`,
+		p.Name, string(hash), p.Scopes, projectID, p.Env).
+		Scan(&k.ID, &k.Name, &k.Scopes, &k.ProjectID, &k.Env, &k.CreatedAt, &k.RevokedAt)
 	if err != nil {
 		return APIKey{}, "", err
 	}
+	k.Project = p.Project // slug for display/enforcement (nil for a global key)
 	return k, composeToken(apiKeyPrefix, k.ID, secret), nil
 }
 
@@ -68,8 +130,9 @@ func (s *Store) CreateAPIKey(ctx context.Context, name string, scopes []string) 
 // secret — the /v1/apikeys admin read. Active keys carry revoked_at = null.
 func (s *Store) ListAPIKeys(ctx context.Context) ([]APIKey, error) {
 	rows, err := s.Pool.Query(ctx, `
-		select id::text, name, scopes, created_at, revoked_at
-		from api_keys order by created_at desc, id`)
+		select k.id::text, k.name, k.scopes, p.slug, k.project_id::text, k.env, k.created_at, k.revoked_at
+		from api_keys k left join projects p on p.id = k.project_id
+		order by k.created_at desc, k.id`)
 	if err != nil {
 		return nil, err
 	}
@@ -77,7 +140,7 @@ func (s *Store) ListAPIKeys(ctx context.Context) ([]APIKey, error) {
 	var out []APIKey
 	for rows.Next() {
 		var k APIKey
-		if err := rows.Scan(&k.ID, &k.Name, &k.Scopes, &k.CreatedAt, &k.RevokedAt); err != nil {
+		if err := rows.Scan(&k.ID, &k.Name, &k.Scopes, &k.Project, &k.ProjectID, &k.Env, &k.CreatedAt, &k.RevokedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, k)
@@ -189,9 +252,10 @@ func (s *Store) AuthAPIKey(ctx context.Context, token string) (APIKey, error) {
 	var k APIKey
 	var hash string
 	err = s.Pool.QueryRow(ctx, `
-		select id::text, name, scopes, hash from api_keys
-		where id = $1::uuid and revoked_at is null`, id).
-		Scan(&k.ID, &k.Name, &k.Scopes, &hash)
+		select k.id::text, k.name, k.scopes, k.hash, p.slug, k.project_id::text, k.env
+		from api_keys k left join projects p on p.id = k.project_id
+		where k.id = $1::uuid and k.revoked_at is null`, id).
+		Scan(&k.ID, &k.Name, &k.Scopes, &hash, &k.Project, &k.ProjectID, &k.Env)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return APIKey{}, ErrBadAPIKey
 	}

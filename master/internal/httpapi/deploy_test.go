@@ -39,11 +39,11 @@ func TestDeployAndRollbackEndpoints(t *testing.T) {
 	ts, dep, rec := deployServer(t, st)
 	ctx := t.Context()
 
-	_, deployKey, err := st.CreateAPIKey(ctx, "ci", []string{httpapi.ScopeDeploy})
+	_, deployKey, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ci", Scopes: []string{httpapi.ScopeDeploy}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, roKey, err := st.CreateAPIKey(ctx, "ro", []string{httpapi.ScopeReadonly})
+	_, roKey, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ro", Scopes: []string{httpapi.ScopeReadonly}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +161,7 @@ func TestRollbackEnvResolve(t *testing.T) {
 	setState(prodActive, "active")
 	setState(prodDep, "deprecated")
 
-	_, deployKey, err := st.CreateAPIKey(ctx, "ci", []string{httpapi.ScopeDeploy})
+	_, deployKey, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ci", Scopes: []string{httpapi.ScopeDeploy}})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -36,7 +36,7 @@ func TestEnvironmentsAPI(t *testing.T) {
 
 	ts := envAPIServer(t, st)
 	mk := func(scope string) *client {
-		_, key, err := st.CreateAPIKey(ctx, scope, []string{scope})
+		_, key, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: scope, Scopes: []string{scope}})
 		if err != nil {
 			t.Fatal(err)
 		}

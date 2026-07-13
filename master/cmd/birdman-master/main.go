@@ -115,7 +115,9 @@ func run() error {
 	if n, err := st.CountActiveAPIKeys(ctx); err != nil {
 		return err
 	} else if n == 0 {
-		_, key, err := st.CreateAPIKey(ctx, "bootstrap-admin", []string{httpapi.ScopeAdmin})
+		_, key, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{
+			Name: "bootstrap-admin", Scopes: []string{httpapi.ScopeAdmin},
+		})
 		if err != nil {
 			return err
 		}

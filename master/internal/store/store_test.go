@@ -49,7 +49,7 @@ func TestAPIKeys(t *testing.T) {
 	if err != nil || n != 0 {
 		t.Fatalf("expected empty api_keys, got %d (%v)", n, err)
 	}
-	k, secret, err := st.CreateAPIKey(ctx, "ci", []string{"deploy", "readonly"})
+	k, secret, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ci", Scopes: []string{"deploy", "readonly"}})
 	if err != nil {
 		t.Fatalf("create key: %v", err)
 	}
@@ -74,11 +74,11 @@ func TestAPIKeyPurge(t *testing.T) {
 	st := testdb.New(t)
 	ctx := context.Background()
 
-	active, _, err := st.CreateAPIKey(ctx, "active", []string{"readonly"})
+	active, _, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "active", Scopes: []string{"readonly"}})
 	if err != nil {
 		t.Fatalf("create active: %v", err)
 	}
-	revoked, _, err := st.CreateAPIKey(ctx, "revoked", []string{"readonly"})
+	revoked, _, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "revoked", Scopes: []string{"readonly"}})
 	if err != nil {
 		t.Fatalf("create revoked: %v", err)
 	}

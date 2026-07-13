@@ -35,11 +35,11 @@ func TestAPIKeysCRUD(t *testing.T) {
 	st, ts := newAPIKeyServer(t)
 	ctx := t.Context()
 
-	adminK, adminSecret, err := st.CreateAPIKey(ctx, "admin", []string{httpapi.ScopeAdmin})
+	adminK, adminSecret, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "admin", Scopes: []string{httpapi.ScopeAdmin}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, roSecret, _ := st.CreateAPIKey(ctx, "ro", []string{httpapi.ScopeReadonly})
+	_, roSecret, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ro", Scopes: []string{httpapi.ScopeReadonly}})
 	admin := &client{t: t, base: ts.URL, key: adminSecret}
 	ro := &client{t: t, base: ts.URL, key: roSecret}
 
@@ -171,8 +171,8 @@ func TestAPIKeysCRUD(t *testing.T) {
 func TestAPIKeyRevokeIdempotent(t *testing.T) {
 	st, ts := newAPIKeyServer(t)
 	ctx := t.Context()
-	_, adminSecret, _ := st.CreateAPIKey(ctx, "admin", []string{httpapi.ScopeAdmin})
-	k, _, _ := st.CreateAPIKey(ctx, "temp", []string{httpapi.ScopeReadonly})
+	_, adminSecret, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "admin", Scopes: []string{httpapi.ScopeAdmin}})
+	k, _, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "temp", Scopes: []string{httpapi.ScopeReadonly}})
 	admin := &client{t: t, base: ts.URL, key: adminSecret}
 
 	if code, _ := admin.do("DELETE", "/v1/apikeys/"+k.ID, nil); code != 200 {
@@ -196,13 +196,13 @@ func TestAPIKeyRevokeIdempotent(t *testing.T) {
 func TestAPIKeyPurge(t *testing.T) {
 	st, ts := newAPIKeyServer(t)
 	ctx := t.Context()
-	_, adminSecret, _ := st.CreateAPIKey(ctx, "admin", []string{httpapi.ScopeAdmin})
-	_, roSecret, _ := st.CreateAPIKey(ctx, "ro", []string{httpapi.ScopeReadonly})
+	_, adminSecret, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "admin", Scopes: []string{httpapi.ScopeAdmin}})
+	_, roSecret, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ro", Scopes: []string{httpapi.ScopeReadonly}})
 	admin := &client{t: t, base: ts.URL, key: adminSecret}
 	ro := &client{t: t, base: ts.URL, key: roSecret}
 
-	active, _, _ := st.CreateAPIKey(ctx, "active-key", []string{httpapi.ScopeReadonly})
-	revoked, _, _ := st.CreateAPIKey(ctx, "revoked-key", []string{httpapi.ScopeReadonly})
+	active, _, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "active-key", Scopes: []string{httpapi.ScopeReadonly}})
+	revoked, _, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "revoked-key", Scopes: []string{httpapi.ScopeReadonly}})
 
 	// readonly cannot purge — same admin-only gate as revoke.
 	if code, _ := ro.do("DELETE", "/v1/apikeys/"+revoked.ID+"?purge=true", nil); code != 403 {
@@ -252,7 +252,7 @@ func TestAPIKeyPurge(t *testing.T) {
 
 	// Anything other than purge=true|1 takes the byte-identical plain-DELETE
 	// path: it revokes (200), it does not hard-delete.
-	other, _, _ := st.CreateAPIKey(ctx, "other-key", []string{httpapi.ScopeReadonly})
+	other, _, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "other-key", Scopes: []string{httpapi.ScopeReadonly}})
 	if code, body := admin.do("DELETE", "/v1/apikeys/"+other.ID+"?purge=false", nil); code != 200 {
 		t.Fatalf("purge=false: want 200 (plain revoke), got %d %v", code, body)
 	}

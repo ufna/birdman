@@ -55,8 +55,8 @@ func registryServer(t *testing.T) (*store.Store, *client, *client, *hookRecorder
 	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", "", log).WithRegistriesHook(hook.fire))
 	t.Cleanup(ts.Close)
 	ctx := t.Context()
-	_, adminSecret, _ := st.CreateAPIKey(ctx, "admin", []string{httpapi.ScopeAdmin})
-	_, roSecret, _ := st.CreateAPIKey(ctx, "ro", []string{httpapi.ScopeReadonly})
+	_, adminSecret, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "admin", Scopes: []string{httpapi.ScopeAdmin}})
+	_, roSecret, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ro", Scopes: []string{httpapi.ScopeReadonly}})
 	admin := &client{t: t, base: ts.URL, key: adminSecret}
 	ro := &client{t: t, base: ts.URL, key: roSecret}
 	return st, admin, ro, hook
@@ -442,7 +442,7 @@ func TestRegistriesHookSurvivesRequestContextCancellation(t *testing.T) {
 	srv := httpapi.New(st, m, mm, dep, nil, nil, "", "", log).WithRegistriesHook(hook.fire)
 
 	ctx := t.Context()
-	_, adminSecret, err := st.CreateAPIKey(ctx, "admin", []string{httpapi.ScopeAdmin})
+	_, adminSecret, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "admin", Scopes: []string{httpapi.ScopeAdmin}})
 	if err != nil {
 		t.Fatal(err)
 	}

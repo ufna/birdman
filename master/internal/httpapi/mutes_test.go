@@ -28,8 +28,8 @@ func muteServer(t *testing.T) (*store.Store, *client, *client) {
 	mm := matchmaker.New(st, m, matchmaker.Config{}, log)
 	dep := deploy.New(deploy.Options{Store: st, Sender: &testdb.CommandRecorder{}, Log: log})
 	ctx := t.Context()
-	_, adminSecret, _ := st.CreateAPIKey(ctx, "admin", []string{httpapi.ScopeAdmin})
-	_, roSecret, _ := st.CreateAPIKey(ctx, "ro", []string{httpapi.ScopeReadonly})
+	_, adminSecret, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "admin", Scopes: []string{httpapi.ScopeAdmin}})
+	_, roSecret, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ro", Scopes: []string{httpapi.ScopeReadonly}})
 
 	vm := fakeVmalert(t)
 	logPath := filepath.Join(t.TempDir(), "alerts.log")

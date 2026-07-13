@@ -93,19 +93,19 @@ func TestRESTFlow(t *testing.T) {
 	t.Cleanup(ts.Close)
 	ctx := t.Context()
 
-	_, adminKey, err := st.CreateAPIKey(ctx, "admin", []string{httpapi.ScopeAdmin})
+	_, adminKey, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "admin", Scopes: []string{httpapi.ScopeAdmin}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, roKey, err := st.CreateAPIKey(ctx, "ro", []string{httpapi.ScopeReadonly})
+	_, roKey, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ro", Scopes: []string{httpapi.ScopeReadonly}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, deployKey, err := st.CreateAPIKey(ctx, "ci", []string{httpapi.ScopeDeploy})
+	_, deployKey, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ci", Scopes: []string{httpapi.ScopeDeploy}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, allocKey, err := st.CreateAPIKey(ctx, "mm", []string{httpapi.ScopeAllocate})
+	_, allocKey, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "mm", Scopes: []string{httpapi.ScopeAllocate}})
 	if err != nil {
 		t.Fatal(err)
 	}

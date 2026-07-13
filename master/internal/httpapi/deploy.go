@@ -27,6 +27,17 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "version_id must be a version id (uuid)")
 		return
 	}
+	// Binding (environments v1 §5): the target is the version's own (project,
+	// env). Load it first so a key bound to another env is refused (403) without
+	// side effects; an unknown version stays a 404 (same as Deploy would report).
+	v, err := s.st.GetVersion(r.Context(), req.VersionID)
+	if err != nil {
+		deployError(w, err)
+		return
+	}
+	if !s.requireBinding(w, r, v.Project, v.Env) {
+		return
+	}
 	st, err := s.dep.Deploy(r.Context(), req.VersionID)
 	if err != nil {
 		deployError(w, err)
@@ -50,9 +61,10 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	project := req.Project
+	// Binding (environments v1 §5): a bound key defaults its own project; else the
+	// v0 sole-project convenience (mirroring matchmaking) fills it when omitted.
+	project := bindProject(r, req.Project)
 	if project == "" {
-		// v0 convenience mirroring matchmaking: sole project needs no field.
 		var err error
 		project, err = s.st.SoleProjectSlug(r.Context())
 		if err != nil {
@@ -82,6 +94,11 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
 				"env is required: multiple environments have a rollback window")
 			return
 		}
+	}
+	// Binding enforced on the resolved target (environments v1 §5): a key bound to
+	// another env cannot roll back this (project, env).
+	if !s.requireBinding(w, r, project, env) {
+		return
 	}
 	var regions []string
 	if req.Region != "" {

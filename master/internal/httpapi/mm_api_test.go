@@ -39,7 +39,7 @@ func mmServer(t *testing.T, st *store.Store, cfg matchmaker.Config) *httptest.Se
 
 func mmKey(t *testing.T, st *store.Store) string {
 	t.Helper()
-	_, key, err := st.CreateAPIKey(t.Context(), "client", []string{httpapi.ScopeMatchmaking})
+	_, key, err := st.CreateAPIKey(t.Context(), store.CreateAPIKeyParams{Name: "client", Scopes: []string{httpapi.ScopeMatchmaking}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestMatchmakingREST(t *testing.T) {
 	if code, _ := anon.do("POST", "/v1/matchmaking/tickets", ticketBody("p1", "1.0.0", "eu", 10)); code != 401 {
 		t.Fatalf("anon ticket: want 401, got %d", code)
 	}
-	_, roKey, err := st.CreateAPIKey(t.Context(), "ro", []string{httpapi.ScopeReadonly})
+	_, roKey, err := st.CreateAPIKey(t.Context(), store.CreateAPIKeyParams{Name: "ro", Scopes: []string{httpapi.ScopeReadonly}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +278,7 @@ func TestProjectMatchSize(t *testing.T) {
 	f.InsertServer(t, f.NodeID, f.VersionID, "ready", 20001, 0)
 	ts := mmServer(t, st, matchmaker.Config{})
 
-	_, adminKey, err := st.CreateAPIKey(t.Context(), "admin", []string{httpapi.ScopeAdmin})
+	_, adminKey, err := st.CreateAPIKey(t.Context(), store.CreateAPIKeyParams{Name: "admin", Scopes: []string{httpapi.ScopeAdmin}})
 	if err != nil {
 		t.Fatal(err)
 	}

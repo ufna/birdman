@@ -84,8 +84,15 @@ func (s *Server) handleCreateVersion(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	// Binding (environments v1 §5): a bound key defaults its project (so CI can
+	// POST just {semver, image_ref, env}) and may register only in its own
+	// (project, env) — enforced before the version is created.
+	project := bindProject(r, req.Project)
+	if !s.requireBinding(w, r, project, req.Env) {
+		return
+	}
 	v, err := s.st.CreateVersion(r.Context(), store.CreateVersionParams{
-		Project:  req.Project,
+		Project:  project,
 		Semver:   req.Semver,
 		ImageRef: req.ImageRef,
 		Env:      req.Env,
@@ -137,8 +144,16 @@ func (s *Server) handleUpsertFleet(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Binding (environments v1 §5): a bound key defaults its project and may
+	// configure only its own (project, env). The route is admin-scoped and admin
+	// keys are never bound, so this is defense in depth against an out-of-band
+	// bound-admin row (TestAPIKeyBindingFleetGuard).
+	project := bindProject(r, req.Project)
+	if !s.requireBinding(w, r, project, req.Env) {
+		return
+	}
 	f, err := s.st.UpsertFleet(r.Context(), store.UpsertFleetParams{
-		Project:       req.Project,
+		Project:       project,
 		Env:           req.Env,
 		Region:        r.PathValue("region"),
 		ActiveVersion: req.ActiveVersion,

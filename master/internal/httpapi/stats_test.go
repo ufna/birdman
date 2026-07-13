@@ -54,8 +54,8 @@ func TestStatsEndpoints(t *testing.T) {
 	insertFinishedMatch(t, f, srv, "eu", 10, 120, 90) // 30 min, peak 10
 	insertFinishedMatch(t, f, srv, "eu", 6, 60, 40)   // 20 min, peak 6
 
-	_, roSecret, _ := st.CreateAPIKey(ctx, "ro", []string{httpapi.ScopeReadonly})
-	_, mmSecret, _ := st.CreateAPIKey(ctx, "mm", []string{httpapi.ScopeMatchmaking})
+	_, roSecret, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ro", Scopes: []string{httpapi.ScopeReadonly}})
+	_, mmSecret, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "mm", Scopes: []string{httpapi.ScopeMatchmaking}})
 	ro := &client{t: t, base: ts.URL, key: roSecret}
 	mmc := &client{t: t, base: ts.URL, key: mmSecret}
 
@@ -127,7 +127,7 @@ func TestStatsEmpty(t *testing.T) {
 	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", "", log))
 	t.Cleanup(ts.Close)
 	ctx := t.Context()
-	_, roSecret, _ := st.CreateAPIKey(ctx, "ro", []string{httpapi.ScopeReadonly})
+	_, roSecret, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ro", Scopes: []string{httpapi.ScopeReadonly}})
 	ro := &client{t: t, base: ts.URL, key: roSecret}
 
 	code, body := ro.do("GET", "/v1/stats/overview?days=3", nil)
@@ -178,7 +178,7 @@ func newStatsAPI(t *testing.T) (ts *httptest.Server, st *store.Store, f *testdb.
 	dep := deploy.New(deploy.Options{Store: st, Sender: &testdb.CommandRecorder{}, Log: log})
 	ts = httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", "", log))
 	t.Cleanup(ts.Close)
-	_, roSecret, err := st.CreateAPIKey(t.Context(), "ro", []string{httpapi.ScopeReadonly})
+	_, roSecret, err := st.CreateAPIKey(t.Context(), store.CreateAPIKeyParams{Name: "ro", Scopes: []string{httpapi.ScopeReadonly}})
 	if err != nil {
 		t.Fatalf("create ro api key: %v", err)
 	}
