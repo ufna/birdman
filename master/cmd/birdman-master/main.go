@@ -24,6 +24,7 @@ import (
 	"google.golang.org/grpc/keepalive"
 
 	"github.com/ufna/birdman/master/internal/agentlink"
+	"github.com/ufna/birdman/master/internal/backup"
 	"github.com/ufna/birdman/master/internal/config"
 	"github.com/ufna/birdman/master/internal/deploy"
 	"github.com/ufna/birdman/master/internal/httpapi"
@@ -235,6 +236,10 @@ func run() error {
 		return err
 	}
 	mm := matchmaker.New(st, m, mmCfg, log)
+	// Backups v1 runner (internal/backup): constructed before httpapi.New so a
+	// later task can expose it through the API (manual run / status); it is
+	// started with the other background loops below (go backupRunner.Run).
+	backupRunner := backup.New(st, cfg.DSN, cfg.Backups, log)
 	apiHandler := httpapi.New(st, m, mm, dep, hub, logRouter, cfg.Metrics.VictoriaMetricsURL, cfg.Metrics.VictoriaLogsURL, log).
 		WithAlertsSources(cfg.Alerts.VmalertURL, cfg.Alerts.LogPath).
 		// After every successful POST/DELETE /v1/registries, refresh every
@@ -264,6 +269,9 @@ func run() error {
 	// endpoints may read zero/partial rollups for older days until it
 	// completes (allocation/critical-path serving must never wait on stats).
 	go statsrollup.New(st, cfg.StatsRollupInterval, log).Run(loopCtx)
+	// Backups v1 scheduler: ticks every minute, dumps when enabled &&
+	// now ≥ last_ok+interval (policy read from backup_settings each run).
+	go backupRunner.Run(loopCtx)
 
 	errCh := make(chan error, 2)
 	go func() {
