@@ -200,7 +200,15 @@ func (r *Runner) runOnce(ctx context.Context, kind string) error {
 		s3Done = true
 	}
 
-	if err := r.st.FinishBackupRun(ctx, runID, "ok", size, s3Done, ""); err != nil {
+	// Финализацию УСПЕХА тоже пишем отвязанным ctx с коротким таймаутом
+	// (симметрично fail()): дамп уже на диске и, если включён S3, выгружен —
+	// смерть боевого ctx в зазоре между дампом/syncS3 и Finish не должна
+	// оставить строку висеть в 'running' при живом успешном дампе (ревью
+	// Task 2). PruneBackupRuns — косметика ротации истории, её оставляем на
+	// боевом ctx: потеря на отмене безобидна.
+	fctx, fcancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer fcancel()
+	if err := r.st.FinishBackupRun(fctx, runID, "ok", size, s3Done, ""); err != nil {
 		return err
 	}
 	if _, err := r.st.PruneBackupRuns(ctx, keepRuns); err != nil {

@@ -22,7 +22,8 @@ func testLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, ni
 
 // fakePgDump кладёт исполняемый скрипт и возвращает его путь.
 // mode: "ok" — пишет 64 байта payload; "fail" — stderr+exit 1;
-// versionMajor — что печатать на --version.
+// "slow" — sleep 2 перед payload (для таймаут-теста: дамп не успевает
+// за runTimeout/ctx); versionMajor — что печатать на --version.
 func fakePgDump(t *testing.T, dir, mode string, versionMajor int) string {
 	t.Helper()
 	script := fmt.Sprintf(`#!/bin/sh
@@ -32,6 +33,10 @@ if [ "$1" = "--version" ]; then
 fi
 case "%s" in
 ok)
+  printf 'PGDMP-fake-payload-PGDMP-fake-payload-PGDMP-fake-payload-PGDMP!!'
+  ;;
+slow)
+  sleep 2
   printf 'PGDMP-fake-payload-PGDMP-fake-payload-PGDMP-fake-payload-PGDMP!!'
   ;;
 fail)
@@ -177,6 +182,36 @@ func TestRunOnceRecordsFailureOnDeadContext(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("backup_failed event not emitted on dead ctx")
+	}
+}
+
+// TestRunOnceTimeoutMarksError — реальный сценарий runTimeout: строка истории
+// уже создана (settings+insert прошли живым ctx), затем дамп упирается в
+// таймаут и боевой ctx умирает. Ветка fail() runID != 0 обязана
+// финализировать строку result='error' через отвязанный ctx — иначе она
+// залипнет в 'running' при мёртвом дампе. Прошлый регресс-тест
+// (pre-cancelled ctx) до этой ветки не доходил: там первый же DB-вызов падал
+// раньше InsertBackupRun и runID оставался 0.
+func TestRunOnceTimeoutMarksError(t *testing.T) {
+	st := testdb.New(t)
+	r, _ := newTestRunner(t, st, "slow", 16)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	if err := r.runOnce(ctx, "scheduled"); err == nil {
+		t.Fatal("runOnce must time out during the dump and return an error")
+	}
+
+	// Читаем живым ctx: строка создана и финализирована error (не 'running').
+	runs, err := st.ListBackupRuns(context.Background(), 5)
+	if err != nil {
+		t.Fatalf("runs: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("want exactly one history row, got %d: %+v", len(runs), runs)
+	}
+	if runs[0].Result != "error" {
+		t.Fatalf("timeout must finalize the row as error, got %q: %+v", runs[0].Result, runs[0])
 	}
 }
 

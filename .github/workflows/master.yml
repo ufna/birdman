@@ -34,6 +34,10 @@ jobs:
     env:
       # Тесты берут DSN из env вместо самоподнятого docker-постгреса.
       BIRDMAN_TEST_DSN: postgres://postgres:birdman@localhost:5432/postgres?sslmode=disable
+      # S3-интеграционные тесты (backup/s3) ходят в MinIO, поднятый шагом ниже.
+      BIRDMAN_TEST_S3_ENDPOINT: http://localhost:9000
+      BIRDMAN_TEST_S3_KEY: minioadmin
+      BIRDMAN_TEST_S3_SECRET: minioadmin
     steps:
       - uses: actions/checkout@v4
 
@@ -43,6 +47,12 @@ jobs:
           cache-dependency-path: |
             master/go.sum
             proto/go.sum
+
+      - name: Start MinIO (S3 integration tests)
+        run: |
+          docker run -d --rm --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio server /data
 
       - name: Vet & build proto
         working-directory: proto
