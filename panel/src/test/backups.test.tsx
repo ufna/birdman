@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { I18nProvider } from '../lib/i18n';
 import { Backups } from '../screens/Backups';
@@ -40,7 +40,10 @@ const lastBody = (m: ReturnType<typeof vi.fn>, method: string) => {
   return call ? JSON.parse(String((call[1] as RequestInit).body)) : undefined;
 };
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.useRealTimers(); // no-op в тестах без fake timers; страховка при падении внутри
+  vi.unstubAllGlobals();
+});
 
 describe('Backups screen', () => {
   it('renders status and history', async () => {
@@ -62,6 +65,9 @@ describe('Backups screen', () => {
     const body = lastBody(fetchMock, 'PATCH');
     expect(body.interval_hours).toBe(12);
     expect(body).not.toHaveProperty('s3_secret_key');
+    // PATCH несёт ТОЛЬКО изменённые поля — нетронутые в форме не отправляются.
+    expect(body).not.toHaveProperty('enabled');
+    expect(body).not.toHaveProperty('retention_local');
   });
 
   it('save sends s3_secret_key when filled (rotate)', async () => {
@@ -86,5 +92,35 @@ describe('Backups screen', () => {
         String(u).endsWith('/v1/backups/run') && (i as RequestInit)?.method === 'POST');
       expect(posted).toBe(true);
     });
+  });
+
+  // Important из ревью Task 5: 30-с поллинг НЕ должен затирать несохранённые
+  // правки формы. Поллятся только прогоны (runs); settings перечитываются лишь
+  // при первой загрузке — форма живёт от baseline и ответа PATCH.
+  it('30s polling refetches runs only and keeps unsaved form edits', async () => {
+    // Fake timers ДО render: интервал компонента должен встать на фейковый clock.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'setInterval', 'clearTimeout', 'clearInterval'] });
+    const fetchMock = backupsMock();
+    vi.stubGlobal('fetch', fetchMock);
+    renderEn();
+    // Первичная загрузка: цепочка fetch→text→setState — микротаски (не таймеры);
+    // осаждаем вручную вместо findBy/waitFor (те завязаны на real timers).
+    await act(async () => {
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+    });
+    fireEvent.change(screen.getByLabelText('Interval (hours)'), { target: { value: '12' } });
+
+    const count = (part: string) => fetchMock.mock.calls.filter(([u]) => String(u).includes(part)).length;
+    const settingsBefore = count('/v1/backups/settings');
+    const runsBefore = count('/v1/backups/runs');
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+
+    expect(count('/v1/backups/runs')).toBeGreaterThan(runsBefore); // поллинг живой
+    expect(count('/v1/backups/settings')).toBe(settingsBefore); // settings НЕ поллятся
+    // Несохранённая правка цела — фоновое обновление не перегидрировало форму.
+    expect((screen.getByLabelText('Interval (hours)') as HTMLInputElement).value).toBe('12');
   });
 });

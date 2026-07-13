@@ -2,11 +2,14 @@
 // 2026-07-13-backups-admin-v1-design.md). Дампы Postgres силами master:
 // статус последнего прогона, форма настроек (расписание + локальный ретеншн +
 // S3-оффсайт с write-only секретом), история прогонов и ручной run-now.
-// Данные — useAsync + страховочный 30-с поллинг открытой вкладки (SSE есть
-// только у падений). PATCH несёт ТОЛЬКО изменённые поля (диф против
-// загруженного); s3_secret_key шлём лишь при ротации (пустое поле = keep).
+// Данные — useAsync; страховочный 30-с поллинг открытой вкладки крутит ТОЛЬКО
+// прогоны (SSE есть только у падений) — settings не поллятся, чтобы фоновая
+// перезагрузка не затирала несохранённые правки (ревью Task 5). Форма живёт
+// от baseline (последняя подтверждённая сервером версия: GET при загрузке,
+// ответ PATCH после save). PATCH несёт ТОЛЬКО изменённые поля (диф против
+// baseline); s3_secret_key шлём лишь при ротации (пустое поле = keep).
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { ColumnDef } from '@tanstack/react-table';
 import { api, ApiError } from '../lib/api';
@@ -42,35 +45,56 @@ export function Backups() {
   const settings = useAsync(() => api.getBackupSettings(), []);
   const runs = useAsync(() => api.listBackupRuns(50), []);
 
-  // Страховочный поллинг открытой вкладки: статус/история раз в 30 с
-  // (SSE-событие есть только у падений — успехи иначе не приедут).
+  // Страховочный поллинг открытой вкладки: ТОЛЬКО прогоны раз в 30 с (SSE-
+  // событие есть лишь у падений — успехи иначе не приедут). settings намеренно
+  // НЕ поллим: их меняет только эта форма, а фоновое перечитывание затирало бы
+  // несохранённые правки и набранный секрет (ревью Task 5, Important);
+  // baseline после save обновляется ответом PATCH.
   useEffect(() => {
     const id = setInterval(() => {
-      settings.reload();
       runs.reload();
     }, 30_000);
     return () => {
       clearInterval(id);
     };
-  }, [settings.reload, runs.reload]);
+  }, [runs.reload]);
 
-  // ── форма: локальный стейт, гидратируется из settings.data
+  // Отложенный ре-фетч истории после run-now: id в ref, чистим на unmount.
+  const runReloadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (runReloadTimer.current !== null) clearTimeout(runReloadTimer.current);
+    },
+    [],
+  );
+
+  // ── форма: локальный стейт + baseline — последняя подтверждённая сервером
+  // версия настроек (GET при первой загрузке, ответ PATCH после save).
+  // Гидрация ТОЛЬКО пока baseline не установлен: фоновые перезагрузки данных
+  // форму не перезаписывают.
+  const [baseline, setBaseline] = useState<BackupSettings | null>(null);
   const [form, setForm] = useState<BackupSettings | null>(null);
   const [secret, setSecret] = useState(''); // write-only поле, всегда отдельно
   const [error, setError] = useState<string | null>(null);
-  const [savedAt, setSavedAt] = useState(0); // сброс dirty после save
   useEffect(() => {
-    if (settings.data) {
+    if (settings.data && baseline === null) {
+      setBaseline(settings.data);
       setForm(settings.data);
       setSecret('');
     }
-  }, [settings.data, savedAt]);
+  }, [settings.data, baseline]);
 
   const dirty = useMemo(() => {
-    if (!form || !settings.data) return false;
+    if (!form || !baseline) return false;
     if (secret !== '') return true;
-    return JSON.stringify(form) !== JSON.stringify(settings.data);
-  }, [form, settings.data, secret]);
+    return JSON.stringify(form) !== JSON.stringify(baseline);
+  }, [form, baseline, secret]);
+
+  // Guard чисел: Number('')===0 и NaN не должны уезжать в PATCH — Save просто
+  // disabled (серверная валидация остаётся второй линией).
+  const formValid =
+    form !== null &&
+    [form.interval_hours, form.retention_local, form.retention_s3].every((n) => Number.isFinite(n) && n >= 1);
 
   const lastOk = runs.data?.find((r) => r.result === 'ok');
   const lastS3 = runs.data?.find((r) => r.result === 'ok' && r.s3_uploaded);
@@ -81,9 +105,9 @@ export function Backups() {
   };
 
   function save() {
-    if (!form || !settings.data) return;
-    const cur = settings.data;
-    // диф против загруженного — PATCH несёт только изменённые поля
+    if (!form || !baseline || !formValid) return;
+    const cur = baseline;
+    // диф против подтверждённого сервером — PATCH несёт только изменённые поля
     const body: BackupSettingsPatch = {};
     if (form.enabled !== cur.enabled) body.enabled = form.enabled;
     if (form.interval_hours !== cur.interval_hours) body.interval_hours = form.interval_hours;
@@ -98,10 +122,13 @@ export function Backups() {
     if (secret.trim() !== '') body.s3_secret_key = secret.trim(); // ротация только когда введён
     api
       .patchBackupSettings(body)
-      .then(() => {
+      .then((saved) => {
+        // Ответ PATCH — новая подтверждённая версия: baseline и форма сразу из
+        // него, без отката к старым значениям и без лишнего GET (ревью Task 5).
         setError(null);
-        setSavedAt(Date.now());
-        settings.reload();
+        setBaseline(saved);
+        setForm(saved);
+        setSecret('');
         toast.success(t('backups.toast.saved'));
       })
       .catch((e: ApiError) => {
@@ -116,7 +143,8 @@ export function Backups() {
         toast.success(t('backups.toast.runStarted'));
         // Прогон асинхронный — статус/история подтянутся поллингом; лёгкий
         // ре-фетч чуть раньше, чтобы 'running' проявилось быстрее.
-        setTimeout(() => {
+        if (runReloadTimer.current !== null) clearTimeout(runReloadTimer.current);
+        runReloadTimer.current = setTimeout(() => {
           runs.reload();
         }, 2000);
       })
@@ -145,15 +173,16 @@ export function Backups() {
       : undefined;
 
   const nextScheduled = () => {
-    const s = settings.data;
+    const s = baseline;
     if (!s || !s.enabled) return t('backups.status.nextDisabled');
     const base = lastOk?.started_at ?? new Date().toISOString();
     return fmt.stamp(new Date(new Date(base).getTime() + s.interval_hours * 3600e3).toISOString());
   };
 
   // «Проверить соединение» тестирует СОХРАНЁННУЮ конфигурацию — недоступна при
-  // грязной форме (сначала сохрани) и когда секрет ещё не задан.
-  const canTest = settings.data?.has_s3_secret === true && !dirty;
+  // грязной форме (сначала сохрани) и когда секрет ещё не задан. baseline —
+  // и есть последняя сохранённая версия (после rotate сразу актуален).
+  const canTest = baseline?.has_s3_secret === true && !dirty;
 
   return (
     <div className="flex flex-col gap-4">
@@ -340,7 +369,7 @@ export function Backups() {
               <button
                 type="button"
                 onClick={save}
-                disabled={!dirty}
+                disabled={!dirty || !formValid}
                 className="rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
               >
                 {t('backups.form.save')}
