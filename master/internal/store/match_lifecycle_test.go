@@ -82,7 +82,7 @@ func TestMatchLifecycleRunningFinished(t *testing.T) {
 	if _, err := st.Allocate(ctx, "game", "dev", "eu", nil, matchID, 2); err != nil {
 		t.Fatalf("allocate: %v", err)
 	}
-	if err := st.RecordMatch(ctx, matchID, "game", "eu", serverID, f.VersionID); err != nil {
+	if err := st.RecordMatch(ctx, matchID, "game", "eu", serverID, f.VersionID, f.Env); err != nil {
 		t.Fatalf("record match: %v", err)
 	}
 	m, err := st.GetMatch(ctx, matchID)
@@ -291,5 +291,65 @@ func TestNodeLostFailuresExcludedAndMatchResurrects(t *testing.T) {
 	running, err := st.ListMatches(ctx, store.MatchFilter{Project: "game", State: "running"})
 	if err != nil || len(running) != 3 {
 		t.Fatalf("running matches: %d, %v", len(running), err)
+	}
+}
+
+// RecordMatch writes matches.env from its parameter, not the migration default
+// 'dev' (W-I1): a prod allocation must not be recorded as a dev match. Passing
+// env='prod' over a dev fixture server proves the value is the parameter's.
+func TestRecordMatchWritesEnv(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10)
+	ctx := context.Background()
+
+	serverID := f.InsertServer(t, f.NodeID, f.VersionID, "ready", 20001, 0)
+	matchID := uuid.NewString()
+	if _, err := st.Allocate(ctx, "game", "dev", "eu", nil, matchID, 2); err != nil {
+		t.Fatalf("allocate: %v", err)
+	}
+	if err := st.RecordMatch(ctx, matchID, "game", "eu", serverID, f.VersionID, "prod"); err != nil {
+		t.Fatalf("record match: %v", err)
+	}
+	var env string
+	if err := st.Pool.QueryRow(ctx,
+		`select env from matches where id = $1::uuid`, matchID).Scan(&env); err != nil {
+		t.Fatalf("read match env: %v", err)
+	}
+	if env != "prod" {
+		t.Fatalf("matches.env: want prod (explicit param), got %q", env)
+	}
+}
+
+// The on-the-fly matches row that match_start upserts for a REST-allocated
+// server takes its env from the SERVER row (invariant I6), never the migration
+// default: a prod server's match must record env='prod', not 'dev' (W-I1).
+func TestMatchStartRecordsServerEnv(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10)
+	ctx := context.Background()
+
+	// prod-половина: нода в prod, prod-версия, ready-сервер (env сервера = env ноды).
+	prodNode := f.AddNode(t, "node-prod", "203.0.113.30", 10)
+	if _, err := st.SetNodeEnv(ctx, prodNode, "prod"); err != nil {
+		t.Fatalf("move node to prod: %v", err)
+	}
+	prodV := f.AddVersion(t, "2.0.0", "prod")
+	serverID := f.InsertServer(t, prodNode, prodV, "ready", 20002, 0)
+
+	matchID := uuid.NewString()
+	if _, err := st.Allocate(ctx, "game", "prod", "eu", nil, matchID, 0); err != nil {
+		t.Fatalf("allocate: %v", err)
+	}
+	// REST-путь: строки matches ещё нет — её создаёт match_start (env из сервера).
+	if err := st.ApplyServerEvent(ctx, prodNode, serverID, "match_start", matchID); err != nil {
+		t.Fatal(err)
+	}
+	var env string
+	if err := st.Pool.QueryRow(ctx,
+		`select env from matches where id = $1::uuid`, matchID).Scan(&env); err != nil {
+		t.Fatalf("read match env: %v", err)
+	}
+	if env != "prod" {
+		t.Fatalf("matches.env from match_start: want prod (server row), got %q", env)
 	}
 }

@@ -24,7 +24,7 @@ func seedMatch(t *testing.T, st *store.Store, f *testdb.Fixture, region, state s
 	ctx := context.Background()
 	serverID := f.InsertServer(t, f.NodeID, f.VersionID, "allocated", port, age)
 	matchID := uuid.NewString()
-	if err := st.RecordMatch(ctx, matchID, f.Project, region, serverID, f.VersionID); err != nil {
+	if err := st.RecordMatch(ctx, matchID, f.Project, region, serverID, f.VersionID, f.Env); err != nil {
 		t.Fatal(err)
 	}
 	_, err := st.Pool.Exec(ctx, `

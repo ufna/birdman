@@ -145,13 +145,20 @@ func (s *Server) handleQoS(w http.ResponseWriter, r *http.Request) {
 	}
 	env := r.URL.Query().Get("env")
 	if env == "" {
-		var err error
-		env, err = s.st.SoleEnvWithActiveNodes(r.Context(), project)
-		if err != nil {
+		// Зеркалим allocate-путь (T5-m1): только ErrConflict (ноль/несколько env с
+		// активными нодами) → 400 env_required; реальный сбой БД идёт в storeError,
+		// а не маскируется под env_required.
+		resolved, err := s.st.SoleEnvWithActiveNodes(r.Context(), project)
+		if errors.Is(err, store.ErrConflict) {
 			writeError(w, http.StatusBadRequest, "env_required",
 				"env is required (zero or several environments have active nodes)")
 			return
 		}
+		if err != nil {
+			storeError(w, err)
+			return
+		}
+		env = resolved
 	}
 	eps, err := s.st.ListQoSEndpoints(r.Context(), project, env)
 	if err != nil {

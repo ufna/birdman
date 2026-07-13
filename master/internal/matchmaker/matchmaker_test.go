@@ -668,7 +668,12 @@ func TestEnvCandidateIsolation(t *testing.T) {
 	}
 	f.UpsertFleet(t, 2, 50)
 	devSrv := f.InsertServer(t, f.NodeID, f.VersionID, "ready", 20001, 0)
-	_, prodV, prodSrv := seedProdEnv(t, st, f, "2.0.0", 20002)
+	// ОДИНАКОВЫЙ semver в обоих env (unique (project, env, semver) это разрешает,
+	// T5-m3): компат-гейт больше НЕ разводит тикеты по версии — единственное, что
+	// удерживает dev-тикет от prod-сервера, это env-скоупинг кандидатов. С разными
+	// semver (было dev 1.0.0 / prod 2.0.0) регрессия скоупинга маскировалась бы
+	// компатом, и тест проходил бы вхолостую.
+	_, prodV, prodSrv := seedProdEnv(t, st, f, "1.0.0", 20002)
 
 	mm := newMM(t, st, matchmaker.Config{})
 	tDev, err := mm.Submit(ctx, matchmaker.SubmitParams{
@@ -678,7 +683,7 @@ func TestEnvCandidateIsolation(t *testing.T) {
 		t.Fatalf("dev submit: %v", err)
 	}
 	tProd, err := mm.Submit(ctx, matchmaker.SubmitParams{
-		Env: "prod", PlayerID: "p1", ClientVersion: "2.0.0", Regions: regions("eu", 10),
+		Env: "prod", PlayerID: "p1", ClientVersion: "1.0.0", Regions: regions("eu", 10),
 	})
 	if err != nil {
 		t.Fatalf("prod submit: %v", err)

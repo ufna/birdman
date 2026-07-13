@@ -49,9 +49,10 @@ func newAuthenticator(st *store.Store) *authenticator {
 
 // authenticate resolves the request to an API key: `Authorization: Bearer`
 // first, then the panel session cookie (session.go). viaCookie tells
-// requireScope to apply the CSRF check. bcrypt verification results are
-// cached (sha256(token) → scopes) so hot paths like /v1/allocate stay well
-// under the 50ms SLO.
+// requireScope to apply the CSRF check. bcrypt verification results are cached
+// (sha256(token) → the whole store.APIKey, the (project, env) binding included,
+// so binding reaches enforcement through the cache too) — hot paths like
+// /v1/allocate stay well under the 50ms SLO.
 func (a *authenticator) authenticate(r *http.Request) (key store.APIKey, viaCookie, ok bool) {
 	h := r.Header.Get("Authorization")
 	token, ok := strings.CutPrefix(h, "Bearer ")
@@ -157,8 +158,16 @@ func (s *Server) requireBinding(w http.ResponseWriter, r *http.Request, project,
 	if keyAllowed(key, project, env) {
 		return true
 	}
+	// Полупара (Project задан, Env nil) недостижима при живом CHECK
+	// api_keys_binding_all_or_nothing, но достижима по схеме — не разыменовываем
+	// key.Env вслепую, иначе форматирование 403 паникнет (w11). key.Project здесь
+	// гарантированно не nil: для глобального ключа keyAllowed вернул бы true.
+	keyEnv := "<nil>"
+	if key.Env != nil {
+		keyEnv = *key.Env
+	}
 	writeError(w, http.StatusForbidden, "forbidden",
-		fmt.Sprintf("key is bound to %s/%s", *key.Project, *key.Env))
+		fmt.Sprintf("key is bound to %s/%s", *key.Project, keyEnv))
 	return false
 }
 

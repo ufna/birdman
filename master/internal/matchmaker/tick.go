@@ -167,7 +167,7 @@ func (mm *Matchmaker) matchBucket(ctx context.Context, project, env string, size
 			mm.log.Error("mm: allocate failed", "project", project, "region", region, "err", err)
 			return
 		}
-		if err := mm.st.RecordMatch(ctx, matchID, project, region, alloc.ServerID, ver.VersionID); err != nil {
+		if err := mm.st.RecordMatch(ctx, matchID, project, region, alloc.ServerID, ver.VersionID, env); err != nil {
 			mm.log.Error("mm: record match failed", "match_id", matchID, "err", err) // non-fatal
 		}
 		mm.deliver(group, matchID, alloc)

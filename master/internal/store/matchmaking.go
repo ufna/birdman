@@ -110,12 +110,17 @@ func (s *Store) ListQoSEndpoints(ctx context.Context, project, env string) ([]Qo
 // row the agent's match_start already upserted to 'running' (the dedik can be
 // faster than this insert); state starts 'pending' otherwise, the lifecycle
 // is driven by ApplyServerEvent (итерация 2).
-func (s *Store) RecordMatch(ctx context.Context, matchID, project, region, serverID, versionID string) error {
+//
+// env пишется ЯВНО (W-I1): без него колонка легла бы в migration-default 'dev',
+// и prod-матч записался бы как dev — ломая per-env историю/статистику (W4).
+// Значение — env бакета матчмейкера, равное env сервера (Allocate скоупит claim
+// по env, инвариант I6), так что колонка совпадает с денормализованным env.
+func (s *Store) RecordMatch(ctx context.Context, matchID, project, region, serverID, versionID, env string) error {
 	_, err := s.Pool.Exec(ctx, `
-		insert into matches (id, project_id, server_id, version_id, region)
-		select $1::uuid, p.id, $4::uuid, $5::uuid, $3
+		insert into matches (id, project_id, server_id, version_id, region, env)
+		select $1::uuid, p.id, $4::uuid, $5::uuid, $3, $6
 		from projects p where p.slug = $2
 		on conflict (id) do nothing`,
-		matchID, project, region, serverID, versionID)
+		matchID, project, region, serverID, versionID, env)
 	return err
 }

@@ -209,6 +209,68 @@ func TestAllocateEnvResolution(t *testing.T) {
 	}
 }
 
+// A bound(game,dev) allocate key without an env field resolves env from its
+// binding (§3: explicit → key binding → sole → 409), so it succeeds even when
+// BOTH dev and prod carry ready servers — where the sole-with-ready fallback
+// alone would answer 409 env_required (W-I2).
+func TestAllocateBoundKeyDefaultsEnv(t *testing.T) {
+	st := testdb.New(t)
+	f := twoEnvStand(t, st)
+	devSrv := f.InsertServer(t, f.NodeID, f.VersionID, "ready", 20001, 0)
+	prodNode := prodNodeID(t, st, "203.0.113.30")
+	prodV := versionID(t, st, "game", "prod", "2.0.0")
+	f.InsertServer(t, prodNode, prodV, "ready", 20002, 0)
+	ts, _, _ := deployServer(t, st)
+	ctx := t.Context()
+
+	game, dev := "game", "dev"
+	_, secret, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{
+		Name: "alloc", Scopes: []string{httpapi.ScopeAllocate}, Project: &game, Env: &dev,
+	})
+	if err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	boundDev := &client{t: t, base: ts.URL, key: secret}
+
+	// No env field, ready servers in BOTH envs: the key-binding step resolves env
+	// to dev before the sole-with-ready fallback would 409.
+	code, body := boundDev.do("POST", "/v1/allocate", map[string]any{
+		"project": "game", "region": "eu", "match_id": uuid.NewString(),
+	})
+	if code != 200 || body["server_id"] != devSrv {
+		t.Fatalf("bound-dev allocate without env: want 200 dev server, got %d %v", code, body)
+	}
+}
+
+// A bound-CI key POSTing a version without env gets «env is required» (400),
+// not the binding 403 — empty-env validation runs before the binding guard,
+// parity with handleUpsertFleet (§5, w10).
+func TestCreateVersionEnvRequiredBeforeBinding(t *testing.T) {
+	st := testdb.New(t)
+	testdb.Seed(t, st, "eu", 10) // project game with seeded dev+prod
+	ts, _, _ := deployServer(t, st)
+	ctx := t.Context()
+
+	game, dev := "game", "dev"
+	_, secret, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{
+		Name: "ci", Scopes: []string{httpapi.ScopeDeploy}, Project: &game, Env: &dev,
+	})
+	if err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	ci := &client{t: t, base: ts.URL, key: secret}
+
+	code, body := ci.do("POST", "/v1/versions", map[string]any{
+		"semver": "1.2.0", "image_ref": "ghcr.io/example/game:1.2.0",
+	})
+	if code != 400 {
+		t.Fatalf("version without env: want 400 «env is required», got %d %v", code, body)
+	}
+	if d, _ := body["detail"].(string); !strings.Contains(d, "env is required") {
+		t.Fatalf("want «env is required», got %q", d)
+	}
+}
+
 // prodNodeID returns the id of the node with the given public IP.
 func prodNodeID(t *testing.T, st *store.Store, ip string) string {
 	t.Helper()

@@ -88,6 +88,13 @@ func (s *Server) handleCreateVersion(w http.ResponseWriter, r *http.Request) {
 	// POST just {semver, image_ref, env}) and may register only in its own
 	// (project, env) — enforced before the version is created.
 	project := bindProject(r, req.Project)
+	// Пустоту env проверяем ДО binding-guard (w10, паритет с handleUpsertFleet):
+	// bound-CI без поля env должен получить «env is required» (400), а не «key is
+	// bound to …» (403). project уже дефолтнут из привязки строкой выше.
+	if req.Env == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "env is required")
+		return
+	}
 	if !s.requireBinding(w, r, project, req.Env) {
 		return
 	}
@@ -227,10 +234,19 @@ func (s *Server) handleAllocate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Environment resolution (environments v1 §3, I4): explicit field → the sole
-	// env with ready servers in the region → 409 env_required. A global allocate
-	// key must not claim a server of a random env.
+	// Environment resolution (environments v1 §3, I4): explicit field → the key's
+	// binding → the sole env with ready servers in the region → 409 env_required.
+	// A global allocate key must not claim a server of a random env.
 	env := req.Env
+	if env == "" {
+		// Шаг привязки ключа (W-I2): bound(dev)-ключ без поля env резолвит env из
+		// своей привязки — иначе при двух env с ready он ловил бы 409 env_required
+		// от sole-фоллбека (или 403 от собственного enforcement в чужом env).
+		// Enforcement по резолвнутому env остаётся ниже (requireBinding).
+		if key, ok := keyFromContext(r.Context()); ok && key.Env != nil {
+			env = *key.Env
+		}
+	}
 	if env == "" {
 		resolved, err := s.st.SoleEnvWithReady(r.Context(), req.Project, req.Region)
 		if errors.Is(err, store.ErrConflict) {
