@@ -300,7 +300,8 @@ dumps, not days.
 Restore: stop the master, `pg_restore -d birdman --clean --if-exists <dump>`
 against your Postgres, start the master. Dumps carry reversible secrets only
 as AEAD ciphertext; the encryption key `secrets.key` never leaves the host —
-keep its escrow copy separately (see §1).
+keep its escrow copy separately (see §1). Step-by-step recovery runbook:
+`docs/specs/ops.md §5`.
 
 ---
 

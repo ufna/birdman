@@ -295,7 +295,8 @@ cd birdman/deploy && docker compose down -v    # -v сносит том Postgres
 Restore: останови master, `pg_restore -d birdman --clean --if-exists <дамп>`
 в свой Postgres, запусти master. Обратимые секреты едут в дампе только
 AEAD-шифротекстом; ключ шифрования `secrets.key` никогда не покидает хост —
-эскроу-копию храни отдельно (см. §1).
+эскроу-копию храни отдельно (см. §1). Пошаговый runbook восстановления:
+`docs/specs/ops.md §5`.
 
 ---
 

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -226,9 +227,18 @@ func (r *Runner) dump(ctx context.Context, path string) (int64, error) {
 		return 0, err
 	}
 	var stderr strings.Builder
-	cmd := exec.CommandContext(ctx, r.pgDump, "-Fc", "-d", r.dsn)
+	// pg_dump кладёт весь -d DSN в argv, а argv процесса виден в
+	// /proc/<pid>/cmdline world-readable: на шаред-дев-боксе (master там —
+	// хост-процесс) это утечка пароля Postgres при каждом дампе. Поэтому если
+	// DSN парсится как URL с паролем — в argv уходит DSN без пароля, а пароль
+	// отдаём pg_dump штатной переменной PGPASSWORD в env.
+	dsnArg, extraEnv := scrubDSNPassword(r.dsn)
+	cmd := exec.CommandContext(ctx, r.pgDump, "-Fc", "-d", dsnArg)
 	cmd.Stdout = f
 	cmd.Stderr = &capWriter{b: &stderr, cap: stderrCap}
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
 	runErr := cmd.Run()
 	syncErr := f.Sync()
 	closeErr := f.Close()
@@ -253,6 +263,26 @@ func (r *Runner) dump(ctx context.Context, path string) (int64, error) {
 		return 0, err
 	}
 	return st.Size(), nil
+}
+
+// scrubDSNPassword — если dsn парсится как URL с паролем, возвращает тот же
+// URL без пароля (для argv) и ["PGPASSWORD=<пароль>"] (для env), чтобы пароль
+// не попал в /proc/<pid>/cmdline на шаред-боксе. Username в URL сохраняется —
+// pg_dump возьмёт его из -d, а пароль из PGPASSWORD (поддерживается штатно).
+// Если dsn — не URL (keyword=value conninfo) или URL без пароля, возвращаем
+// dsn как есть и nil: ломать нестандартный conninfo хуже, а в нашем деплое DSN
+// всегда postgres://… с паролем — целевой класс и покрыт.
+func scrubDSNPassword(dsn string) (string, []string) {
+	u, err := url.Parse(dsn)
+	if err != nil || u.User == nil {
+		return dsn, nil
+	}
+	pass, ok := u.User.Password()
+	if !ok {
+		return dsn, nil
+	}
+	u.User = url.User(u.User.Username())
+	return u.String(), []string{"PGPASSWORD=" + pass}
 }
 
 // rotateLocal — держим retention свежих birdman-*.dump (ts в имени

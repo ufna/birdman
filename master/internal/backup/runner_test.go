@@ -24,13 +24,20 @@ func testLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, ni
 // mode: "ok" — пишет 64 байта payload; "fail" — stderr+exit 1;
 // "slow" — sleep 2 перед payload (для таймаут-теста: дамп не успевает
 // за runTimeout/ctx); versionMajor — что печатать на --version.
+// На реальном прогоне дампа (не --version) обёртка фиксирует свои argv и
+// PGPASSWORD в <dir>/pg_dump.args и <dir>/pg_dump.env — на это опирается
+// TestRunOnceKeepsPasswordOutOfArgv (пароль обязан ехать env, не argv).
 func fakePgDump(t *testing.T, dir, mode string, versionMajor int) string {
 	t.Helper()
+	argsMarker := filepath.Join(dir, "pg_dump.args")
+	envMarker := filepath.Join(dir, "pg_dump.env")
 	script := fmt.Sprintf(`#!/bin/sh
 if [ "$1" = "--version" ]; then
   echo "pg_dump (PostgreSQL) %d.1"
   exit 0
 fi
+echo "$@" > "%s"
+env | grep '^PGPASSWORD=' > "%s" || true
 case "%s" in
 ok)
   printf 'PGDMP-fake-payload-PGDMP-fake-payload-PGDMP-fake-payload-PGDMP!!'
@@ -44,7 +51,7 @@ fail)
   exit 1
   ;;
 esac
-`, versionMajor, mode)
+`, versionMajor, argsMarker, envMarker, mode)
 	p := filepath.Join(dir, "pg_dump")
 	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
@@ -97,6 +104,39 @@ func TestRunOnceOKAndRotation(t *testing.T) {
 	}
 	if runs[0].Result != "ok" || runs[0].SizeBytes == nil || *runs[0].SizeBytes != 64 {
 		t.Fatalf("run row: %+v", runs[0])
+	}
+}
+
+// TestRunOnceKeepsPasswordOutOfArgv — регрессия: pg_dump кладёт весь -d DSN в
+// argv, а /proc/<pid>/cmdline world-readable (master на дев-боксе — хост-
+// процесс), поэтому пароль Postgres обязан ехать pg_dump через PGPASSWORD в
+// env, а в argv — DSN без пароля. Синтетический DSN с паролем достаточно:
+// mode "ok" саму БД не читает (история пишется в живой testdb через store).
+func TestRunOnceKeepsPasswordOutOfArgv(t *testing.T) {
+	st := testdb.New(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	pgDump := fakePgDump(t, dir, "ok", 16) // testdb = postgres:16
+	const dsn = "postgres://postgres:sekret-pw@127.0.0.1:5432/x?sslmode=disable"
+	r := New(st, dsn, config.Backups{Dir: dir, PgDumpPath: pgDump}, testLog())
+
+	if err := r.runOnce(ctx, "manual"); err != nil {
+		t.Fatalf("runOnce: %v", err)
+	}
+
+	args, err := os.ReadFile(filepath.Join(dir, "pg_dump.args"))
+	if err != nil {
+		t.Fatalf("read args marker: %v", err)
+	}
+	if strings.Contains(string(args), "sekret-pw") {
+		t.Fatalf("password leaked into pg_dump argv: %q", string(args))
+	}
+	env, err := os.ReadFile(filepath.Join(dir, "pg_dump.env"))
+	if err != nil {
+		t.Fatalf("read env marker: %v", err)
+	}
+	if !strings.Contains(string(env), "PGPASSWORD=sekret-pw") {
+		t.Fatalf("password not passed via PGPASSWORD env: %q", string(env))
 	}
 }
 

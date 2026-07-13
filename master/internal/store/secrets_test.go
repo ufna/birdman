@@ -152,6 +152,49 @@ func TestEncryptExistingSecrets(t *testing.T) {
 	}
 }
 
+// TestEncryptExistingSecretsBooleanPK: the pass encrypts a legacy plaintext
+// backup_settings.s3_secret_key, whose table has a boolean singleton PK — a
+// regression guard for the id::text WHERE (the old id = $2::uuid cast crashed
+// master start with "invalid input syntax for type uuid: true" when an operator
+// hand-tampered the column via psql). This is also the acceptance of the column
+// being registered in the pass at all.
+func TestEncryptExistingSecretsBooleanPK(t *testing.T) {
+	st := testdb.New(t)
+	ctx := context.Background()
+
+	// Ручной plaintext-тампер оператора через psql: сырой UPDATE в обход codec.
+	if _, err := st.Pool.Exec(ctx,
+		`update backup_settings set s3_secret_key = 'manual-plain'`); err != nil {
+		t.Fatalf("seed plaintext s3_secret_key: %v", err)
+	}
+
+	n, err := st.EncryptExistingSecrets(ctx)
+	if err != nil {
+		t.Fatalf("EncryptExistingSecrets: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("encrypted %d rows, want 1 (only backup_settings.s3_secret_key)", n)
+	}
+
+	// At rest: конверт, не plaintext.
+	var raw string
+	if err := st.Pool.QueryRow(ctx, `select s3_secret_key from backup_settings`).Scan(&raw); err != nil {
+		t.Fatalf("raw select: %v", err)
+	}
+	if !strings.HasPrefix(raw, secretEnvPrefix) {
+		t.Fatalf("s3_secret_key not encrypted in place: %q", raw)
+	}
+
+	// Обратимо через реальный read-путь раннера.
+	cfg, err := st.BackupS3Config(ctx)
+	if err != nil {
+		t.Fatalf("BackupS3Config after pass: %v", err)
+	}
+	if cfg.SecretKey != "manual-plain" {
+		t.Fatalf("decrypted secret = %q, want original plaintext", cfg.SecretKey)
+	}
+}
+
 // TestEncryptExistingSecretsConcurrent: two masters starting at once run the
 // pass under the advisory lock; exactly one does the work, the state stays
 // consistent, and no row is double-wrapped.

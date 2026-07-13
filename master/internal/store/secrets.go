@@ -63,7 +63,11 @@ func (s *Store) EncryptExistingSecrets(ctx context.Context) (int, error) {
 // returning how many rows it rewrote. table/col/aad are hard-coded call-site
 // constants (registries.token, internal_ca.key_pem,
 // backup_settings.s3_secret_key) — never user input, so the fmt-built SQL has
-// no injection surface. It buffers the scanned rows before issuing any UPDATE:
+// no injection surface. The UPDATE matches on id::text — the same form the
+// SELECT returns — so it fits both the uuid PKs (registries, internal_ca) and
+// the boolean singleton PK of backup_settings; the earlier id = $2::uuid cast
+// crashed on the latter (boolean = uuid) when an operator hand-tampered the
+// column via psql. It buffers the scanned rows before issuing any UPDATE:
 // pgx runs one statement at a time per tx connection, so the SELECT cursor must
 // be drained before the UPDATEs on the same tx. `for update` locks the scanned
 // rows (belt-and-suspenders alongside the advisory lock).
@@ -101,7 +105,7 @@ func encryptColumn(ctx context.Context, tx pgx.Tx, codec *secrets.Codec, table, 
 			return 0, err
 		}
 		if _, err := tx.Exec(ctx,
-			fmt.Sprintf(`update %s set %s = $1 where id = $2::uuid`, table, col), env, p.id); err != nil {
+			fmt.Sprintf(`update %s set %s = $1 where id::text = $2`, table, col), env, p.id); err != nil {
 			return 0, err
 		}
 	}
