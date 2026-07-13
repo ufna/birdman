@@ -23,6 +23,9 @@ ENV CGO_ENABLED=0 GOFLAGS=-buildvcs=false
 RUN go build -trimpath -ldflags '-s -w' -o /out/birdman-master ./cmd/birdman-master
 
 FROM alpine:3.22
+# pg_dump для Backups v1: master сам дампит БД (spec 2026-07-13). Версия
+# клиента = мажору postgres:16 из deploy/compose.yml.
+RUN apk add --no-cache postgresql16-client
 RUN adduser -D -H -u 10001 birdman
 COPY --from=build /out/birdman-master /birdman-master
 ENTRYPOINT ["/birdman-master"]

@@ -170,9 +170,11 @@ var (
 	backupLastSuccessDesc = prometheus.NewDesc("birdman_backup_last_success_timestamp_seconds",
 		"Unix time of the last successful backup run (0 = never).", nil, nil)
 	// last_error — rotation-immune основа алерта BackupFailed (Задача 6):
-	// max(started_at) по error-строкам не зависит от ротации истории (свежая
-	// ошибка всегда среди 200 сохраняемых прогонов), в отличие от
-	// increase(runs_total) — см. комментарий у backupRunsDesc ниже.
+	// max(started_at) по error-строкам не зависит от ротации истории в
+	// пределах окна алерта (1ч — свежая ошибка не успевает выпасть из 200
+	// сохраняемых прогонов; после 200 подряд ok-прогонов строка ошибки
+	// ротируется и гейдж падает на 0), в отличие от increase(runs_total) —
+	// см. комментарий у backupRunsDesc ниже.
 	backupLastErrorDesc = prometheus.NewDesc("birdman_backup_last_error_timestamp_seconds",
 		"Unix time of the last failed backup run (0 = never).", nil, nil)
 	backupLastSizeDesc = prometheus.NewDesc("birdman_backup_last_size_bytes",

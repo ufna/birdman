@@ -14,6 +14,17 @@
     - "{{ birdman_master_dir }}"
     - "{{ birdman_master_data_dir }}"
 
+# Backups v1 (spec 2026-07-13): master исполняет pg_dump сам — клиент нужен на
+# хосте. Ubuntu 24.04: postgresql-client-16 в штатных репах (16.14, проверено
+# 13.07.2026), pgdg не нужен. Первый apt-таск в ролях — осознанное решение
+# владельца, единственное касание хоста.
+- name: Install postgresql-client-16 (master runs pg_dump — Backups v1)
+  ansible.builtin.apt:
+    name: postgresql-client-16
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
 - name: Generate Postgres password once (kept only on the box)
   ansible.builtin.copy:
     content: "{{ lookup('password', '/dev/null length=32 chars=ascii_letters,digits') }}"

@@ -157,6 +157,29 @@ groups:
 
           description: 'Серт mTLS-agentlink (CA/сервер master, серт ноды, взгляд агента) истекает < порога (ops.md §1 CertExpiry). Проверь enrollment/renewal и ротацию CA.'
 
+      # Backups v1 (spec 2026-07-13): Stale — страховка «тихо перестал ходить»
+      # (метрика деривится из БД и отдаёт 0, если успехов не было вовсе);
+      # Failed — быстрый сигнал по свежей ошибке прогона.
+      - alert: BackupStale
+        expr: birdman_backup_enabled == 1 and (time() - birdman_backup_last_success_timestamp_seconds) > 2 * birdman_backup_interval_seconds
+        for: {{ birdman_backup_stale_for }}
+        labels:
+          severity: warning
+        annotations:
+          summary: {% raw %}'BackupStale: последний успешный бекап старше 2×интервала'{% endraw %}
+
+          description: 'Планировщик бекапов master не приносит успехов (ops.md §5, Backups v1).'
+
+      - alert: BackupFailed
+        expr: birdman_backup_last_error_timestamp_seconds > 0 and (time() - birdman_backup_last_error_timestamp_seconds) < 3600
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: {% raw %}'BackupFailed: прогон бекапа падал за последний час'{% endraw %}
+
+          description: 'Смотри Админку → Бекапы (история с текстом ошибки) и событие backup_failed. Горит до истечения часа после ошибки — осознанно (rotation-immune гейдж вместо increase по немонотонному runs_total).'
+
 # ---------------------------------------------------------------------------
 # MasterDown — НАМЕРЕННО не реализовано здесь. Его НЕЛЬЗЯ определить с самого
 # master/этого стека (стек живёт на той же тачке — при падении master'а/бокса

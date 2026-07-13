@@ -85,10 +85,9 @@ ansible-playbook playbooks/monitoring.yml
 
 Конфиги шаблонятся в `/etc/birdman/monitoring/…` и монтируются ro в контейнеры.
 
-Бэкапы Postgres: `birdman-pg-backup.timer` (каждые 6ч) → `pg_dump -Fc` в
-`/var/lib/birdman/backups` (держим 14 свежих). Учебный restore:
-`/usr/local/bin/birdman-pg-restore-test` (поднимает throwaway postgres:16,
-восстанавливает последний дамп, гоняет sanity-запрос, PASS/FAIL, сносит).
+Бэкапы Postgres исполняет сам master (Backups v1, настройка — в панели);
+restore-drill — `/usr/local/bin/birdman-pg-restore-test` (роль также сносит
+legacy-таймер `birdman-pg-backup`).
 
 UFW `19999/udp` (QoS echo) открывает роль `birdman_agent_dev` (единственный
 внешне-открытый порт ноды), при прогоне `dev-node.yml`.

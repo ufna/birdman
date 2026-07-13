@@ -92,10 +92,10 @@ birdman_pending_stuck_for: "10m"
 # 14*86400 = 1209600.
 birdman_cert_expiry_warn_seconds: 1209600
 
-# --- бэкапы Postgres (ops.md §5) ---
-birdman_postgres_container: birdman-postgres   # контейнер из роли birdman_master_dev
+# --- бэкапы Postgres (ops.md §5; Backups v1 — дампит сам master) ---
+# Расписание/ретеншны/S3 настраиваются в панели; здесь остались каталог,
+# параметры restore-drill'а и порог алерта.
 birdman_pg_db: birdman
 birdman_pg_user: postgres
 birdman_backups_dir: /var/lib/birdman/backups
-birdman_backups_retention: 14          # держим N свежих дампов
-birdman_backup_oncalendar: "*-*-* 00/6:00:00"  # каждые 6ч (00,06,12,18 UTC)
+birdman_backup_stale_for: 15m          # BackupStale: for-порог vmalert
