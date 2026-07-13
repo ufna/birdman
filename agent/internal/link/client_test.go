@@ -118,17 +118,18 @@ func (f *fakeMaster) counts() (sessions, heartbeats, events, acks int) {
 
 // fakeHandler records dispatched commands.
 type fakeHandler struct {
-	mu        sync.Mutex
-	starts    []*agentlinkv1.StartServer
-	stops     []*agentlinkv1.StopServer
-	allocates []*agentlinkv1.AllocateServer
-	prepulls  []*agentlinkv1.PrePull
-	drains    []*agentlinkv1.Drain
-	undrains  []*agentlinkv1.Undrain
-	srvDrains []*agentlinkv1.DrainServer
-	upgrades  []*agentlinkv1.UpgradeAgent
-	tails     []*agentlinkv1.TailLogs
-	setRegs   []*agentlinkv1.SetRegistries
+	mu         sync.Mutex
+	starts     []*agentlinkv1.StartServer
+	stops      []*agentlinkv1.StopServer
+	allocates  []*agentlinkv1.AllocateServer
+	prepulls   []*agentlinkv1.PrePull
+	drains     []*agentlinkv1.Drain
+	undrains   []*agentlinkv1.Undrain
+	srvDrains  []*agentlinkv1.DrainServer
+	upgrades   []*agentlinkv1.UpgradeAgent
+	tails      []*agentlinkv1.TailLogs
+	setRegs    []*agentlinkv1.SetRegistries
+	removeImgs []*agentlinkv1.RemoveImage
 }
 
 func (h *fakeHandler) Start(_ context.Context, c *agentlinkv1.StartServer) {
@@ -180,6 +181,16 @@ func (h *fakeHandler) SetRegistries(_ context.Context, c *agentlinkv1.SetRegistr
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.setRegs = append(h.setRegs, c)
+}
+func (h *fakeHandler) RemoveImage(_ context.Context, c *agentlinkv1.RemoveImage) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.removeImgs = append(h.removeImgs, c)
+}
+func (h *fakeHandler) removeImgCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.removeImgs)
 }
 func (h *fakeHandler) startCount() int {
 	h.mu.Lock()
@@ -481,6 +492,43 @@ func TestSetRegistriesDispatchedAckedAndReplaced(t *testing.T) {
 	})
 	if handler.setRegsCount() != 2 {
 		t.Fatalf("duplicate cmd_id dispatched again: setRegsCount=%d", handler.setRegsCount())
+	}
+}
+
+// TestRemoveImageDispatchedAndAcked covers the agent-side routing of the
+// environments-v1 RemoveImage command (§6б): it reaches the handler and is
+// acked through the existing recv-loop machinery (no Ack extension). A
+// duplicate cmd_id is re-acked but NOT re-dispatched (idempotency window),
+// exactly like every other command kind.
+func TestRemoveImageDispatchedAndAcked(t *testing.T) {
+	h := newHarness(t)
+	handler := &fakeHandler{}
+	startClient(t, h, handler, &fakeSource{}, NewOutbox(t.Logf))
+	eventually(t, "connected", func() bool { s, _, _, _ := h.fake.counts(); return s == 1 })
+
+	msg := &agentlinkv1.MasterMsg{Msg: &agentlinkv1.MasterMsg_RemoveImage{RemoveImage: &agentlinkv1.RemoveImage{
+		CmdId: "rm-1", ImageRef: "ghcr.io/x/y:1",
+	}}}
+	h.fake.push(t, msg)
+	eventually(t, "remove_image dispatched and acked", func() bool {
+		_, _, _, acks := h.fake.counts()
+		return handler.removeImgCount() == 1 && acks == 1
+	})
+	handler.mu.Lock()
+	got := handler.removeImgs[0]
+	handler.mu.Unlock()
+	if got.GetCmdId() != "rm-1" || got.GetImageRef() != "ghcr.io/x/y:1" {
+		t.Fatalf("remove_image command: %+v", got)
+	}
+
+	// Duplicate cmd_id: re-acked, NOT re-dispatched.
+	h.fake.push(t, msg)
+	eventually(t, "duplicate re-acked", func() bool {
+		_, _, _, acks := h.fake.counts()
+		return acks == 2
+	})
+	if handler.removeImgCount() != 1 {
+		t.Fatalf("duplicate cmd_id dispatched again: removeImgCount=%d", handler.removeImgCount())
 	}
 }
 

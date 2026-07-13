@@ -102,23 +102,31 @@ func runDaemon(args []string) int {
 	defer client.Close()
 
 	rt := &daemon.ContainerdRuntime{Client: client}
+	// Dual-fs watermark (environments v1 §6в): images live under containerd_root,
+	// which can be a separate mount from data_dir — the GC watches the MAX usage
+	// of the two so a full image store triggers collection even when data_dir is
+	// roomy.
+	containerdDiskUsage := func() (uint64, uint64) { return stats.DiskUsage(cfg.ContainerdRoot) }
 	gc := imagegc.New(imagegc.Options{
-		Runtime:   rt,
-		DiskUsage: func() (uint64, uint64) { return stats.DiskUsage(cfg.DataDir) },
-		Watermark: float64(cfg.DiskGCWatermarkPct) / 100,
-		Logf:      logf,
+		Runtime:             rt,
+		DiskUsage:           func() (uint64, uint64) { return stats.DiskUsage(cfg.DataDir) },
+		ContainerdDiskUsage: containerdDiskUsage,
+		Watermark:           float64(cfg.DiskGCWatermarkPct) / 100,
+		Logf:                logf,
 	})
 
 	var upgraded atomic.Bool
 	outbox := link.NewOutbox(logf)
 	mgr, err := daemon.NewManager(ctx, daemon.Options{
-		Config:       cfg,
-		Runtime:      rt,
-		Sink:         outbox,
-		SocketDir:    *socketDir,
-		Logf:         logf,
-		AgentVersion: version,
-		TouchImage:   gc.Touch,
+		Config:              cfg,
+		Runtime:             rt,
+		Sink:                outbox,
+		SocketDir:           *socketDir,
+		Logf:                logf,
+		AgentVersion:        version,
+		TouchImage:          gc.Touch,
+		UntouchImage:        gc.Untouch,
+		ContainerdDiskUsage: containerdDiskUsage,
 		OnUpgraded: func(v string) {
 			logf("self-upgrade to %s complete — exiting for systemd restart", v)
 			upgraded.Store(true)

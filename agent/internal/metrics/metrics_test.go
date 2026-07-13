@@ -79,6 +79,27 @@ func TestRenderCertExpiry(t *testing.T) {
 	}
 }
 
+// TestRenderContainerdDisk covers the dual-fs watermark's containerd-root
+// gauges (environments v1 §6в): the DiskHigh alert rules are duplicated onto
+// this pair, so the exact metric names matter. On a single-filesystem node the
+// values equal the data_dir pair — that is expected and documented.
+func TestRenderContainerdDisk(t *testing.T) {
+	s := sample()
+	s.ContainerdDiskUsed = 4096
+	s.ContainerdDiskTotal = 8192
+	out := Render("test", s)
+	for _, want := range []string{
+		"# TYPE birdman_agent_containerd_disk_used_bytes gauge\n",
+		"birdman_agent_containerd_disk_used_bytes 4096\n",
+		"# TYPE birdman_agent_containerd_disk_total_bytes gauge\n",
+		"birdman_agent_containerd_disk_total_bytes 8192\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in output:\n%s", want, out)
+		}
+	}
+}
+
 func TestServe(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

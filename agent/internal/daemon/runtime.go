@@ -9,6 +9,7 @@ import (
 	"context"
 	"syscall"
 
+	"github.com/ufna/birdman/agent/internal/imagegc"
 	"github.com/ufna/birdman/agent/internal/runtime"
 )
 
@@ -75,6 +76,19 @@ type Runtime interface {
 	Start(ctx context.Context, spec StartSpec) (Handle, error)
 	// Restore lists containers owned by the agent and re-attaches to them.
 	Restore(ctx context.Context) ([]RestoredServer, error)
+
+	// --- image store (RemoveImage handler + imagegc, agent.md §6) ---
+	// The image-management surface the manager needs to retire a disabled
+	// version's image (environments v1 §6б). ContainerdRuntime already
+	// satisfies these (they are also the imagegc.Runtime surface).
+
+	// Images lists the images present in the birdman namespace.
+	Images(ctx context.Context) ([]imagegc.Image, error)
+	// DeleteImage removes an image and synchronously collects its content.
+	DeleteImage(ctx context.Context, ref string) error
+	// UsedImageRefs returns the refs backing existing containers — an image in
+	// this set is busy and must not be removed.
+	UsedImageRefs(ctx context.Context) (map[string]bool, error)
 }
 
 // Sink receives agent→master notifications (implemented by link.Outbox).

@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ufna/birdman/agent/internal/config"
+	"github.com/ufna/birdman/agent/internal/imagegc"
 	"github.com/ufna/birdman/agent/internal/runtime"
 	agentlinkv1 "github.com/ufna/birdman/proto/agentlink/v1"
 )
@@ -97,9 +99,70 @@ type fakeRuntime struct {
 	pulls       []string
 	pullLookups []runtime.CredLookup // one per Pull call, same index as pulls
 	pullErr     error
+
+	// image-store surface (RemoveImage handler + imagegc, environments v1 §6б):
+	images    []imagegc.Image // images present in the runtime store
+	usedRefs  map[string]bool // refs backing a live container (UsedImageRefs)
+	deleted   []string        // DeleteImage calls, in order
+	deleteErr error
+	usedErr   error
+	// usedGate, when non-nil, blocks UsedImageRefs until closed — lets a test
+	// prove the RemoveImage handler does its runtime work in a goroutine and
+	// never blocks the command dispatch (recv) loop.
+	usedGate chan struct{}
 }
 
 func newFakeRuntime() *fakeRuntime { return &fakeRuntime{handles: map[string]*fakeHandle{}} }
+
+func (r *fakeRuntime) Images(context.Context) ([]imagegc.Image, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.images), nil
+}
+
+func (r *fakeRuntime) UsedImageRefs(context.Context) (map[string]bool, error) {
+	if r.usedGate != nil {
+		<-r.usedGate
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.usedErr != nil {
+		return nil, r.usedErr
+	}
+	out := make(map[string]bool, len(r.usedRefs))
+	for k, v := range r.usedRefs {
+		out[k] = v
+	}
+	return out, nil
+}
+
+func (r *fakeRuntime) DeleteImage(_ context.Context, name string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.deleteErr != nil {
+		return r.deleteErr
+	}
+	r.deleted = append(r.deleted, name)
+	for i, img := range r.images {
+		if img.Name == name {
+			r.images = slices.Delete(r.images, i, i+1)
+			break
+		}
+	}
+	return nil
+}
+
+func (r *fakeRuntime) wasDeleted(name string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Contains(r.deleted, name)
+}
+
+func (r *fakeRuntime) deleteCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.deleted)
+}
 
 func (r *fakeRuntime) Pull(_ context.Context, ref string, lookup runtime.CredLookup) error {
 	r.mu.Lock()
@@ -975,6 +1038,107 @@ func TestStartServerUsesRegistryAuthChain(t *testing.T) {
 	u, tok, err := lookup("ghcr.io")
 	if err != nil || u != "u1" || tok != "t1" {
 		t.Fatalf("StartServer lookup(ghcr.io) = (%q, %q, %v), want (u1, t1, nil)", u, tok, err)
+	}
+}
+
+// --- RemoveImage (environments v1 §6б) ---
+
+// TestRemoveImageDeletesAndUntouches: an unused, present image is deleted
+// synchronously and its ref is dropped from the GC protected set (РЕВИЗИЯ M12
+// — a dead ref must not keep occupying a protection slot). Unrelated protected
+// refs are untouched.
+func TestRemoveImageDeletesAndUntouches(t *testing.T) {
+	rt := newFakeRuntime()
+	rt.images = []imagegc.Image{{Name: "img:1"}, {Name: "keep:2"}}
+	rt.usedRefs = map[string]bool{}
+	m, _, _ := testManager(t, rt)
+
+	gc := imagegc.New(imagegc.Options{DiskUsage: func() (uint64, uint64) { return 0, 0 }, Logf: t.Logf})
+	m.touchImage = gc.Touch
+	m.untouchImage = gc.Untouch
+	gc.Touch("img:1")
+	gc.Touch("keep:2")
+
+	m.RemoveImage(context.Background(), &agentlinkv1.RemoveImage{CmdId: "r1", ImageRef: "img:1"})
+	eventually(t, "img:1 deleted", func() bool { return rt.wasDeleted("img:1") })
+	eventually(t, "img:1 untouched from GC set", func() bool { return !gc.Protected()["img:1"] })
+	if !gc.Protected()["keep:2"] {
+		t.Fatal("Untouch must drop only the removed ref, keep:2 must stay protected")
+	}
+}
+
+// TestRemoveImageAbsentNoop: a command for an image not present on the node is
+// a clean no-op — no delete is attempted (idempotency under at-least-once
+// replay after the image was already collected).
+func TestRemoveImageAbsentNoop(t *testing.T) {
+	rt := newFakeRuntime()
+	rt.images = []imagegc.Image{{Name: "other:9"}} // img:1 not present
+	rt.usedRefs = map[string]bool{}
+	m, _, _ := testManager(t, rt)
+	cap := &logCapture{}
+	m.logf = cap.Printf
+
+	m.RemoveImage(context.Background(), &agentlinkv1.RemoveImage{CmdId: "r1", ImageRef: "img:1"})
+	eventually(t, "no-op logged", func() bool { return cap.count("no-op") >= 1 })
+	if rt.deleteCount() != 0 {
+		t.Fatalf("absent image must not be deleted, deletes=%d", rt.deleteCount())
+	}
+}
+
+// TestRemoveImageBusySkips: an image backing a live container is logged and
+// skipped, never deleted — the watermark GC reclaims it once the container is
+// gone, and the master is not told (§6б, РЕВИЗИЯ I1).
+func TestRemoveImageBusySkips(t *testing.T) {
+	rt := newFakeRuntime()
+	rt.images = []imagegc.Image{{Name: "img:1"}}
+	rt.usedRefs = map[string]bool{"img:1": true}
+	m, _, _ := testManager(t, rt)
+	cap := &logCapture{}
+	m.logf = cap.Printf
+
+	m.RemoveImage(context.Background(), &agentlinkv1.RemoveImage{CmdId: "r1", ImageRef: "img:1"})
+	eventually(t, "busy skip logged", func() bool { return cap.count("in use") >= 1 })
+	if rt.deleteCount() != 0 {
+		t.Fatalf("busy image must not be deleted, deletes=%d", rt.deleteCount())
+	}
+}
+
+// TestRemoveImageDoesNotBlockDispatch: the handler must return immediately and
+// do its runtime work (UsedImageRefs/DeleteImage) in a goroutine — synchronous
+// work would stall the recv loop that acks every command (РЕВИЗИЯ I1, PrePull
+// pattern). UsedImageRefs is gated so a synchronous implementation would hang
+// the RemoveImage call itself.
+func TestRemoveImageDoesNotBlockDispatch(t *testing.T) {
+	rt := newFakeRuntime()
+	rt.images = []imagegc.Image{{Name: "img:1"}}
+	rt.usedRefs = map[string]bool{}
+	rt.usedGate = make(chan struct{}) // UsedImageRefs blocks until released
+	m, _, _ := testManager(t, rt)
+
+	returned := make(chan struct{})
+	go func() {
+		m.RemoveImage(context.Background(), &agentlinkv1.RemoveImage{CmdId: "r1", ImageRef: "img:1"})
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RemoveImage blocked dispatch: it did the runtime work synchronously")
+	}
+
+	// Release the gate — the goroutine now completes the deletion.
+	close(rt.usedGate)
+	eventually(t, "delete happens after gate release", func() bool { return rt.wasDeleted("img:1") })
+}
+
+// TestRemoveImageEmptyRefIgnored: an empty image_ref never touches the runtime.
+func TestRemoveImageEmptyRefIgnored(t *testing.T) {
+	rt := newFakeRuntime()
+	m, _, _ := testManager(t, rt)
+	m.RemoveImage(context.Background(), &agentlinkv1.RemoveImage{CmdId: "r1", ImageRef: ""})
+	time.Sleep(50 * time.Millisecond)
+	if rt.deleteCount() != 0 {
+		t.Fatal("empty image_ref must be ignored without touching the runtime")
 	}
 }
 
