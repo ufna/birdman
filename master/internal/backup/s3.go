@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"path"
 	"sort"
 	"strings"
 
@@ -46,9 +45,19 @@ func (r *Runner) syncS3(ctx context.Context, cfg store.BackupS3Config, localPath
 	return rotateS3(ctx, cli, cfg)
 }
 
-// rotateS3 — держим RetentionS3 свежих birdman-*.dump под префиксом
-// (ts в имени лексикографичен — сортировки по ключу достаточно).
+// rotateS3 — держим RetentionS3 свежих birdman-*.dump среди ПРЯМЫХ ДЕТЕЙ
+// префикса. Вложенные ключи (prefix+"keep/…", prefix+"archive/…") — не наши:
+// syncS3 пишет только prefix+имя, а инвариант «ts в имени лексикографичен ⇒
+// сортировка по ключу = сортировка по времени» верен только для прямых
+// детей. Вложенный birdman-*.dump с древним ts иначе сортировался бы по
+// полному ключу выше свежих дампов, съедал keep-слот и ронял настоящие
+// дампы (при RetentionS3=1 — включая только что загруженный).
 func rotateS3(ctx context.Context, cli *minio.Client, cfg store.BackupS3Config) error {
+	if cfg.RetentionS3 < 1 {
+		// Защита в глубину: нулевой/отрицательный ретеншн не имеет права
+		// снести бакет (или паниковать на срезе), что бы ни пропустил store.
+		return nil
+	}
 	var keys []string
 	for obj := range cli.ListObjects(ctx, cfg.Bucket, minio.ListObjectsOptions{
 		Prefix: cfg.Prefix, Recursive: true,
@@ -56,8 +65,11 @@ func rotateS3(ctx context.Context, cli *minio.Client, cfg store.BackupS3Config) 
 		if obj.Err != nil {
 			return fmt.Errorf("list %s: %w", cfg.Bucket, obj.Err)
 		}
-		base := path.Base(obj.Key)
-		if strings.HasPrefix(base, "birdman-") && strings.HasSuffix(base, ".dump") {
+		rest := strings.TrimPrefix(obj.Key, cfg.Prefix)
+		if strings.Contains(rest, "/") {
+			continue // вложенный ключ — не наш: syncS3 пишет только прямых детей
+		}
+		if strings.HasPrefix(rest, "birdman-") && strings.HasSuffix(rest, ".dump") {
 			keys = append(keys, obj.Key)
 		}
 	}

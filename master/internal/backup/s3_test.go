@@ -51,6 +51,27 @@ func TestSyncS3UploadAndRotation(t *testing.T) {
 	r := &Runner{dir: dir, log: testLog()}
 	ctx := context.Background()
 
+	cli, err := newS3Client(cfg)
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+
+	// Декои ДО ротационных загрузок: вложенный СТАРЫЙ дамп и чужой файл под
+	// префиксом. Ротация работает только с прямыми детьми префикса и не
+	// имеет права их трогать: вложенный birdman-*.dump с древним ts иначе
+	// сортировался бы по полному ключу выше свежих прямых дампов ('k' > 'b'),
+	// съедал keep-слот и ронял настоящие дампы (ревью Task 3).
+	decoys := []string{
+		cfg.Prefix + "keep/birdman-20200101T000000Z.dump",
+		cfg.Prefix + "other.txt",
+	}
+	for _, k := range decoys {
+		if _, err := cli.PutObject(ctx, bucket, k, strings.NewReader("decoy"),
+			int64(len("decoy")), minio.PutObjectOptions{}); err != nil {
+			t.Fatalf("put decoy %s: %v", k, err)
+		}
+	}
+
 	for i := 1; i <= 3; i++ {
 		name := fmt.Sprintf("birdman-2026071%dT000000Z.dump", i)
 		p := filepath.Join(dir, name)
@@ -62,25 +83,47 @@ func TestSyncS3UploadAndRotation(t *testing.T) {
 		}
 	}
 
-	// retention_s3=2 → самый старый объект удалён, префикс уважен.
-	cli, _ := newS3Client(cfg)
-	var keys []string
-	for obj := range cli.ListObjects(ctx, bucket, minio.ListObjectsOptions{Prefix: cfg.Prefix, Recursive: true}) {
-		if obj.Err != nil {
-			t.Fatalf("list: %v", obj.Err)
+	listKeys := func() map[string]bool {
+		t.Helper()
+		got := map[string]bool{}
+		for obj := range cli.ListObjects(ctx, bucket, minio.ListObjectsOptions{Prefix: cfg.Prefix, Recursive: true}) {
+			if obj.Err != nil {
+				t.Fatalf("list: %v", obj.Err)
+			}
+			got[obj.Key] = true
 		}
-		keys = append(keys, obj.Key)
+		return got
 	}
-	if len(keys) != 2 {
-		t.Fatalf("rotation kept %v, want 2", keys)
+
+	// retention_s3=2: из прямых детей живы два свежих, старейший удалён;
+	// оба декоя нетронуты.
+	got := listKeys()
+	want := []string{
+		decoys[0],
+		decoys[1],
+		cfg.Prefix + "birdman-20260712T000000Z.dump",
+		cfg.Prefix + "birdman-20260713T000000Z.dump",
 	}
-	for _, k := range keys {
-		if !strings.HasPrefix(k, "nightly/birdman-") {
-			t.Fatalf("prefix not honored: %s", k)
+	for _, k := range want {
+		if !got[k] {
+			t.Fatalf("object %s missing after rotation, bucket has %v", k, got)
 		}
-		if strings.Contains(k, "20260711") {
-			t.Fatalf("oldest object survived rotation: %s", k)
-		}
+	}
+	if got[cfg.Prefix+"birdman-20260711T000000Z.dump"] {
+		t.Fatalf("oldest direct dump survived rotation, bucket has %v", got)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("unexpected extra objects after rotation: %v, want exactly %v", got, want)
+	}
+
+	// Guard ретеншна: RetentionS3<1 — no-op, а не снос бакета/паника на срезе.
+	cfgZero := cfg
+	cfgZero.RetentionS3 = 0
+	if err := rotateS3(ctx, cli, cfgZero); err != nil {
+		t.Fatalf("rotateS3 with retention 0: %v", err)
+	}
+	if after := listKeys(); len(after) != len(want) {
+		t.Fatalf("retention 0 must be a no-op, bucket has %v", after)
 	}
 }
 

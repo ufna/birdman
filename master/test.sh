@@ -19,11 +19,26 @@ docker network create "$NET" >/dev/null
 docker run -d --rm --name "$PG" --network "$NET" \
   -e POSTGRES_PASSWORD=birdman postgres:16 >/dev/null
 
-# MinIO — S3-совместимая обвязка для интеграционных тестов backup/s3
-# (пока go-test-контейнер тянет модули и компилит, MinIO успевает подняться).
+# MinIO — S3-совместимая обвязка для интеграционных тестов backup/s3.
 docker run -d --rm --name "$MINIO" --network "$NET" \
   -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
   minio/minio server /data >/dev/null
+
+# Явный health-probe вместо ставки на прогрев компиляцией: bounded-луп
+# (15×1с) на health/live изнутри docker-сети; не поднялся — явная ошибка.
+minio_ok=""
+for _ in {1..15}; do
+  if docker run --rm --network "$NET" curlimages/curl \
+       -sf "http://${MINIO}:9000/minio/health/live" >/dev/null 2>&1; then
+    minio_ok=1
+    break
+  fi
+  sleep 1
+done
+if [ -z "$minio_ok" ]; then
+  echo "ERROR: MinIO did not become healthy at http://${MINIO}:9000" >&2
+  exit 1
+fi
 
 docker run --rm --network "$NET" \
   -v "$PWD":/src -w /src/master \

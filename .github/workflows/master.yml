@@ -53,6 +53,15 @@ jobs:
           docker run -d --rm --name minio -p 9000:9000 \
             -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
             minio/minio server /data
+          # Явный health-probe: bounded-луп (15×1с); не поднялся — фейл шага.
+          for _ in {1..15}; do
+            if curl -sf http://localhost:9000/minio/health/live >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "ERROR: MinIO did not become healthy on :9000" >&2
+          exit 1
 
       - name: Vet & build proto
         working-directory: proto
