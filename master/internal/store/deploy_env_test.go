@@ -130,7 +130,7 @@ func TestBeginDeployBusyPerEnv(t *testing.T) {
 	}
 
 	// prod-деплой НЕ блокируется dev-prepulling.
-	res, err := st.BeginDeploy(ctx, prodV)
+	res, err := st.BeginDeploy(ctx, prodV, store.BeginDeployOpts{})
 	if err != nil {
 		t.Fatalf("prod BeginDeploy must not be blocked by a dev prepull: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestBeginDeployBusyPerEnv(t *testing.T) {
 
 	// Позитивный контроль: второй dev-деплой всё ещё блокируется своим env.
 	devV2 := f.AddVersion(t, "1.2.0", "dev")
-	if _, err := st.BeginDeploy(ctx, devV2); !errors.Is(err, store.ErrDeployInProgress) {
+	if _, err := st.BeginDeploy(ctx, devV2, store.BeginDeployOpts{}); !errors.Is(err, store.ErrDeployInProgress) {
 		t.Fatalf("second dev deploy must be blocked within env: got %v", err)
 	}
 }

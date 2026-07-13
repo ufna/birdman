@@ -140,7 +140,7 @@ type Matchmaker struct {
 
 	mu          sync.Mutex
 	tickets     map[string]*ticket
-	byPlayer    map[string]*ticket // active (queued) ticket per (project, player)
+	byPlayer    map[string]*ticket // active (queued) ticket per (project, env, player)
 	regionsSeen map[string]bool    // for zeroing the queue-depth gauge
 }
 
@@ -179,8 +179,8 @@ type SubmitParams struct {
 	Regions       []RegionPing
 }
 
-// Submit validates and enqueues a ticket. Anti-dup (master.md §4): a new
-// ticket for the same (project, player) cancels the previous queued one.
+// Submit validates and enqueues a ticket. Anti-dup (master.md §4, env v1 §3 M6):
+// a new ticket for the same (project, env, player) cancels the previous queued one.
 // A client version incompatible with every live server version (active or
 // deprecated in the multi-version window, per compat rules) is rejected as
 // update_required right away (the ticket is still stored for GET).

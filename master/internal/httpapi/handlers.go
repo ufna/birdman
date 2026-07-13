@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/ufna/birdman/master/internal/deploy"
 	"github.com/ufna/birdman/master/internal/store"
 )
 
@@ -112,7 +113,19 @@ func (s *Server) handleCreateVersion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"version": v})
+	resp := map[string]any{"version": v}
+	// Авто-деплой dev-потока (environments v1 §4): регистрация в auto_deploy-env
+	// немедленно гонит цепочку «только вперёд». TryAutoDeploy сам no-op'ит на
+	// не-auto env (prod → AutoDeployNoop), поэтому зовём безусловно и добавляем
+	// поле лишь на реальном авто-пути. Синхронно, как ручной deploy: BeginDeploy
+	// быстрый, а prepull-Send неблокирующий.
+	switch s.dep.TryAutoDeploy(r.Context(), project, req.Env) {
+	case deploy.AutoDeployStarted:
+		resp["auto_deploy"] = "started"
+	case deploy.AutoDeployQueued:
+		resp["auto_deploy"] = "queued"
+	}
+	writeJSON(w, http.StatusCreated, resp)
 }
 
 func (s *Server) handleListVersions(w http.ResponseWriter, r *http.Request) {

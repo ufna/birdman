@@ -11,9 +11,10 @@ import (
 
 // Deploy manager persistence (итерация 3, docs/specs/master.md §5).
 // Version state machine: registered → prepulling → active → deprecated →
-// disabled. Version states are project-global; per-region targeting lives in
-// fleet_configs.active_version (уточнено в v0: одна deprecated на проект —
-// при флипе более старые deprecated уходят в disabled).
+// disabled. Version states are scoped per (project, env) (environments v1 §3);
+// per-region targeting lives in fleet_configs.active_version (одна active и одно
+// deprecated-окно на (project, env) — при флипе более старые deprecated уходят в
+// disabled).
 
 var (
 	// ErrVersionState — the version is in a state that forbids the operation
@@ -35,10 +36,23 @@ type BeginDeployResult struct {
 	AlreadyPrepulling bool
 }
 
+// BeginDeployOpts annotates the deploy_started event. The zero value is the
+// manual path (POST /v1/deploy, /v1/promote): the event carries no auto/skipped
+// keys. The auto-deploy chain passes Auto=true and Skipped=N (how many
+// intermediate registered builds this jump passes over) so the payload records
+// «только вперёд» provenance (environments v1 §4). Decision (task-2): manual
+// deploys omit the keys entirely rather than writing auto:false — event
+// consumers treat a missing "auto" as manual, and the panel/history stay
+// unchanged for the pre-env manual flow.
+type BeginDeployOpts struct {
+	Auto    bool
+	Skipped int
+}
+
 // BeginDeploy moves a version to `prepulling` (step 1 of POST /v1/deploy).
 // Idempotent: repeated calls for a prepulling/active version report the fact
-// instead of failing. Only one version per project may be prepulling.
-func (s *Store) BeginDeploy(ctx context.Context, versionID string) (BeginDeployResult, error) {
+// instead of failing. Only one version per (project, env) may be prepulling.
+func (s *Store) BeginDeploy(ctx context.Context, versionID string, opts BeginDeployOpts) (BeginDeployResult, error) {
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
 		return BeginDeployResult{}, err
@@ -97,8 +111,14 @@ func (s *Store) BeginDeploy(ctx context.Context, versionID string) (BeginDeployR
 		`update versions set state = 'prepulling' where id = $1::uuid`, v.ID); err != nil {
 		return BeginDeployResult{}, err
 	}
-	if err := insertEvent(ctx, tx, EventDeployStarted, EventRef{VersionID: &v.ID},
-		map[string]any{"project": v.Project, "semver": v.Semver, "image_ref": v.ImageRef}); err != nil {
+	payload := map[string]any{"project": v.Project, "semver": v.Semver, "image_ref": v.ImageRef}
+	if opts.Auto {
+		// Авто-путь «только вперёд» (environments v1 §4): помечаем событие и
+		// сколько промежуточных registered-билдов этот прыжок пропустил.
+		payload["auto"] = true
+		payload["skipped"] = opts.Skipped
+	}
+	if err := insertEvent(ctx, tx, EventDeployStarted, EventRef{VersionID: &v.ID}, payload); err != nil {
 		return BeginDeployResult{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -183,9 +203,9 @@ type ActivateResult struct {
 //	old active → deprecated (deprecated_at = now);
 //	older deprecated versions → disabled (одна deprecated на проект);
 //	the new version → active (deprecated_at cleared);
-//	fleet_configs.active_version → the new version: every project region,
-//	or only `regions` when non-empty (region-scoped rollback; version
-//	states remain project-global — уточнено в v0).
+//	fleet_configs.active_version → the new version: every region of this env,
+//	or only `regions` when non-empty (region-scoped rollback; version states
+//	are scoped per (project, env) — environments v1 §3).
 func (s *Store) ActivateVersion(ctx context.Context, versionID, fromState, eventKind string, regions []string) (ActivateResult, error) {
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
