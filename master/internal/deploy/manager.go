@@ -128,7 +128,7 @@ func (m *Manager) Deploy(ctx context.Context, versionID string) (Status, error) 
 // startJob fans PrePull out to the fleet nodes and arms the timeout. With no
 // live nodes to warm the flip happens immediately (vacuously pulled).
 func (m *Manager) startJob(ctx context.Context, v store.Version) (Status, error) {
-	targets, err := m.st.PrePullTargets(ctx, v.ProjectID)
+	targets, err := m.st.PrePullTargets(ctx, v.ProjectID, v.Env)
 	if err != nil {
 		return Status{}, err
 	}
@@ -194,17 +194,22 @@ func (m *Manager) HandlePullReport(nodeID string, r *agentlinkv1.PullReport) {
 	}
 	imageRef := r.GetImageRef()
 
+	// C2 (environments v1 §3): выбираем job по (image_ref, нода ещё в pending
+	// ЭТОГО job'а), а не по одному image_ref. Иначе два параллельных деплоя
+	// одного ref в разных env (промоут!) съедают отчёты друг друга и ложно
+	// abort'ятся по таймауту. Нода принадлежит одному env → матч уникален; отчёт
+	// уже отработавшей ноды не находит job (j==nil) и штатно игнорируется.
 	m.mu.Lock()
 	var j *job
 	for _, cand := range m.jobs {
-		if cand.version.ImageRef == imageRef {
+		if cand.version.ImageRef == imageRef && cand.pending[nodeID] {
 			j = cand
 			break
 		}
 	}
 	if j == nil {
 		m.mu.Unlock()
-		return // not ours (ad-hoc prepull or a long-gone deploy)
+		return // not ours (ad-hoc prepull, a duplicate, or a long-gone deploy)
 	}
 	if status == "failed" {
 		delete(m.jobs, j.version.ID)
@@ -285,13 +290,13 @@ func (m *Manager) abort(versionID, reason string) {
 	}
 }
 
-// Rollback flips the project's deprecated version back to active
+// Rollback flips an environment's deprecated version back to active
 // (POST /v1/rollback): images are already on the nodes — no prepull, the
-// whole operation is one transaction. regions empty → all project fleets;
-// otherwise only those regions' fleet_configs are repointed (version states
-// remain project-global — уточнено в v0).
-func (m *Manager) Rollback(ctx context.Context, project string, regions []string) (store.ActivateResult, error) {
-	target, err := m.st.RollbackTarget(ctx, project)
+// whole operation is one transaction. regions empty → all of that env's fleets;
+// otherwise only those regions' fleet_configs are repointed. env-скоуп
+// (environments v1 §3): откат живёт строго внутри (project, env).
+func (m *Manager) Rollback(ctx context.Context, project, env string, regions []string) (store.ActivateResult, error) {
+	target, err := m.st.RollbackTarget(ctx, project, env)
 	if err != nil {
 		return store.ActivateResult{}, err
 	}

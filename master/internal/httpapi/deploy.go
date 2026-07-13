@@ -11,8 +11,8 @@ import (
 
 // Deploy endpoints (итерация 3, docs/specs/master.md §5–6, scope `deploy`):
 //
-//	POST /v1/deploy   {version_id}         → 202 prepulling | 200 active
-//	POST /v1/rollback {project?, region?}  → 200 rolled back (seconds)
+//	POST /v1/deploy   {version_id}               → 202 prepulling | 200 active
+//	POST /v1/rollback {project?, env?, region?}  → 200 rolled back (seconds)
 
 type deployRequest struct {
 	VersionID string `json:"version_id"`
@@ -41,6 +41,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 
 type rollbackRequest struct {
 	Project string `json:"project"`
+	Env     string `json:"env,omitempty"`
 	Region  string `json:"region"`
 }
 
@@ -59,11 +60,34 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// env-резолв (environments v1 §3, I3): явный env — как есть; иначе смотрим,
+	// у скольких окружений проекта есть deprecated-окно — ровно одно → откат туда
+	// (sole-fallback), ноль → нечего откатывать (409), больше одного → env обязателен.
+	env := req.Env
+	if env == "" {
+		envs, err := s.st.EnvsWithDeprecated(r.Context(), project)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+		switch len(envs) {
+		case 0:
+			writeError(w, http.StatusConflict, "conflict",
+				"project "+project+" has no deprecated version to roll back to")
+			return
+		case 1:
+			env = envs[0]
+		default:
+			writeError(w, http.StatusConflict, "conflict",
+				"env is required: multiple environments have a rollback window")
+			return
+		}
+	}
 	var regions []string
 	if req.Region != "" {
 		regions = []string{req.Region}
 	}
-	res, err := s.dep.Rollback(r.Context(), project, regions)
+	res, err := s.dep.Rollback(r.Context(), project, env, regions)
 	if err != nil {
 		deployError(w, err)
 		return

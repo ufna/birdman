@@ -318,7 +318,7 @@ func TestRollback(t *testing.T) {
 	ctx := context.Background()
 
 	// Nothing deprecated yet → rollback refused.
-	if _, err := m.Rollback(ctx, "game", nil); !errors.Is(err, store.ErrVersionState) {
+	if _, err := m.Rollback(ctx, "game", "dev", nil); !errors.Is(err, store.ErrVersionState) {
 		t.Fatalf("premature rollback: want ErrVersionState, got %v", err)
 	}
 
@@ -328,7 +328,7 @@ func TestRollback(t *testing.T) {
 	report(m, f.NodeID, "ghcr.io/example/game-server:1.1.0", "pulled")
 	rec.Take() // drop the prepull
 
-	res, err := m.Rollback(ctx, "game", nil)
+	res, err := m.Rollback(ctx, "game", "dev", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +352,7 @@ func TestRollback(t *testing.T) {
 	}
 
 	// Unknown region is rejected without flipping anything.
-	if _, err := m.Rollback(ctx, "game", []string{"mars"}); !errors.Is(err, store.ErrNotFound) {
+	if _, err := m.Rollback(ctx, "game", "dev", []string{"mars"}); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("bad region rollback: want ErrNotFound, got %v", err)
 	}
 	if got := versionState(t, st, f.VersionID); got != "active" {

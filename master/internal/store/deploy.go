@@ -69,25 +69,28 @@ func (s *Store) BeginDeploy(ctx context.Context, versionID string) (BeginDeployR
 	}
 
 	// registered | deprecated → start a deploy, if nothing else is in flight
-	// and the project has at least one fleet to deploy to.
+	// and the environment has at least one fleet to deploy to. Both checks are
+	// scoped to the version's (project, env): a dev prepull must not block a prod
+	// deploy of the same project, and hasFleet asks about THIS env's fleets
+	// (environments v1 §3).
 	var busy bool
 	if err := tx.QueryRow(ctx, `
 		select exists(select 1 from versions
-		              where project_id = $1::uuid and state = 'prepulling')`,
-		v.ProjectID).Scan(&busy); err != nil {
+		              where project_id = $1::uuid and env = $2 and state = 'prepulling')`,
+		v.ProjectID, v.Env).Scan(&busy); err != nil {
 		return BeginDeployResult{}, err
 	}
 	if busy {
-		return BeginDeployResult{}, fmt.Errorf("another deploy of project %s is prepulling: %w", v.Project, ErrDeployInProgress)
+		return BeginDeployResult{}, fmt.Errorf("another deploy of project %s (env %s) is prepulling: %w", v.Project, v.Env, ErrDeployInProgress)
 	}
 	var hasFleet bool
 	if err := tx.QueryRow(ctx,
-		`select exists(select 1 from fleet_configs where project_id = $1::uuid)`,
-		v.ProjectID).Scan(&hasFleet); err != nil {
+		`select exists(select 1 from fleet_configs where project_id = $1::uuid and env = $2)`,
+		v.ProjectID, v.Env).Scan(&hasFleet); err != nil {
 		return BeginDeployResult{}, err
 	}
 	if !hasFleet {
-		return BeginDeployResult{}, fmt.Errorf("project %s has no fleets: %w", v.Project, ErrNoFleet)
+		return BeginDeployResult{}, fmt.Errorf("project %s has no fleets in env %s: %w", v.Project, v.Env, ErrNoFleet)
 	}
 
 	if _, err := tx.Exec(ctx,
@@ -111,17 +114,19 @@ type PrePullNode struct {
 	Region string
 }
 
-// PrePullTargets returns the nodes a deploy must warm: active nodes with a
-// fresh heartbeat (<30s) in every region the project has a fleet_config for
-// (master.md §5 step 1: «всем активным тачкам региона(ов) флита»).
-func (s *Store) PrePullTargets(ctx context.Context, projectID string) ([]PrePullNode, error) {
+// PrePullTargets returns the nodes a deploy must warm: active nodes of the
+// version's environment with a fresh heartbeat (<30s) in every region that env
+// has a fleet_config for (master.md §5 step 1: «всем активным тачкам региона(ов)
+// флита»). env-скоуп (environments v1 §3): деплой греет только ноды своего env —
+// prod-деплой не трогает dev-ноды того же региона и наоборот.
+func (s *Store) PrePullTargets(ctx context.Context, projectID, env string) ([]PrePullNode, error) {
 	rows, err := s.Pool.Query(ctx, `
 		select n.id::text, n.region
 		from nodes n
-		where n.project_id = $1::uuid and n.state = 'active'
+		where n.project_id = $1::uuid and n.env = $2 and n.state = 'active'
 		  and n.last_heartbeat_at > now() - interval '30 seconds'
-		  and n.region in (select region from fleet_configs where project_id = $1::uuid)
-		order by n.created_at`, projectID)
+		  and n.region in (select region from fleet_configs where project_id = $1::uuid and env = $2)
+		order by n.created_at`, projectID, env)
 	if err != nil {
 		return nil, err
 	}
@@ -207,20 +212,22 @@ func (s *Store) ActivateVersion(ctx context.Context, versionID, fromState, event
 
 	res := ActivateResult{}
 
-	// Demote what the project runs today: the `active` version AND any
+	// Demote what the environment runs today: the `active` version AND any
 	// version the fleets still point at while its state is `registered`
 	// (bootstrap: active_version was assigned via PUT /v1/fleets before the
 	// deploy manager existed) — without this the old build would fall out of
 	// the multi-version window and its live matches would be drained at once.
+	// env-скоуп (environments v1 §3): флип живёт строго внутри (project, env) —
+	// активация dev-версии не демоутит prod-active того же проекта.
 	demoteRows, err := tx.Query(ctx, `
 		update versions set state = 'deprecated', deprecated_at = now()
-		where project_id = $1::uuid and id <> $2::uuid
+		where project_id = $1::uuid and env = $3 and id <> $2::uuid
 		  and (state = 'active'
 		       or (state = 'registered' and id in (
 		             select active_version from fleet_configs
-		             where project_id = $1::uuid and active_version is not null)))
+		             where project_id = $1::uuid and env = $3 and active_version is not null)))
 		returning id::text, semver, image_ref, env, created_at`,
-		v.ProjectID, v.ID)
+		v.ProjectID, v.ID, v.Env)
 	if err != nil {
 		return ActivateResult{}, err
 	}
@@ -245,13 +252,14 @@ func (s *Store) ActivateVersion(ctx context.Context, versionID, fromState, event
 	}
 
 	// Older deprecated versions leave the window: only one deprecated per
-	// project (уточнено в v0). The freshly demoted ones (and the rollback
-	// target itself, still `deprecated` at this point) are kept.
+	// (project, env) — environments v1 §3 (уточнено в v0). The freshly demoted
+	// ones (and the rollback target itself, still `deprecated` at this point)
+	// are kept.
 	rows, err := tx.Query(ctx, `
 		update versions set state = 'disabled'
-		where project_id = $1::uuid and state = 'deprecated'
+		where project_id = $1::uuid and env = $3 and state = 'deprecated'
 		  and not (id::text = any($2::text[]))
-		returning id::text`, v.ProjectID, keep)
+		returning id::text`, v.ProjectID, keep, v.Env)
 	if err != nil {
 		return ActivateResult{}, err
 	}
@@ -285,11 +293,14 @@ func (s *Store) ActivateVersion(ctx context.Context, versionID, fromState, event
 	if regions == nil {
 		regions = []string{} // nil would become SQL NULL and poison ANY()
 	}
+	// env-скоуп репойнта (environments v1 §3, C3): перепойнчиваем ТОЛЬКО флоты
+	// этого env — иначе UPDATE сажает версию одного env в active_version флота
+	// чужого env того же региона и нарушает составной FK fleet_active_version_env_fk.
 	regRows, err := tx.Query(ctx, `
 		update fleet_configs set active_version = $2::uuid
-		where project_id = $1::uuid
+		where project_id = $1::uuid and env = $4
 		  and (cardinality($3::text[]) = 0 or region = any($3::text[]))
-		returning region`, v.ProjectID, v.ID, regions)
+		returning region`, v.ProjectID, v.ID, regions, v.Env)
 	if err != nil {
 		return ActivateResult{}, err
 	}
@@ -308,7 +319,7 @@ func (s *Store) ActivateVersion(ctx context.Context, versionID, fromState, event
 	if len(regions) > 0 && len(res.Regions) == 0 {
 		// Region-scoped flip hit no fleet — abort the whole transaction so
 		// the version states stay untouched too.
-		return ActivateResult{}, fmt.Errorf("no fleet of project %s in regions %v: %w", v.Project, regions, ErrNotFound)
+		return ActivateResult{}, fmt.Errorf("no fleet of project %s (env %s) in regions %v: %w", v.Project, v.Env, regions, ErrNotFound)
 	}
 
 	payload := map[string]any{
@@ -328,21 +339,47 @@ func (s *Store) ActivateVersion(ctx context.Context, versionID, fromState, event
 	return res, nil
 }
 
-// RollbackTarget finds the version a rollback would activate: the project's
-// (single by construction) deprecated version, newest deprecated_at first.
-func (s *Store) RollbackTarget(ctx context.Context, project string) (Version, error) {
+// RollbackTarget finds the version a rollback would activate in an environment:
+// that (project, env)'s (single by construction) deprecated version, newest
+// deprecated_at first. env-скоуп (environments v1 §3): откат живёт внутри env.
+func (s *Store) RollbackTarget(ctx context.Context, project, env string) (Version, error) {
 	var v Version
 	err := s.Pool.QueryRow(ctx, `
 		select v.id::text, v.project_id::text, p.slug, v.semver, v.image_ref, v.env, v.state, v.created_at, v.deprecated_at
 		from versions v join projects p on p.id = v.project_id
-		where p.slug = $1 and v.state = 'deprecated'
+		where p.slug = $1 and v.env = $2 and v.state = 'deprecated'
 		order by v.deprecated_at desc nulls last
-		limit 1`, project).
+		limit 1`, project, env).
 		Scan(&v.ID, &v.ProjectID, &v.Project, &v.Semver, &v.ImageRef, &v.Env, &v.State, &v.CreatedAt, &v.DeprecatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return Version{}, fmt.Errorf("project %s has no deprecated version to roll back to: %w", project, ErrVersionState)
+		return Version{}, fmt.Errorf("project %s (env %s) has no deprecated version to roll back to: %w", project, env, ErrVersionState)
 	}
 	return v, err
+}
+
+// EnvsWithDeprecated returns the environments of a project that currently hold a
+// deprecated version (a warm rollback window), sorted by name. The rollback API
+// resolves env with it when the request names none: exactly one → that env;
+// zero → nothing to roll back; several → env is required (environments v1 §3, I3).
+func (s *Store) EnvsWithDeprecated(ctx context.Context, project string) ([]string, error) {
+	rows, err := s.Pool.Query(ctx, `
+		select distinct v.env
+		from versions v join projects p on p.id = v.project_id
+		where p.slug = $1 and v.state = 'deprecated'
+		order by v.env`, project)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var env string
+		if err := rows.Scan(&env); err != nil {
+			return nil, err
+		}
+		out = append(out, env)
+	}
+	return out, rows.Err()
 }
 
 // PrepullingVersions lists versions stuck in `prepulling` — deploy jobs to
@@ -370,16 +407,18 @@ func (s *Store) PrepullingVersions(ctx context.Context) ([]Version, error) {
 
 // DisableExpiredDeprecated closes the multi-version window by TTL (уточнено
 // в v0, master.md §5): a deprecated version older than the LONGEST
-// reap_ttl_min across the project's fleets goes to `disabled` — the
+// reap_ttl_min across ITS ENVIRONMENT's fleets goes to `disabled` — the
 // matchmaker stops offering it (old clients start getting update_required)
-// and reconcile reaps its ready buffer / drains its live matches.
+// and reconcile reaps its ready buffer / drains its live matches. env-скоуп
+// (environments v1 §3, M4): TTL берётся от флотов env версии, не всего проекта —
+// иначе длинный prod-TTL держал бы dev-версию в окне сверх её dev-TTL.
 func (s *Store) DisableExpiredDeprecated(ctx context.Context) ([]Version, error) {
 	rows, err := s.Pool.Query(ctx, `
 		update versions v set state = 'disabled'
 		where v.state = 'deprecated' and v.deprecated_at is not null
 		  and v.deprecated_at + make_interval(mins => coalesce((
 		        select max(f.reap_ttl_min) from fleet_configs f
-		        where f.project_id = v.project_id), 0)) < now()
+		        where f.project_id = v.project_id and f.env = v.env), 0)) < now()
 		returning v.id::text, v.project_id::text, v.semver, v.image_ref, v.env, v.created_at, v.deprecated_at`)
 	if err != nil {
 		return nil, err
