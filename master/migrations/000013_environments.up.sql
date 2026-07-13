@@ -23,11 +23,24 @@ insert into environments (project_id, name, production, auto_deploy, retention_k
 insert into environments (project_id, name, production, auto_deploy, retention_keep)
   select id, 'prod', true, false, 0 from projects;
 
--- versions: channel → env (staging→dev, prod→prod), + provenance
+-- versions: env-бэкфилл (ERRATUM №3, 13.07, whole-wave ревью W1 + данные стенда):
+-- channel был ЗРЕЛОСТЬЮ билда, не размещением — стенд регистрировал всё через
+-- channel='prod' при dev-флоте; маппинг staging→dev/prod→prod дал бы
+-- fleet-active версию в env='prod' при флоте 'dev' → составной FK
+-- fleet_active_version_env_fk рвётся, миграция падает dirty. По §9 вся
+-- существующая история — dev: бэкфилл env='dev' ДЛЯ ВСЕХ версий + guard на
+-- дубли (project, semver) между channel'ами (тогда оба легли бы в dev и
+-- нарушили unique — оператор разруливает вручную ДО миграции; на стенде дублей нет).
 alter table versions add column env text;
-update versions set env = case channel when 'staging' then 'dev' else 'prod' end;
+do $$
+begin
+  if exists (select 1 from versions group by project_id, semver having count(*) > 1) then
+    raise exception 'migration 000013: duplicate (project, semver) across channels — resolve manually before migrating (see spec erratum #3)';
+  end if;
+end $$;
+update versions set env = 'dev';
 alter table versions alter column env set not null;
-alter table versions add column promoted_from uuid references versions(id);
+alter table versions add column promoted_from uuid references versions(id);  -- provenance (Promote → env)
 alter table versions drop constraint versions_project_id_semver_channel_key;
 alter table versions add constraint versions_project_env_semver_key unique (project_id, env, semver);
 alter table versions drop column channel;

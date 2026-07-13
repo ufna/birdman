@@ -123,9 +123,11 @@ func (s *Store) notifyAllocated(nodeID, serverID, matchID string, playersExpecte
 // SoleEnvWithReady returns the single environment of a project that currently
 // has a ready server on a live node in the region — the /v1/allocate env
 // fallback when the request names none (environments v1 §3, I4). The env is the
-// server's own (s.env, invariant I6). ErrConflict when zero or several envs
-// qualify (the request must then name env explicitly → 409). Node liveness
-// mirrors claimSQL so a resolved env is actually claimable.
+// server's own (s.env, invariant I6). ErrNoCapacity when ZERO envs qualify (an
+// empty pool — the caller returns 409 no_capacity, as before the env wave, not
+// env_required); ErrConflict when SEVERAL qualify (the request must then name
+// env explicitly → 409 env_required). Node liveness mirrors claimSQL so a
+// resolved env is actually claimable.
 func (s *Store) SoleEnvWithReady(ctx context.Context, project, region string) (string, error) {
 	rows, err := s.Pool.Query(ctx, `
 		select distinct s.env
@@ -154,7 +156,9 @@ func (s *Store) SoleEnvWithReady(ctx context.Context, project, region string) (s
 	}
 	switch len(envs) {
 	case 0:
-		return "", fmt.Errorf("no environment of project %s has ready servers in %s: %w", project, region, ErrConflict)
+		// Пустой пул, НЕ двусмысленность: вызывающий отдаёт no_capacity (как до
+		// волны env), а не env_required. Различение 0 и >1 живёт здесь.
+		return "", fmt.Errorf("no environment of project %s has ready servers in %s: %w", project, region, ErrNoCapacity)
 	case 1:
 		return envs[0], nil
 	default:

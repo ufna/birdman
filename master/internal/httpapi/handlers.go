@@ -249,12 +249,18 @@ func (s *Server) handleAllocate(w http.ResponseWriter, r *http.Request) {
 	}
 	if env == "" {
 		resolved, err := s.st.SoleEnvWithReady(r.Context(), req.Project, req.Region)
-		if errors.Is(err, store.ErrConflict) {
+		switch {
+		case errors.Is(err, store.ErrNoCapacity):
+			// Env-less allocate над ПУСТЫМ пулом: не двусмысленность, а нехватка
+			// ёмкости — no_capacity как до волны env (резолвить было нечего), а не
+			// env_required. Тот же 409 + метрика + событие, что и на claim-пути ниже.
+			s.writeAllocNoCapacity(w, r, req)
+			return
+		case errors.Is(err, store.ErrConflict):
 			s.m.AllocFailures.WithLabelValues("bad_request").Inc()
 			writeError(w, http.StatusConflict, "env_required", err.Error())
 			return
-		}
-		if err != nil {
+		case err != nil:
 			s.m.AllocFailures.WithLabelValues("internal").Inc()
 			storeError(w, err)
 			return
@@ -272,19 +278,7 @@ func (s *Server) handleAllocate(w http.ResponseWriter, r *http.Request) {
 	alloc, err := s.st.Allocate(r.Context(), req.Project, env, req.Region, req.VersionID, req.MatchID, 0)
 	switch {
 	case errors.Is(err, store.ErrNoCapacity):
-		s.m.AllocFailures.WithLabelValues("no_capacity").Inc()
-		payload := map[string]any{
-			"project": req.Project, "region": req.Region, "reason": "no_capacity",
-		}
-		if req.VersionID != nil {
-			payload["version_id"] = *req.VersionID
-		}
-		mid := req.MatchID
-		if evErr := s.st.InsertEvent(r.Context(), store.EventAllocationFailed,
-			store.EventRef{MatchID: &mid}, payload); evErr != nil {
-			s.log.Error("allocate: event write failed", "err", evErr)
-		}
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "no_capacity"})
+		s.writeAllocNoCapacity(w, r, req)
 		return
 	case errors.Is(err, store.ErrNotFound):
 		s.m.AllocFailures.WithLabelValues("bad_request").Inc()
@@ -297,6 +291,26 @@ func (s *Server) handleAllocate(w http.ResponseWriter, r *http.Request) {
 	}
 	s.m.AllocDuration.Observe(time.Since(started).Seconds())
 	writeJSON(w, http.StatusOK, alloc)
+}
+
+// writeAllocNoCapacity emits the shared no_capacity outcome (409
+// {"error":"no_capacity"} + AllocFailures{no_capacity} + allocation_failed
+// event). Both the empty-pool env fallback (env-less allocate, zero ready) and
+// the claim path that finds no server land here — one place, one contract.
+func (s *Server) writeAllocNoCapacity(w http.ResponseWriter, r *http.Request, req allocateRequest) {
+	s.m.AllocFailures.WithLabelValues("no_capacity").Inc()
+	payload := map[string]any{
+		"project": req.Project, "region": req.Region, "reason": "no_capacity",
+	}
+	if req.VersionID != nil {
+		payload["version_id"] = *req.VersionID
+	}
+	mid := req.MatchID
+	if evErr := s.st.InsertEvent(r.Context(), store.EventAllocationFailed,
+		store.EventRef{MatchID: &mid}, payload); evErr != nil {
+		s.log.Error("allocate: event write failed", "err", evErr)
+	}
+	writeJSON(w, http.StatusConflict, map[string]string{"error": "no_capacity"})
 }
 
 // emptyNotNull keeps JSON arrays as [] instead of null.

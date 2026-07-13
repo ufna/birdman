@@ -242,6 +242,32 @@ func TestAllocateBoundKeyDefaultsEnv(t *testing.T) {
 	}
 }
 
+// Env-less allocate over an EMPTY pool (zero ready servers in the region) is
+// no_capacity, not env_required: SoleEnvWithReady returns ErrNoCapacity for the
+// 0-env case and the handler answers 409 {"error":"no_capacity"} — as before the
+// env wave, when the empty pool reached store.Allocate directly (Fix W1).
+func TestAllocateEnvlessEmptyPoolNoCapacity(t *testing.T) {
+	st := testdb.New(t)
+	testdb.Seed(t, st, "eu", 10) // project game, live dev node — but NO ready servers
+	ts, _, _ := deployServer(t, st)
+	ctx := t.Context()
+
+	_, secret, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{
+		Name: "alloc", Scopes: []string{httpapi.ScopeAllocate},
+	})
+	if err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	globalAlloc := &client{t: t, base: ts.URL, key: secret}
+
+	code, body := globalAlloc.do("POST", "/v1/allocate", map[string]any{
+		"project": "game", "region": "eu", "match_id": uuid.NewString(),
+	})
+	if code != 409 || body["error"] != "no_capacity" {
+		t.Fatalf("env-less allocate over empty pool: want 409 no_capacity, got %d %v", code, body)
+	}
+}
+
 // A bound-CI key POSTing a version without env gets «env is required» (400),
 // not the binding 403 — empty-env validation runs before the binding guard,
 // parity with handleUpsertFleet (§5, w10).

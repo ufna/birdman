@@ -205,6 +205,9 @@ func (s *Store) PatchEnvironment(ctx context.Context, project, name string, p En
 // not empty → ErrConflict listing the offenders (§2, honest I10: used envs are
 // effectively undeletable in v1 since versions rows are never removed).
 // ErrNotFound for an unknown env.
+//
+// dev и prod — платформенно-гарантированные окружения: ensureProject пересевает
+// их при следующем касании проекта; DELETE действует до этого момента.
 func (s *Store) DeleteEnvironment(ctx context.Context, project, name string) error {
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {

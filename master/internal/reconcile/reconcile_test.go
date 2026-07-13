@@ -89,6 +89,11 @@ func TestReconcileCreatesBuffer(t *testing.T) {
 		if start.GetPort() != 0 {
 			t.Fatalf("agent must pick the port, got %d", start.GetPort())
 		}
+		// BIRDMAN_ENV прокинут в дедик из env флота (environments v1): сервер
+		// знает своё окружение. Фикстура живёт в dev.
+		if got := start.GetEnv()["BIRDMAN_ENV"]; got != "dev" {
+			t.Fatalf("StartServer must carry BIRDMAN_ENV=dev, got %q", got)
+		}
 	}
 	if states := f.ServerStates(t); states["creating"] != 3 {
 		t.Fatalf("want 3 creating servers, got %+v", states)

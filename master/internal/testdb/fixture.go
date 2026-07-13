@@ -94,9 +94,9 @@ func (f *Fixture) SetHeartbeatAge(t *testing.T, nodeID string, age time.Duration
 	}
 }
 
-// InsertServer inserts a server row directly (bypassing reconcile). servers.env
-// is derived from the node's env (environments v1, I6): a server runs in its
-// node's environment.
+// InsertServer inserts a server row directly (bypassing reconcile). Тестовый
+// сидинг: env сервера = env ноды фикстуры (в проде env приходит из флота при
+// планировании; I6 — про чтение истории, не сидинг).
 func (f *Fixture) InsertServer(t *testing.T, nodeID, versionID, state string, port int32, age time.Duration) string {
 	t.Helper()
 	var id string
