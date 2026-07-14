@@ -343,6 +343,8 @@ func stampCmdID(m *agentlinkv1.MasterMsg, cmdID string) {
 		c.DrainServer.CmdId = cmdID
 	case *agentlinkv1.MasterMsg_SetRegistries:
 		c.SetRegistries.CmdId = cmdID
+	case *agentlinkv1.MasterMsg_RemoveImage:
+		c.RemoveImage.CmdId = cmdID
 	}
 }
 
@@ -370,6 +372,8 @@ func commandID(m *agentlinkv1.MasterMsg) string {
 		return c.DrainServer.GetCmdId()
 	case *agentlinkv1.MasterMsg_SetRegistries:
 		return c.SetRegistries.GetCmdId()
+	case *agentlinkv1.MasterMsg_RemoveImage:
+		return c.RemoveImage.GetCmdId()
 	}
 	return ""
 }
