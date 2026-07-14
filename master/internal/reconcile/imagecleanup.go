@@ -25,6 +25,14 @@ import (
 // replayed on reconnect; a missed RemoveImage self-heals (agent EnsureImage
 // re-pulls on StartServer) and the watermark GC is the ultimate backstop — so
 // this dispatcher is best-effort and never blocks a disabled transition.
+//
+// Гонка disabled×drain (Фаза D): отправка В МОМЕНТ перехода — быстрый путь, и он
+// НЕ самодостаточен. Переход в disabled случается ровно тогда, когда серверы этой
+// версии ещё дренятся: агент видит образ занятым живым контейнером и скипает
+// команду, а повторить её некому. Поэтому четвёртый источник батчей —
+// сходящийся sweep реконсайлера (Reconciler.sweepImageCleanup, ~60с субтик):
+// VersionsPendingImageCleanup отдаёт disabled-версии, чьи контейнеры уже ушли, и
+// они получают ровно одну догоняющую RemoveImage (маркер image_cleanup_at).
 type ImageCleaner struct {
 	st     *store.Store
 	sender Sender
