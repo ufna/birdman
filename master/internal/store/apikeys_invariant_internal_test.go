@@ -19,7 +19,8 @@ import (
 // осиротевшей привязкой (например, запретить раз-отзыв ключам, чьё окружение
 // удалено, храня причину отзыва).
 func TestRevocationIsIrreversible(t *testing.T) {
-	// Сбрасывать revoked_at в null нельзя нигде в проде. Ищем именно мутацию
+	// Скоуп — пакет store (весь SQL по api_keys живёт здесь; хендлеры ходят
+	// только через его методы). Ищем именно мутацию
 	// (`update … set revoked_at = null`), а не упоминание в комментарии/предикате
 	// (`where revoked_at is null` — легитимный фильтр живых ключей).
 	unrevoke := regexp.MustCompile(`(?is)update\s+api_keys\b[^;'`+"`"+`]*?set[^;'`+"`"+`]*?revoked_at\s*=\s*(null|default)`)

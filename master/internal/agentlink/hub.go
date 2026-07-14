@@ -284,16 +284,15 @@ func (h *Hub) SessionAuthCounts() (mtls, token int) {
 }
 
 // HasSession reports whether the node currently holds a LIVE session — the
-// read-only liveness probe behind the image-cleanup sweep's marker rule
-// (reconcile.SessionChecker, imagecleanup.go). A command Send'ed to a node with
-// no session is merely PARKED in the in-memory pending queue: it is replayed on
-// reconnect, but the queue does NOT survive a master restart. So the sweep must
-// not stamp image_cleanup_at (its «ровно одна догоняющая команда» marker) for a
-// version whose RemoveImage went nowhere — otherwise the command is lost and the
-// image survives to the watermark GC. Taken under the same mutex as the queue
-// mutations, so the answer is consistent with what a Send at that instant would
-// do (it is a snapshot, not a lease: the session may die right after — see the
-// residual-window note in reconcile.sweepImageCleanup).
+// read-only liveness probe of the image-cleanup sweep (reconcile.SessionChecker,
+// imagecleanup.go). Маркер `image_cleanup_at` ставится НЕ по факту отправки, а по
+// отчётам агента (ImageReport removed|absent от всех целевых нод), так что потеря
+// команды маркер не подделает. HasSession нужен для другого: команду офлайн-ноде
+// просто НЕ отправляем — иначе каждый 60с-субтик парковал бы в её in-memory
+// очередь ещё одну RemoveImage, и очередь долго-лежащей ноды пухла бы без нужды.
+// Читается под тем же мьютексом, что и мутации очередей (снимок, не аренда:
+// сессия может умереть сразу после — тогда отчёта не будет, маркера не будет,
+// следующий субтик переотправит).
 func (h *Hub) HasSession(nodeID string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
