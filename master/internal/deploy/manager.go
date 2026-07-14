@@ -483,7 +483,9 @@ func (m *Manager) PendingNodes(versionID string) int {
 func (m *Manager) TryAutoDeploy(ctx context.Context, project, env string) AutoDeployOutcome {
 	e, err := m.st.GetEnvironment(ctx, project, env)
 	if err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
+		// Нет такого env (ErrBadEnv) — штатный no-op, не повод шуметь в лог;
+		// всё остальное — реальный сбой стора.
+		if !errors.Is(err, store.ErrBadEnv) {
 			m.log.Error("auto-deploy: get environment failed", "project", project, "env", env, "err", err)
 		}
 		return AutoDeployNoop

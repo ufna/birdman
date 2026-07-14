@@ -2,12 +2,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import * as Tooltip from '@radix-ui/react-tooltip';
+import type { Environment } from '../lib/api';
 import { I18nProvider } from '../lib/i18n';
+import { EnvContext } from '../lib/env';
 import { Stats } from '../screens/Stats';
 import { Cost } from '../screens/Cost';
 
-// Скелетоны Stats/Cost: держат раскладку на ПЕРВОЙ загрузке и на СМЕНЕ ПЕРИОДА —
-// контент не «прыгает». Скелетон-зона помечена role=status (aria-busy).
+// Скелетоны Stats/Cost: держат раскладку на ПЕРВОЙ загрузке, на СМЕНЕ ПЕРИОДА и
+// на СМЕНЕ ОКРУЖЕНИЯ — контент не «прыгает» и не показывает данные прежнего env
+// как готовые. Скелетон-зона помечена role=status (aria-busy).
 
 const renderEn = (ui: ReactElement) =>
   render(
@@ -121,5 +124,73 @@ describe('Cost — скелетон первой загрузки и смены 
     expect(screen.queryByRole('status')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: '30' }));
     expect(await screen.findByRole('status')).toBeTruthy();
+  });
+});
+
+// --- смена ОКРУЖЕНИЯ → скелетон (follow-up p3) ---
+// Ответ /v1/stats/* не несёт env, поэтому «готовность» проверяет и период, и
+// запрошенный env: иначе на переключении чипа мгновение видны цифры ПРЕЖНЕГО
+// окружения как готовые.
+
+const dev: Environment = { project: 'game', name: 'dev', production: false, auto_deploy: true, retention_keep: 20, created_at: '2026-07-01T00:00:00Z' };
+const prod: Environment = { project: 'game', name: 'prod', production: true, auto_deploy: false, retention_keep: 0, created_at: '2026-07-01T00:00:00Z' };
+
+const envValue = (selected: string | null) => ({
+  environments: [dev, prod],
+  project: 'game',
+  selected,
+  setSelected: () => {},
+  loading: false,
+  reload: () => {},
+});
+
+const withEnv = (selected: string | null, ui: ReactElement) => (
+  <I18nProvider initialLang="en">
+    <Tooltip.Provider>
+      <EnvContext.Provider value={envValue(selected)}>{ui}</EnvContext.Provider>
+    </Tooltip.Provider>
+  </I18nProvider>
+);
+
+/** fetch: запрос агрегата БЕЗ ?env= резолвится, с ?env=… — «висит» (наблюдаем
+ *  скелетон нового окружения, а не готовые данные прежнего). */
+function envStagedFetch(dataPath: string, make: (days: number) => unknown) {
+  return vi.fn((url: string) => {
+    const u = String(url);
+    if (u.includes('/v1/metrics/')) return Promise.resolve(json({ status: 'success', data: { result: [] } }));
+    if (u.includes(dataPath)) {
+      const params = new URL(u, 'http://x').searchParams;
+      if (params.get('env') !== null) return new Promise(() => {}); // данные нового env ещё в пути
+      return Promise.resolve(json(make(Number(params.get('days')))));
+    }
+    return Promise.resolve(json({}));
+  });
+}
+
+describe('Cost — скелетон при смене окружения', () => {
+  it('смена env → скелетон, данные прежнего env не показываются', async () => {
+    vi.stubGlobal('fetch', envStagedFetch('/v1/stats/cost', mkCost));
+    const { rerender } = render(withEnv(null, <Cost />));
+    expect(await screen.findByText('Total slot-hours')).toBeTruthy();
+    expect(screen.queryByRole('status')).toBeNull();
+
+    rerender(withEnv('prod', <Cost />));
+    expect(await screen.findByRole('status')).toBeTruthy();
+    expect(screen.queryByText('Total slot-hours')).toBeNull();
+  });
+});
+
+describe('Stats — скелетон при смене окружения', () => {
+  it('смена env в продуктовом режиме → скелетон, пока не пришли данные нового env', async () => {
+    vi.stubGlobal('fetch', envStagedFetch('/v1/stats/overview', mkOverview));
+    const { rerender } = render(withEnv(null, <Stats />));
+    // Переходим в продуктовый режим (7д) — там и живёт /v1/stats/overview-тело.
+    fireEvent.click(screen.getByRole('button', { name: '7 d' }));
+    expect(await screen.findByText('Peak CCU')).toBeTruthy();
+    expect(screen.queryByRole('status')).toBeNull();
+
+    rerender(withEnv('prod', <Stats />));
+    expect(await screen.findByRole('status')).toBeTruthy();
+    expect(screen.queryByText('Peak CCU')).toBeNull();
   });
 });

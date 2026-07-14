@@ -18,10 +18,14 @@ import (
 
 func TestMain(m *testing.M) { os.Exit(testdb.Run(m)) }
 
-// fakeSender is the in-memory AgentLink transport used instead of gRPC.
+// fakeSender is the in-memory AgentLink transport used instead of gRPC. По
+// умолчанию все ноды считаются ОНЛАЙН (HasSession → true): так вёл себя хаб в
+// тестах до появления SessionChecker. offline помечает ноды без живой сессии —
+// их команды в проде лишь паркуются в in-memory очереди хаба (I-1).
 type fakeSender struct {
-	mu   sync.Mutex
-	cmds []fakeCmd
+	mu      sync.Mutex
+	cmds    []fakeCmd
+	offline map[string]bool
 }
 
 type fakeCmd struct {
@@ -34,6 +38,25 @@ func (f *fakeSender) Send(nodeID string, msg *agentlinkv1.MasterMsg) string {
 	defer f.mu.Unlock()
 	f.cmds = append(f.cmds, fakeCmd{NodeID: nodeID, Msg: msg})
 	return uuid.NewString()
+}
+
+// HasSession implements reconcile.SessionChecker.
+func (f *fakeSender) HasSession(nodeID string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return !f.offline[nodeID]
+}
+
+// goOffline marks a node as having no live agentlink session.
+func (f *fakeSender) goOffline(nodeIDs ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.offline == nil {
+		f.offline = map[string]bool{}
+	}
+	for _, id := range nodeIDs {
+		f.offline[id] = true
+	}
 }
 
 func (f *fakeSender) take() []fakeCmd {

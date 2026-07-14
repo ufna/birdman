@@ -347,11 +347,14 @@ func TestPromoteVersion(t *testing.T) {
 		t.Fatalf("same-env conflict must say «already in», got %q", err.Error())
 	}
 
-	// Несуществующий to_env → понятная ошибка «no such environment» (→400 в API),
-	// НЕ ErrConflict и НЕ ErrNotFound (паритет CreateVersion).
+	// Несуществующий to_env → ErrBadEnv (→400 в API, v3), НЕ ErrConflict и НЕ
+	// ErrNotFound (паритет CreateVersion).
 	_, err = st.PromoteVersion(ctx, f.VersionID, "staging")
-	if err == nil || errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("unknown to_env: want a plain «no such environment» error, got %v", err)
+	if !errors.Is(err, store.ErrBadEnv) {
+		t.Fatalf("unknown to_env: want ErrBadEnv, got %v", err)
+	}
+	if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("unknown to_env: bad env — это 400, а не 404/409: %v", err)
 	}
 	if !strings.Contains(err.Error(), "no such environment") {
 		t.Fatalf("unknown to_env error must say «no such environment», got %q", err.Error())

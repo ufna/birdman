@@ -197,6 +197,7 @@ function ProjectDeploys({
           mayDeploy ? (
             <VersionActions
               version={row.original}
+              envsKnown={environments.length > 0}
               prodEnvs={prodEnvs}
               isProdEnv={isProdEnv}
               onDone={reload}
@@ -204,7 +205,7 @@ function ProjectDeploys({
           ) : null,
       },
     ],
-    [t, fmt, liveByVersion, mayDeploy, prodEnvs, isProdEnv, versionById, reload],
+    [t, fmt, liveByVersion, mayDeploy, environments, prodEnvs, isProdEnv, versionById, reload],
   );
 
   return (
@@ -280,11 +281,15 @@ function Provenance({ version, versionById }: { version: VersionInfo; versionByI
  *  non-production env, если есть production-цель). prepulling → «warming». */
 function VersionActions({
   version,
+  envsKnown,
   prodEnvs,
   isProdEnv,
   onDone,
 }: {
   version: VersionInfo;
+  /** Список окружений загружен и не пуст. Пустой/недоступный список делает
+   *  isProdEnv() слепым (всё «не production») — Promote в этом случае гейтим. */
+  envsKnown: boolean;
   prodEnvs: Environment[];
   isProdEnv: (env: string) => boolean;
   onDone: () => void;
@@ -295,13 +300,21 @@ function VersionActions({
     return <span className="font-mono text-xs text-warn">{t('deploys.warming')}</span>;
   }
   const canDeployState = version.state === 'registered' || version.state === 'deprecated';
-  // Промоут доступен у deployable-состояний в non-production env (не для disabled).
+  // Цели промоута: production-окружения, КРОМЕ окружения самой версии (промоут
+  // «в себя» бессмыслен; страховка на случай рассинхрона флага production).
+  const targets = prodEnvs.filter((e) => e.name !== version.env);
+  // Промоут доступен у deployable-состояний в non-production env (не для
+  // disabled) — и только когда список окружений реально известен (follow-up p5:
+  // при пустом/недоступном списке isProdEnv() врал «не production» даже для
+  // prod-версий, и кнопка открывала диалог без целей).
   const canPromote =
-    !isProdEnv(version.env) && (version.state === 'registered' || version.state === 'active' || version.state === 'deprecated');
+    envsKnown &&
+    !isProdEnv(version.env) &&
+    (version.state === 'registered' || version.state === 'active' || version.state === 'deprecated');
   if (!canDeployState && !canPromote) return null;
   return (
     <div className="flex justify-end gap-2">
-      {canPromote && <PromoteDialog version={version} prodEnvs={prodEnvs} onDone={onDone} />}
+      {canPromote && <PromoteDialog version={version} prodEnvs={targets} onDone={onDone} />}
       {canDeployState && (
         <ConfirmButton
           label={t('deploys.deploy')}

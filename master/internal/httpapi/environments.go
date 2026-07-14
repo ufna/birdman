@@ -118,9 +118,10 @@ func (s *Server) handleDeleteEnvironment(w http.ResponseWriter, r *http.Request)
 }
 
 // handleSetNodeEnv is PATCH /v1/nodes/{id} {env} (admin): move a node to another
-// environment. 200 with the updated node; 400 for a non-uuid id or a missing
-// env; 404 for an unknown node/env; 409 when the node is dead or carries live
-// servers (drain it first). Emits node_env_changed.
+// environment. 200 with the updated node; 400 for a non-uuid id, a missing env or
+// an unknown env (ErrBadEnv — окружение здесь ССЫЛКА в теле, опечатка в ней это
+// плохой ввод, v3); 404 for an unknown node (адресуемый ресурс); 409 when the node
+// is dead or carries live servers (drain it first). Emits node_env_changed.
 func (s *Server) handleSetNodeEnv(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if _, err := uuid.Parse(id); err != nil {

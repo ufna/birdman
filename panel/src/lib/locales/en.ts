@@ -688,6 +688,26 @@ export const en = {
   'env.all': 'All',
   'env.productionTitle': 'production environment',
 
+  // Environment list unavailable: the filter degrades to «All» and says so.
+  'env.unavailable': 'Environments unavailable',
+  'env.unavailable.hint':
+    "Couldn't load the environment list — the env filter is off and every screen shows all data. Click to retry.",
+  'env.unavailable.multiProject':
+    'The panel works with a single project (v1) and master has more than one, so the environment list is unavailable. The env filter is off — every screen shows all data.',
+
+  // Fleet: move a node to another environment (PATCH /v1/nodes/{id}).
+  'fleet.moveEnv': 'Move to env…',
+  'fleet.moveEnv.title': 'Move {host} to another environment',
+  'fleet.moveEnv.desc':
+    'The node will serve versions of the target environment. It must carry no live dedics — drain it first.',
+  'fleet.moveEnv.target': 'Target environment',
+  'fleet.moveEnv.current': 'current: {env}',
+  'fleet.moveEnv.confirm': 'Move',
+  'fleet.moveEnv.toast': '{host} moved to {env}',
+  'fleet.moveEnv.err.conflict':
+    'The node still carries live dedics — drain it first (Drain), then move it once the dedics are gone.',
+  'fleet.moveEnv.err.generic': "Couldn't move the node.",
+
   // Deploys: env badge, promote, provenance, hide-disabled, env settings card.
   'deploys.hideDisabled': 'Hide disabled',
   'deploys.promote': 'Promote',

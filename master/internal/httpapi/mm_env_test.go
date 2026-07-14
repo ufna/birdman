@@ -313,6 +313,31 @@ func TestAllocateEnvlessEmptyPoolNoCapacity(t *testing.T) {
 // A bound-CI key POSTing a version without env gets «env is required» (400),
 // not the binding 403 — empty-env validation runs before the binding guard,
 // parity with handleUpsertFleet (§5, w10).
+// M1 (ревью follow-up): непривязанный ключ без поля project обязан получить 400
+// «project is required», а не 500 — клиентский ввод не должен уезжать в internal
+// через плоскую ошибку ensureProject (v3 сделал не-sentinel → 500).
+func TestCreateVersionProjectRequired(t *testing.T) {
+	st := testdb.New(t)
+	testdb.Seed(t, st, "eu", 10)
+	ts, _, _ := deployServer(t, st)
+	ctx := t.Context()
+
+	_, secret, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{
+		Name: "global-deploy", Scopes: []string{httpapi.ScopeDeploy},
+	})
+	if err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	c := &client{t: t, base: ts.URL, key: secret}
+
+	code, body := c.do("POST", "/v1/versions", map[string]any{
+		"semver": "1.2.3", "image_ref": "ghcr.io/x/y:1.2.3", "env": "dev",
+	})
+	if code != 400 || body["error"] != "bad_request" {
+		t.Fatalf("непривязанный ключ без project: got %d %v, want 400 bad_request", code, body)
+	}
+}
+
 func TestCreateVersionEnvRequiredBeforeBinding(t *testing.T) {
 	st := testdb.New(t)
 	testdb.Seed(t, st, "eu", 10) // project game with seeded dev+prod

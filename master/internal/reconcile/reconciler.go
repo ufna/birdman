@@ -17,6 +17,21 @@ import (
 // commands to offline nodes are queued and replayed on reconnect.
 type Sender interface {
 	Send(nodeID string, msg *agentlinkv1.MasterMsg) (cmdID string)
+	SessionChecker
+}
+
+// SessionChecker reports whether a node holds a LIVE agentlink session right now
+// (agentlink.Hub.HasSession). Send NEVER fails: a command for an offline node is
+// parked in the hub's IN-MEMORY pending queue, which a master restart wipes — so
+// «sent» alone is not enough for the image-cleanup sweep, whose image_cleanup_at
+// marker means «догоняющая RemoveImage отправлена, больше не повторяем». The
+// sweep therefore stamps the marker only for versions every target node of which
+// had a live session at Send time (imagecleanup.go); the rest are re-sent on the
+// next subtick (RemoveImage is idempotent — an agent no-ops a missing image).
+// Part of Sender so the wiring is compile-time enforced: the only production
+// implementation is the hub itself.
+type SessionChecker interface {
+	HasSession(nodeID string) bool
 }
 
 // OrphanSweeper re-arms deploy jobs stuck `prepulling` with no in-memory job
@@ -188,6 +203,20 @@ func (r *Reconciler) RunOnce(ctx context.Context) error {
 //
 // Ошибка диспатча оставляет маркер пустым — следующий субтик повторит (доставка и
 // так at-least-once, а RemoveImage идемпотентна: агент no-op'ит отсутствующий образ).
+//
+// Маркер переживает in-memory очередь хаба (I-1). Send НИКОГДА не падает: команда
+// офлайн-ноде просто паркуется в pending-очереди хаба, а она ЖИВЁТ В ПАМЯТИ и
+// теряется при рестарте мастера. Штамповать маркер за такую отправку нельзя —
+// команда исчезла бы вместе с очередью, а версия уже выпала бы из выборки, и образ
+// дожил бы до watermark-GC. Поэтому маркер ставится ТОЛЬКО тем версиям, у которых
+// в момент отправки была живая сессия у КАЖДОЙ целевой ноды окружения
+// (ImageCleaner.CleanupImagesDelivered); остальные маркера не получают и уедут
+// снова на следующем субтике (дубль идемпотентен).
+//
+// Остаточное окно: рестарт мастера МЕЖДУ Send живой ноде и её Ack — команда всё
+// ещё только в памяти, а маркер уже проставлен. Закрывается лишь персистентной
+// очередью команд (вне этой итерации); подстраховка та же, что и раньше —
+// watermark-GC агента и re-pull EnsureImage на StartServer.
 func (r *Reconciler) sweepImageCleanup(ctx context.Context) {
 	pending, err := r.st.VersionsPendingImageCleanup(ctx)
 	if err != nil {
@@ -197,20 +226,23 @@ func (r *Reconciler) sweepImageCleanup(ctx context.Context) {
 	if len(pending) == 0 {
 		return
 	}
-	if err := r.cleaner.CleanupImages(ctx, pending); err != nil {
+	delivered, err := r.cleaner.CleanupImagesDelivered(ctx, pending)
+	if err != nil {
 		r.log.Error("reconcile: RemoveImage dispatch (sweep) failed", "err", err)
 		return // маркер не ставим — догоним на следующем субтике
 	}
-	ids := make([]string, 0, len(pending))
-	for _, d := range pending {
-		ids = append(ids, d.VersionID)
+	if len(delivered) < len(pending) {
+		// Часть версий ушла в очередь офлайн-нод (или была придержана shared-ref
+		// гардом) — маркера им не даём, следующий проход повторит отправку.
+		r.log.Info("reconcile: image cleanup sweep — часть версий без живых сессий целевых нод, маркер отложен",
+			"versions", len(pending), "delivered", len(delivered))
 	}
-	if err := r.st.MarkImageCleanupSent(ctx, ids); err != nil {
+	if err := r.st.MarkImageCleanupSent(ctx, delivered); err != nil {
 		r.log.Error("reconcile: image cleanup marker failed", "err", err)
 		return
 	}
 	r.log.Info("reconcile: image cleanup sweep dispatched RemoveImage for drained versions",
-		"versions", len(pending))
+		"versions", len(pending), "marked", len(delivered))
 }
 
 func (r *Reconciler) reconcileFleet(ctx context.Context, f store.FleetConfig) error {

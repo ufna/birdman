@@ -277,3 +277,93 @@ func TestImageCleanupSweepConvergesAfterDrain(t *testing.T) {
 		t.Fatalf("sweep обязан сработать ровно раз (маркер image_cleanup_at), got %v", got)
 	}
 }
+
+// imageCleanupMarked сообщает, проставлен ли маркер image_cleanup_at у версии.
+func imageCleanupMarked(t *testing.T, st *store.Store, versionID string) bool {
+	t.Helper()
+	var marked bool
+	if err := st.Pool.QueryRow(context.Background(),
+		`select image_cleanup_at is not null from versions where id = $1::uuid`, versionID).Scan(&marked); err != nil {
+		t.Fatalf("read image_cleanup_at: %v", err)
+	}
+	return marked
+}
+
+// TestImageCleanupSweepMarkerNeedsLiveSessions (I-1): маркер image_cleanup_at
+// означает «догоняющая RemoveImage отправлена, больше не повторяем» — и потому
+// НЕ ИМЕЕТ ПРАВА появляться, когда команда всего лишь припаркована в in-memory
+// очереди хаба. Send офлайн-ноде не падает, но очередь живёт в памяти мастера:
+// рестарт (или просто нода, которая уже не вернётся тем же процессом) — и команда
+// исчезла, а версия из выборки уже выпала → образ дожил бы до watermark-GC.
+// Правило: маркер ставим, только если В МОМЕНТ ОТПРАВКИ у КАЖДОЙ целевой ноды env
+// была живая сессия. Иначе следующий 60с-субтик шлёт снова (дубль идемпотентен —
+// агент no-op'ит отсутствующий образ).
+func TestImageCleanupSweepMarkerNeedsLiveSessions(t *testing.T) {
+	st := testdb.New(t)
+	ctx := context.Background()
+	f := testdb.Seed(t, st, "eu", 10) // node1 в dev — единственная целевая нода
+	vid := f.AddVersion(t, "2.0.0", "dev")
+	ref := "ghcr.io/example/game-server:2.0.0"
+	disableRaw(t, st, vid) // серверов у версии нет → сразу кандидат sweep'а
+
+	// Пасс 1: нода ОФЛАЙН. Команда всё равно уходит (ляжет в pending хаба), но
+	// маркер ставить нельзя.
+	r1, sender1 := newReconciler(st)
+	sender1.goOffline(f.NodeID)
+	if err := r1.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := removeImagesTo(sender1.take()); got[f.NodeID] != ref {
+		t.Fatalf("RemoveImage обязана уйти и офлайн-ноде (очередь хаба доставит на реконнекте), got %v", got)
+	}
+	if imageCleanupMarked(t, st, vid) {
+		t.Fatal("у целевой ноды не было живой сессии — маркер image_cleanup_at ставить нельзя: команда живёт только в памяти хаба")
+	}
+
+	// Пасс 2: нода снова онлайн. Версия без маркера осталась в выборке — sweep шлёт
+	// повторно и ТЕПЕРЬ штампует маркер.
+	r2, sender2 := newReconciler(st)
+	if err := r2.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := removeImagesTo(sender2.take()); got[f.NodeID] != ref {
+		t.Fatalf("версия без маркера обязана уехать снова следующим субтиком, got %v", got)
+	}
+	if !imageCleanupMarked(t, st, vid) {
+		t.Fatal("все целевые ноды живы — маркер обязан быть проставлен")
+	}
+
+	// Пасс 3: маркер стоит → повторов больше нет.
+	r3, sender3 := newReconciler(st)
+	if err := r3.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := removeImagesTo(sender3.take()); len(got) != 0 {
+		t.Fatalf("маркер проставлен — RemoveImage не спамим каждый субтик, got %v", got)
+	}
+}
+
+// TestImageCleanupSweepMarkerPartialFleet (I-1, продолжение): в окружении две ноды,
+// живая сессия только у одной. Команда уходит обеим, но версия НЕ считается
+// доставленной — маркера нет, следующий проход повторит. Дубль безопасен: агент
+// живой ноды no-op'ит уже удалённый образ.
+func TestImageCleanupSweepMarkerPartialFleet(t *testing.T) {
+	st := testdb.New(t)
+	ctx := context.Background()
+	f := testdb.Seed(t, st, "eu", 10)
+	node2 := f.AddNode(t, "node-2", "203.0.113.11", 10)
+	vid := f.AddVersion(t, "2.0.0", "dev")
+	disableRaw(t, st, vid)
+
+	r, sender := newReconciler(st)
+	sender.goOffline(node2) // node1 онлайн, node2 — нет
+	if err := r.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := removeImagesTo(sender.take()); len(got) != 2 {
+		t.Fatalf("RemoveImage обязана уйти ОБЕИМ нодам окружения, got %v", got)
+	}
+	if imageCleanupMarked(t, st, vid) {
+		t.Fatal("хоть одна целевая нода без живой сессии — маркер ставить нельзя")
+	}
+}

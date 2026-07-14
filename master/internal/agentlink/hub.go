@@ -283,6 +283,24 @@ func (h *Hub) SessionAuthCounts() (mtls, token int) {
 	return mtls, token
 }
 
+// HasSession reports whether the node currently holds a LIVE session — the
+// read-only liveness probe behind the image-cleanup sweep's marker rule
+// (reconcile.SessionChecker, imagecleanup.go). A command Send'ed to a node with
+// no session is merely PARKED in the in-memory pending queue: it is replayed on
+// reconnect, but the queue does NOT survive a master restart. So the sweep must
+// not stamp image_cleanup_at (its «ровно одна догоняющая команда» marker) for a
+// version whose RemoveImage went nowhere — otherwise the command is lost and the
+// image survives to the watermark GC. Taken under the same mutex as the queue
+// mutations, so the answer is consistent with what a Send at that instant would
+// do (it is a snapshot, not a lease: the session may die right after — see the
+// residual-window note in reconcile.sweepImageCleanup).
+func (h *Hub) HasSession(nodeID string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	q, ok := h.queues[nodeID]
+	return ok && q.sess != nil
+}
+
 // ConnectedNodes returns the ids of nodes with a live session — used by
 // Service.BroadcastRegistries to fan a fresh snapshot out to every agent
 // currently online (design doc §2).

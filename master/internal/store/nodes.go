@@ -16,23 +16,36 @@ var ErrBadToken = errors.New("bad_token")
 // ensureProject returns the project id for slug, creating the project on
 // first reference (v0 clarification in docs/specs/master.md §6: no dedicated
 // projects endpoint yet).
+//
+// Сев окружений — ТОЛЬКО при фактическом INSERT проекта (seed-on-insert, w2).
+// Раньше dev+prod сеялись при КАЖДОМ касании проекта (`on conflict do nothing`
+// в безусловном insert'е), поэтому удалённое оператором окружение dev/prod молча
+// воскресало на первом же CreateVersion/UpsertFleet/CreateNode — DELETE
+// /v1/environments выглядел работающим, а окружение возвращалось из ниоткуда.
+// Детект вставки — `xmax = 0` в RETURNING: у строки, вставленной ЭТИМ
+// оператором, xmax нулевой; у обновлённой веткой `do update` — нет.
 func ensureProject(ctx context.Context, tx pgx.Tx, slug string) (string, error) {
 	if slug == "" {
 		return "", fmt.Errorf("project slug is required")
 	}
 	var id string
+	var inserted bool
 	err := tx.QueryRow(ctx, `
 		insert into projects (slug) values ($1)
 		on conflict (slug) do update set slug = excluded.slug
-		returning id::text`, slug).Scan(&id)
+		returning id::text, (xmax = 0) as inserted`, slug).Scan(&id, &inserted)
 	if err != nil {
 		return "", err
 	}
-	// Environments v1: каждый проект получает dev+prod при первом упоминании
-	// (design §1). Это load-bearing — nodes/versions/fleets ссылаются на
-	// environments по FK (project_id, env), а новая нода/версия/флот входят как
-	// dev, поэтому строка environments dev обязана существовать в этой же tx до
-	// их вставки. dev: auto_deploy, keep=20; prod: production, keep=∞.
+	if !inserted {
+		return id, nil // проект уже существовал — его окружения не наши, не трогаем
+	}
+	// Environments v1: НОВЫЙ проект получает dev+prod (design §1). Это load-bearing —
+	// nodes/versions/fleets ссылаются на environments по FK (project_id, env), а новая
+	// нода/версия/флот входят как dev, поэтому строка environments dev обязана
+	// существовать в этой же tx до их вставки. dev: auto_deploy, keep=20; prod:
+	// production, keep=∞. `do nothing` оставлен как страховка от гонки двух
+	// параллельных первых касаний проекта.
 	if _, err := tx.Exec(ctx, `
 		insert into environments (project_id, name, production, auto_deploy, retention_keep)
 		values ($1::uuid, 'dev', false, true, 20), ($1::uuid, 'prod', true, false, 0)
@@ -49,10 +62,17 @@ type CreateNodeParams struct {
 	PublicIP      string
 	CapacitySlots int32
 	Labels        map[string]any
+	Env           string // окружение регистрации; пусто → "dev" (дефолт колонки)
 }
 
 // CreateNode registers a node ahead of agent connection and returns the
 // bootstrap node_token — shown exactly once (docs/specs/protocol.md §Auth).
+//
+// Env необязателен и по умолчанию "dev" — но существование окружения проверяется
+// ЯВНО (w2). После seed-on-insert в ensureProject окружение dev у старого проекта
+// может быть удалено оператором, и «нода входит как dev» перестало быть
+// самоочевидным: без проверки insert падал бы сырым 23503 (nodes_env_fk → 500).
+// Теперь это внятный ErrBadEnv → 400 «no such environment <project>/<env>».
 func (s *Store) CreateNode(ctx context.Context, p CreateNodeParams) (Node, string, error) {
 	if p.Region == "" || p.Hostname == "" || p.PublicIP == "" {
 		return Node{}, "", fmt.Errorf("region, hostname and public_ip are required")
@@ -86,15 +106,36 @@ func (s *Store) CreateNode(ctx context.Context, p CreateNodeParams) (Node, strin
 	if err != nil {
 		return Node{}, "", err
 	}
+	env := p.Env
+	if env == "" {
+		env = "dev"
+	}
+	// Env обязан существовать у проекта. Проверка внутри tx: для НОВОГО проекта
+	// ensureProject засеял dev/prod прямо сейчас (ещё до коммита) — тот же паттерн,
+	// что в CreateVersion/UpsertFleet.
+	var envExists bool
+	if err := tx.QueryRow(ctx,
+		`select exists(select 1 from environments where project_id = $1::uuid and name = $2)`,
+		projectID, env).Scan(&envExists); err != nil {
+		return Node{}, "", err
+	}
+	if !envExists {
+		return Node{}, "", badEnvErr(p.Project, env)
+	}
 	var n Node
 	err = tx.QueryRow(ctx, `
-		insert into nodes (project_id, region, hostname, public_ip, capacity_slots, labels, token_hash)
-		values ($1::uuid, $2, $3, $4::inet, $5, $6::jsonb, $7)
+		insert into nodes (project_id, region, hostname, public_ip, capacity_slots, labels, token_hash, env)
+		values ($1::uuid, $2, $3, $4::inet, $5, $6::jsonb, $7, $8)
 		returning id::text, project_id::text, region, env, hostname, host(public_ip),
 		          capacity_slots, agent_version, state, created_at`,
-		projectID, p.Region, p.Hostname, p.PublicIP, p.CapacitySlots, string(labels), string(hash)).
+		projectID, p.Region, p.Hostname, p.PublicIP, p.CapacitySlots, string(labels), string(hash), env).
 		Scan(&n.ID, &n.ProjectID, &n.Region, &n.Env, &n.Hostname, &n.PublicIP,
 			&n.CapacitySlots, &n.AgentVersion, &n.State, &n.CreatedAt)
+	// Гонка с DELETE env между in-tx пре-чеком и insert'ом: nodes_env_fk (23503) →
+	// внятный ErrBadEnv (400), а не сырой 500 (паритет CreateVersion, w5).
+	if mapped := mapEnvFKViolation(err, p.Project, env); mapped != nil {
+		return Node{}, "", mapped
+	}
 	if err != nil {
 		return Node{}, "", err
 	}
@@ -249,7 +290,9 @@ func (s *Store) SetNodeEnv(ctx context.Context, nodeID, env string) (Node, error
 	}
 
 	// Target env must exist for this project (nodes_env_fk would also reject the
-	// write, but this gives a clean 404 instead of a 500).
+	// write, but this gives a clean 400 instead of a 500). ErrBadEnv, не ErrNotFound
+	// (v3): целевой env — это ССЫЛКА в теле PATCH'а, опечатка в ней — плохой ввод
+	// (400), тогда как несуществующая НОДА (адресуемый ресурс) остаётся 404 выше.
 	var envExists bool
 	if err := tx.QueryRow(ctx,
 		`select exists(select 1 from environments where project_id = $1::uuid and name = $2)`,
@@ -257,7 +300,7 @@ func (s *Store) SetNodeEnv(ctx context.Context, nodeID, env string) (Node, error
 		return Node{}, err
 	}
 	if !envExists {
-		return Node{}, fmt.Errorf("environment %s: %w", env, ErrNotFound)
+		return Node{}, badEnvErr(project, env)
 	}
 
 	// A node with live servers cannot be moved — its running dedics belong to
@@ -277,8 +320,8 @@ func (s *Store) SetNodeEnv(ctx context.Context, nodeID, env string) (Node, error
 	if env != cur {
 		if _, err := tx.Exec(ctx, `update nodes set env = $2 where id = $1::uuid`, nodeID, env); err != nil {
 			// Гонка с DELETE целевого env между in-tx пре-чеком и UPDATE'ом:
-			// nodes_env_fk (23503) → внятный «no such environment» (ErrNotFound →
-			// 404), а не сырой 500 (w5, паритет CreateVersion/PromoteVersion).
+			// nodes_env_fk (23503) → внятный «no such environment» (ErrBadEnv →
+			// 400), а не сырой 500 (w5, паритет CreateVersion/PromoteVersion).
 			if mapped := mapEnvFKViolation(err, project, env); mapped != nil {
 				return Node{}, mapped
 			}

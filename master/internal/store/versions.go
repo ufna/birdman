@@ -13,6 +13,11 @@ import (
 // ErrConflict is returned on unique-constraint conflicts (duplicate version).
 var ErrConflict = errors.New("conflict")
 
+// imageCleanupSweepBatch — потолок одного прохода VersionsPendingImageCleanup
+// (M-2). Держит взрыв кандидатов вне in-memory очередей хаба; остаток забирает
+// следующий 60с-субтик.
+const imageCleanupSweepBatch = 200
+
 // CreatedID orders versions for the auto-deploy «только вперёд» rule
 // (environments v1 §4): primary key created_at, tie-broken by id — a CI burst
 // can stamp several versions in the same second. The zero value (empty ID)
@@ -66,7 +71,7 @@ func (s *Store) CreateVersion(ctx context.Context, p CreateVersionParams) (Versi
 		return Version{}, err
 	}
 	if !envExists {
-		return Version{}, fmt.Errorf("no such environment %s/%s", p.Project, p.Env)
+		return Version{}, badEnvErr(p.Project, p.Env)
 	}
 	var v Version
 	err = tx.QueryRow(ctx, `
@@ -173,7 +178,7 @@ func (s *Store) PromoteVersion(ctx context.Context, versionID, toEnv string) (Ve
 		return Version{}, err
 	}
 	if !envExists {
-		return Version{}, fmt.Errorf("no such environment %s/%s", src.Project, toEnv)
+		return Version{}, badEnvErr(src.Project, toEnv)
 	}
 
 	// Идемпотентность (I7): уже есть версия (project, toEnv, semver)? Реюз строго
@@ -219,11 +224,10 @@ func (s *Store) PromoteVersion(ctx context.Context, versionID, toEnv string) (Ve
 		return Version{}, fmt.Errorf("version %s/%s (%s): %w", src.Project, src.Semver, toEnv, ErrConflict)
 	}
 	// Гонка с DELETE целевого env между in-tx пре-чеком и insert'ом: versions_env_fk
-	// (23503). Детектим тем же mapEnvFKViolation, но возвращаем ПЛОСКУЮ (не-ErrNotFound)
-	// «no such environment» — точь-в-точь как пре-чек выше: promoteError отдаёт её как
-	// 400 (опечатка/гонка to_env — ввод клиента), а не 404 от завёрнутого ErrNotFound.
-	if mapEnvFKViolation(err, src.Project, toEnv) != nil {
-		return Version{}, fmt.Errorf("no such environment %s/%s", src.Project, toEnv)
+	// (23503) → тот же ErrBadEnv, что и пре-чек выше (v3): promoteError отдаёт его как
+	// 400 (опечатка/гонка to_env — ввод клиента), а не 404/500.
+	if mapped := mapEnvFKViolation(err, src.Project, toEnv); mapped != nil {
+		return Version{}, mapped
 	}
 	if err != nil {
 		return Version{}, err
@@ -446,6 +450,13 @@ func (s *Store) ImageRefInUse(ctx context.Context, projectID, env, imageRef stri
 //
 // Дедуп ref'ов и рассылка нодам окружения — на стороне ImageCleaner.CleanupImages;
 // отправив, вызывающий штампует MarkImageCleanupSent.
+//
+// Выборка ограничена imageCleanupSweepBatch (M-2): разовый всплеск кандидатов —
+// после миграции, на большом парке или после долгого простоя sweep'а — не должен
+// раздувать in-memory pending-очереди хаба (RemoveImage уходит КАЖДОЙ ноде
+// окружения, офлайн-ноды копят команды в памяти мастера). Остаток доберётся
+// следующим субтиком: выборка сходящаяся (order by created_at + маркер), поэтому
+// хвост не голодает.
 func (s *Store) VersionsPendingImageCleanup(ctx context.Context) ([]DisabledVersion, error) {
 	rows, err := s.Pool.Query(ctx, `
 		select v.id::text, v.project_id::text, v.semver, v.image_ref, v.env
@@ -461,7 +472,8 @@ func (s *Store) VersionsPendingImageCleanup(ctx context.Context) ([]DisabledVers
 		        select 1 from versions o
 		        where o.project_id = v.project_id and o.env = v.env
 		          and o.image_ref = v.image_ref and o.state <> 'disabled')
-		order by v.created_at`)
+		order by v.created_at
+		limit $1`, imageCleanupSweepBatch)
 	if err != nil {
 		return nil, err
 	}

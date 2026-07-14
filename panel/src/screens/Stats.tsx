@@ -62,10 +62,20 @@ export function Stats() {
   const { selected } = useEnv();
   // env сужает историю через ?env= (environments v1 §7, I5). CCU остаётся
   // глобальным платформенным пиком — StatsBody подписывает его «platform-wide».
-  const ov = useLiveAsync(() => api.statsOverview(days, selected ?? undefined), [days, selected]);
-  // Показываем данные, только если они за ЗАПРОШЕННЫЙ период; иначе (первая
-  // загрузка или смена периода/режима) — скелетон под финальную раскладку.
-  const ready = ov.data !== undefined && ov.data.days === days;
+  //
+  // Ответ /v1/stats/* НЕ несёт env, поэтому помечаем данные окружением, за
+  // которое их запросили: «готовность» обязана учитывать и период, И env —
+  // иначе при переключении чипа мгновение показываются данные ПРЕЖНЕГО
+  // окружения как готовые (follow-up p3).
+  const ov = useLiveAsync(
+    () => api.statsOverview(days, selected ?? undefined).then((data) => ({ env: selected, data })),
+    [days, selected],
+  );
+  // Данные годны, только если они за ЗАПРОШЕННЫЙ период и ЗАПРОШЕННЫЙ env;
+  // иначе (первая загрузка, смена периода/режима/окружения) — скелетон под
+  // финальную раскладку.
+  const readyOv =
+    ov.data !== undefined && ov.data.env === selected && ov.data.data.days === days ? ov.data.data : undefined;
 
   // Полноэкранная ошибка — ТОЛЬКО в product-режиме: там /v1/stats/overview и
   // есть страница. В live-режиме VM-панели (MetricChart/UtilizationChart) и
@@ -86,9 +96,9 @@ export function Stats() {
     <div className="flex flex-col gap-4">
       <Header rangeKey={rangeKey} setRangeKey={setRangeKey} />
       {range.mode === 'live' ? (
-        <LiveBody range={range} days={days} ov={ov} />
-      ) : ready && ov.data !== undefined ? (
-        <StatsBody ov={ov.data} envActive={selected !== null} />
+        <LiveBody range={range} days={days} ov={{ ready: readyOv, error: ov.error }} />
+      ) : readyOv !== undefined ? (
+        <StatsBody ov={readyOv} envActive={selected !== null} />
       ) : (
         <StatsSkeleton />
       )}
@@ -120,14 +130,15 @@ function Header({ rangeKey, setRangeKey }: { rangeKey: string; setRangeKey: (k: 
  * `ov` — состояние /v1/stats/overview (для вторичной alloc→start строки
  * fill-rate-карточки), НЕ гейт: пока он ещё грузится (нет ни данных, ни
  * ошибки) — показываем FillRateSkeleton, как и раньше; если он осел с ошибкой
- * (или данные за другой период) — FillRateCard всё равно монтируется, просто
- * его alloc-строка деградирует (Critical bug fix: раньше это было «навечно
- * скелетон», а VM-панели выше вообще не зависят от ov и всегда рендерятся).
+ * (или данные за другой период/env) — FillRateCard всё равно монтируется,
+ * просто его alloc-строка деградирует (Critical bug fix: раньше это было
+ * «навечно скелетон», а VM-панели выше вообще не зависят от ov и всегда
+ * рендерятся).
  */
 function LiveBody({ range, days, ov }: { range: StatsRange; days: number; ov: OverviewState }) {
   const { t } = useT();
   const windowMs = range.windowMs ?? 24 * 60 * 60_000;
-  const readyOv = ov.data !== undefined && ov.data.days === days ? ov.data : undefined;
+  const readyOv = ov.ready;
   return (
     <div className="flex flex-col gap-4">
       <div className="grid gap-3 sm:grid-cols-2">
@@ -154,9 +165,10 @@ function LiveBody({ range, days, ov }: { range: StatsRange; days: number; ov: Ov
   );
 }
 
-/** Состояние /v1/stats/overview, нужное LiveBody (подмножество useLiveAsync). */
+/** Состояние /v1/stats/overview, нужное LiveBody: ГОДНЫЕ данные (за текущий
+ *  период и env) либо ошибка — гейт готовности считает Stats выше. */
 interface OverviewState {
-  data?: StatsOverview;
+  ready?: StatsOverview;
   error?: Error;
 }
 

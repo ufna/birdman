@@ -2,7 +2,6 @@ package store
 
 import (
 	"errors"
-	"fmt"
 
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -19,16 +18,17 @@ var envFKConstraints = map[string]bool{
 }
 
 // mapEnvFKViolation turns a 23503 foreign-key violation on one of the env FKs
-// (envFKConstraints) into a clean «no such environment» ErrNotFound, so the
+// (envFKConstraints) into a clean ErrBadEnv «no such environment», so the
 // operator gets a 400 «no such environment» instead of a raw 500 when the
 // environment is dropped in the TOCTOU window between the existence pre-check
-// and the insert. The pre-checks handle the common case; this closes the race.
+// and the insert. The pre-checks handle the common case; this closes the race —
+// both now speak the SAME sentinel (v3), so httpapi has one rule for both.
 // Returns nil when err is NOT such a violation — the caller keeps its own
 // handling (a different constraint, a unique 23505, or a plain error).
 func mapEnvFKViolation(err error, project, env string) error {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23503" && envFKConstraints[pgErr.ConstraintName] {
-		return fmt.Errorf("no such environment %s/%s: %w", project, env, ErrNotFound)
+		return badEnvErr(project, env)
 	}
 	return nil
 }
