@@ -37,39 +37,58 @@ func deployStartedAuto(t *testing.T, st *store.Store, versionID string) (auto bo
 	return
 }
 
+// eventCount counts a version's events of one kind — the durable trace of what
+// the manager actually did with it (unlike the version state, which is a
+// transient).
+func eventCount(t *testing.T, st *store.Store, kind, versionID string) int {
+	t.Helper()
+	var n int
+	if err := st.Pool.QueryRow(context.Background(),
+		`select count(*)::int from events where kind = $1 and version_id = $2::uuid`,
+		kind, versionID).Scan(&n); err != nil {
+		t.Fatalf("count %s for %s: %v", kind, versionID, err)
+	}
+	return n
+}
+
 // deployStartedCount counts deploy_started events of a version — how many times
 // it was put in flight (forward-only: a skipped version has 0, a failed-and-
 // -not-retried version has exactly 1).
 func deployStartedCount(t *testing.T, st *store.Store, versionID string) int {
 	t.Helper()
-	var n int
-	if err := st.Pool.QueryRow(context.Background(),
-		`select count(*)::int from events where kind = $1 and version_id = $2::uuid`,
-		store.EventDeployStarted, versionID).Scan(&n); err != nil {
-		t.Fatalf("count deploy_started for %s: %v", versionID, err)
-	}
-	return n
+	return eventCount(t, st, store.EventDeployStarted, versionID)
 }
 
-// settleOutOfPrepulling polls until none of the versions is prepulling anymore
-// (both the initial and any chained expire-driven prepulls have timed out).
-func settleOutOfPrepulling(t *testing.T, st *store.Store, ids ...string) {
+// waitEvent polls until the version has at least want events of the given kind
+// (the async, timer-driven paths: prepull expire → abort → chain).
+//
+// Ждать движение цепочки можно ТОЛЬКО по durable-фактам (строкам events), но не
+// по состоянию версии. Состояние — транзиент: между abort'ом истёкшей версии
+// (AbortDeploy: prepulling → registered) и BeginDeploy следующей цели
+// (deploy_started + prepulling — одна транзакция) лежит окно в несколько
+// запросов, в котором НЕ prepulling вообще никто. Прежний опрос «все вышли из
+// prepulling» проскакивал сквозь это окно раньше, чем цепочка сдвигалась, и
+// следом падал ассерт по событию — редкий FAIL под параллельной нагрузкой
+// (флейк TestAutoDeployExpireMovesChain). Событие же пишется в той же
+// транзакции, что и смена состояния, — сигнал строго не слабее.
+func waitEvent(t *testing.T, st *store.Store, kind, versionID string, want int) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		busy := false
-		for _, id := range ids {
-			if versionState(t, st, id) == "prepulling" {
-				busy = true
-				break
-			}
-		}
-		if !busy {
+	const (
+		timeout = 10 * time.Second
+		step    = 50 * time.Millisecond
+	)
+	deadline := time.Now().Add(timeout)
+	for {
+		n := eventCount(t, st, kind, versionID)
+		if n >= want {
 			return
 		}
-		time.Sleep(10 * time.Millisecond)
+		if time.Now().After(deadline) {
+			t.Fatalf("timeout (%s) waiting for %d %s event(s) of version %s, got %d",
+				timeout, want, kind, versionID, n)
+		}
+		time.Sleep(step)
 	}
-	t.Fatal("versions did not settle out of prepulling")
 }
 
 // Burst of three fast registrations in an auto_deploy env: only #1 prepulls
@@ -180,13 +199,17 @@ func TestAutoDeployAbortSkipsFailedVersion(t *testing.T) {
 }
 
 // The prepull-timeout completion path advances the chain the same way as a
-// failed report: v1 expires (not retried), v3 is attempted (skips v2). Asserted
-// via durable deploy_started events (no reliance on transient prepulling states).
+// failed report: v1 expires (not retried), v3 is attempted (skips v2). Both the
+// wait and the asserts ride durable events — no reliance on transient states.
 func TestAutoDeployExpireMovesChain(t *testing.T) {
 	st := testdb.New(t)
 	f := testdb.Seed(t, st, "eu", 10)
 	f.UpsertFleet(t, 2, 50)
-	m, _, _ := newManager(t, st, 40*time.Millisecond)
+	// Таймаут prepull'а — с запасом больше, чем регистрация трёх версий: v1 обязан
+	// быть ещё в полёте, когда v2/v3 встают за ним в очередь (истеки он прямо в
+	// сетапе — цепочка выкатила бы v2 и снесла бы саму предпосылку теста). Ждём мы
+	// всё равно по событиям, а не по этой константе, так что запас ничего не стоит.
+	m, _, _ := newManager(t, st, 500*time.Millisecond)
 	ctx := context.Background()
 
 	v1 := f.AddVersion(t, "1.1.0", "dev")
@@ -196,8 +219,12 @@ func TestAutoDeployExpireMovesChain(t *testing.T) {
 	v3 := f.AddVersion(t, "1.3.0", "dev")
 	m.TryAutoDeploy(ctx, "game", "dev")
 
-	// v1 expires → chain attempts v3 → v3 also expires; everything settles.
-	settleOutOfPrepulling(t, st, v1, v2, v3)
+	// v1 expires → the chain attempts v3 → v3 expires too → nothing newer is left.
+	// Обе точки ждём по durable-событиям: deploy_started(v3) — цепочка сдвинулась;
+	// deploy_failed(v3) — второй истёк и прошёл ещё один (уже пустой) проход
+	// цепочки, то есть счётчики ниже устоялись.
+	waitEvent(t, st, store.EventDeployStarted, v3, 1)
+	waitEvent(t, st, store.EventDeployFailed, v3, 1)
 	if n := deployStartedCount(t, st, v1); n != 1 {
 		t.Fatalf("v1 attempted once (expired, not retried), got %d", n)
 	}

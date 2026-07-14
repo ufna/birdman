@@ -537,34 +537,47 @@ func (m *Manager) PrePull(_ context.Context, cmd *agentlinkv1.PrePull) {
 // Ack confirms receipt via the recv loop — RemoveImage does NOT extend Ack)
 // and the runtime work runs in a goroutine: synchronous work here would block
 // the recv loop that acks every command. Branches:
-//   - image backs a live container → logged and skipped (the watermark GC
-//     reclaims it once the container exits; the master is not told);
+//   - image backs a live container → skipped (the version's servers are still
+//     draining; the watermark GC reclaims it once the container exits);
 //   - image absent → no-op (idempotent under at-least-once replay);
 //   - otherwise → SynchronousDelete, and the ref is dropped from the GC
 //     protected set (РЕВИЗИЯ M12: a dead ref must not hold a protection slot).
+//
+// EVERY branch reports its outcome back with ImageReport{status} (removed |
+// absent | busy | error) — the master needs the RESULT, not just the Ack: it
+// stamps versions.image_cleanup_at only when every target node reported
+// removed|absent, and re-sends RemoveImage otherwise (a busy image means the
+// containers had not exited yet — by the next cleanup subtick they have).
 //
 // A deprecated version's image is never targeted (the master's guard keeps the
 // rollback window warm); a missed removal self-heals via EnsureImage on the
 // next StartServer.
 func (m *Manager) RemoveImage(_ context.Context, cmd *agentlinkv1.RemoveImage) {
-	ref := cmd.GetImageRef()
+	cmdID, ref := cmd.GetCmdId(), cmd.GetImageRef()
 	if ref == "" {
+		// Master never sends this (its dispatcher skips empty refs) — report it as
+		// an error rather than staying silent: exactly one report per command keeps
+		// the master's «жду отчёта от каждой ноды» bookkeeping unambiguous.
 		m.logf("[daemon] remove_image: empty image_ref ignored")
+		m.sink.ImageReport(cmdID, ref, "error", "empty image_ref")
 		return
 	}
 	go func() {
 		used, err := m.rt.UsedImageRefs(m.ctx)
 		if err != nil {
 			m.logf("[daemon] remove_image %s: list used refs: %v — skipped (watermark GC is the backstop)", ref, err)
+			m.sink.ImageReport(cmdID, ref, "error", err.Error())
 			return
 		}
 		if used[ref] {
 			m.logf("[daemon] remove_image %s: in use by a live container — skipped (watermark GC reclaims it later)", ref)
+			m.sink.ImageReport(cmdID, ref, "busy", "")
 			return
 		}
 		present, err := m.rt.ImagePresent(m.ctx, ref)
 		if err != nil {
 			m.logf("[daemon] remove_image %s: image lookup: %v — skipped (watermark GC is the backstop)", ref, err)
+			m.sink.ImageReport(cmdID, ref, "error", err.Error())
 			return
 		}
 		if !present {
@@ -572,14 +585,17 @@ func (m *Manager) RemoveImage(_ context.Context, cmd *agentlinkv1.RemoveImage) {
 			// stale protection slot and treat as a clean no-op.
 			m.untouchImage(ref)
 			m.logf("[daemon] remove_image %s: not present — no-op (idempotent)", ref)
+			m.sink.ImageReport(cmdID, ref, "absent", "")
 			return
 		}
 		if err := m.rt.DeleteImage(m.ctx, ref); err != nil {
 			m.logf("[daemon] remove_image %s: delete: %v — skipped (watermark GC is the backstop)", ref, err)
+			m.sink.ImageReport(cmdID, ref, "error", err.Error())
 			return
 		}
 		m.untouchImage(ref)
 		m.logf("[daemon] remove_image %s: removed", ref)
+		m.sink.ImageReport(cmdID, ref, "removed", "")
 	}()
 }
 

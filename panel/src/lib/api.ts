@@ -88,6 +88,29 @@ export interface EnvironmentPatch {
   retention_keep?: number;
 }
 
+/** Состав окружения (GET /v1/environments/{p}/{n}/usage): что удаление снесёт.
+ *  `nodes` — блокирующее: ноду нельзя осиротить, её сначала переводят в другое
+ *  окружение. `api_keys` — живые привязанные ключи: их каскад отзовёт. */
+export interface EnvironmentUsage {
+  versions: number;
+  fleets: number;
+  nodes: number;
+  servers: number;
+  matches: number;
+  api_keys: number;
+}
+
+/** Тело ответа 200 у DELETE непустого окружения — что именно снёс каскад. */
+export interface EnvironmentDeleted {
+  name: string;
+  production: boolean;
+  versions: number;
+  fleets: number;
+  matches: number;
+  servers: number;
+  api_keys_revoked: number;
+}
+
 /** Ответ POST /v1/deploy: {deploy: Status} (deploy.Status в master). */
 export interface DeployStatus {
   version: VersionInfo;
@@ -516,9 +539,22 @@ export const api = {
       `/v1/environments/${encodeURIComponent(project)}/${encodeURIComponent(name)}`,
       body,
     ).then((r) => r.environment),
-  /** Удалить окружение (admin). 204 только у никогда не использованного; иначе 409. */
-  deleteEnvironment: (project: string, name: string) =>
-    request<void>('DELETE', `/v1/environments/${encodeURIComponent(project)}/${encodeURIComponent(name)}`),
+  /** Состав окружения (readonly) — панель показывает его в диалоге удаления. */
+  environmentUsage: (project: string, name: string) =>
+    request<{ usage: EnvironmentUsage }>(
+      'GET',
+      `/v1/environments/${encodeURIComponent(project)}/${encodeURIComponent(name)}/usage`,
+    ).then((r) => r.usage),
+  /** Удалить окружение ВМЕСТЕ с содержимым (admin): версии/флоты/матчи/серверы
+   *  сносятся каскадом, привязанные ключи отзываются. Требования сервера:
+   *  ноль нод (иначе 409 — сначала переведите их) и confirm, ТОЧНО равный имени
+   *  (иначе 400). Пустое окружение сервер удалит и без confirm (204 → undefined). */
+  deleteEnvironment: (project: string, name: string, confirm: string) =>
+    request<{ deleted: EnvironmentDeleted } | undefined>(
+      'DELETE',
+      `/v1/environments/${encodeURIComponent(project)}/${encodeURIComponent(name)}`,
+      { confirm },
+    ).then((r) => r?.deleted),
   /** Перевод ноды в другой env (admin, environments v1 §2): PATCH пустой ноде. */
   setNodeEnv: (id: string, env: string) =>
     request<{ node: NodeInfo }>('PATCH', `/v1/nodes/${encodeURIComponent(id)}`, { env }).then((r) => r.node),

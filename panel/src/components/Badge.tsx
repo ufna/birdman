@@ -41,8 +41,9 @@ export const EVENT_KINDS = [
   'node_created', 'node_quarantine', 'node_down', 'node_recovered', 'node_drain', 'node_undrain',
   // environments v1 (§2/§6): node_env_changed — нода переведена в другой env;
   // version_promoted — версия создана промоутом dev→prod (provenance);
-  // version_retired — версия ушла registered→disabled ретеншном (не флип/TTL).
-  'node_env_changed', 'version_promoted', 'version_retired',
+  // version_retired — версия ушла registered→disabled ретеншном (не флип/TTL);
+  // environment_deleted — окружение снесено вместе с содержимым (каскад + confirm).
+  'node_env_changed', 'version_promoted', 'version_retired', 'environment_deleted',
   // mTLS agentlink v1 (docs/superpowers/specs/2026-07-10-mtls-agentlink-design.md
   // §7): node_enrolled — первый обмен node_token→серт; node_cert_renewed —
   // ротация клиентского серта по живой mTLS-сессии.
@@ -198,6 +199,9 @@ export function toneOfEventKind(kind: string): Tone {
       return 'accent';
     case 'registry_removed':
     case 'apikey_revoked':
+    // environment_deleted — необратимый снос окружения с содержимым: warn, как
+    // прочие «удалили сущность» (не dead: это осознанное действие оператора).
+    case 'environment_deleted':
       return 'warn';
     // version_retired — тихая уборка ретеншном (registered→disabled), прошлое:
     // neutral (спокойнее, чем warn у version_disabled — флип/TTL). Явно, хоть и

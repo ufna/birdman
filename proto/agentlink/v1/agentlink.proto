@@ -52,6 +52,7 @@ message AgentMsg {
     LogChunk log = 4; // response to TailLogs
     PullReport pull = 5; // progress/result of PrePull
     Ack ack = 6; // confirms a master command by cmd_id
+    ImageReport image_report = 7; // result of RemoveImage
   }
 }
 
@@ -111,6 +112,31 @@ message PullReport {
   string image_ref = 2;
   string status = 3; // pulling|pulled|failed
   string detail = 4; // progress info or error text
+}
+
+// ImageReport carries the RESULT of one RemoveImage back to the master
+// (environments v1 §6б). Ack{cmd_id} only confirms receipt — it has no result
+// field and is deliberately not extended — so without this message the master
+// stamped its «догоняющая команда отправлена» marker (versions.image_cleanup_at)
+// blind, and a busy/errored removal was never retried. The agent sends EXACTLY
+// ONE ImageReport per RemoveImage it handles (the Ack stays a separate, ordinary
+// recv-loop message):
+//
+//	removed — the image was deleted from the node's store;
+//	absent  — nothing to delete (already gone: replay, or the watermark GC won);
+//	busy    — the ref still backs a live container (the version's servers are
+//	          still draining) — nothing was deleted;
+//	error   — the removal failed; detail carries the error text.
+//
+// The master marks a version's image as retired only when EVERY target node of
+// its (project, env) reported removed|absent; busy/error leave the version
+// unmarked, so the next cleanup subtick sends RemoveImage again (idempotent — an
+// absent image is a no-op). detail is empty unless status = error.
+message ImageReport {
+  string cmd_id = 1;
+  string image_ref = 2;
+  string status = 3; // removed|absent|busy|error
+  string detail = 4; // error text for status=error, otherwise empty
 }
 
 message Ack {

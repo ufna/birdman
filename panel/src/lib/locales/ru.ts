@@ -142,6 +142,7 @@ export const ru: Record<MessageKey, string> = {
   'event.apikey_revoked': 'Ключ отозван',
   'event.apikey_purged': 'Ключ удалён навсегда',
   'event.node_env_changed': 'Тачка сменила окружение',
+  'event.environment_deleted': 'Окружение удалено',
   'event.version_promoted': 'Версия промоутнута',
   'event.version_retired': 'Версия снята ретеншном',
 
@@ -752,12 +753,34 @@ export const ru: Record<MessageKey, string> = {
   'access.environments.edit.desc': 'Имя иммутабельно. Включение авто-деплоя требует выключенного production.',
   'access.environments.delete': 'Удалить',
   'access.environments.delete.title': 'Удалить окружение {name}?',
-  'access.environments.delete.desc':
-    'Удалить можно только никогда не использованное окружение. Как только появились версии, флоты, ноды или ключи — в v1 оно неудаляемо (история версий хранится).',
-  'access.environments.delete.usedHint': 'Используется — удалить нельзя (v1 хранит историю версий).',
+  'access.environments.delete.desc': 'Окружение удаляется вместе со всем содержимым. Действие необратимо.',
+  'access.environments.delete.usage': 'Будет удалено:',
+  'access.environments.delete.usage.versions': 'Версий',
+  'access.environments.delete.usage.fleets': 'Флотов',
+  'access.environments.delete.usage.matches': 'Матчей',
+  'access.environments.delete.usage.servers': 'Серверов',
+  'access.environments.delete.usage.keys.one': '{count} ключ будет отозван.',
+  'access.environments.delete.usage.keys.few': '{count} ключа будут отозваны.',
+  'access.environments.delete.usage.keys.many': '{count} ключей будет отозвано.',
+  'access.environments.delete.usage.keys.other': '{count} ключа будут отозваны.',
+  'access.environments.delete.usageErr': 'Не удалось получить состав окружения.',
+  'access.environments.delete.nodesBlock.one':
+    'В окружении ещё {count} тачка. Сначала переведите её в другое окружение (экран «Флот» → «Перевести в env…»).',
+  'access.environments.delete.nodesBlock.few':
+    'В окружении ещё {count} тачки. Сначала переведите их в другое окружение (экран «Флот» → «Перевести в env…»).',
+  'access.environments.delete.nodesBlock.many':
+    'В окружении ещё {count} тачек. Сначала переведите их в другое окружение (экран «Флот» → «Перевести в env…»).',
+  'access.environments.delete.nodesBlock.other':
+    'В окружении ещё {count} тачки. Сначала переведите их в другое окружение (экран «Флот» → «Перевести в env…»).',
+  'access.environments.delete.confirmLabel': 'Введите имя окружения, чтобы удалить его:',
+  'access.environments.delete.copy': 'Копировать имя',
+  'access.environments.delete.copied': 'Скопировано',
+  'access.environments.delete.err': 'Не удалось удалить окружение.',
   'access.environments.toast.created': 'Окружение {name} создано',
   'access.environments.toast.updated': 'Окружение {name} обновлено',
   'access.environments.toast.deleted': 'Окружение {name} удалено',
+  'access.environments.toast.deletedCascade':
+    'Окружение {name} удалено: версий {versions}, флотов {fleets}, матчей {matches}, серверов {servers}, ключей отозвано {keys}',
 
   // Статистика: CCU — глобальный (платформенный) пик; подпись при активном env-фильтре.
   'stats.ccu.platformWide': 'по всей платформе (без фильтра по env)',

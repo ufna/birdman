@@ -3,8 +3,10 @@
 // RegistriesSection.tsx: таблица (name/production/auto_deploy/retention/created)
 // и одна форма add/edit. Guardrail production×auto_deploy — и клиентски (чекбокс
 // auto_deploy глохнет при production), и от API (400, показываем detail).
-// Удаление разрешено только у никогда не использованного env; иначе 409 —
-// честная подсказка «используется, удалить нельзя» (I10, история версий хранится).
+//
+// Удаление сносит окружение ВМЕСТЕ с содержимым (см. DeleteEnvironmentAction):
+// диалог показывает состав из GET .../usage, требует подтверждения вводом имени
+// и блокируется, пока в окружении есть ноды (их сначала переводят на «Флоте»).
 //
 // Источник данных — общий useEnv() (тот же список, что кормит чипы Shell): после
 // create/patch/delete зовём reload — обновляются и чипы, и эта таблица.
@@ -12,14 +14,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { ColumnDef } from '@tanstack/react-table';
+import * as AlertDialog from '@radix-ui/react-alert-dialog';
 import * as Dialog from '@radix-ui/react-dialog';
 import { api, ApiError } from '../lib/api';
-import type { Environment } from '../lib/api';
+import type { Environment, EnvironmentUsage } from '../lib/api';
 import { useEnv } from '../lib/env';
 import { useT, useFormat } from '../lib/i18n';
 import { useToast } from './Toast';
 import { DataTable } from './DataTable';
-import { ConfirmButton } from './ConfirmDialog';
 import { Card, CardHeader, ErrorNote, LoadingRow } from './ui';
 
 export function EnvironmentsSection() {
@@ -165,6 +167,28 @@ function PencilIcon() {
   );
 }
 
+/** Строка состава окружения в диалоге удаления (метка + число). */
+function UsageRow({ id, label, value }: { id: string; label: string; value: number }) {
+  return (
+    <li data-testid={`env-usage-${id}`} className="flex items-baseline justify-between gap-3">
+      <span className="text-muted">{label}</span>
+      <span className="tabular font-mono font-medium">{value}</span>
+    </li>
+  );
+}
+
+/**
+ * Удаление окружения ВМЕСТЕ с содержимым (запрос владельца; снимает прежний тупик
+ * «использованный env неудаляем»). Диалог:
+ *   1. при открытии зовёт GET .../usage и показывает состав («что снесём»);
+ *   2. ноды в окружении — блокирующее условие: ноду нельзя молча осиротить,
+ *      удаление недоступно, пока их не переведут на экране «Флот» (Move to env…);
+ *   3. подтверждение вводом ИМЕНИ (имя рядом + кнопка копирования): кнопка
+ *      «Удалить» жива, только когда введённое совпадает ТОЧНО (без trim —
+ *      лишний пробел не считается совпадением, как и на сервере).
+ * Пустому окружению шаг подтверждения тоже показываем (единообразие): сервер
+ * примет confirm и без необходимости (204).
+ */
 function DeleteEnvironmentAction({
   project,
   environment,
@@ -174,25 +198,211 @@ function DeleteEnvironmentAction({
   environment: Environment;
   onDone: () => void;
 }) {
-  const { t } = useT();
+  const { t, tp } = useT();
   const toast = useToast();
-  return (
-    <ConfirmButton
-      label={t('access.environments.delete')}
-      tone="dead"
-      title={t('access.environments.delete.title', { name: environment.name })}
-      description={t('access.environments.delete.desc')}
-      confirmLabel={t('access.environments.delete')}
-      // Использованный env неудаляем (409) — честная подсказка вместо сырого кода.
-      errorOverride={(e) =>
-        e instanceof ApiError && e.status === 409 ? t('access.environments.delete.usedHint') : undefined
-      }
-      onConfirm={async () => {
-        await api.deleteEnvironment(project, environment.name);
-        toast.success(t('access.environments.toast.deleted', { name: environment.name }));
+  const [open, setOpen] = useState(false);
+  const [usage, setUsage] = useState<EnvironmentUsage | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [typed, setTyped] = useState('');
+  const [copied, setCopied] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Состав грузим на каждое открытие (данные могли устареть с прошлого раза).
+  useEffect(() => {
+    if (!open) return;
+    let stale = false;
+    setUsage(null);
+    setLoadError(null);
+    api.environmentUsage(project, environment.name).then(
+      (u) => {
+        if (!stale) setUsage(u);
+      },
+      (e: unknown) => {
+        if (!stale) setLoadError(e instanceof ApiError ? (e.detail ?? e.code) : t('access.environments.delete.usageErr'));
+      },
+    );
+    return () => {
+      stale = true;
+    };
+  }, [open, project, environment.name, t]);
+
+  const blocked = usage !== null && usage.nodes > 0;
+  const nameMatches = typed === environment.name; // ТОЧНОЕ совпадение, без trim
+  const canDelete = usage !== null && !blocked && nameMatches && !pending;
+
+  const copyName = () => {
+    void navigator.clipboard?.writeText(environment.name).then(
+      () => {
+        setCopied(true);
+      },
+      () => {
+        /* clipboard недоступен — имя всё равно видно, можно набрать руками */
+      },
+    );
+  };
+
+  const submit = () => {
+    if (!canDelete) return;
+    setPending(true);
+    setError(null);
+    api
+      .deleteEnvironment(project, environment.name, typed)
+      .then((deleted) => {
+        setPending(false);
+        setOpen(false);
+        toast.success(
+          deleted === undefined
+            ? t('access.environments.toast.deleted', { name: environment.name })
+            : t('access.environments.toast.deletedCascade', {
+                name: deleted.name,
+                versions: deleted.versions,
+                fleets: deleted.fleets,
+                matches: deleted.matches,
+                servers: deleted.servers,
+                keys: deleted.api_keys_revoked,
+              }),
+        );
         onDone();
+      })
+      .catch((e: unknown) => {
+        setPending(false);
+        // 409 — ноды появились (или уехали) между usage и удалением: показываем
+        // detail сервера прямо в диалоге и обновляем состав.
+        setError(e instanceof ApiError ? (e.detail ?? e.code) : t('access.environments.delete.err'));
+        if (e instanceof ApiError && e.status === 409) {
+          api.environmentUsage(project, environment.name).then(
+            (u) => {
+              setUsage(u);
+            },
+            () => {
+              /* состав не перечитался — на решение это не влияет, ошибка уже видна */
+            },
+          );
+        }
+      });
+  };
+
+  return (
+    <AlertDialog.Root
+      open={open}
+      onOpenChange={(o) => {
+        if (pending) return;
+        setOpen(o);
+        setTyped('');
+        setCopied(false);
+        setError(null);
       }}
-    />
+    >
+      <AlertDialog.Trigger asChild>
+        <button
+          type="button"
+          className="rounded-lg border border-line px-2.5 py-1 text-xs font-medium text-muted transition-colors hover:text-ink"
+        >
+          {t('access.environments.delete')}
+        </button>
+      </AlertDialog.Trigger>
+      <AlertDialog.Portal>
+        <AlertDialog.Overlay className="fixed inset-0 z-40 bg-black/40 backdrop-blur-[1px]" />
+        <AlertDialog.Content
+          className="fixed top-1/2 left-1/2 z-50 w-[min(30rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 rounded-xl border border-line bg-card p-5 shadow-xl"
+          onEscapeKeyDown={(e) => {
+            if (pending) e.preventDefault();
+          }}
+        >
+          <AlertDialog.Title className="text-base font-semibold">
+            {t('access.environments.delete.title', { name: environment.name })}
+          </AlertDialog.Title>
+          <AlertDialog.Description asChild>
+            <div className="mt-2 text-sm text-muted">{t('access.environments.delete.desc')}</div>
+          </AlertDialog.Description>
+
+          {loadError !== null && (
+            <p role="alert" className="mt-3 rounded-lg bg-dead-bg px-3 py-2 text-xs text-dead">
+              {loadError}
+            </p>
+          )}
+          {usage === null && loadError === null && <LoadingRow />}
+
+          {usage !== null && (
+            <>
+              <p className="mt-4 text-xs font-medium">{t('access.environments.delete.usage')}</p>
+              <ul className="mt-1.5 grid grid-cols-2 gap-x-6 gap-y-1 rounded-lg border border-line bg-paper px-3 py-2 text-xs">
+                <UsageRow id="versions" label={t('access.environments.delete.usage.versions')} value={usage.versions} />
+                <UsageRow id="fleets" label={t('access.environments.delete.usage.fleets')} value={usage.fleets} />
+                <UsageRow id="matches" label={t('access.environments.delete.usage.matches')} value={usage.matches} />
+                <UsageRow id="servers" label={t('access.environments.delete.usage.servers')} value={usage.servers} />
+              </ul>
+              <p className="mt-1.5 text-xs text-muted">{tp('access.environments.delete.usage.keys', usage.api_keys)}</p>
+
+              {blocked ? (
+                // Ноды не каскадятся никогда: живой агент не должен остаться с
+                // node_id в несуществующем окружении.
+                <p role="alert" className="mt-3 rounded-lg bg-warn-bg px-3 py-2 text-xs text-warn">
+                  {tp('access.environments.delete.nodesBlock', usage.nodes)}
+                </p>
+              ) : (
+                <div className="mt-4 flex flex-col gap-1.5">
+                  <label htmlFor="env-delete-confirm" className="text-xs font-medium">
+                    {t('access.environments.delete.confirmLabel')}
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <code className="rounded border border-line bg-paper px-2 py-1 font-mono text-xs">
+                      {environment.name}
+                    </code>
+                    <button
+                      type="button"
+                      onClick={copyName}
+                      aria-label={t('access.environments.delete.copy')}
+                      className="rounded-md border border-line px-2 py-1 text-[11px] font-medium text-muted transition-colors hover:text-ink"
+                    >
+                      {copied ? t('access.environments.delete.copied') : t('access.environments.delete.copy')}
+                    </button>
+                  </div>
+                  <input
+                    id="env-delete-confirm"
+                    autoFocus
+                    autoComplete="off"
+                    value={typed}
+                    onChange={(e) => {
+                      setTyped(e.target.value);
+                    }}
+                    placeholder={environment.name}
+                    className={`${inputClass} font-mono`}
+                  />
+                </div>
+              )}
+            </>
+          )}
+
+          {error !== null && (
+            <p role="alert" className="mt-3 rounded-lg bg-dead-bg px-3 py-2 text-xs text-dead">
+              {error}
+            </p>
+          )}
+
+          <div className="mt-5 flex justify-end gap-2">
+            <AlertDialog.Cancel asChild>
+              <button
+                type="button"
+                disabled={pending}
+                className="rounded-lg border border-line px-3 py-1.5 text-sm text-muted transition-colors hover:text-ink disabled:opacity-40"
+              >
+                {t('common.cancel')}
+              </button>
+            </AlertDialog.Cancel>
+            <button
+              type="button"
+              disabled={!canDelete}
+              onClick={submit}
+              className="rounded-lg bg-dead px-3 py-1.5 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+            >
+              {pending ? t('common.running') : t('access.environments.delete')}
+            </button>
+          </div>
+        </AlertDialog.Content>
+      </AlertDialog.Portal>
+    </AlertDialog.Root>
   );
 }
 

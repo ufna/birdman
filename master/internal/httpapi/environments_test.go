@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -94,12 +95,13 @@ func TestEnvironmentsAPI(t *testing.T) {
 		t.Fatalf("patch unknown env: want 404, got %d", code)
 	}
 
-	// Delete unused → 204; delete used (dev has node+version) → 409.
+	// Delete unused → 204 (пустое окружение, confirm не нужен); delete dev (нода на
+	// нём) → 409 предусловия «сначала переведите ноды».
 	if code, _ := admin.do("DELETE", "/v1/environments/game/staging", nil); code != 204 {
 		t.Fatalf("delete unused env: want 204, got %d", code)
 	}
 	if code, _ := admin.do("DELETE", "/v1/environments/game/dev", nil); code != 409 {
-		t.Fatalf("delete used env: want 409, got %d", code)
+		t.Fatalf("delete env with nodes: want 409, got %d", code)
 	}
 
 	// Node move (admin): a fresh empty node moves dev→prod.
@@ -188,5 +190,91 @@ func TestNodeCreateEnv(t *testing.T) {
 	}
 	if envs[0].(map[string]any)["name"] != "prod" {
 		t.Fatalf("dev воскрес: %v", body)
+	}
+}
+
+// Удаление НЕПУСТОГО окружения (запрос владельца): GET .../usage (readonly) отдаёт
+// состав, DELETE требует подтверждения вводом имени и сносит содержимое каскадом.
+// Предусловие «ноль нод» сильнее confirm: пока нода в окружении — только 409.
+func TestEnvironmentDeleteForce(t *testing.T) {
+	st := testdb.New(t)
+	ctx := t.Context()
+	f := testdb.Seed(t, st, "eu", 10) // dev: нода node-1 + версия 1.0.0
+
+	ts := envAPIServer(t, st)
+	mk := func(scope string) *client {
+		_, key, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: scope, Scopes: []string{scope}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &client{t: t, base: ts.URL, key: key}
+	}
+	admin := mk(httpapi.ScopeAdmin)
+	ro := mk(httpapi.ScopeReadonly)
+
+	// Состав окружения — readonly-скоуп (панель зовёт его при открытии диалога).
+	code, body := ro.do("GET", "/v1/environments/game/dev/usage", nil)
+	if code != 200 {
+		t.Fatalf("usage (readonly): want 200, got %d %v", code, body)
+	}
+	usage, _ := body["usage"].(map[string]any)
+	if usage["versions"] != float64(1) || usage["nodes"] != float64(1) ||
+		usage["fleets"] != float64(0) || usage["servers"] != float64(0) ||
+		usage["matches"] != float64(0) || usage["api_keys"] != float64(0) {
+		t.Fatalf("usage: %v", usage)
+	}
+	if code, _ := ro.do("GET", "/v1/environments/game/ghost/usage", nil); code != 404 {
+		t.Fatalf("usage of an unknown env: want 404, got %d", code)
+	}
+	// Удалять readonly-ключ не может (403 раньше любых проверок тела).
+	if code, _ := ro.do("DELETE", "/v1/environments/game/dev", map[string]any{"confirm": "dev"}); code != 403 {
+		t.Fatalf("readonly delete: want 403, got %d", code)
+	}
+
+	// Предусловие: нода в окружении → 409 ДАЖЕ с верным confirm.
+	code, body = admin.do("DELETE", "/v1/environments/game/dev", map[string]any{"confirm": "dev"})
+	if code != 409 || body["error"] != "conflict" {
+		t.Fatalf("delete env with a node: want 409 conflict, got %d %v", code, body)
+	}
+	if d, _ := body["detail"].(string); !strings.Contains(d, "node(s)") {
+		t.Fatalf("409 detail must point at the nodes: %q", d)
+	}
+
+	// Переводим ноду в prod — окружение непустое (версия), но нод больше нет.
+	if code, _ := admin.do("PATCH", "/v1/nodes/"+f.NodeID, map[string]any{"env": "prod"}); code != 200 {
+		t.Fatalf("move node to prod: %d", code)
+	}
+	// Без confirm → 400; с неверным confirm → 400 (тот же detail).
+	code, body = admin.do("DELETE", "/v1/environments/game/dev", nil)
+	if code != 400 || body["detail"] != "confirm must equal the environment name" {
+		t.Fatalf("delete used env without confirm: want 400, got %d %v", code, body)
+	}
+	if code, _ := admin.do("DELETE", "/v1/environments/game/dev", map[string]any{"confirm": "Dev"}); code != 400 {
+		t.Fatalf("wrong confirm: want 400, got %d", code)
+	}
+	if code, _ := admin.do("DELETE", "/v1/environments/game/dev", map[string]any{"confirm": " dev"}); code != 400 {
+		t.Fatalf("confirm with a leading space: want 400, got %d", code)
+	}
+	// Окружение на месте (ни одна из отбитых попыток ничего не удалила).
+	if code, _ := ro.do("GET", "/v1/environments/game/dev/usage", nil); code != 200 {
+		t.Fatalf("dev must survive a failed confirm: %d", code)
+	}
+
+	// Верный confirm → 200 с составом снесённого.
+	code, body = admin.do("DELETE", "/v1/environments/game/dev", map[string]any{"confirm": "dev"})
+	if code != 200 {
+		t.Fatalf("delete used env with confirm: want 200, got %d %v", code, body)
+	}
+	deleted, _ := body["deleted"].(map[string]any)
+	if deleted["name"] != "dev" || deleted["versions"] != float64(1) ||
+		deleted["fleets"] != float64(0) || deleted["api_keys_revoked"] != float64(0) {
+		t.Fatalf("200 body must carry what was deleted: %v", body)
+	}
+	// Окружения больше нет: usage → 404, повторный DELETE → 404.
+	if code, _ := ro.do("GET", "/v1/environments/game/dev/usage", nil); code != 404 {
+		t.Fatalf("usage after delete: want 404, got %d", code)
+	}
+	if code, _ := admin.do("DELETE", "/v1/environments/game/dev", map[string]any{"confirm": "dev"}); code != 404 {
+		t.Fatalf("delete twice: want 404, got %d", code)
 	}
 }
