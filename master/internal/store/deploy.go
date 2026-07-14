@@ -474,27 +474,33 @@ func (s *Store) DisableExpiredDeprecated(ctx context.Context) ([]Version, error)
 	return out, nil
 }
 
-// VersionStateCounts returns state → count for the birdman_versions metric.
-func (s *Store) VersionStateCounts(ctx context.Context) (map[string]map[string]int, error) {
+// VersionStateCount is one (project, env, state) → count row of the
+// birdman_versions metric (environments v1 §7: env is a metric dimension).
+type VersionStateCount struct {
+	Project string
+	Env     string
+	State   string
+	Count   int
+}
+
+// VersionStateCounts returns per (project, env, state) version counts for the
+// birdman_versions metric.
+func (s *Store) VersionStateCounts(ctx context.Context) ([]VersionStateCount, error) {
 	rows, err := s.Pool.Query(ctx, `
-		select p.slug, v.state, count(*)::int
+		select p.slug, v.env, v.state, count(*)::int
 		from versions v join projects p on p.id = v.project_id
-		group by 1, 2`)
+		group by 1, 2, 3`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[string]map[string]int{}
+	var out []VersionStateCount
 	for rows.Next() {
-		var project, state string
-		var n int
-		if err := rows.Scan(&project, &state, &n); err != nil {
+		var c VersionStateCount
+		if err := rows.Scan(&c.Project, &c.Env, &c.State, &c.Count); err != nil {
 			return nil, err
 		}
-		if out[project] == nil {
-			out[project] = map[string]int{}
-		}
-		out[project][state] = n
+		out = append(out, c)
 	}
 	return out, rows.Err()
 }

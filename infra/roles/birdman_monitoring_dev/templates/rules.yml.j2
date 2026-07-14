@@ -35,21 +35,41 @@ groups:
 
           description: 'Очередь команд master→agent не пустеет (спека followups §3).'
 
-      # BufferEmpty (1/2): ready-буфер региона опустел и держится.
-      # ВНИМАНИЕ: если master перестаёт экспортировать ready-серию региона
-      # (0 серий вместо явного 0), sum by(region) не вернёт 0 — на этот случай
-      # есть парный BufferEmptyAllocFail ниже.
-      - alert: BufferEmptyReady
-        expr: sum by (region) (birdman_servers{state="ready"}) == 0
+      # BufferEmpty (1/2): ready-буфер региона опустел и держится. Расщеплён на
+      # ПАРУ по production (environments v1 §7): birdman_servers несёт лейбл
+      # production (деривация — join environments по (project_id, s.env), НЕ
+      # через nodes — I6). prod → critical, не-prod → warning: пустой буфер
+      # боевого окружения будит, dev/стейджинг только предупреждает.
+      # ВНИМАНИЕ (для ОБОИХ срезов): если master перестаёт экспортировать
+      # ready-серию этого среза в регионе (0 серий вместо явного 0), sum by(region)
+      # не вернёт 0 — страхует парный BufferEmptyAllocFail ниже (по
+      # allocation_failures, у которого среза production НЕТ).
+      - alert: BufferEmptyReadyProd
+        expr: sum by (region) (birdman_servers{state="ready", production="true"}) == 0
         for: {{ birdman_ready_empty_for }}
         labels:
           severity: critical
         annotations:
-          summary: {% raw %}'BufferEmpty: регион {{ $labels.region }} без ready-серверов'{% endraw %}
+          summary: {% raw %}'BufferEmpty(prod): регион {{ $labels.region }} без ready-серверов'{% endraw %}
 
-          description: 'sum(birdman_servers{state="ready"}) == 0 дольше порога (ops.md §1 BufferEmpty).'
+          description: 'sum(birdman_servers{state="ready", production="true"}) == 0 дольше порога (ops.md §1 BufferEmpty).'
 
-      # BufferEmpty (2/2): аллокации падают из-за отсутствия ёмкости.
+      - alert: BufferEmptyReadyNonProd
+        expr: sum by (region) (birdman_servers{state="ready", production="false"}) == 0
+        for: {{ birdman_ready_empty_for }}
+        labels:
+          severity: warning
+        annotations:
+          summary: {% raw %}'BufferEmpty(non-prod): регион {{ $labels.region }} без ready-серверов'{% endraw %}
+
+          description: 'sum(birdman_servers{state="ready", production="false"}) == 0 дольше порога (ops.md §1 BufferEmpty).'
+
+      # BufferEmpty (2/2): аллокации падают из-за отсутствия ёмкости. Метрика
+      # birdman_allocation_failures_total НЕ несёт лейбла production (пары по
+      # production живут на СЕРВЕРНОЙ серии выше, environments v1 §7), поэтому это
+      # ОДНО правило critical — заодно absent-страховка для обоих production-срезов
+      # ready==0. Новый reason=env_required (409-ambiguous allocate) сюда не
+      # попадает: expr фильтрует reason="no_capacity".
       - alert: BufferEmptyAllocFail
         expr: increase(birdman_allocation_failures_total{reason="no_capacity"}[1m]) > 0
         for: 0s

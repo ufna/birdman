@@ -178,7 +178,7 @@ returning id, node_id, port;
 - `join_token` = HMAC(match_id, player_id, exp 60с) — дедик проверяет через liba (анти-«зашёл мимо матчмейкера»); v0 — опционально, включается флагом (`matchmaking.join_token.enabled`, секрет — env `BIRDMAN_MM_JOIN_SECRET`; выдача реализована, проверка на дедике — TODO liba).
 - Анти-дубль: один активный тикет на player_id (новый вытесняет старый → `cancelled`).
 - (Уточнено в v0.) Проект тикета: поле `project` опционально — по умолчанию `matchmaking.default_project` из конфига либо единственный проект в БД; успешная аллокация пишет строку в `matches` (state `pending`).
-- Метрики: `birdman_mm_queue_depth{region}` (по лучшему региону тикета), `birdman_mm_time_to_match_seconds` (histogram), `birdman_mm_tickets_total{result}`.
+- Метрики: `birdman_mm_queue_depth{region,env}` (по лучшему региону тикета и окружению; environments v1 §7), `birdman_mm_time_to_match_seconds` (histogram), `birdman_mm_tickets_total{result}`.
 - Явно вне v0: скиллы, пати, бэкфилл, реконнект в матч.
 
 ## 5. Deploy-менеджер (мягкий деплой)
@@ -203,7 +203,7 @@ POST /v1/rollback: шаг 3 в обратную сторону (образы у�
 > - **Окно закрывает `reap_ttl_min`**: по его истечении (от `versions.deprecated_at`, максимум по флитам проекта) deprecated → `disabled` — reconcile реапит её ready-буфер, живым матчам шлёт per-server `DrainServer{deadline_s=300}` (protocol.md §1; ровно один раз — сервер помечается `draining`), матчмейкер перестаёт её предлагать (старые клиенты получают `update_required`).
 > - PrePull-таргеты — active-ноды с heartbeat <30с в регионах флитов проекта; нет живых нод → флип сразу (образам некуда греться). Repeated `POST /v1/deploy` идемпотентен (prepulling → отчёт о прогрессе, active → no-op); одновременно prepull'ится максимум одна версия проекта; `failed` PullReport абортит деплой сразу. Стейт ожидания prepull — in-memory, маркер — `versions.state=prepulling`: после рестарта master деплой резюмируется с новым 15-мин таймаутом (PrePull идемпотентен и дёшев на тёплом кэше).
 > - `POST /v1/rollback {project?, region?}`: project можно опустить при единственном проекте; `region` ограничивает переключение `fleet_configs.active_version` этим регионом (состояния версий остаются глобальными); наружу — событие `deploy_rolled_back`.
-> - События: `deploy_started`, `deploy_node_pulled`, `deploy_activated`, `deploy_failed`, `deploy_rolled_back`, `version_disabled`, `server_drain`. Метрики: `birdman_deploy_prepull_seconds` (histogram), `birdman_versions{project,state}`.
+> - События: `deploy_started`, `deploy_node_pulled`, `deploy_activated`, `deploy_failed`, `deploy_rolled_back`, `version_disabled`, `server_drain`. Метрики: `birdman_deploy_prepull_seconds` (histogram), `birdman_versions{project,env,state}`.
 > - `PUT /v1/fleets/{region}` больше не сбрасывает `active_version` при отсутствии поля (nil → оставить как есть): владелец флипов — deploy-менеджер, прямое назначение осталось как bootstrap/ops-override.
 
 ## 6. Публичный REST API (сводка; OpenAPI — в `master/api/openapi.yaml`)

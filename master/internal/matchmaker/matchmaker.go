@@ -141,7 +141,7 @@ type Matchmaker struct {
 	mu          sync.Mutex
 	tickets     map[string]*ticket
 	byPlayer    map[string]*ticket // active (queued) ticket per (project, env, player)
-	regionsSeen map[string]bool    // for zeroing the queue-depth gauge
+	regionsSeen map[regionEnv]bool // (region, env) pairs ever seen — for zeroing the queue-depth gauge
 }
 
 func New(st *store.Store, m *metrics.Metrics, cfg Config, log *slog.Logger) *Matchmaker {
@@ -149,7 +149,7 @@ func New(st *store.Store, m *metrics.Metrics, cfg Config, log *slog.Logger) *Mat
 		st: st, m: m, cfg: cfg.withDefaults(), log: log,
 		tickets:     map[string]*ticket{},
 		byPlayer:    map[string]*ticket{},
-		regionsSeen: map[string]bool{},
+		regionsSeen: map[regionEnv]bool{},
 	}
 }
 

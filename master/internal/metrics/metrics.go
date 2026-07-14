@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -23,7 +24,7 @@ type Metrics struct {
 	AllocFailures *prometheus.CounterVec
 
 	// Matchmaker (docs/specs/ops.md §1).
-	MMQueueDepth  *prometheus.GaugeVec   // {region} queued tickets by best region
+	MMQueueDepth  *prometheus.GaugeVec   // {region, env} queued tickets by best region
 	MMTimeToMatch prometheus.Histogram   // seconds from ticket submit to matched
 	MMTickets     *prometheus.CounterVec // {result} matched|cancelled|update_required|expired
 
@@ -85,12 +86,12 @@ func New(st *store.Store, log *slog.Logger) *Metrics {
 		}),
 		AllocFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "birdman_allocation_failures_total",
-			Help: "Failed allocations by reason (no_capacity, bad_request, internal).",
+			Help: "Failed allocations by reason (no_capacity, bad_request, env_required, internal).",
 		}, []string{"reason"}),
 		MMQueueDepth: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "birdman_mm_queue_depth",
-			Help: "Queued matchmaking tickets per best (lowest-rtt) region.",
-		}, []string{"region"}),
+			Help: "Queued matchmaking tickets per best (lowest-rtt) region and env (environments v1 §7).",
+		}, []string{"region", "env"}),
 		MMTimeToMatch: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Name:    "birdman_mm_time_to_match_seconds",
 			Help:    "Time from ticket submit to matched.",
@@ -121,18 +122,24 @@ func New(st *store.Store, log *slog.Logger) *Metrics {
 }
 
 var (
+	// birdman_servers{project, env, production, state, region, version}
+	// (environments v1 §7, M14). env is the SERVER's env (servers.env);
+	// production is a join to environments by (project_id, env) — both derived
+	// from the server row, NEVER from the node (I6): a node moved between
+	// environments must not rewrite the env/production history of servers it
+	// hosted. region still comes from the node (nodes.region).
 	serversDesc = prometheus.NewDesc(
 		"birdman_servers",
-		"Server counts by state, region and version (semver).",
-		[]string{"state", "region", "version"}, nil)
+		"Server counts by project, env, production, state, region and version (semver).",
+		[]string{"project", "env", "production", "state", "region", "version"}, nil)
 	heartbeatAgeDesc = prometheus.NewDesc(
 		"birdman_node_heartbeat_age_seconds",
 		"Seconds since the last agent heartbeat, per node.",
 		[]string{"node", "region"}, nil)
 	versionsDesc = prometheus.NewDesc(
 		"birdman_versions",
-		"Registered version counts by project and state (registered, prepulling, active, deprecated, disabled).",
-		[]string{"project", "state"}, nil)
+		"Registered version counts by project, env and state (registered, prepulling, active, deprecated, disabled).",
+		[]string{"project", "env", "state"}, nil)
 	// birdman_events_total feeds the CrashLoop alert (increase of
 	// {kind="crash_loop"}); the events table is append-only, so a DB-derived
 	// count is monotonic and survives a master restart — a real counter.
@@ -458,24 +465,32 @@ func (c *dbCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 	}
 
+	// project from projects.slug; env from servers.env; production from
+	// environments (project_id, s.env) — NEVER from nodes (I6). region stays
+	// nodes.region; version stays versions.semver. The environments join is an
+	// inner join safely: servers.env is always a seeded/FK-backed env of the
+	// project (dev/prod always exist per ensureProject).
 	rows, err := c.st.Pool.Query(ctx, `
-		select s.state, n.region, v.semver, count(*)
+		select p.slug, s.env, e.production, s.state, n.region, v.semver, count(*)
 		from servers s
 		join nodes n on n.id = s.node_id
 		join versions v on v.id = s.version_id
-		group by 1, 2, 3`)
+		join projects p on p.id = s.project_id
+		join environments e on e.project_id = s.project_id and e.name = s.env
+		group by 1, 2, 3, 4, 5, 6`)
 	if err != nil {
 		c.log.Error("metrics: servers query failed", "err", err)
 	} else {
 		for rows.Next() {
-			var state, region, semver string
+			var project, env, state, region, semver string
+			var production bool
 			var count float64
-			if err := rows.Scan(&state, &region, &semver, &count); err != nil {
+			if err := rows.Scan(&project, &env, &production, &state, &region, &semver, &count); err != nil {
 				c.log.Error("metrics: servers scan failed", "err", err)
 				break
 			}
 			ch <- prometheus.MustNewConstMetric(serversDesc, prometheus.GaugeValue,
-				count, state, region, semver)
+				count, project, env, strconv.FormatBool(production), state, region, semver)
 		}
 		rows.Close()
 	}
@@ -504,11 +519,9 @@ func (c *dbCollector) Collect(ch chan<- prometheus.Metric) {
 		c.log.Error("metrics: versions query failed", "err", err)
 		return
 	}
-	for project, states := range counts {
-		for state, n := range states {
-			ch <- prometheus.MustNewConstMetric(versionsDesc, prometheus.GaugeValue,
-				float64(n), project, state)
-		}
+	for _, vc := range counts {
+		ch <- prometheus.MustNewConstMetric(versionsDesc, prometheus.GaugeValue,
+			float64(vc.Count), vc.Project, vc.Env, vc.State)
 	}
 }
 

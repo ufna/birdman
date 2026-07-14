@@ -57,7 +57,7 @@
   доигрывает и выходит сам (событие `server_drain`). `POST /v1/rollback
   {project?, region?}` — обратный флип deprecated↔active за секунды
   (образы уже на тачках; `deploy_rolled_back`). Метрики:
-  `birdman_deploy_prepull_seconds`, `birdman_versions{project,state}`;
+  `birdman_deploy_prepull_seconds`, `birdman_versions{project,env,state}`;
 - **REST** (`:8100`, Bearer API-ключи из таблицы `api_keys`, скоупы
   admin/deploy/matchmaking/allocate/readonly; bcrypt + кэш):
   - `POST /v1/matchmaking/tickets` `{player_id, client_version,
@@ -70,10 +70,10 @@
     из живых нод — сам UDP-echo появится в агенте в итерации 4, адреса уже
     правильные;
   - rate-limit матчмейкинга: 5 rps per player_id → `429 rate_limited`;
-- **/metrics** (Prometheus): `birdman_servers{state,region,version}`,
+- **/metrics** (Prometheus): `birdman_servers{project,env,production,state,region,version}`,
   `birdman_allocation_duration_seconds`,
   `birdman_allocation_failures_total{reason}`,
-  `birdman_node_heartbeat_age_seconds`, `birdman_mm_queue_depth{region}`,
+  `birdman_node_heartbeat_age_seconds`, `birdman_mm_queue_depth{region,env}`,
   `birdman_mm_time_to_match_seconds`, `birdman_mm_tickets_total{result}`;
 - **SSE** `GET /v1/events/stream` (readonly+): новые строки `events` как
   `id:`/`event: <kind>`/`data: <json>` (курсор по id, poll ~1с), keepalive

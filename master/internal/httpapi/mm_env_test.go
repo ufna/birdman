@@ -1,6 +1,8 @@
 package httpapi_test
 
 import (
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -189,6 +191,14 @@ func TestAllocateEnvResolution(t *testing.T) {
 	if code != 409 || body["error"] != "env_required" {
 		t.Fatalf("allocate no env: want 409 env_required, got %d %v", code, body)
 	}
+	// The 409-ambiguous path books its OWN AllocationFailures reason label
+	// (environments v1 §7) — dashboards separate «operator must name env» from a
+	// malformed request's bad_request. CounterVec only prints series it has
+	// touched, so the presence of this line means the env_required inc happened.
+	if scrape := metricsText(t, ts.URL); !strings.Contains(scrape,
+		`birdman_allocation_failures_total{reason="env_required"} `) {
+		t.Fatal("409-ambiguous allocate must increment AllocationFailures{reason=env_required}")
+	}
 
 	// bound(dev) key on env=prod → 403.
 	code, body = boundDev.do("POST", "/v1/allocate", map[string]any{
@@ -350,4 +360,19 @@ func versionID(t *testing.T, st *store.Store, project, env, semver string) strin
 		t.Fatalf("version id: %v", err)
 	}
 	return id
+}
+
+// metricsText scrapes the public /metrics endpoint and returns the raw text.
+func metricsText(t *testing.T, baseURL string) string {
+	t.Helper()
+	resp, err := http.Get(baseURL + "/metrics")
+	if err != nil {
+		t.Fatalf("scrape /metrics: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read /metrics: %v", err)
+	}
+	return string(raw)
 }
