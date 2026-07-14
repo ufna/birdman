@@ -7,6 +7,7 @@ import (
 	"github.com/ufna/birdman/master/internal/httpapi"
 	"github.com/ufna/birdman/master/internal/store"
 	"github.com/ufna/birdman/master/internal/testdb"
+	agentlinkv1 "github.com/ufna/birdman/proto/agentlink/v1"
 )
 
 // API-key (project, env) binding + deploy-surface enforcement
@@ -174,6 +175,51 @@ func TestAPIKeyBindingEnforcement(t *testing.T) {
 		"project": "game", "env": "prod", "active_version": prodV,
 	}); code != 200 {
 		t.Fatalf("admin prod fleet: want 200, got %d %v", code, body)
+	}
+}
+
+// TestAPIKeyBindingRollbackOwnEnv (w13) — позитив к негативу из
+// TestAPIKeyBindingEnforcement («rollback с env=prod → 403»): ключ, привязанный к
+// (game, dev), обязан СВОБОДНО откатывать СВОЁ окружение. Матрица привязок до сих
+// пор пинила на rollback только отказ, то есть «403 всегда» прошло бы её насквозь;
+// этот тест закрывает дыру: 2xx и версия действительно вернулась в active.
+func TestAPIKeyBindingRollbackOwnEnv(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10) // dev node + dev version 1.0.0
+	f.UpsertFleet(t, 2, 50)           // dev fleet, active_version 1.0.0
+	v2 := f.AddVersion(t, "1.1.0", "dev")
+	ts, dep, _ := deployServer(t, st)
+	ctx := t.Context()
+
+	game, dev := "game", "dev"
+	_, secret, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{
+		Name: "ci-dev", Scopes: []string{httpapi.ScopeDeploy}, Project: &game, Env: &dev,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundDev := &client{t: t, base: ts.URL, key: secret}
+
+	// Катим 1.1.0 в dev и добиваем флип отчётом ноды: 1.0.0 уходит в deprecated —
+	// появляется окно отката.
+	if code, body := boundDev.do("POST", "/v1/deploy", map[string]any{"version_id": v2}); code != 202 {
+		t.Fatalf("bound deploy dev: want 202, got %d %v", code, body)
+	}
+	dep.HandlePullReport(f.NodeID, &agentlinkv1.PullReport{
+		ImageRef: "ghcr.io/example/game-server:1.1.0", Status: "pulled",
+	})
+
+	// Откат в СВОЁМ env — bound-ключ проходит enforcement (2xx), 1.0.0 снова active.
+	code, body := boundDev.do("POST", "/v1/rollback", map[string]any{"env": "dev"})
+	if code/100 != 2 {
+		t.Fatalf("bound rollback in its own env: want 2xx, got %d %v", code, body)
+	}
+	if rb, _ := body["rollback"].(map[string]any); rb == nil || rb["old_semver"] != "1.1.0" {
+		t.Fatalf("rollback body: %v", body)
+	}
+	v, err := st.GetVersion(ctx, f.VersionID)
+	if err != nil || v.State != "active" {
+		t.Fatalf("откаченная версия обязана снова быть active: %+v %v", v, err)
 	}
 }
 

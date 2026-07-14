@@ -84,8 +84,12 @@ func (s *Store) ListEnvironments(ctx context.Context, projectSlug string) ([]Env
 	return out, rows.Err()
 }
 
-// GetEnvironment returns one environment (ErrNotFound when missing). Used by
-// CreateVersion / the matchmaker to validate an explicit env, and by the API.
+// GetEnvironment returns one environment (ErrBadEnv when missing). Every caller
+// is an existence check of an env NAMED BY A REQUEST — the matchmaker ticket, the
+// ?env= stats filter, the rollback body, the auto-deploy resolve — so a missing
+// env is bad client input (400), not a missing resource (v3, ErrBadEnv). The
+// env-as-addressed-resource routes (PATCH/DELETE /v1/environments/{p}/{name})
+// have their own queries and keep ErrNotFound → 404.
 func (s *Store) GetEnvironment(ctx context.Context, project, name string) (Environment, error) {
 	var e Environment
 	err := s.Pool.QueryRow(ctx, `
@@ -94,7 +98,7 @@ func (s *Store) GetEnvironment(ctx context.Context, project, name string) (Envir
 		where p.slug = $1 and e.name = $2`, project, name).
 		Scan(&e.ProjectID, &e.Project, &e.Name, &e.Production, &e.AutoDeploy, &e.RetentionKeep, &e.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return Environment{}, fmt.Errorf("environment %s/%s: %w", project, name, ErrNotFound)
+		return Environment{}, badEnvErr(project, name)
 	}
 	return e, err
 }

@@ -64,8 +64,8 @@ func (s *Server) handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, matchmaker.ErrInvalid):
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
-	case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrConflict):
-		// Unknown project / ambiguous default project.
+	case errors.Is(err, store.ErrBadEnv), errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrConflict):
+		// Unknown project / unknown env (ErrBadEnv, v3) / ambiguous default project.
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	case err != nil:

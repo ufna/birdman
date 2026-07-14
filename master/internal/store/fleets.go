@@ -50,7 +50,7 @@ func (s *Store) UpsertFleet(ctx context.Context, p UpsertFleetParams) (FleetConf
 		return FleetConfig{}, err
 	}
 	if !envExists {
-		return FleetConfig{}, fmt.Errorf("no such environment %s/%s", p.Project, p.Env)
+		return FleetConfig{}, badEnvErr(p.Project, p.Env)
 	}
 	// Environments v1: fleet_configs.env — NOT NULL, PK (project, env, region).
 	// active_version обязан принадлежать ТОМУ ЖЕ (project, env) — это держит

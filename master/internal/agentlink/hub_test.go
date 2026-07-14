@@ -193,6 +193,41 @@ func TestHubSessionAuthCounts(t *testing.T) {
 	}
 }
 
+// TestHubHasSession пинит liveness-пробу, на которой висит маркер sweep'а снятия
+// образов (I-1, reconcile.SessionChecker): Send офлайн-ноде НЕ падает — команда
+// просто ложится в in-memory pending, поэтому «отправлено» ≠ «доставлено», и
+// единственный признак живой доставки — наличие сессии. Неизвестная нода и нода
+// с отвалившейся сессией обязаны давать false, даже если в очереди висит pending.
+func TestHubHasSession(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	hub := NewHub(log)
+
+	if hub.HasSession("nobody") {
+		t.Fatal("нода, которой хаб не видел: want false")
+	}
+
+	// Очередь без сессии (команда припаркована) — всё ещё НЕ живая сессия: ровно
+	// тот случай, ради которого маркер откладывается.
+	hub.Send("node-offline", &agentlinkv1.MasterMsg{
+		Msg: &agentlinkv1.MasterMsg_RemoveImage{RemoveImage: &agentlinkv1.RemoveImage{ImageRef: "img"}},
+	})
+	if hub.PendingCount("node-offline") != 1 {
+		t.Fatal("команда офлайн-ноде обязана лечь в pending")
+	}
+	if hub.HasSession("node-offline") {
+		t.Fatal("нода без сессии, но с pending-командой: want false")
+	}
+
+	sess := hub.attach("node-live", nil, false, true)
+	if !hub.HasSession("node-live") {
+		t.Fatal("нода с живой сессией: want true")
+	}
+	hub.detach("node-live", sess)
+	if hub.HasSession("node-live") {
+		t.Fatal("после detach сессии нет: want false")
+	}
+}
+
 // drainSetRegistries reads every currently-buffered SetRegistries host off
 // sess.out without blocking, in arrival order — mirrors the non-blocking
 // shape of session.push itself.

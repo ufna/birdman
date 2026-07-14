@@ -47,8 +47,106 @@ func TestEnvironmentsSeededOnProjectCreate(t *testing.T) {
 	if got, err := st.GetEnvironment(ctx, "newgame", "dev"); err != nil || got.Project != "newgame" {
 		t.Fatalf("get dev: %+v %v", got, err)
 	}
-	if _, err := st.GetEnvironment(ctx, "newgame", "nope"); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("get missing env: want ErrNotFound, got %v", err)
+	// v3: несуществующее окружение — ErrBadEnv (→400 «no such environment»), а не
+	// ErrNotFound: env здесь ссылка из запроса, а не адресуемый ресурс.
+	if _, err := st.GetEnvironment(ctx, "newgame", "nope"); !errors.Is(err, store.ErrBadEnv) {
+		t.Fatalf("get missing env: want ErrBadEnv, got %v", err)
+	}
+}
+
+// TestEnvironmentsSeedOnlyOnProjectInsert (w2): ensureProject сеет dev+prod ТОЛЬКО
+// при фактической ВСТАВКЕ проекта. Раньше сев шёл при КАЖДОМ касании (безусловный
+// insert environments … on conflict do nothing), поэтому удалённое оператором
+// окружение молча воскресало на первом же CreateVersion/UpsertFleet/CreateNode:
+// DELETE /v1/environments отрабатывал, а env возвращался из ниоткуда.
+//
+// Здесь же — env у CreateNode: нода больше не входит в dev «по дефолту колонки»
+// вслепую (это упало бы сырым FK-500 при удалённом dev), а валидирует окружение и
+// умеет войти сразу в нужное.
+func TestEnvironmentsSeedOnlyOnProjectInsert(t *testing.T) {
+	st := testdb.New(t)
+	ctx := context.Background()
+
+	// Новый проект (первая вставка) — dev+prod засеяны.
+	if _, err := st.SetProjectMatchSize(ctx, "newgame", 4); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	// Ссылок на dev нет, поэтому его можно удалить — как это сделал бы оператор.
+	if err := st.DeleteEnvironment(ctx, "newgame", "dev"); err != nil {
+		t.Fatalf("delete dev: %v", err)
+	}
+
+	// Повторные касания проекта (ensureProject внутри) НЕ воскрешают dev.
+	if _, err := st.SetProjectMatchSize(ctx, "newgame", 5); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateVersion(ctx, store.CreateVersionParams{
+		Project: "newgame", Semver: "1.0.0", ImageRef: "ghcr.io/example/newgame:1.0.0", Env: "prod",
+	}); err != nil {
+		t.Fatalf("create version in prod: %v", err)
+	}
+	assertEnvNames := func(want ...string) {
+		t.Helper()
+		envs, err := st.ListEnvironments(ctx, "newgame")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, e := range envs {
+			got = append(got, e.Name)
+		}
+		if len(got) != len(want) {
+			t.Fatalf("окружения newgame: want %v, got %v", want, got)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("окружения newgame: want %v, got %v", want, got)
+			}
+		}
+	}
+	assertEnvNames("prod") // dev не воскрес
+
+	// CreateNode без env целится в дефолтный dev, которого больше нет → ErrBadEnv
+	// (400 «no such environment»), а не сырой FK-500 и не тихое воскрешение.
+	_, _, err := st.CreateNode(ctx, store.CreateNodeParams{
+		Project: "newgame", Region: "eu", Hostname: "n1", PublicIP: "203.0.113.1", CapacitySlots: 4,
+	})
+	if !errors.Is(err, store.ErrBadEnv) {
+		t.Fatalf("CreateNode без env при удалённом dev: want ErrBadEnv, got %v", err)
+	}
+	assertEnvNames("prod")
+
+	// Явный несуществующий env → тот же ErrBadEnv.
+	if _, _, err := st.CreateNode(ctx, store.CreateNodeParams{
+		Project: "newgame", Region: "eu", Hostname: "n1", PublicIP: "203.0.113.1", CapacitySlots: 4, Env: "ghost",
+	}); !errors.Is(err, store.ErrBadEnv) {
+		t.Fatalf("CreateNode с несуществующим env: want ErrBadEnv, got %v", err)
+	}
+
+	// Явный env=prod → нода входит в prod.
+	n, _, err := st.CreateNode(ctx, store.CreateNodeParams{
+		Project: "newgame", Region: "eu", Hostname: "n1", PublicIP: "203.0.113.1", CapacitySlots: 4, Env: "prod",
+	})
+	if err != nil {
+		t.Fatalf("CreateNode env=prod: %v", err)
+	}
+	if n.Env != "prod" {
+		t.Fatalf("нода обязана войти в prod, got %q", n.Env)
+	}
+
+	// Регрессия наоборот: НОВЫЙ проект по-прежнему получает dev+prod при вставке,
+	// и нода без env входит в dev.
+	fresh, _, err := st.CreateNode(ctx, store.CreateNodeParams{
+		Project: "fresh", Region: "eu", Hostname: "n1", PublicIP: "203.0.113.2", CapacitySlots: 4,
+	})
+	if err != nil {
+		t.Fatalf("CreateNode нового проекта: %v", err)
+	}
+	if fresh.Env != "dev" {
+		t.Fatalf("нода нового проекта входит как dev, got %q", fresh.Env)
+	}
+	if envs, err := st.ListEnvironments(ctx, "fresh"); err != nil || len(envs) != 2 {
+		t.Fatalf("новый проект обязан получить dev+prod: %+v %v", envs, err)
 	}
 }
 
@@ -153,7 +251,7 @@ func TestEnvironmentsDelete(t *testing.T) {
 	if err := st.DeleteEnvironment(ctx, "game", "temp"); err != nil {
 		t.Fatalf("delete unused env: %v", err)
 	}
-	if _, err := st.GetEnvironment(ctx, "game", "temp"); !errors.Is(err, store.ErrNotFound) {
+	if _, err := st.GetEnvironment(ctx, "game", "temp"); !errors.Is(err, store.ErrBadEnv) {
 		t.Fatalf("temp still present after delete: %v", err)
 	}
 
@@ -220,9 +318,14 @@ func TestEnvironmentsSetNodeEnv(t *testing.T) {
 		t.Fatalf("move quarantined empty node: %+v %v", qn, err)
 	}
 
-	// Non-existent target env → ErrNotFound; unknown node → ErrNotFound.
-	if _, err := st.SetNodeEnv(ctx, quar, "ghost"); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("move to missing env: want ErrNotFound, got %v", err)
+	// Non-existent target env → ErrBadEnv (ССЫЛКА в теле PATCH'а → 400, v3);
+	// unknown node → ErrNotFound (адресуемый ресурс → 404).
+	_, err = st.SetNodeEnv(ctx, quar, "ghost")
+	if !errors.Is(err, store.ErrBadEnv) {
+		t.Fatalf("move to missing env: want ErrBadEnv, got %v", err)
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("missing target env — это 400, а не 404: %v", err)
 	}
 	if _, err := st.SetNodeEnv(ctx, uuid.NewString(), "prod"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("move unknown node: want ErrNotFound, got %v", err)

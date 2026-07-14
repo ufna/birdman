@@ -580,6 +580,53 @@ func TestPendingImageCleanupMarkerStopsResend(t *testing.T) {
 	}
 }
 
+// TestPendingImageCleanupBatchLimit (M-2): один проход sweep'а забирает не больше
+// 200 кандидатов. Разовый всплеск — после миграции, на большом парке или после
+// долгого простоя sweep'а — иначе раздул бы in-memory pending-очереди хаба
+// (RemoveImage уходит КАЖДОЙ ноде окружения). Хвост не голодает: выборка
+// упорядочена по created_at, а отправленное гасится маркером, поэтому следующий
+// 60с-субтик берёт следующую порцию.
+func TestPendingImageCleanupBatchLimit(t *testing.T) {
+	st := testdb.New(t)
+	ctx := context.Background()
+	f := testdb.Seed(t, st, "eu", 10)
+	projectID := versionProjectID(t, st, f.VersionID)
+
+	// 250 disabled-версий с уникальными ref'ами, без серверов — все кандидаты.
+	const total = 250
+	if _, err := st.Pool.Exec(ctx, `
+		insert into versions (project_id, semver, image_ref, env, state, created_at)
+		select $1::uuid, '9.0.' || i, 'ghcr.io/example/game-server:9.0.' || i, 'dev', 'disabled',
+		       now() - (interval '1 second' * (1000 - i))
+		from generate_series(1, $2) as i`, projectID, total); err != nil {
+		t.Fatalf("seed disabled versions: %v", err)
+	}
+
+	pending, err := st.VersionsPendingImageCleanup(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 200 {
+		t.Fatalf("кандидатов %d — за проход обязано выйти ровно 200 (LIMIT), got %d", total, len(pending))
+	}
+
+	// Остаток доберётся следующим проходом: гасим отданное маркером.
+	ids := make([]string, 0, len(pending))
+	for _, d := range pending {
+		ids = append(ids, d.VersionID)
+	}
+	if err := st.MarkImageCleanupSent(ctx, ids); err != nil {
+		t.Fatal(err)
+	}
+	rest, err := st.VersionsPendingImageCleanup(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rest) != total-200 {
+		t.Fatalf("хвост обязан достаться следующему субтику: want %d, got %d", total-200, len(rest))
+	}
+}
+
 // versionProjectID returns a version's project uuid (the id EnvNodeIDs /
 // ImageRefInUse take).
 func versionProjectID(t *testing.T, st *store.Store, versionID string) string {

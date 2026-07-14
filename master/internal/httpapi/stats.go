@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -132,12 +131,9 @@ func (s *Server) statsEnv(w http.ResponseWriter, r *http.Request) (string, bool)
 		return "", false
 	}
 	if _, err := s.st.GetEnvironment(r.Context(), project, env); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			// Тот же формат «no such environment <project>/<env>», что и deploy.go
-			// (M3): единый текст 400 по всем env-хендлерам.
-			writeError(w, http.StatusBadRequest, "bad_request", "no such environment "+project+"/"+env)
-			return "", false
-		}
+		// ErrBadEnv → 400 «no such environment <project>/<env>» — тот же текст и тот
+		// же код, что и на deploy/versions/promote (v3: единый sentinel в storeError);
+		// реальный сбой стора → 500, а не «плохой ввод».
 		storeError(w, err)
 		return "", false
 	}

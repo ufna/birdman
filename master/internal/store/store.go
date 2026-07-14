@@ -114,3 +114,22 @@ func (s *Store) Ping(ctx context.Context) error {
 
 // ErrNotFound is returned when a referenced entity does not exist.
 var ErrNotFound = errors.New("not_found")
+
+// ErrBadEnv — единый sentinel «окружения, на которое ссылается запрос, не
+// существует» (v3). До него это состояние возвращалось вразнобой: то плоской
+// ошибкой (CreateVersion/PromoteVersion/UpsertFleet/CreateAPIKey), то ErrNotFound
+// (SetNodeEnv/GetEnvironment/mapEnvFKViolation), и httpapi-мапперы promote/versions
+// вынужденно клали default→400 — то есть глотали любой инфра-сбой стора как «плохой
+// ввод». Теперь: env-как-ССЫЛКА (тело/квери запроса — CreateVersion, PromoteVersion,
+// UpsertFleet, CreateAPIKey, CreateNode, SetNodeEnv, stats-/rollback-резолв, гонка с
+// DELETE env через mapEnvFKViolation) → ErrBadEnv → 400 bad_request; всё прочее из
+// стора → 500. Env-как-АДРЕСУЕМЫЙ-РЕСУРС (PATCH/DELETE /v1/environments/{p}/{name})
+// остаётся ErrNotFound → 404: там окружение — сам объект запроса, а не ссылка.
+var ErrBadEnv = errors.New("no such environment")
+
+// badEnvErr — каноническая ошибка ErrBadEnv с текстом «no such environment
+// <project>/<env>» (ровно тот, что уходит в detail 400-ответа: httpapi печатает
+// err.Error(), поэтому формат живёт здесь, в одном месте).
+func badEnvErr(project, env string) error {
+	return fmt.Errorf("%w %s/%s", ErrBadEnv, project, env)
+}

@@ -218,9 +218,14 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// storeError maps store sentinel errors to HTTP responses.
+// storeError maps store sentinel errors to HTTP responses. ErrBadEnv (окружение,
+// названное запросом, не существует) — это плохой ВВОД, а не отсутствующий ресурс:
+// единый 400 {"error":"bad_request","detail":"no such environment <project>/<env>"}
+// по всем env-поверхностям (v3, store.ErrBadEnv).
 func storeError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, store.ErrBadEnv):
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not_found", err.Error())
 	case errors.Is(err, store.ErrConflict):

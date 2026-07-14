@@ -108,14 +108,85 @@ func TestEnvironmentsAPI(t *testing.T) {
 	if code != 200 || body["node"].(map[string]any)["env"] != "prod" {
 		t.Fatalf("move node: %d %v", code, body)
 	}
-	// Non-uuid id → 400; unknown env → 404; unknown node → 404.
+	// Non-uuid id → 400; unknown env → 400; unknown node → 404. Несуществующий env
+	// в ТЕЛЕ запроса — плохой ввод (единый ErrBadEnv → 400 «no such environment
+	// <project>/<env>», v3), а не отсутствующий ресурс; 404 остаётся за самой нодой.
 	if code, _ := admin.do("PATCH", "/v1/nodes/not-a-uuid", map[string]any{"env": "prod"}); code != 400 {
 		t.Fatalf("bad node id: want 400, got %d", code)
 	}
-	if code, _ := admin.do("PATCH", "/v1/nodes/"+n2, map[string]any{"env": "ghost"}); code != 404 {
-		t.Fatalf("move to missing env: want 404, got %d", code)
+	code, body = admin.do("PATCH", "/v1/nodes/"+n2, map[string]any{"env": "ghost"})
+	if code != 400 {
+		t.Fatalf("move to missing env: want 400, got %d %v", code, body)
+	}
+	if d, _ := body["detail"].(string); d != "no such environment game/ghost" {
+		t.Fatalf("400 detail: want «no such environment game/ghost», got %q", d)
 	}
 	if code, _ := admin.do("PATCH", "/v1/nodes/"+uuid.NewString(), map[string]any{"env": "prod"}); code != 404 {
 		t.Fatalf("move unknown node: want 404, got %d", code)
+	}
+}
+
+// TestNodeCreateEnv (w2): POST /v1/nodes принимает необязательное поле env.
+// Ключевой сценарий — удалённый оператором dev: регистрация ноды без env целится
+// в дефолтный dev, и раньше ensureProject молча ВОСКРЕШАЛ бы его (сев шёл при
+// каждом касании проекта). Теперь сев только при вставке проекта, а такая
+// регистрация — честный 400 «no such environment»; чтобы завести ноду, оператор
+// называет живое окружение явно.
+func TestNodeCreateEnv(t *testing.T) {
+	st := testdb.New(t)
+	ctx := t.Context()
+	ts := envAPIServer(t, st)
+
+	_, key, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{
+		Name: "admin", Scopes: []string{httpapi.ScopeAdmin},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := &client{t: t, base: ts.URL, key: key}
+
+	// Новый проект (dev+prod засеяны при вставке).
+	if code, body := admin.do("PUT", "/v1/projects/newgame", map[string]any{"match_size": 4}); code != 200 {
+		t.Fatalf("create project: %d %v", code, body)
+	}
+	// Нода сразу в prod — env в теле.
+	code, body := admin.do("POST", "/v1/nodes", map[string]any{
+		"project": "newgame", "region": "eu", "hostname": "n-prod",
+		"public_ip": "203.0.113.21", "capacity_slots": 4, "env": "prod",
+	})
+	if code != 201 || body["node"].(map[string]any)["env"] != "prod" {
+		t.Fatalf("create node in prod: %d %v", code, body)
+	}
+	// dev пуст (нода ушла в prod) → удаляется.
+	if code, _ := admin.do("DELETE", "/v1/environments/newgame/dev", nil); code != 204 {
+		t.Fatalf("delete dev: want 204, got %d", code)
+	}
+
+	// Регистрация без env целится в удалённый dev → 400 (не 500 и не воскрешение).
+	code, body = admin.do("POST", "/v1/nodes", map[string]any{
+		"project": "newgame", "region": "eu", "hostname": "n2",
+		"public_ip": "203.0.113.22", "capacity_slots": 4,
+	})
+	if code != 400 {
+		t.Fatalf("node without env into a deleted dev: want 400, got %d %v", code, body)
+	}
+	if d, _ := body["detail"].(string); d != "no such environment newgame/dev" {
+		t.Fatalf("400 detail: want «no such environment newgame/dev», got %q", d)
+	}
+	// Несуществующий env явно → тот же 400.
+	if code, _ := admin.do("POST", "/v1/nodes", map[string]any{
+		"project": "newgame", "region": "eu", "hostname": "n3",
+		"public_ip": "203.0.113.23", "capacity_slots": 4, "env": "ghost",
+	}); code != 400 {
+		t.Fatalf("node with an unknown env: want 400, got %d", code)
+	}
+	// И главное: dev не воскрес ни от одного из этих касаний проекта.
+	code, body = admin.do("GET", "/v1/environments?project=newgame", nil)
+	envs, _ := body["environments"].([]any)
+	if code != 200 || len(envs) != 1 {
+		t.Fatalf("после удаления dev у проекта обязан остаться только prod: %d %v", code, body)
+	}
+	if envs[0].(map[string]any)["name"] != "prod" {
+		t.Fatalf("dev воскрес: %v", body)
 	}
 }

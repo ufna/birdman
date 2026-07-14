@@ -21,6 +21,10 @@ type createNodeRequest struct {
 	PublicIP      string         `json:"public_ip"`
 	CapacitySlots int32          `json:"capacity_slots"`
 	Labels        map[string]any `json:"labels"`
+	// Env — необязательное окружение регистрации (w2); пусто → "dev". Нужен, когда
+	// dev у проекта удалён (после seed-on-insert он больше не воскресает) или когда
+	// ноду сразу заводят в prod, не гоняя её через PATCH /v1/nodes/{id}.
+	Env string `json:"env,omitempty"`
 }
 
 func (s *Server) handleCreateNode(w http.ResponseWriter, r *http.Request) {
@@ -35,7 +39,9 @@ func (s *Server) handleCreateNode(w http.ResponseWriter, r *http.Request) {
 		PublicIP:      req.PublicIP,
 		CapacitySlots: req.CapacitySlots,
 		Labels:        req.Labels,
+		Env:           req.Env,
 	})
+	// Всё, что отдаёт CreateNode (валидация полей, ErrBadEnv) — плохой ввод: 400.
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
@@ -96,6 +102,13 @@ func (s *Server) handleCreateVersion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "env is required")
 		return
 	}
+	// Обязательные поля тела проверяем ЗДЕСЬ, а не полагаемся на плоскую ошибку
+	// стора (v3): ниже не-sentinel ошибка = 500, поэтому клиентский ввод обязан
+	// отсекаться на входе, иначе пустой semver уехал бы в «internal».
+	if req.Semver == "" || req.ImageRef == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "semver and image_ref are required")
+		return
+	}
 	if !s.requireBinding(w, r, project, req.Env) {
 		return
 	}
@@ -105,12 +118,10 @@ func (s *Server) handleCreateVersion(w http.ResponseWriter, r *http.Request) {
 		ImageRef: req.ImageRef,
 		Env:      req.Env,
 	})
-	if errors.Is(err, store.ErrConflict) {
-		storeError(w, err)
-		return
-	}
+	// ErrBadEnv → 400 «no such environment …», ErrConflict → 409, всё остальное →
+	// 500 (v3): раньше здесь стоял безусловный 400 и он глотал инфра-сбои стора.
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		storeError(w, err)
 		return
 	}
 	resp := map[string]any{"version": v}

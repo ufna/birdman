@@ -106,13 +106,11 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
 	// RollbackTarget и всплывал вводящим в заблуждение 409 «нет deprecated-версии»
 	// (ErrVersionState) — типо в имени env это 400. Sole-fallback-путь (env
 	// выведен из EnvsWithDeprecated) заведомо существует, его не перепроверяем.
+	// storeError сам отдаёт ErrBadEnv как 400 «no such environment <p>/<e>» (v3),
+	// а реальный сбой стора — как 500.
 	if req.Env != "" {
 		if _, err := s.st.GetEnvironment(r.Context(), project, env); err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				writeError(w, http.StatusBadRequest, "bad_request", "no such environment "+project+"/"+env)
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+			storeError(w, err)
 			return
 		}
 	}
@@ -186,18 +184,24 @@ func (s *Server) handlePromote(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, code, map[string]any{"version": promoted, "deploy": st})
 }
 
-// promoteError maps PromoteVersion sentinels onto HTTP responses. Unlike
-// deployError, a plain (non-sentinel) error — «no such environment …» — is a
-// 400 bad_request, consistent with CreateVersion/W1 (a typo'd to_env is client
-// input, not a 500).
+// promoteError maps PromoteVersion sentinels onto HTTP responses: несуществующий
+// to_env → 400 (ErrBadEnv — опечатка в теле запроса), неизвестная version_id → 404,
+// конфликт состояния/семвера → 409.
+//
+// default здесь — 500, а НЕ 400 (v3). Раньше плоская ошибка «no such environment»
+// вынуждала default→400, и вместе с ней в 400 уезжал ЛЮБОЙ сбой стора (упал pg,
+// оборвался tx) — инфра-500 маскировался под «плохой ввод» клиента. Теперь
+// bad-env говорит sentinel'ом, а всё непонятное честно 500.
 func promoteError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, store.ErrBadEnv):
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not_found", err.Error())
 	case errors.Is(err, store.ErrConflict):
 		writeError(w, http.StatusConflict, "conflict", err.Error())
 	default:
-		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 	}
 }
 

@@ -2,30 +2,33 @@ package store
 
 import (
 	"errors"
-	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // w5: mapEnvFKViolation переводит 23503 на env-FK в чистый «no such environment»
-// (ErrNotFound → 400 на HTTP) и молчит на всём прочем. Прямой юнит на маппер:
-// реальную гонку (DELETE env между in-tx пре-чеком и insert'ом) без тестовых
-// хуков не воспроизвести, поэтому пиним само отображение.
+// (v3: ErrBadEnv → 400 на HTTP, тот же sentinel, что и у in-tx пре-чеков) и молчит
+// на всём прочем. Прямой юнит на маппер: реальную гонку (DELETE env между in-tx
+// пре-чеком и insert'ом) без тестовых хуков не воспроизвести, поэтому пиним само
+// отображение.
 func TestMapEnvFKViolation(t *testing.T) {
 	fk := func(constraint string) error {
 		return &pgconn.PgError{Code: "23503", ConstraintName: constraint}
 	}
 
-	// Все env-FK (versions/fleet/api_keys + nodes для паритета) → ErrNotFound,
-	// сообщение называет окружение.
+	// Все env-FK (versions/fleet/api_keys/nodes) → ErrBadEnv, сообщение называет
+	// окружение ровно тем текстом, что уходит в detail 400-ответа.
 	for _, c := range []string{"versions_env_fk", "fleet_env_fk", "api_keys_env_fk", "nodes_env_fk"} {
 		got := mapEnvFKViolation(fk(c), "game", "prod")
-		if !errors.Is(got, ErrNotFound) {
-			t.Fatalf("%s: want ErrNotFound, got %v", c, got)
+		if !errors.Is(got, ErrBadEnv) {
+			t.Fatalf("%s: want ErrBadEnv, got %v", c, got)
 		}
-		if !strings.Contains(got.Error(), "no such environment game/prod") {
-			t.Fatalf("%s: message must name the env, got %v", c, got)
+		if errors.Is(got, ErrNotFound) {
+			t.Fatalf("%s: bad env — это 400, а не 404: %v", c, got)
+		}
+		if got.Error() != "no such environment game/prod" {
+			t.Fatalf("%s: message must name the env, got %q", c, got.Error())
 		}
 	}
 

@@ -100,7 +100,7 @@ func (s *Store) CreateAPIKey(ctx context.Context, p CreateAPIKeyParams) (APIKey,
 			return APIKey{}, "", err
 		}
 		if !envExists {
-			return APIKey{}, "", fmt.Errorf("no such environment %s/%s", *p.Project, *p.Env)
+			return APIKey{}, "", badEnvErr(*p.Project, *p.Env)
 		}
 		projectID = &pid
 	}
