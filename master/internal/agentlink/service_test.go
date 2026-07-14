@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -37,18 +38,21 @@ func TestMain(m *testing.M) { os.Exit(testdb.Run(m)) }
 func startServer(t *testing.T, st *store.Store) (*agentlink.Hub, *agentlink.Service, agentlinkv1.AgentLinkClient) {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	return startServerWithLog(t, st, log)
+	return startServerWithLog(t, st, log, nil)
 }
 
 // startServerWithLog is startServer with an injectable logger —
 // TestRegistriesTokenNeverLogged uses it to capture every log line (not just
-// stderr at Error level) into a buffer it can grep for a leaked token.
-func startServerWithLog(t *testing.T, st *store.Store, log *slog.Logger) (*agentlink.Hub, *agentlink.Service, agentlinkv1.AgentLinkClient) {
+// stderr at Error level) into a buffer it can grep for a leaked token. images is
+// the agent→master ImageReport route (nil in every test but the one that asserts
+// it); it is wired BEFORE the server starts serving, so no session can race the
+// field.
+func startServerWithLog(t *testing.T, st *store.Store, log *slog.Logger, images agentlink.ImageSink) (*agentlink.Hub, *agentlink.Service, agentlinkv1.AgentLinkClient) {
 	t.Helper()
 	hub := agentlink.NewHub(log)
 	// Existing tests run token-mode/no-client-cert; mixed is the production
 	// default and behaves identically for a token Hello with no client cert.
-	svc := agentlink.NewService(st, hub, nil, nil, agentlink.AuthMixed, log)
+	svc := agentlink.NewService(st, hub, nil, nil, agentlink.AuthMixed, log).WithImageSink(images)
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -590,7 +594,7 @@ func TestRegistriesTokenNeverLogged(t *testing.T) {
 
 	var logBuf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	hub, svc, client := startServerWithLog(t, st, log)
+	hub, svc, client := startServerWithLog(t, st, log, nil)
 
 	ctxS, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -622,4 +626,99 @@ func TestRegistriesTokenNeverLogged(t *testing.T) {
 	if strings.Contains(logBuf.String(), secretToken) {
 		t.Fatalf("registry token leaked into logs: %s", logBuf.String())
 	}
+}
+
+// --- ImageReport: результат RemoveImage доезжает до мастера (environments v1 §6б) ---
+
+// recordingImageSink stands in for *reconcile.ImageCleaner — the production
+// ImageSink the service routes agent ImageReports to.
+type recordingImageSink struct {
+	mu  sync.Mutex
+	got []recordedImageReport
+}
+
+type recordedImageReport struct{ nodeID, cmdID, ref, status, detail string }
+
+func (s *recordingImageSink) HandleImageReport(nodeID string, r *agentlinkv1.ImageReport) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.got = append(s.got, recordedImageReport{
+		nodeID: nodeID, cmdID: r.GetCmdId(), ref: r.GetImageRef(),
+		status: r.GetStatus(), detail: r.GetDetail(),
+	})
+}
+
+func (s *recordingImageSink) reports() []recordedImageReport {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]recordedImageReport(nil), s.got...)
+}
+
+// TestSessionRoutesImageReportToSink: агент отвечает на RemoveImage не только Ack'ом
+// (тот подтверждает лишь ПОЛУЧЕНИЕ команды), но и ImageReport'ом с фактическим
+// результатом — recv-петля сессии обязана прокинуть его наверх, в image cleaner,
+// вместе с node_id (мастер ждёт подтверждения от КАЖДОЙ целевой ноды окружения,
+// поэтому «кто ответил» — часть факта). Ack при этом остаётся штатным: обе ветки
+// живут рядом и не мешают друг другу.
+func TestSessionRoutesImageReportToSink(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10)
+	sink := &recordingImageSink{}
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	hub, _, client := startServerWithLog(t, st, log, sink)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	stream, err := client.Session(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Send(hello(f.NodeToken)); err != nil {
+		t.Fatal(err)
+	}
+	// Attach prefaces every stream with a registries snapshot — drain and ack it so
+	// the pending-queue assertion below sees only the RemoveImage we send ourselves.
+	preface, err := stream.Recv()
+	if err != nil || preface.GetSetRegistries() == nil {
+		t.Fatalf("want the attach registries preface first, got %+v (err=%v)", preface, err)
+	}
+	if err := stream.Send(&agentlinkv1.AgentMsg{Msg: &agentlinkv1.AgentMsg_Ack{
+		Ack: &agentlinkv1.Ack{CmdId: preface.GetSetRegistries().GetCmdId()},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "preface acked", func() bool { return hub.PendingCount(f.NodeID) == 0 })
+
+	// Мастер шлёт RemoveImage; агент отвечает Ack (получено) + ImageReport (что вышло).
+	ref := "ghcr.io/example/game-server:2.0.0"
+	cmdID := hub.Send(f.NodeID, &agentlinkv1.MasterMsg{
+		Msg: &agentlinkv1.MasterMsg_RemoveImage{RemoveImage: &agentlinkv1.RemoveImage{ImageRef: ref}},
+	})
+	cmd, err := stream.Recv()
+	if err != nil || cmd.GetRemoveImage() == nil {
+		t.Fatalf("want RemoveImage, got %+v (err=%v)", cmd, err)
+	}
+	if got := cmd.GetRemoveImage().GetCmdId(); got != cmdID {
+		t.Fatalf("cmd_id mismatch: sent %s, delivered %s", cmdID, got)
+	}
+	if err := stream.Send(&agentlinkv1.AgentMsg{Msg: &agentlinkv1.AgentMsg_Ack{
+		Ack: &agentlinkv1.Ack{CmdId: cmdID},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Send(&agentlinkv1.AgentMsg{Msg: &agentlinkv1.AgentMsg_ImageReport{
+		ImageReport: &agentlinkv1.ImageReport{
+			CmdId: cmdID, ImageRef: ref, Status: "busy", Detail: "",
+		},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	eventually(t, "ImageReport routed to the sink", func() bool { return len(sink.reports()) == 1 })
+	got := sink.reports()[0]
+	if got.nodeID != f.NodeID || got.ref != ref || got.status != "busy" || got.cmdID != cmdID {
+		t.Fatalf("recv loop must hand the report up verbatim, with the reporting node: %+v", got)
+	}
+	// Ack всё так же гасит команду в очереди хаба — ImageReport его не подменяет.
+	eventually(t, "RemoveImage acked", func() bool { return hub.PendingCount(f.NodeID) == 0 })
 }

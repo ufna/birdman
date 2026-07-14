@@ -37,6 +37,16 @@ type Metrics struct {
 	// SetRegistriesWithheldCounter (main.go wiring).
 	AgentlinkRegistriesWithheld prometheus.Counter
 
+	// ImageRemovals counts the RESULT an agent reports for each RemoveImage
+	// (ImageReport.status, environments v1 §6б): removed|absent mean the image is
+	// gone from that node (the version's image_cleanup_at marker may be stamped),
+	// busy means it still backs a live container and error that the removal failed
+	// — both leave the version unmarked for the next 60s sweep to retry. A fleet
+	// stuck on busy/error is a disk leak that used to be INVISIBLE: the master
+	// stamped the marker blind, because the protocol carried no result at all.
+	// Incremented by the image cleaner via SetRemovalCounter (main.go wiring).
+	ImageRemovals *prometheus.CounterVec // {status}
+
 	// agentlink holds the late-wired callbacks behind the sessions{auth} and
 	// tls_cert_expiry{cert="server"} samples (mTLS agentlink v1, design §3):
 	// the hub and the server-leaf holder are constructed around the same time
@@ -110,10 +120,14 @@ func New(st *store.Store, log *slog.Logger) *Metrics {
 			Name: "birdman_agentlink_registries_withheld_total",
 			Help: "SetRegistries deliveries withheld from agentlink sessions that are neither cert-authenticated nor loopback (registries gate, mTLS v1).",
 		}),
+		ImageRemovals: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "birdman_image_removals_total",
+			Help: "RemoveImage results reported by agents, by status (removed, absent, busy, error) — environments v1 §6б.",
+		}, []string{"status"}),
 	}
 	m.agentlink = &agentlinkCollector{st: st, log: log}
 	reg.MustRegister(m.AllocDuration, m.AllocFailures, m.MMQueueDepth, m.MMTimeToMatch, m.MMTickets, m.DeployPrepull,
-		m.AgentlinkRegistriesWithheld)
+		m.AgentlinkRegistriesWithheld, m.ImageRemovals)
 	reg.MustRegister(&dbCollector{st: st, log: log})
 	reg.MustRegister(m.agentlink)
 	reg.MustRegister(collectors.NewGoCollector())

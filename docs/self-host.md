@@ -276,11 +276,15 @@ versions past the newest N are moved to `disabled` and their images are dropped 
 the env's nodes. Removal happens in two beats: a `RemoveImage` goes out immediately on
 the `disabled` transition, and — because the version's containers are usually still
 draining at that exact moment (the agent then skips a busy image) — a **converging
-sweep** in the same ~60s tick re-sends it once the version has no live servers left,
-then stamps `versions.image_cleanup_at` so it never re-sends again. The disk-watermark
-GC stays as a backstop (it also covers the narrow case of a master restart between the
-send and the agent's ack). `active`/`prepulling`/`deprecated` are never touched — the
-rollback window stays warm.
+sweep** in the same ~60s tick re-sends it once the version has no live servers left.
+The agent reports the RESULT of every removal back (`removed`, `absent`, `busy`,
+`error`), and the master stamps `versions.image_cleanup_at` — «done, never re-send» —
+only once EVERY target node of the env has confirmed the image is gone; a `busy` or
+`error` leaves the version unmarked, so the next sweep simply tries again. The sweep
+sends nothing at all to a node that is currently offline (it would only pile duplicates
+into an in-memory queue). Watch `birdman_image_removals_total{status}` — a fleet stuck
+on busy/error is leaking disk. The disk-watermark GC stays as a backstop.
+`active`/`prepulling`/`deprecated` are never touched — the rollback window stays warm.
 
 Manage environments under **Admin → Environments** in the panel, or via
 `GET/POST /v1/environments` and `PATCH /v1/environments/{project}/{name}`.

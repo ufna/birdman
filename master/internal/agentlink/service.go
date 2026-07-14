@@ -42,18 +42,32 @@ type PullSink interface {
 	HandlePullReport(nodeID string, r *agentlinkv1.PullReport)
 }
 
+// ImageSink consumes agent ImageReports — the RESULT of a RemoveImage
+// (removed|absent|busy|error, environments v1 §6б). Satisfied by
+// *reconcile.ImageCleaner, the same instance that dispatches the sweep's
+// RemoveImage: the version's «догоняющая команда отправлена» marker
+// (versions.image_cleanup_at) is stamped only once EVERY target node has
+// reported the image gone, so the dispatcher must be the one that hears the
+// answers. The plain Ack cannot carry this — it only confirms receipt of the
+// command, not that the image was actually deleted. May be nil (tests without a
+// cleaner): reports are then logged and dropped.
+type ImageSink interface {
+	HandleImageReport(nodeID string, r *agentlinkv1.ImageReport)
+}
+
 // Service implements agentlink.v1.AgentLink. Nodes are pre-registered via
 // REST (POST /v1/nodes → node_token); Hello{node_token} authenticates the
 // stream (v0 auth clarification in docs/specs/protocol.md §Auth).
 type Service struct {
 	agentlinkv1.UnimplementedAgentLinkServer
 
-	st   *store.Store
-	hub  *Hub
-	pull PullSink
-	logs *LogRouter
-	mode AuthMode
-	log  *slog.Logger
+	st     *store.Store
+	hub    *Hub
+	pull   PullSink
+	images ImageSink // RemoveImage results (§6б); wired via WithImageSink, may be nil
+	logs   *LogRouter
+	mode   AuthMode
+	log    *slog.Logger
 
 	// regMu serializes "read the current registries from the store" with
 	// "enqueue that snapshot into the hub" — as ONE atomic step — across
@@ -91,6 +105,15 @@ func NewService(st *store.Store, hub *Hub, pull PullSink, logs *LogRouter, mode 
 		mode = AuthMixed
 	}
 	return &Service{st: st, hub: hub, pull: pull, logs: logs, mode: mode, log: log}
+}
+
+// WithImageSink routes agent ImageReports (RemoveImage results, §6б) to the
+// image cleaner. Chainable and additive — an unwired service just logs them, so
+// every existing test construction keeps working. Returns the receiver for
+// main.go's construction chain.
+func (s *Service) WithImageSink(sink ImageSink) *Service {
+	s.images = sink
+	return s
 }
 
 func (s *Service) Session(stream agentlinkv1.AgentLink_SessionServer) error {
@@ -391,6 +414,19 @@ func (s *Service) readLoop(ctx context.Context, stream agentlinkv1.AgentLink_Ses
 			// (итерация 3, master.md §5).
 			if s.pull != nil {
 				s.pull.HandlePullReport(nodeID, m.Pull)
+			}
+		case *agentlinkv1.AgentMsg_ImageReport:
+			// Result of a RemoveImage (environments v1 §6б): the image cleanup
+			// sweep stamps versions.image_cleanup_at only when EVERY target node
+			// of the (project, env) reported removed|absent — busy/error leave the
+			// version unmarked so the next 60s subtick re-sends. The Ack above is
+			// receipt, not result; this is the result.
+			r := m.ImageReport
+			s.log.Info("agentlink: image report", "node_id", nodeID,
+				"image_ref", r.GetImageRef(), "status", r.GetStatus(),
+				"cmd_id", r.GetCmdId(), "detail", r.GetDetail())
+			if s.images != nil {
+				s.images.HandleImageReport(nodeID, r)
 			}
 		case *agentlinkv1.AgentMsg_Log:
 			// Route TailLogs answer chunks to the REST logs proxy

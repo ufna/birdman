@@ -217,10 +217,18 @@ func run() error {
 	// Registries gate (design §3): every SetRegistries skipped for an
 	// untrusted session (neither cert-auth nor loopback) is counted.
 	hub.SetRegistriesWithheldCounter(m.AgentlinkRegistriesWithheld.Inc)
-	// Image cleanup dispatcher (environments v1 §6б): RemoveImage on every
-	// disabled transition. Shared by the deploy manager (flip-demote) and the
-	// reconcile loop (reap-TTL + retention) — one stateless instance over the hub.
+	// Image cleanup dispatcher (environments v1 §6б): RemoveImage on every disabled
+	// transition. EXACTLY ONE instance, shared by all three of its collaborators —
+	// the deploy manager (flip-demote), the reconcile loop (reap-TTL + retention +
+	// the converging sweep) and the agentlink service (which routes the agents'
+	// ImageReports back into it). It is no longer stateless: the sweep's
+	// image_cleanup_at marker is stamped when EVERY target node reports the image
+	// gone (removed|absent), so the object that sends must be the object that hears.
 	imageCleaner := reconcile.NewImageCleaner(st, hub, log)
+	// birdman_image_removals_total{status}: removed|absent|busy|error, as reported
+	// by the agents — a fleet stuck on busy/error is a disk leak that used to be
+	// invisible (the marker was stamped blind, the protocol carried no result).
+	imageCleaner.SetRemovalCounter(func(status string) { m.ImageRemovals.WithLabelValues(status).Inc() })
 	// Deploy manager (итерация 3): PrePull fan-out + PullReport-driven flip.
 	dep := deploy.New(deploy.Options{
 		Store: st, Sender: hub, Log: log,
@@ -231,7 +239,10 @@ func run() error {
 		return fmt.Errorf("deploy resume: %w", err)
 	}
 
-	agentlinkSvc := agentlink.NewService(st, hub, dep, logRouter, agentlink.AuthMode(cfg.AgentlinkAuth), log)
+	agentlinkSvc := agentlink.NewService(st, hub, dep, logRouter, agentlink.AuthMode(cfg.AgentlinkAuth), log).
+		// RemoveImage results (§6б): the cleaner marks a version's image retired
+		// only once every target node has reported it gone.
+		WithImageSink(imageCleaner)
 	agentlinkv1.RegisterAgentLinkServer(grpcServer, agentlinkSvc)
 	grpcLis, err := net.Listen("tcp", cfg.ListenGRPC)
 	if err != nil {
@@ -271,10 +282,15 @@ func run() error {
 	if rotateServerLeaf {
 		go holder.rotateLoop(loopCtx, caCertPEM, caKeyPEM, hostname, cfg.TLS.ExtraSANs, log)
 	}
-	// WithOrphanSweeper wires the deploy manager's orphan-prepull sweep into the
-	// loop (W2-реестр); the reconciler dispatches RemoveImage on reap-TTL/retention
-	// via its own image cleaner (same hub).
-	go reconcile.New(st, hub, log).WithOrphanSweeper(dep).Run(loopCtx, time.Second)
+	// WithImageCleaner hands the loop the SHARED cleaner (не свой собственный):
+	// the ~60s cleanup sweep dispatches RemoveImage through it, and that same object
+	// receives the agents' ImageReports from the agentlink service above — that is
+	// what lets the sweep stamp image_cleanup_at only for images actually gone.
+	// WithOrphanSweeper wires the deploy manager's orphan-prepull sweep (W2-реестр).
+	go reconcile.New(st, hub, log).
+		WithImageCleaner(imageCleaner).
+		WithOrphanSweeper(dep).
+		Run(loopCtx, time.Second)
 	go reconcile.NewLeaseChecker(st, log, time.Duration(cfg.NodeDownAfterMin)*time.Minute).Run(loopCtx, time.Second)
 	go mm.Run(loopCtx)
 	// statsrollup's startup Backfill runs inside this goroutine and
