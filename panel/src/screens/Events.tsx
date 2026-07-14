@@ -9,6 +9,7 @@ import type { ReactNode } from 'react';
 import { api } from '../lib/api';
 import type { ApiEvent, NodeInfo } from '../lib/api';
 import { useData, useLive } from '../lib/live';
+import { useEnv, eventEnvOf } from '../lib/env';
 import { useServerDrawer } from '../lib/drawer';
 import { shortId, summarizePayload } from '../lib/format';
 import { useT, useFormat } from '../lib/i18n';
@@ -33,6 +34,7 @@ function kindLabel(kind: string, i18n: Pick<I18nContextValue, 't' | 'has'>): str
 
 export function Events() {
   const { subscribe } = useLive();
+  const { selected } = useEnv();
   const i18n = useT();
   const { t, tp } = i18n;
   const nodes = useData(() => api.listNodes(), []);
@@ -91,9 +93,12 @@ export function Events() {
       if (kind !== '' && e.kind !== kind) return false;
       if (node !== '' && e.node_id !== node) return false;
       if (cutoff > 0 && new Date(e.ts).getTime() < cutoff) return false;
+      // env-фильтр (environments v1 §7, M13): при выбранном env показываем только
+      // события этого env; события БЕЗ env (старые/безадресные) — только в «All».
+      if (selected !== null && eventEnvOf(e) !== selected) return false;
       return true;
     });
-  }, [all, kind, node, period]);
+  }, [all, kind, node, period, selected]);
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const clampedPage = Math.min(page, pageCount - 1);

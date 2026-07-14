@@ -8,6 +8,7 @@ import type { ReactNode } from 'react';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import * as Dialog from '@radix-ui/react-dialog';
 import { useLive } from '../lib/live';
+import { useEnv } from '../lib/env';
 import { canAdmin, useSession } from '../lib/session';
 import type { SessionInfo } from '../lib/api';
 import { useTheme } from '../lib/theme';
@@ -125,6 +126,57 @@ function NavGlyph({ icon }: { icon: NavIcon }) {
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden className="size-4 shrink-0">
       {p[icon]}
     </svg>
+  );
+}
+
+/**
+ * Глобальный переключатель окружения (environments v1 §8): чипы из
+ * GET /v1/environments (non-production сначала, потом production, потом «All»),
+ * выбор персистится (useEnv). Скрыт, пока окружений нет/не загрузились —
+ * тогда фильтр по env панели и так no-op. Экраны сужают данные по selected.
+ */
+export function EnvChips() {
+  const { environments, selected, setSelected } = useEnv();
+  const { t } = useT();
+  if (environments.length === 0) return null;
+  const chipCls = (active: boolean) =>
+    `inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition-colors ${
+      active ? 'border-accent bg-mark text-accent-ink' : 'border-line text-muted hover:text-ink'
+    }`;
+  return (
+    <div role="group" aria-label={t('env.switch')} className="flex flex-wrap items-center gap-1.5">
+      <span aria-hidden className="text-xs font-medium tracking-wide text-muted uppercase">
+        {t('env.switch')}
+      </span>
+      {environments.map((e) => {
+        const active = selected === e.name;
+        return (
+          <button
+            key={e.name}
+            type="button"
+            aria-pressed={active}
+            title={e.production ? t('env.productionTitle') : undefined}
+            onClick={() => {
+              setSelected(e.name);
+            }}
+            className={chipCls(active)}
+          >
+            {e.production && <span aria-hidden className="size-1.5 rounded-full bg-warn" />}
+            <span className="font-mono">{e.name}</span>
+          </button>
+        );
+      })}
+      <button
+        type="button"
+        aria-pressed={selected === null}
+        onClick={() => {
+          setSelected(null);
+        }}
+        className={chipCls(selected === null)}
+      >
+        {t('env.all')}
+      </button>
+    </div>
   );
 }
 
@@ -366,7 +418,8 @@ export function Shell({ path, navigate, children }: { path: string; navigate: (p
               <MobileNav path={path} navigate={navigate} critical={critical} />
             </div>
           </header>
-          <main id="main-content" tabIndex={-1} className="mx-auto w-full max-w-[1400px] flex-1 px-4 py-5 focus:outline-none md:px-6">
+          <main id="main-content" tabIndex={-1} className="mx-auto flex w-full max-w-[1400px] flex-1 flex-col gap-4 px-4 py-5 focus:outline-none md:px-6">
+            <EnvChips />
             {children}
           </main>
         </div>

@@ -9,10 +9,12 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ColumnDef } from '@tanstack/react-table';
-import { api } from '../lib/api';
-import type { ApiEvent, GameServer, NodeInfo, VersionInfo } from '../lib/api';
+import * as Dialog from '@radix-ui/react-dialog';
+import { api, ApiError } from '../lib/api';
+import type { ApiEvent, Environment, GameServer, NodeInfo, VersionInfo } from '../lib/api';
 import { useData, useLive } from '../lib/live';
-import { canDeploy, useSession } from '../lib/session';
+import { useEnv, keepForEnv } from '../lib/env';
+import { canAdmin, canDeploy, useSession } from '../lib/session';
 import { shortId } from '../lib/format';
 import { useT, useFormat } from '../lib/i18n';
 import { buildHowtoCtx } from '../lib/deployHowto';
@@ -22,6 +24,20 @@ import { DeployHowto } from '../components/DeployHowto';
 import { StateBadge, toneOfVersionState } from '../components/Badge';
 import { ConfirmButton } from '../components/ConfirmDialog';
 import { Card, CardHeader, ErrorNote, LoadingRow } from '../components/ui';
+
+/** Компактный бейдж окружения версии/строки (не StateBadge — это не «состояние»). */
+export function EnvTag({ env, production }: { env: string; production?: boolean }) {
+  const { t } = useT();
+  return (
+    <span
+      title={production ? t('env.productionTitle') : undefined}
+      className="inline-flex items-center gap-1 rounded border border-line px-1.5 py-0.5 font-mono text-[11px] text-muted"
+    >
+      {production === true && <span aria-hidden className="size-1.5 rounded-full bg-warn" />}
+      {env}
+    </span>
+  );
+}
 
 const LIVE_SERVER_STATES = new Set(['creating', 'ready', 'allocated', 'draining']);
 const HEARTBEAT_FRESH_MS = 30_000;
@@ -34,8 +50,19 @@ export function Deploys({ navigate }: { navigate: (path: string) => void }) {
   const progress = useDeployProgress();
   const { session } = useSession();
   const mayDeploy = session != null && canDeploy(session);
+  const mayAdmin = session != null && canAdmin(session);
+  const { selected, environments, reload: reloadEnvs } = useEnv();
+  // «Скрывать disabled» по умолчанию (environments v1 §8, M11): при dev-потоке
+  // список версий пухнет снятыми ретеншном строками — прячем их за тогглом.
+  const [hideDisabled, setHideDisabled] = useState(true);
 
   const liveByVersion = useMemo(() => countLiveByVersion(servers.data ?? []), [servers.data]);
+  // Все версии (без env-фильтра) — для резолва provenance promoted_from: источник
+  // промоута живёт в ДРУГОМ окружении, чем показанная версия.
+  const versionById = useMemo(
+    () => new Map((versions.data ?? []).map((v) => [v.id, v])),
+    [versions.data],
+  );
 
   const error = versions.error ?? servers.error ?? nodes.error;
   if (error !== undefined && versions.data === undefined) {
@@ -43,14 +70,27 @@ export function Deploys({ navigate }: { navigate: (path: string) => void }) {
   }
   if (versions.data === undefined) return <LoadingRow />;
 
-  const projects = groupByProject(versions.data);
+  // Клиентский фильтр по выбранному env (environments v1 §8); «All» → всё.
+  const shownVersions = keepForEnv(versions.data, selected, (v) => v.env);
+  const projects = groupByProject(shownVersions);
   const isEmpty = projects.length === 0;
-  const howtoCtx = buildHowtoCtx(window.location.origin, projects);
+  const howtoCtx = buildHowtoCtx(window.location.origin, groupByProject(versions.data));
+  const prodEnvs = environments.filter((e) => e.production);
+  // Карточка настроек env — только для конкретно выбранного env и admin.
+  const selectedEnvObj = selected !== null ? environments.find((e) => e.name === selected) : undefined;
+
+  const reload = () => {
+    versions.reload();
+    servers.reload();
+  };
 
   return (
     <div className="flex flex-col gap-4">
-      {isEmpty && <p className="text-sm text-muted">{t('deploys.emptyPre')}</p>}
-      <DeployHowto ctx={howtoCtx} navigate={navigate} defaultExpanded={isEmpty} />
+      {isEmpty && <p className="text-sm text-muted">{selected !== null ? t('deploys.emptyEnv') : t('deploys.emptyPre')}</p>}
+      {mayAdmin && selectedEnvObj !== undefined && (
+        <EnvSettingsCard env={selectedEnvObj} onSaved={reloadEnvs} />
+      )}
+      <DeployHowto ctx={howtoCtx} navigate={navigate} defaultExpanded={isEmpty && selected === null} />
       {projects.map(({ project, versions: pv }) => (
         <ProjectDeploys
           key={project}
@@ -61,10 +101,12 @@ export function Deploys({ navigate }: { navigate: (path: string) => void }) {
           liveByVersion={liveByVersion}
           progress={progress}
           mayDeploy={mayDeploy}
-          reload={() => {
-            versions.reload();
-            servers.reload();
-          }}
+          environments={environments}
+          prodEnvs={prodEnvs}
+          versionById={versionById}
+          hideDisabled={hideDisabled}
+          setHideDisabled={setHideDisabled}
+          reload={reload}
         />
       ))}
     </div>
@@ -79,6 +121,11 @@ function ProjectDeploys({
   liveByVersion,
   progress,
   mayDeploy,
+  environments,
+  prodEnvs,
+  versionById,
+  hideDisabled,
+  setHideDisabled,
   reload,
 }: {
   project: string;
@@ -88,6 +135,11 @@ function ProjectDeploys({
   liveByVersion: Map<string, number>;
   progress: Map<string, DeployProgress>;
   mayDeploy: boolean;
+  environments: Environment[];
+  prodEnvs: Environment[];
+  versionById: Map<string, VersionInfo>;
+  hideDisabled: boolean;
+  setHideDisabled: (v: boolean) => void;
   reload: () => void;
 }) {
   const { t, tp } = useT();
@@ -97,6 +149,15 @@ function ProjectDeploys({
   const deprecated = versions.filter((v) => v.state === 'deprecated');
   const prepulling = versions.filter((v) => v.state === 'prepulling');
   const regionActive = useMemo(() => deriveRegionActive(servers, versions), [servers, versions]);
+  const isProdEnv = useCallback(
+    (envName: string) => environments.find((e) => e.name === envName)?.production === true,
+    [environments],
+  );
+  const tableVersions = useMemo(
+    () => (hideDisabled ? versions.filter((v) => v.state !== 'disabled') : versions),
+    [versions, hideDisabled],
+  );
+  const disabledCount = versions.length - versions.filter((v) => v.state !== 'disabled').length;
 
   const columns = useMemo<ColumnDef<VersionInfo, unknown>[]>(
     () => [
@@ -106,9 +167,14 @@ function ProjectDeploys({
         cell: ({ row }) => (
           <div>
             <div className="font-mono font-medium">{row.original.semver}</div>
-            <div className="font-mono text-xs text-muted">{row.original.channel}</div>
+            <Provenance version={row.original} versionById={versionById} />
           </div>
         ),
+      },
+      {
+        id: 'env',
+        header: t('col.env'),
+        cell: ({ row }) => <EnvTag env={row.original.env} production={isProdEnv(row.original.env)} />,
       },
       {
         id: 'state',
@@ -141,10 +207,17 @@ function ProjectDeploys({
         id: 'actions',
         header: '',
         cell: ({ row }) =>
-          mayDeploy ? <DeployAction version={row.original} onDone={reload} /> : null,
+          mayDeploy ? (
+            <VersionActions
+              version={row.original}
+              prodEnvs={prodEnvs}
+              isProdEnv={isProdEnv}
+              onDone={reload}
+            />
+          ) : null,
       },
     ],
-    [t, fmt, liveByVersion, mayDeploy, reload],
+    [t, fmt, liveByVersion, mayDeploy, prodEnvs, isProdEnv, versionById, reload],
   );
 
   return (
@@ -152,22 +225,35 @@ function ProjectDeploys({
       <CardHeader
         title={t('deploys.project', { project })}
         aside={
-          mayDeploy && deprecated.length > 0 ? (
-            <ConfirmButton
-              label={t('deploys.rollback')}
-              tone="dead"
-              title={t('deploys.rollback.title', { project })}
-              description={t('deploys.rollback.desc', { semver: deprecated[0].semver })}
-              confirmLabel={t('deploys.rollback')}
-              onConfirm={async () => {
-                const res = await api.rollback({ project });
-                toast.success(t('deploys.toast.rolledBack', { project, semver: res.version.semver }));
-                reload();
-              }}
-            />
-          ) : (
-            <span className="font-mono text-xs text-muted">{tp('deploys.versionsCount', versions.length)}</span>
-          )
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="flex items-center gap-1.5 text-xs text-muted">
+              <input
+                type="checkbox"
+                checked={hideDisabled}
+                onChange={(e) => {
+                  setHideDisabled(e.target.checked);
+                }}
+              />
+              {t('deploys.hideDisabled')}
+              {disabledCount > 0 && <span className="tabular font-mono">({disabledCount})</span>}
+            </label>
+            {mayDeploy && deprecated.length > 0 ? (
+              <ConfirmButton
+                label={t('deploys.rollback')}
+                tone="dead"
+                title={t('deploys.rollback.title', { project })}
+                description={t('deploys.rollback.desc', { semver: deprecated[0].semver })}
+                confirmLabel={t('deploys.rollback')}
+                onConfirm={async () => {
+                  const res = await api.rollback({ project, env: deprecated[0].env });
+                  toast.success(t('deploys.toast.rolledBack', { project, semver: res.version.semver }));
+                  reload();
+                }}
+              />
+            ) : (
+              <span className="font-mono text-xs text-muted">{tp('deploys.versionsCount', versions.length)}</span>
+            )}
+          </div>
         }
       />
 
@@ -182,7 +268,7 @@ function ProjectDeploys({
 
       <DataTable
         columns={columns}
-        data={versions}
+        data={tableVersions}
         rowId={(v) => v.id}
         empty={t('deploys.emptyProject')}
       />
@@ -190,26 +276,260 @@ function ProjectDeploys({
   );
 }
 
-/** Deploy-кнопка для строки версии: доступна для registered/deprecated. */
-function DeployAction({ version, onDone }: { version: VersionInfo; onDone: () => void }) {
+/** Provenance-строка: «promoted from <env>/<semver>» по promoted_from. Источник
+ *  ищем среди всех версий; не нашли — показываем сам факт промоута без id. */
+function Provenance({ version, versionById }: { version: VersionInfo; versionById: Map<string, VersionInfo> }) {
+  const { t } = useT();
+  if (version.promoted_from === undefined) return null;
+  const src = versionById.get(version.promoted_from);
+  const label =
+    src !== undefined
+      ? t('deploys.provenance', { from: `${src.env}/${src.semver}` })
+      : t('deploys.provenance.unknown');
+  return <div className="font-mono text-[11px] text-muted">↳ {label}</div>;
+}
+
+/** Действия строки версии: Deploy (registered/deprecated) + Promote (версии
+ *  non-production env, если есть production-цель). prepulling → «warming». */
+function VersionActions({
+  version,
+  prodEnvs,
+  isProdEnv,
+  onDone,
+}: {
+  version: VersionInfo;
+  prodEnvs: Environment[];
+  isProdEnv: (env: string) => boolean;
+  onDone: () => void;
+}) {
   const { t } = useT();
   const toast = useToast();
   if (version.state === 'prepulling') {
     return <span className="font-mono text-xs text-warn">{t('deploys.warming')}</span>;
   }
-  if (version.state !== 'registered' && version.state !== 'deprecated') return null;
+  const canDeployState = version.state === 'registered' || version.state === 'deprecated';
+  // Промоут доступен у deployable-состояний в non-production env (не для disabled).
+  const canPromote =
+    !isProdEnv(version.env) && (version.state === 'registered' || version.state === 'active' || version.state === 'deprecated');
+  if (!canDeployState && !canPromote) return null;
   return (
-    <ConfirmButton
-      label={t('deploys.deploy')}
-      title={t('deploys.deploy.title', { semver: version.semver })}
-      description={t('deploys.deploy.desc')}
-      confirmLabel={t('deploys.deploy')}
-      onConfirm={async () => {
-        await api.deploy(version.id);
-        toast.success(t('deploys.toast.deployed', { semver: version.semver }));
+    <div className="flex justify-end gap-2">
+      {canPromote && <PromoteDialog version={version} prodEnvs={prodEnvs} onDone={onDone} />}
+      {canDeployState && (
+        <ConfirmButton
+          label={t('deploys.deploy')}
+          title={t('deploys.deploy.title', { semver: version.semver })}
+          description={t('deploys.deploy.desc')}
+          confirmLabel={t('deploys.deploy')}
+          onConfirm={async () => {
+            await api.deploy(version.id);
+            toast.success(t('deploys.toast.deployed', { semver: version.semver }));
+            onDone();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/** Диалог промоута: выбор целевого production-env + confirm → POST /v1/promote. */
+function PromoteDialog({
+  version,
+  prodEnvs,
+  onDone,
+}: {
+  version: VersionInfo;
+  prodEnvs: Environment[];
+  onDone: () => void;
+}) {
+  const { t } = useT();
+  const toast = useToast();
+  const [open, setOpen] = useState(false);
+  const [target, setTarget] = useState(prodEnvs[0]?.name ?? '');
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const noTargets = prodEnvs.length === 0;
+
+  const submit = () => {
+    if (target === '' || pending) return;
+    setPending(true);
+    setError(null);
+    api
+      .promote(version.id, target)
+      .then(() => {
+        setPending(false);
+        setOpen(false);
+        toast.success(t('deploys.promote.toast', { semver: version.semver, env: target }));
         onDone();
+      })
+      .catch((e: unknown) => {
+        setPending(false);
+        setError(e instanceof ApiError ? (e.detail ?? e.code) : t('access.environments.create.err'));
+      });
+  };
+
+  return (
+    <Dialog.Root
+      open={open}
+      onOpenChange={(o) => {
+        if (pending) return;
+        setOpen(o);
+        if (o) {
+          setTarget(prodEnvs[0]?.name ?? '');
+          setError(null);
+        }
       }}
-    />
+    >
+      <Dialog.Trigger asChild>
+        <button
+          type="button"
+          className="rounded-lg border border-line px-2.5 py-1 text-xs font-medium text-muted transition-colors hover:text-ink"
+        >
+          {t('deploys.promote')}
+        </button>
+      </Dialog.Trigger>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-40 bg-black/40 backdrop-blur-[1px]" />
+        <Dialog.Content className="fixed top-1/2 left-1/2 z-50 w-[min(28rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 rounded-xl border border-line bg-card p-5 shadow-xl">
+          <Dialog.Title className="text-base font-semibold">
+            {t('deploys.promote.title', { semver: version.semver, from: version.env })}
+          </Dialog.Title>
+          <Dialog.Description className="mt-1 text-sm text-muted">{t('deploys.promote.desc', { semver: version.semver })}</Dialog.Description>
+          {noTargets ? (
+            <p className="mt-4 rounded-lg bg-paper px-3 py-2 text-xs text-muted">{t('deploys.promote.noTargets')}</p>
+          ) : (
+            <label className="mt-4 flex flex-col gap-1 text-sm font-medium">
+              {t('deploys.promote.target')}
+              <select
+                value={target}
+                onChange={(e) => {
+                  setTarget(e.target.value);
+                }}
+                className="rounded-lg border border-line bg-paper px-3 py-2 text-sm font-normal"
+              >
+                {prodEnvs.map((e) => (
+                  <option key={e.name} value={e.name}>
+                    {e.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          {error !== null && (
+            <p role="alert" className="mt-3 rounded-lg bg-dead-bg px-3 py-2 text-xs text-dead">
+              {error}
+            </p>
+          )}
+          <div className="mt-5 flex justify-end gap-2">
+            <Dialog.Close asChild>
+              <button type="button" className="rounded-lg border border-line px-3 py-1.5 text-sm text-muted hover:text-ink">
+                {t('common.cancel')}
+              </button>
+            </Dialog.Close>
+            <button
+              type="button"
+              disabled={noTargets || target === '' || pending}
+              onClick={submit}
+              className="rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+            >
+              {pending ? t('common.running') : t('deploys.promote.confirm')}
+            </button>
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
+/** Карточка настроек выбранного env (admin): auto_deploy + retention_keep → PATCH.
+ *  Guardrail: production-env не может включить auto_deploy (чекбокс заблокирован;
+ *  API тоже вернёт 400). */
+function EnvSettingsCard({ env, onSaved }: { env: Environment; onSaved: () => void }) {
+  const { t } = useT();
+  const toast = useToast();
+  const [autoDeploy, setAutoDeploy] = useState(env.auto_deploy);
+  const [retention, setRetention] = useState(String(env.retention_keep));
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Пересинхронизировать поля при смене выбранного env (перемонтирование по key
+  // не гарантируем — env-объект может обновиться после reload).
+  useEffect(() => {
+    setAutoDeploy(env.auto_deploy);
+    setRetention(String(env.retention_keep));
+    setError(null);
+  }, [env.name, env.auto_deploy, env.retention_keep]);
+
+  const retentionNum = Number(retention);
+  const retentionOk = Number.isInteger(retentionNum) && retentionNum >= 0;
+  const dirty = autoDeploy !== env.auto_deploy || (retentionOk && retentionNum !== env.retention_keep);
+
+  const save = () => {
+    if (!retentionOk || pending || !dirty) return;
+    setPending(true);
+    setError(null);
+    api
+      .patchEnvironment(env.project, env.name, { auto_deploy: autoDeploy, retention_keep: retentionNum })
+      .then(() => {
+        setPending(false);
+        toast.success(t('deploys.env.toast', { env: env.name }));
+        onSaved();
+      })
+      .catch((e: unknown) => {
+        setPending(false);
+        setError(e instanceof ApiError ? (e.detail ?? e.code) : t('access.environments.create.err'));
+      });
+  };
+
+  return (
+    <Card>
+      <CardHeader
+        title={t('deploys.env.settingsFor', { env: env.name })}
+        aside={<EnvTag env={env.name} production={env.production} />}
+      />
+      <div className="flex flex-col gap-3 p-4">
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={autoDeploy}
+            disabled={env.production}
+            onChange={(e) => {
+              setAutoDeploy(e.target.checked);
+            }}
+          />
+          <span>{t('deploys.env.autoDeploy')}</span>
+        </label>
+        <p className="text-xs text-muted">{t('deploys.env.autoDeployHint')}</p>
+        <label className="flex flex-col gap-1 text-sm font-medium">
+          {t('deploys.env.retention')}
+          <input
+            type="number"
+            min={0}
+            value={retention}
+            onChange={(e) => {
+              setRetention(e.target.value);
+            }}
+            className="w-28 rounded-lg border border-line bg-paper px-3 py-2 text-sm font-normal"
+          />
+        </label>
+        <p className="text-xs text-muted">{t('deploys.env.retentionHint')}</p>
+        {error !== null && (
+          <p role="alert" className="rounded-lg bg-dead-bg px-3 py-2 text-xs text-dead">
+            {error}
+          </p>
+        )}
+        <div>
+          <button
+            type="button"
+            disabled={!retentionOk || pending || !dirty}
+            onClick={save}
+            className="rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+          >
+            {pending ? t('common.running') : t('deploys.env.save')}
+          </button>
+        </div>
+      </div>
+    </Card>
   );
 }
 

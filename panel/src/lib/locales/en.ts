@@ -92,6 +92,7 @@ export const en = {
   'col.playersPeak': 'Peak players',
   'col.created': 'Created',
   'col.node': 'Node',
+  'col.env': 'Env',
   'col.slots': 'Slots',
   'col.heartbeat': 'Heartbeat',
   'col.agent': 'Agent',
@@ -156,6 +157,9 @@ export const en = {
   'event.apikey_created': 'Key created',
   'event.apikey_revoked': 'Key revoked',
   'event.apikey_purged': 'Key deleted forever',
+  'event.node_env_changed': 'Node moved to env',
+  'event.version_promoted': 'Version promoted',
+  'event.version_retired': 'Version retired',
 
   // — API-key scope labels (codes stay in the API) —
   'scope.admin': 'Admin',
@@ -391,7 +395,7 @@ export const en = {
   'deploys.howto.key.hideSecret': 'Hide secret',
   'deploys.howto.key.toastCreated': 'Key {name} created',
   'deploys.howto.step3.title': '3. Register the version and deploy',
-  'deploys.howto.step3.registerLabel': 'Register a new version (channel prod here — use staging for a staging build):',
+  'deploys.howto.step3.registerLabel': 'Register a new version (the env in the body is where it lands — CI usually pushes to a non-production env like dev):',
   'deploys.howto.step3.deployLabel': 'Deploy a registered version:',
   'deploys.howto.step3.localNote':
     "master only listens on the node's localhost — run these from the node itself or through an SSH tunnel (this panel's address is already a tunnel).",
@@ -677,6 +681,83 @@ export const en = {
   'backups.history.result.ok': 'ok',
   'backups.history.result.error': 'error',
   'event.backup_failed': 'Backup failed',
+
+  // --- Environments (environments v1 §8) ---
+  // Global env switcher (Shell chips).
+  'env.switch': 'Environment',
+  'env.all': 'All',
+  'env.production': 'production',
+  'env.productionTitle': 'production environment',
+
+  // Deploys: env badge, promote, provenance, hide-disabled, env settings card.
+  'deploys.hideDisabled': 'Hide disabled',
+  'deploys.promote': 'Promote',
+  'deploys.promote.title': 'Promote {semver} from {from}',
+  'deploys.promote.desc':
+    'Register {semver} in a production environment (same image, provenance kept) and deploy it there. Live matches on other environments are not affected.',
+  'deploys.promote.target': 'Target environment',
+  'deploys.promote.confirm': 'Promote',
+  'deploys.promote.noTargets': 'No production environment to promote into — create one in Admin → Environments.',
+  'deploys.promote.toast': 'Promoted {semver} → {env}',
+  'deploys.provenance': 'promoted from {from}',
+  'deploys.provenance.unknown': 'promoted from another environment',
+  'deploys.env.settings': 'Environment settings',
+  'deploys.env.settingsFor': '{env} settings',
+  'deploys.env.autoDeploy': 'Auto-deploy',
+  'deploys.env.autoDeployHint': 'Registering a version deploys it immediately (dev flow). Not allowed on production.',
+  'deploys.env.retention': 'Keep versions',
+  'deploys.env.retentionHint': '0 = unlimited. Registered/disabled versions beyond this are retired.',
+  'deploys.env.save': 'Save',
+  'deploys.env.toast': 'Environment {env} updated',
+  'deploys.emptyEnv': 'No versions in this environment.',
+
+  // Access: API-key (project, env) binding.
+  'access.col.binding': 'Binding',
+  'access.binding.global': 'global',
+  'access.create.binding': 'Binding',
+  'access.create.bindingHint':
+    'Deploy, matchmaking and allocate keys can be scoped to one environment. Admin keys cannot be bound.',
+  'access.create.bindingGlobal': 'Global (all environments)',
+
+  // Access: Environments admin section.
+  'access.environments': 'Environments',
+  'access.environments.hint':
+    'Environments are a per-project platform dimension. Behaviour follows the production flag, not the name.',
+  'access.environments.empty': 'No environments yet.',
+  'access.environments.col.name': 'Name',
+  'access.environments.col.production': 'Production',
+  'access.environments.col.autoDeploy': 'Auto-deploy',
+  'access.environments.col.retention': 'Keep versions',
+  'access.environments.col.created': 'Created',
+  'access.environments.flag.on': 'on',
+  'access.environments.flag.off': 'off',
+  'access.environments.retentionUnlimited': 'unlimited',
+  'access.environments.add': 'Add environment',
+  'access.environments.create.title': 'Add environment',
+  'access.environments.create.desc':
+    'Pick a lowercase name. The production flag drives behaviour: production forbids auto-deploy and keeps versions unlimited.',
+  'access.environments.create.name': 'Name',
+  'access.environments.create.namePlaceholder': 'e.g. staging',
+  'access.environments.create.production': 'Production environment',
+  'access.environments.create.autoDeploy': 'Auto-deploy new versions',
+  'access.environments.create.retention': 'Keep versions (0 = unlimited)',
+  'access.environments.create.submit': 'Create',
+  'access.environments.create.err': "Couldn't save the environment.",
+  'access.environments.guardrail': 'Auto-deploy is only allowed when production is off.',
+  'access.environments.edit': 'Edit',
+  'access.environments.edit.title': 'Edit environment {name}',
+  'access.environments.edit.desc': 'The name is immutable. Enabling auto-deploy requires production to be off.',
+  'access.environments.delete': 'Delete',
+  'access.environments.delete.title': 'Delete environment {name}?',
+  'access.environments.delete.desc':
+    'Only a never-used environment can be deleted. Once it has versions, fleets, nodes or keys it is undeletable in v1 (version history is kept).',
+  'access.environments.delete.usedHint': "In use — can't be deleted (v1 keeps version history).",
+  'access.environments.toast.created': 'Environment {name} created',
+  'access.environments.toast.updated': 'Environment {name} updated',
+  'access.environments.toast.deleted': 'Environment {name} deleted',
+
+  // Stats: CCU is platform-wide (global), noted when an env filter is active.
+  'stats.ccu.platformWide': 'platform-wide (not filtered by env)',
 } as const;
 
 export type MessageKey = keyof typeof en;

@@ -25,6 +25,7 @@ import {
 } from '../lib/deployHowto';
 import type { HowtoCtx, HowtoKey } from '../lib/deployHowto';
 import { canAdmin, useSession } from '../lib/session';
+import { useEnv } from '../lib/env';
 import { useAsync } from '../lib/useAsync';
 import { useT } from '../lib/i18n';
 import { useToast } from './Toast';
@@ -32,6 +33,8 @@ import { Card, CardHeader } from './ui';
 
 const EXAMPLE_SEMVER = '1.2.3';
 const STUB_WORKFLOW_PATH = '.github/workflows/stub-server.yml';
+/** Пример env для curl, когда конкретный env не выбран и окружений ещё нет. */
+const EXAMPLE_ENV_FALLBACK = 'dev';
 
 export function DeployHowto({
   ctx,
@@ -47,6 +50,10 @@ export function DeployHowto({
   const toast = useToast();
   const { session } = useSession();
   const isAdmin = session != null && canAdmin(session);
+  const { selected, environments } = useEnv();
+  // env для примера curl: выбранный env → первый non-production env → 'dev'.
+  // Так команда всегда рабочая (env обязателен в POST /v1/versions).
+  const exampleEnv = selected ?? environments.find((e) => !e.production)?.name ?? environments[0]?.name ?? EXAMPLE_ENV_FALLBACK;
   const [expanded, setExpanded] = useState(defaultExpanded);
   const contentId = useId();
 
@@ -191,7 +198,7 @@ export function DeployHowto({
           <Step title={t('deploys.howto.step3.title')}>
             <p className="text-muted">{t('deploys.howto.step3.registerLabel')}</p>
             <CodeBlock
-              code={registerVersionCurl(ctx, EXAMPLE_SEMVER, 'prod', effectiveKey)}
+              code={registerVersionCurl(ctx, EXAMPLE_SEMVER, exampleEnv, effectiveKey)}
               testId="howto-register-cmd"
               copyLabel={t('deploys.howto.copyRegister')}
               copiedLabel={t('deploys.howto.copied')}

@@ -3,12 +3,13 @@
 // limit/offset. Клик по строке (в обеих вкладках) открывает дровер деталей
 // матча (статы + логи).
 
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import * as Tabs from '@radix-ui/react-tabs';
 import type { ColumnDef } from '@tanstack/react-table';
 import { api } from '../lib/api';
 import type { Match, MatchState } from '../lib/api';
 import { useData } from '../lib/live';
+import { useEnv, keepForEnv } from '../lib/env';
 import { useMatchDrawer, useServerDrawer } from '../lib/drawer';
 import { useNow } from '../lib/useNow';
 import { versionColor } from '../lib/stats';
@@ -22,6 +23,22 @@ import { Card, CardHeader, ErrorNote, LoadingRow } from '../components/ui';
 const PAGE_SIZE = 50;
 
 type T = I18nContextValue['t'];
+
+/**
+ * Карта version_id → env для клиентского env-фильтра матчей (environments v1
+ * §8): у матчей нет поля env в API, выводим окружение через версию. version_id
+ * уникален per (project, env, semver) — маппинг точный (не по semver, который
+ * после промоута совпадает у dev и prod).
+ */
+function useMatchEnvFilter(): (matches: Match[]) => Match[] {
+  const { selected } = useEnv();
+  const versions = useData(() => api.listVersions(), []);
+  const envOf = useMemo(() => new Map((versions.data ?? []).map((v) => [v.id, v.env])), [versions.data]);
+  return useCallback(
+    (matches: Match[]) => keepForEnv(matches, selected, (m) => envOf.get(m.version_id)),
+    [selected, envOf],
+  );
+}
 
 export function Matches() {
   const { t } = useT();
@@ -51,6 +68,7 @@ export function Matches() {
 function LiveMatches() {
   const { t } = useT();
   const { open: openMatch } = useMatchDrawer();
+  const filterByEnv = useMatchEnvFilter();
   const live = useData(
     () =>
       Promise.all([
@@ -68,18 +86,19 @@ function LiveMatches() {
   if (live.error !== undefined && live.data === undefined) {
     return <ErrorNote error={live.error} retry={live.reload} />;
   }
+  const rows = live.data !== undefined ? filterByEnv(live.data) : undefined;
   return (
     <Card>
       <CardHeader
         title={t('matches.live.title')}
-        aside={<span className="tabular font-mono text-xs text-muted">{live.data?.length ?? 0}</span>}
+        aside={<span className="tabular font-mono text-xs text-muted">{rows?.length ?? 0}</span>}
       />
-      {live.data === undefined ? (
+      {rows === undefined ? (
         <LoadingRow />
       ) : (
         <DataTable
           columns={columns}
-          data={live.data}
+          data={rows}
           rowId={(m) => m.id}
           onRowClick={(m) => {
             openMatch(m.id);
@@ -154,6 +173,7 @@ const HISTORY_STATE_VALUES: (MatchState | '')[] = ['', 'pending', 'running', 'fi
 function MatchHistory() {
   const { t } = useT();
   const { open: openMatch } = useMatchDrawer();
+  const filterByEnv = useMatchEnvFilter();
   const [state, setState] = useState<MatchState | ''>('');
   const [region, setRegion] = useState('');
   const [page, setPage] = useState(0);
@@ -177,7 +197,9 @@ function MatchHistory() {
     [state, region, page],
   );
   const hasNext = (rows.data?.length ?? 0) > PAGE_SIZE;
-  const visible = rows.data?.slice(0, PAGE_SIZE) ?? [];
+  // env-фильтр клиентский (у матчей нет ?env=): сужаем видимую страницу. Пагинация
+  // остаётся постраничной по сырым матчам — компромисс v1 (API param нет).
+  const visible = filterByEnv(rows.data?.slice(0, PAGE_SIZE) ?? []);
   const columns = useHistoryColumns();
 
   const select = 'rounded-lg border border-line bg-card px-2.5 py-1.5 text-xs';

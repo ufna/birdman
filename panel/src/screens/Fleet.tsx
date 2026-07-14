@@ -6,7 +6,9 @@ import type { ColumnDef } from '@tanstack/react-table';
 import { api } from '../lib/api';
 import type { ApiEvent, GameServer, NodeInfo } from '../lib/api';
 import { useData } from '../lib/live';
+import { useEnv, keepForEnv } from '../lib/env';
 import { canAdmin, useSession } from '../lib/session';
+import { EnvTag } from './Deploys';
 import { useServerDrawer } from '../lib/drawer';
 import { useNow } from '../lib/useNow';
 import { ageOf, heartbeatTone, shortId } from '../lib/format';
@@ -28,7 +30,9 @@ export function Fleet() {
   const events = useData(() => api.listEvents(500), []);
   const { session } = useSession();
   const mayAdmin = session != null && canAdmin(session);
+  const { selected, environments } = useEnv();
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const isProdEnv = (envName: string) => environments.find((e) => e.name === envName)?.production === true;
 
   const semverOf = useMemo(
     () => new Map((versions.data ?? []).map((v) => [v.id, v.semver])),
@@ -48,10 +52,10 @@ export function Fleet() {
 
   const sortedNodes = useMemo(
     () =>
-      [...(nodes.data ?? [])].sort(
+      keepForEnv([...(nodes.data ?? [])], selected, (n) => n.env).sort(
         (a, b) => a.region.localeCompare(b.region) || a.hostname.localeCompare(b.hostname),
       ),
-    [nodes.data],
+    [nodes.data, selected],
   );
 
   const columns = useMemo<ColumnDef<NodeInfo, unknown>[]>(
@@ -69,6 +73,11 @@ export function Fleet() {
         ),
       },
       { id: 'region', header: t('col.region'), cell: ({ row }) => <span className="font-mono text-xs">{row.original.region}</span> },
+      {
+        id: 'env',
+        header: t('col.env'),
+        cell: ({ row }) => <EnvTag env={row.original.env} production={isProdEnv(row.original.env)} />,
+      },
       {
         id: 'state',
         header: t('col.state'),
@@ -132,7 +141,7 @@ export function Fleet() {
         ),
       },
     ],
-    [t, serversByNode, expandedId, quarantineReason, mayAdmin, nodes.reload],
+    [t, serversByNode, expandedId, quarantineReason, mayAdmin, nodes.reload, environments],
   );
 
   const error = nodes.error ?? servers.error ?? versions.error;

@@ -13,6 +13,8 @@ export interface NodeInfo {
   id: string;
   project: string;
   region: string;
+  /** Окружение ноды (environments v1); новые ноды входят как dev (master models.go). */
+  env: string;
   hostname: string;
   public_ip: string;
   capacity_slots: number;
@@ -43,12 +45,47 @@ export interface VersionInfo {
   project: string;
   semver: string;
   image_ref: string;
-  channel: string;
+  /** Окружение версии (environments v1); заменило прежний лейбл channel
+   *  (master store/models.go Version.Env). Скоуп active/deprecated — per (project, env). */
+  env: string;
   /** registered | prepulling | active | deprecated | disabled (master store/deploy.go). */
   state: VersionState | string;
   created_at: string;
   /** Проставляется при демоте active → deprecated; отсчёт reap_ttl_min от неё. */
   deprecated_at?: string;
+  /** Provenance: id исходной версии, если версия создана промоутом dev→prod
+   *  (environments v1 §4). Отсутствует у обычной регистрации. */
+  promoted_from?: string;
+}
+
+/** Окружение проекта (environments v1 §2): измерение платформы. Ведёт поведение
+ *  флаг `production` (bool), не имя: production=true запрещает auto_deploy
+ *  (guardrail в БД+API) и снимает лимит ретеншна. GET /v1/environments (readonly);
+ *  create/patch/delete — admin. */
+export interface Environment {
+  project: string;
+  name: string;
+  production: boolean;
+  auto_deploy: boolean;
+  retention_keep: number;
+  created_at: string;
+}
+
+/** Тело POST /v1/environments. production&&auto_deploy → 400; имена all/global → 400. */
+export interface EnvironmentInput {
+  project: string;
+  name: string;
+  production?: boolean;
+  auto_deploy?: boolean;
+  retention_keep?: number;
+}
+
+/** Тело PATCH /v1/environments/{project}/{name}: только изменённые поля; имя
+ *  иммутабельно. Включение auto_deploy при production=true → 400 (guardrail). */
+export interface EnvironmentPatch {
+  production?: boolean;
+  auto_deploy?: boolean;
+  retention_keep?: number;
 }
 
 /** Ответ POST /v1/deploy: {deploy: Status} (deploy.Status в master). */
@@ -245,6 +282,16 @@ export interface ApiKey {
   scopes: Scope[];
   created_at: string;
   revoked_at: string | null;
+  /** Опциональная привязка (project, env) — строго парой (environments v1 §5).
+   *  Отсутствует у глобального ключа (NULL-привязка = пре-env поведение). */
+  project?: string;
+  env?: string;
+}
+
+/** Привязка ключа к (project, env) — строго парой (environments v1 §5). */
+export interface KeyBinding {
+  project: string;
+  env: string;
 }
 
 /** Ответ POST /v1/apikeys: ключ + секрет (показывается РОВНО один раз). */
@@ -427,9 +474,17 @@ export const api = {
   /** Мягкий деплой версии: 202 prepulling / 200 active (master §5). */
   deploy: (versionId: string) =>
     request<{ deploy: DeployStatus }>('POST', '/v1/deploy', { version_id: versionId }).then((r) => r.deploy),
-  /** Откат: deprecated ↔ active за секунды. project опускаем при единственном. */
-  rollback: (body: { project?: string; region?: string } = {}) =>
+  /** Откат: deprecated ↔ active за секунды. project опускаем при единственном;
+   *  env обязателен, когда у проекта >1 env с deprecated-окном (environments v1 §3). */
+  rollback: (body: { project?: string; env?: string; region?: string } = {}) =>
     request<{ rollback: RollbackResult }>('POST', '/v1/rollback', body).then((r) => r.rollback),
+  /** Промоут версии в другой env (environments v1 §4): регистрация в to_env (тот же
+   *  image_ref, provenance promoted_from) + немедленный deploy-пайплайн. 202/200. */
+  promote: (versionId: string, toEnv: string) =>
+    request<{ version: VersionInfo; deploy: DeployStatus }>('POST', '/v1/promote', {
+      version_id: versionId,
+      to_env: toEnv,
+    }),
   /** Вывод тачки из ротации (admin). */
   drainNode: (id: string) =>
     request<{ node: NodeInfo }>('POST', `/v1/nodes/${encodeURIComponent(id)}/drain`).then((r) => r.node),
@@ -438,11 +493,35 @@ export const api = {
 
   // --- П2: статистика / cost (скоуп readonly) ---
 
-  /** Агрегаты обзора за N дней (matches/players/CCU/версии/fill-rate). */
-  statsOverview: (days: number) =>
-    request<StatsOverview>('GET', `/v1/stats/overview${qs({ days })}`),
-  /** Слото-часы per регион/версия + утилизация за N дней. */
-  statsCost: (days: number) => request<StatsCost>('GET', `/v1/stats/cost${qs({ days })}`),
+  /** Агрегаты обзора за N дней (matches/players/CCU/версии/fill-rate). `env`
+   *  (environments v1 §7, I5) сужает историю через ?env=; CCU остаётся
+   *  глобальным платформенным пиком (панель подписывает его «platform-wide»). */
+  statsOverview: (days: number, env?: string) =>
+    request<StatsOverview>('GET', `/v1/stats/overview${qs({ days, env })}`),
+  /** Слото-часы per регион/версия + утилизация за N дней. `env` — как в overview. */
+  statsCost: (days: number, env?: string) => request<StatsCost>('GET', `/v1/stats/cost${qs({ days, env })}`),
+
+  // --- Окружения (environments v1 §2): список — readonly, CRUD — admin ---
+
+  /** Список окружений проекта (readonly). project опускаем — резолвится sole. */
+  listEnvironments: (project?: string) =>
+    request<{ environments: Environment[] }>('GET', `/v1/environments${qs({ project })}`).then((r) => r.environments),
+  /** Создать окружение (admin). 201; production&&auto_deploy или all/global → 400; дубль → 409. */
+  createEnvironment: (body: EnvironmentInput) =>
+    request<{ environment: Environment }>('POST', '/v1/environments', body).then((r) => r.environment),
+  /** Правка флагов окружения (admin). Включение auto_deploy при production → 400. */
+  patchEnvironment: (project: string, name: string, body: EnvironmentPatch) =>
+    request<{ environment: Environment }>(
+      'PATCH',
+      `/v1/environments/${encodeURIComponent(project)}/${encodeURIComponent(name)}`,
+      body,
+    ).then((r) => r.environment),
+  /** Удалить окружение (admin). 204 только у никогда не использованного; иначе 409. */
+  deleteEnvironment: (project: string, name: string) =>
+    request<void>('DELETE', `/v1/environments/${encodeURIComponent(project)}/${encodeURIComponent(name)}`),
+  /** Перевод ноды в другой env (admin, environments v1 §2): PATCH пустой ноде. */
+  setNodeEnv: (id: string, env: string) =>
+    request<{ node: NodeInfo }>('PATCH', `/v1/nodes/${encodeURIComponent(id)}`, { env }).then((r) => r.node),
 
   // --- П2: алерты (скоуп readonly; master проксирует vmalert) ---
 
@@ -465,9 +544,11 @@ export const api = {
   // --- П2: API-ключи (admin-only) ---
 
   listApiKeys: () => request<{ apikeys: ApiKey[] }>('GET', '/v1/apikeys').then((r) => r.apikeys),
-  /** Создаёт ключ; секрет в ответе показывается ровно один раз. */
-  createApiKey: (name: string, scopes: Scope[]) =>
-    request<CreatedApiKey>('POST', '/v1/apikeys', { name, scopes }),
+  /** Создаёт ключ; секрет в ответе показывается ровно один раз. `binding`
+   *  (environments v1 §5) — опциональная привязка (project, env) строго парой:
+   *  несовместима со скоупом admin (400), требует существования env. */
+  createApiKey: (name: string, scopes: Scope[], binding?: KeyBinding) =>
+    request<CreatedApiKey>('POST', '/v1/apikeys', { name, scopes, ...binding }),
   /** Отзыв ключа (409 last_admin_key — нельзя отозвать последний admin). */
   revokeApiKey: (id: string) =>
     request<{ key: ApiKey }>('DELETE', `/v1/apikeys/${encodeURIComponent(id)}`).then((r) => r.key),

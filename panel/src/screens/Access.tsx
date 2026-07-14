@@ -12,8 +12,9 @@ import { useMemo, useState } from 'react';
 import type { ColumnDef } from '@tanstack/react-table';
 import * as Dialog from '@radix-ui/react-dialog';
 import { api, ApiError } from '../lib/api';
-import type { ApiKey, CreatedApiKey, Scope } from '../lib/api';
+import type { ApiKey, CreatedApiKey, KeyBinding, Scope } from '../lib/api';
 import { useAsync } from '../lib/useAsync';
+import { useEnv } from '../lib/env';
 import { useT, useFormat } from '../lib/i18n';
 import type { I18nContextValue } from '../lib/i18n';
 import { useToast } from '../components/Toast';
@@ -21,10 +22,21 @@ import { DataTable } from '../components/DataTable';
 import { StateBadge, toneOfKeyStatus } from '../components/Badge';
 import { ConfirmButton } from '../components/ConfirmDialog';
 import { RegistriesSection } from '../components/RegistriesSection';
+import { EnvironmentsSection } from '../components/EnvironmentsSection';
+import { EnvTag } from './Deploys';
 import { Card, CardHeader, ErrorNote, LoadingRow } from '../components/ui';
 
 /** Скоупы, которые можно выдать ключу (совпадает с validScopes в master). */
 export const SCOPE_OPTIONS: Scope[] = ['admin', 'deploy', 'matchmaking', 'allocate', 'readonly'];
+
+/** Скоупы, для которых привязка (project, env) осмысленна и энфорсится
+ *  (environments v1 §5): deploy/matchmaking/allocate. admin — несовместим. */
+export const BINDABLE_SCOPES: Scope[] = ['deploy', 'matchmaking', 'allocate'];
+
+/** Можно ли привязать ключ с таким набором скоупов: есть bindable-скоуп и НЕ admin. */
+export function canBindScopes(scopes: Set<Scope>): boolean {
+  return !scopes.has('admin') && BINDABLE_SCOPES.some((s) => scopes.has(s));
+}
 
 /** errorOverride для отзыва: 409 last_admin_key → человекочитаемо; иначе — дефолт. */
 export function lastAdminKeyMessage(t: I18nContextValue['t']): (e: unknown) => string | undefined {
@@ -56,6 +68,7 @@ export function Access() {
           <KeysTable keys={keys.data} reload={keys.reload} />
         )}
       </Card>
+      <EnvironmentsSection />
       <RegistriesSection />
     </div>
   );
@@ -80,6 +93,16 @@ function KeysTable({ keys, reload }: { keys: ApiKey[]; reload: () => void }) {
         id: 'scopes',
         header: t('access.col.scopes'),
         cell: ({ row }) => <ScopeChips scopes={row.original.scopes} />,
+      },
+      {
+        id: 'binding',
+        header: t('access.col.binding'),
+        cell: ({ row }) =>
+          row.original.project !== undefined && row.original.env !== undefined ? (
+            <EnvTag env={`${row.original.project} / ${row.original.env}`} />
+          ) : (
+            <span className="text-xs text-muted">{t('access.binding.global')}</span>
+          ),
       },
       {
         id: 'created',
@@ -175,17 +198,24 @@ function PurgeAction({ apiKey, onDone }: { apiKey: ApiKey; onDone: () => void })
 function CreateKeyDialog({ onCreated }: { onCreated: () => void }) {
   const { t } = useT();
   const toast = useToast();
+  const { environments, project } = useEnv();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
   const [scopes, setScopes] = useState<Set<Scope>>(new Set());
+  const [bindEnv, setBindEnv] = useState(''); // '' = Global (без привязки)
   const [created, setCreated] = useState<CreatedApiKey | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Привязка осмысленна только для deploy/matchmaking/allocate без admin и
+  // когда есть окружения и известен проект (environments v1 §5).
+  const bindable = canBindScopes(scopes) && environments.length > 0 && project !== null;
 
   // Полный сброс — в т.ч. чистит секрет из памяти после закрытия.
   const reset = () => {
     setName('');
     setScopes(new Set());
+    setBindEnv('');
     setCreated(null);
     setPending(false);
     setError(null);
@@ -195,8 +225,10 @@ function CreateKeyDialog({ onCreated }: { onCreated: () => void }) {
     if (name.trim() === '' || scopes.size === 0 || pending) return;
     setPending(true);
     setError(null);
+    const binding: KeyBinding | undefined =
+      bindable && bindEnv !== '' && project !== null ? { project, env: bindEnv } : undefined;
     api
-      .createApiKey(name.trim(), [...scopes])
+      .createApiKey(name.trim(), [...scopes], binding)
       .then((res) => {
         setCreated(res); // переключает диалог в режим показа секрета
         setPending(false);
@@ -265,6 +297,27 @@ function CreateKeyDialog({ onCreated }: { onCreated: () => void }) {
                     ))}
                   </div>
                 </fieldset>
+                {environments.length > 0 && (
+                  <label className="flex flex-col gap-1 text-sm font-medium">
+                    {t('access.create.binding')}
+                    <select
+                      value={bindEnv}
+                      disabled={!bindable}
+                      onChange={(e) => {
+                        setBindEnv(e.target.value);
+                      }}
+                      className="rounded-lg border border-line bg-paper px-3 py-2 text-sm font-normal disabled:opacity-50"
+                    >
+                      <option value="">{t('access.create.bindingGlobal')}</option>
+                      {environments.map((env) => (
+                        <option key={env.name} value={env.name}>
+                          {project !== null ? `${project} / ${env.name}` : env.name}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="text-xs font-normal text-muted">{t('access.create.bindingHint')}</span>
+                  </label>
+                )}
                 {error !== null && (
                   <p role="alert" className="rounded-lg bg-dead-bg px-3 py-2 text-xs text-dead">
                     {error}
