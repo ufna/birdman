@@ -13,6 +13,7 @@
 | `birdman_node_heartbeat_age_seconds` | master | карантин/алерт NodeDown |
 | `birdman_servers{project,env,production,region,version,state}` | master | буферы, окно мультиверсий (env/production — из строки сервера, не из ноды; environments v1 §7) |
 | `birdman_versions{project,env,state}` | master | версии в стейт-машине per (project,env) — окно мультиверсий, ретеншн (environments v1 §7; W4-T1 M3; production несёт `birdman_servers`, не эту серию — (project,env)→production функционально зависимо) |
+| `birdman_image_removals_total{status}` | master | результаты RemoveImage, доложенные агентами (`ImageReport`): removed, absent, busy, error. Флот, где удаления стабильно возвращаются busy/error, — утечка диска до watermark-GC (раньше была невидима: маркер ставился вслепую, `master.md` §6б) |
 | `birdman_allocation_duration_seconds` (hist) | master | SLO p95 <1с |
 | `birdman_allocation_failures_total{reason}` | master | no_capacity, bad_request, env_required (409-ambiguous allocate), internal |
 | `birdman_mm_queue_depth{region,env}` / `birdman_mm_time_to_match_seconds` (hist) | master | здоровье матчмейкера |

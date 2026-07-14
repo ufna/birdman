@@ -20,7 +20,7 @@ const (
 	logPushTimeout = 10 * time.Second
 )
 
-// Outbox queues agent→master messages (ServerEvent, PullReport) across
+// Outbox queues agent→master messages (ServerEvent, PullReport, ImageReport) across
 // sessions: messages survive reconnects and are drained in order once a
 // stream is available. Delivery is at-least-once: a message is removed only
 // after a successful stream write, so a session dying mid-drain re-sends it.
@@ -57,6 +57,16 @@ func (o *Outbox) ServerEvent(serverID, kind, detail string) {
 func (o *Outbox) PullReport(cmdID, imageRef, status, detail string) {
 	o.push(&agentlinkv1.AgentMsg{Msg: &agentlinkv1.AgentMsg_Pull{
 		Pull: &agentlinkv1.PullReport{CmdId: cmdID, ImageRef: imageRef, Status: status, Detail: detail},
+	}})
+}
+
+// ImageReport queues the result of a RemoveImage command (environments v1 §6б:
+// removed|absent|busy|error). It rides the same at-least-once outbox as
+// PullReport/ServerEvent, so a report survives a session drop and is re-sent on
+// reconnect — the master's image-cleanup marker waits for it.
+func (o *Outbox) ImageReport(cmdID, imageRef, status, detail string) {
+	o.push(&agentlinkv1.AgentMsg{Msg: &agentlinkv1.AgentMsg_ImageReport{
+		ImageReport: &agentlinkv1.ImageReport{CmdId: cmdID, ImageRef: imageRef, Status: status, Detail: detail},
 	}})
 }
 

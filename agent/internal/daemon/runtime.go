@@ -99,6 +99,12 @@ type Runtime interface {
 type Sink interface {
 	ServerEvent(serverID, kind, detail string)
 	PullReport(cmdID, imageRef, status, detail string)
+	// ImageReport reports the RESULT of one RemoveImage (environments v1 §6б):
+	// removed|absent|busy|error, detail non-empty only for error. Exactly one
+	// per handled RemoveImage — the master marks the version's image as retired
+	// only once every target node reported removed|absent, and re-sends the
+	// command otherwise (the plain Ack carries no result).
+	ImageReport(cmdID, imageRef, status, detail string)
 	// LogChunk queues one TailLogs answer chunk. Unlike events, log chunks
 	// are not persistent: the call blocks briefly for queue space and
 	// returns false on overflow/timeout — the tail must then cancel

@@ -20,6 +20,7 @@ message AgentMsg {
     LogChunk    log = 4;     // ответ на TailLogs
     PullReport  pull = 5;    // прогресс/результат PrePull
     Ack         ack = 6;     // подтверждение команды master по cmd_id (уточнено в v0)
+    ImageReport image_report = 7; // (аддитивно) результат RemoveImage — см. ниже
   }
 }
 message Hello      { string node_token=1; string hostname=2; string region=3;
@@ -61,6 +62,7 @@ message UpgradeAgent{ string cmd_id=1; string url=2; string sha256=3; string ver
 message TailLogs    { string cmd_id=1; string server_id=2; bool follow=3; }
 message LogChunk    { string cmd_id=1; string server_id=2; bytes data=3; bool eof=4; }
 message PullReport  { string cmd_id=1; string image_ref=2; string status=3; string detail=4; } // pulling|pulled|failed
+message ImageReport { string cmd_id=1; string image_ref=2; string status=3; string detail=4; } // removed|absent|busy|error — результат RemoveImage
 
 // (добавлено в итерации 2) доставка матча до дедика: master шлёт после КАЖДОЙ
 // успешной аллокации (и REST /v1/allocate, и встроенный матчмейкер); агент
@@ -107,10 +109,17 @@ message RegistryCred  { string host=1; string username=2; string token=3; } // h
 // deprecated на activate-флипе — основной dev-путь — плюс TTL/ретеншн). Агент
 // обрабатывает как PrePull: диспатч возвращается сразу (обычный `Ack`
 // подтверждает приём, НЕ растягивается на удаление), работа — в горутине.
-// Идемпотентно: образ под живым контейнером логируется и скипается (подберёт
-// watermark-GC `agent.md` §6 позже, мастеру не докладываем); отсутствующий —
-// no-op под реплеем; иначе синхронное удаление + ref выкидывается из
-// protected-set GC. Образ `deprecated`-версии не трогаем (окно отката тёплое);
+// Идемпотентно: образ под живым контейнером скипается (подберёт watermark-GC
+// `agent.md` §6 позже); отсутствующий — no-op под реплеем; иначе синхронное
+// удаление + ref выкидывается из protected-set GC. КАЖДАЯ ветка докладывает
+// РЕЗУЛЬТАТ одним `ImageReport{status}` — `removed|absent|busy|error` (detail
+// непуст только у error). Это не дубль `Ack`: тот подтверждает лишь ПРИЁМ
+// команды, поэтому без отчёта мастер штамповал маркер «догоняющая команда
+// отработала» (`versions.image_cleanup_at`) ВСЛЕПУЮ и пропущенное удаление
+// (занят дренящимся контейнером, ошибка рантайма) терялось навсегда. Мастер
+// помечает версию только когда КАЖДАЯ целевая нода окружения ответила
+// removed|absent; busy|error → маркера нет, следующий 60с-субтик шлёт снова
+// (`master.md` §Окружения). Образ `deprecated`-версии не трогаем (окно отката тёплое);
 // пропуск самолечится (`EnsureImage` до-качивает на StartServer). Guard против
 // общих ссылок (тот же `image_ref` держит НЕ-disabled версия того же
 // project/env) живёт на МАСТЕРЕ (reconcile/imagecleanup, §6б) — WITHHELD там, до

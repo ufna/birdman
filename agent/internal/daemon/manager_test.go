@@ -230,11 +230,16 @@ type logChunk struct {
 	eof      bool
 }
 
+// imageReport is one RemoveImage RESULT the manager reported back to the master
+// (proto ImageReport, environments v1 §6б).
+type imageReport struct{ cmdID, ref, status, detail string }
+
 type fakeSink struct {
-	mu     sync.Mutex
-	events []sinkEvent
-	pulls  []string // "status ref"
-	chunks []logChunk
+	mu           sync.Mutex
+	events       []sinkEvent
+	pulls        []string // "status ref"
+	imageReports []imageReport
+	chunks       []logChunk
 }
 
 func (s *fakeSink) ServerEvent(serverID, kind, detail string) {
@@ -246,6 +251,38 @@ func (s *fakeSink) PullReport(_, imageRef, status, _ string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pulls = append(s.pulls, status+" "+imageRef)
+}
+func (s *fakeSink) ImageReport(cmdID, imageRef, status, detail string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.imageReports = append(s.imageReports, imageReport{cmdID, imageRef, status, detail})
+}
+
+// imageReportsFor returns every ImageReport sent for ref — the handler owes the
+// master EXACTLY ONE per RemoveImage, so tests assert the count too.
+func (s *fakeSink) imageReportsFor(ref string) []imageReport {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []imageReport
+	for _, r := range s.imageReports {
+		if r.ref == ref {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// awaitImageReport waits for the one ImageReport the RemoveImage handler owes for
+// ref and returns it. The handler does its runtime work in a goroutine (it must
+// never block the recv loop), so the report lands asynchronously.
+func awaitImageReport(t *testing.T, sink *fakeSink, ref string) imageReport {
+	t.Helper()
+	eventually(t, "ImageReport for "+ref, func() bool { return len(sink.imageReportsFor(ref)) > 0 })
+	got := sink.imageReportsFor(ref)
+	if len(got) != 1 {
+		t.Fatalf("RemoveImage owes the master EXACTLY ONE report for %s, got %d: %+v", ref, len(got), got)
+	}
+	return got[0]
 }
 func (s *fakeSink) LogChunk(_ context.Context, _, serverID string, data []byte, eof bool) bool {
 	s.mu.Lock()
@@ -1053,16 +1090,22 @@ func TestStartServerUsesRegistryAuthChain(t *testing.T) {
 }
 
 // --- RemoveImage (environments v1 §6б) ---
+//
+// КАЖДАЯ ветка хендлера ОБЯЗАНА доложить результат мастеру одним ImageReport
+// (removed|absent|busy|error). Ack подтверждает лишь ПОЛУЧЕНИЕ команды, поэтому
+// без отчёта мастер штамповал маркер versions.image_cleanup_at вслепую: пропущенное
+// удаление (образ занят дренящимся контейнером, ошибка рантайма) терялось навсегда,
+// а образ доживал до watermark-GC. Тесты ниже фиксируют статус на всех четырёх.
 
 // TestRemoveImageDeletesAndUntouches: an unused, present image is deleted
 // synchronously and its ref is dropped from the GC protected set (РЕВИЗИЯ M12
 // — a dead ref must not keep occupying a protection slot). Unrelated protected
-// refs are untouched.
+// refs are untouched. Reports `removed`.
 func TestRemoveImageDeletesAndUntouches(t *testing.T) {
 	rt := newFakeRuntime()
 	rt.images = []imagegc.Image{{Name: "img:1"}, {Name: "keep:2"}}
 	rt.usedRefs = map[string]bool{}
-	m, _, _ := testManager(t, rt)
+	m, sink, _ := testManager(t, rt)
 
 	gc := imagegc.New(imagegc.Options{DiskUsage: func() (uint64, uint64) { return 0, 0 }, Logf: t.Logf})
 	m.touchImage = gc.Touch
@@ -1076,16 +1119,23 @@ func TestRemoveImageDeletesAndUntouches(t *testing.T) {
 	if !gc.Protected()["keep:2"] {
 		t.Fatal("Untouch must drop only the removed ref, keep:2 must stay protected")
 	}
+	got := awaitImageReport(t, sink, "img:1")
+	if got.status != "removed" || got.cmdID != "r1" || got.detail != "" {
+		t.Fatalf("deleted image must report removed/cmd r1/no detail, got %+v", got)
+	}
 }
 
 // TestRemoveImageAbsentNoop: a command for an image not present on the node is
 // a clean no-op — no delete is attempted (idempotency under at-least-once
-// replay after the image was already collected).
+// replay after the image was already collected). Reports `absent`, which the
+// master accepts exactly like `removed`: the image is not on the node, which is
+// the whole point of the command. That equivalence is what makes the sweep's
+// re-send safe.
 func TestRemoveImageAbsentNoop(t *testing.T) {
 	rt := newFakeRuntime()
 	rt.images = []imagegc.Image{{Name: "other:9"}} // img:1 not present
 	rt.usedRefs = map[string]bool{}
-	m, _, _ := testManager(t, rt)
+	m, sink, _ := testManager(t, rt)
 	cap := &logCapture{}
 	m.logf = cap.Printf
 
@@ -1094,16 +1144,20 @@ func TestRemoveImageAbsentNoop(t *testing.T) {
 	if rt.deleteCount() != 0 {
 		t.Fatalf("absent image must not be deleted, deletes=%d", rt.deleteCount())
 	}
+	if got := awaitImageReport(t, sink, "img:1"); got.status != "absent" || got.detail != "" {
+		t.Fatalf("absent image must report absent with no detail, got %+v", got)
+	}
 }
 
-// TestRemoveImageBusySkips: an image backing a live container is logged and
-// skipped, never deleted — the watermark GC reclaims it once the container is
-// gone, and the master is not told (§6б, РЕВИЗИЯ I1).
+// TestRemoveImageBusySkips: an image backing a live container is skipped, never
+// deleted — the version's servers are still draining. The master IS told now
+// (`busy`): it used to be kept in the dark, stamp its «одна догоняющая команда»
+// marker anyway, and never retry — so the image survived to the watermark GC.
 func TestRemoveImageBusySkips(t *testing.T) {
 	rt := newFakeRuntime()
 	rt.images = []imagegc.Image{{Name: "img:1"}}
 	rt.usedRefs = map[string]bool{"img:1": true}
-	m, _, _ := testManager(t, rt)
+	m, sink, _ := testManager(t, rt)
 	cap := &logCapture{}
 	m.logf = cap.Printf
 
@@ -1112,6 +1166,44 @@ func TestRemoveImageBusySkips(t *testing.T) {
 	if rt.deleteCount() != 0 {
 		t.Fatalf("busy image must not be deleted, deletes=%d", rt.deleteCount())
 	}
+	if got := awaitImageReport(t, sink, "img:1"); got.status != "busy" {
+		t.Fatalf("image backing a live container must report busy, got %+v", got)
+	}
+}
+
+// TestRemoveImageErrorReported: a runtime failure reports `error` + detail, so the
+// master leaves the version UNMARKED and the 60s sweep re-sends — instead of
+// recording «done» over a removal that never happened. Both failing probes of the
+// handler are covered: the delete itself, and the used-refs lookup that precedes it.
+func TestRemoveImageErrorReported(t *testing.T) {
+	t.Run("delete fails", func(t *testing.T) {
+		rt := newFakeRuntime()
+		rt.images = []imagegc.Image{{Name: "img:1"}}
+		rt.usedRefs = map[string]bool{}
+		rt.deleteErr = errors.New("containerd: image is dangling")
+		m, sink, _ := testManager(t, rt)
+
+		m.RemoveImage(context.Background(), &agentlinkv1.RemoveImage{CmdId: "r1", ImageRef: "img:1"})
+		got := awaitImageReport(t, sink, "img:1")
+		if got.status != "error" || !strings.Contains(got.detail, "dangling") {
+			t.Fatalf("failed delete must report error with the runtime's text in detail, got %+v", got)
+		}
+	})
+	t.Run("used-refs probe fails", func(t *testing.T) {
+		rt := newFakeRuntime()
+		rt.images = []imagegc.Image{{Name: "img:1"}}
+		rt.usedErr = errors.New("list containers: connection refused")
+		m, sink, _ := testManager(t, rt)
+
+		m.RemoveImage(context.Background(), &agentlinkv1.RemoveImage{CmdId: "r1", ImageRef: "img:1"})
+		got := awaitImageReport(t, sink, "img:1")
+		if got.status != "error" || !strings.Contains(got.detail, "connection refused") {
+			t.Fatalf("failed used-refs probe must report error with detail, got %+v", got)
+		}
+		if rt.deleteCount() != 0 {
+			t.Fatalf("a failed used-refs probe must not delete anything, deletes=%d", rt.deleteCount())
+		}
+	})
 }
 
 // TestRemoveImageDoesNotBlockDispatch: the handler must return immediately and
@@ -1148,7 +1240,7 @@ func TestRemoveImageDoesNotBlockDispatch(t *testing.T) {
 // zero deletes is deterministic; no sleep to race the (never-spawned) goroutine.
 func TestRemoveImageEmptyRefIgnored(t *testing.T) {
 	rt := newFakeRuntime()
-	m, _, _ := testManager(t, rt)
+	m, sink, _ := testManager(t, rt)
 	cap := &logCapture{}
 	m.logf = cap.Printf
 	m.RemoveImage(context.Background(), &agentlinkv1.RemoveImage{CmdId: "r1", ImageRef: ""})
@@ -1157,6 +1249,12 @@ func TestRemoveImageEmptyRefIgnored(t *testing.T) {
 	}
 	if rt.deleteCount() != 0 {
 		t.Fatal("empty image_ref must be ignored without touching the runtime")
+	}
+	// Even the command the master never sends gets its one report: «ровно один отчёт
+	// на команду» keeps the master's per-node bookkeeping unambiguous.
+	got := sink.imageReportsFor("")
+	if len(got) != 1 || got[0].status != "error" || got[0].detail == "" {
+		t.Fatalf("empty image_ref must still report error+detail exactly once, got %+v", got)
 	}
 }
 
