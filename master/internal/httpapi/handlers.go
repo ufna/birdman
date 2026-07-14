@@ -109,6 +109,13 @@ func (s *Server) handleCreateVersion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "semver and image_ref are required")
 		return
 	}
+	// project — тот же класс клиентского ввода (M1 ревью follow-up): непривязанный
+	// ключ без поля project иначе уехал бы в «internal» через плоскую ошибку
+	// ensureProject.
+	if project == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "project is required")
+		return
+	}
 	if !s.requireBinding(w, r, project, req.Env) {
 		return
 	}
