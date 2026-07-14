@@ -272,10 +272,15 @@ CI uses two: a dev-bound key on every push (auto-deploy) and a prod-bound key ga
 behind a GitHub environment approval for the promote.
 
 **Retention** (`retention_keep` on the env, dev default 20, prod 0 = unlimited):
-versions past the newest N are moved to `disabled` and their images are removed from
-the env's nodes right away (`RemoveImage`); the disk-watermark GC stays as a
-backstop. `active`/`prepulling`/`deprecated` are never touched — the rollback window
-stays warm.
+versions past the newest N are moved to `disabled` and their images are dropped from
+the env's nodes. Removal happens in two beats: a `RemoveImage` goes out immediately on
+the `disabled` transition, and — because the version's containers are usually still
+draining at that exact moment (the agent then skips a busy image) — a **converging
+sweep** in the same ~60s tick re-sends it once the version has no live servers left,
+then stamps `versions.image_cleanup_at` so it never re-sends again. The disk-watermark
+GC stays as a backstop (it also covers the narrow case of a master restart between the
+send and the agent's ack). `active`/`prepulling`/`deprecated` are never touched — the
+rollback window stays warm.
 
 Manage environments under **Admin → Environments** in the panel, or via
 `GET/POST /v1/environments` and `PATCH /v1/environments/{project}/{name}`.
