@@ -91,7 +91,7 @@ func TestRollupStore(t *testing.T) {
 	}
 
 	// RollupDims returns exactly what was written.
-	got, err := st.RollupDims(ctx, day1, day2)
+	got, err := st.RollupDims(ctx, day1, day2, "")
 	if err != nil {
 		t.Fatalf("rollup dims: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestRollupStore(t *testing.T) {
 	if err := st.UpsertRollupDay(ctx, day1, dims1, peak1[dk(day1)]); err != nil {
 		t.Fatalf("re-upsert day1: %v", err)
 	}
-	got2, err := st.RollupDims(ctx, day1, day2)
+	got2, err := st.RollupDims(ctx, day1, day2, "")
 	if err != nil {
 		t.Fatalf("rollup dims after re-upsert: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestRollupStore(t *testing.T) {
 	if v, ok := peaks0[dk(day0)]; !ok || v != 0 {
 		t.Fatalf("empty day should be marked processed with peak 0: ok=%v peak=%v", ok, v)
 	}
-	dims0, err := st.RollupDims(ctx, day0, day0)
+	dims0, err := st.RollupDims(ctx, day0, day0, "")
 	if err != nil {
 		t.Fatalf("dims empty day: %v", err)
 	}
@@ -182,5 +182,68 @@ func TestRollupStore(t *testing.T) {
 	}
 	if !sawRunning {
 		t.Fatalf("expected still-running match started before window in overlap: %+v", overlap)
+	}
+}
+
+// TestRollupStoreEnv covers the env dimension (environments v1, I5) of the
+// rollup store surface: match_stats_daily is keyed by env (PK now (day,
+// region, semver, env)), so two dims with the same day/region/semver but
+// different env coexist and RollupDims filters by env; match_ccu_daily stays
+// global (PK (day)) — one platform-wide peak row per day, never split by env.
+func TestRollupStoreEnv(t *testing.T) {
+	st := testdb.New(t)
+	testdb.Seed(t, st, "eu", 10)
+	ctx := context.Background()
+	day := time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC)
+
+	// Same day/region/semver, two environments — distinct match_stats_daily
+	// rows. peakCCU is a single platform-wide value for the day.
+	dims := []store.RollupDim{
+		{Day: day, Region: "eu", Semver: "1.0.0", Env: "dev", Matches: 3, PlayersPeakSum: 30, SlotSeconds: 900},
+		{Day: day, Region: "eu", Semver: "1.0.0", Env: "prod", Matches: 1, PlayersPeakSum: 5, SlotSeconds: 600},
+	}
+	if err := st.UpsertRollupDay(ctx, day, dims, 42); err != nil {
+		t.Fatalf("upsert env day: %v", err)
+	}
+
+	// No env filter → both rows, each carrying its env.
+	all, err := st.RollupDims(ctx, day, day, "")
+	if err != nil {
+		t.Fatalf("rollup dims (all): %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("want 2 dim rows across env, got %d: %+v", len(all), all)
+	}
+	byEnv := map[string]store.RollupDim{}
+	for _, d := range all {
+		byEnv[d.Env] = d
+	}
+	if byEnv["dev"].Matches != 3 || byEnv["prod"].Matches != 1 {
+		t.Fatalf("env dims mismatch: %+v", byEnv)
+	}
+
+	// env filter isolates a single environment's slice.
+	prod, err := st.RollupDims(ctx, day, day, "prod")
+	if err != nil {
+		t.Fatalf("rollup dims (prod): %v", err)
+	}
+	if len(prod) != 1 || prod[0].Env != "prod" || prod[0].Matches != 1 {
+		t.Fatalf("prod slice = %+v, want sole prod dim (matches 1)", prod)
+	}
+	dev, err := st.RollupDims(ctx, day, day, "dev")
+	if err != nil {
+		t.Fatalf("rollup dims (dev): %v", err)
+	}
+	if len(dev) != 1 || dev[0].Env != "dev" || dev[0].Matches != 3 {
+		t.Fatalf("dev slice = %+v, want sole dev dim (matches 3)", dev)
+	}
+
+	// match_ccu_daily stays a single global row per day (no env split).
+	peaks, err := st.RollupPeakCCU(ctx, day, day)
+	if err != nil {
+		t.Fatalf("rollup peak ccu: %v", err)
+	}
+	if len(peaks) != 1 || peaks[dk(day)] != 42 {
+		t.Fatalf("peak ccu = %+v, want single global {%s:42}", peaks, dk(day))
 	}
 }
