@@ -253,8 +253,9 @@ curl -s -X POST http://127.0.0.1:8100/v1/promote -H "Authorization: Bearer $KEY"
 ```
 
 Idempotent (re-promoting the same ref reuses the registered row). If a prod deploy
-is already in flight the promote returns `409` and lands via the forward-only chain
-once the running deploy finishes.
+is already in flight the promote returns `409` — the version is already registered
+in the target env; retry the promote once the running deploy finishes (it reuses
+the registered row and starts the deploy).
 
 **Nodes belong to one env.** New nodes join as `dev` (never prod implicitly); move
 an empty node explicitly — any state but `dead`, no live servers on it:
