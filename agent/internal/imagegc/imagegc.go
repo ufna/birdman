@@ -37,16 +37,23 @@ const protectedCap = 8
 type Options struct {
 	Runtime   Runtime
 	DiskUsage func() (used, total uint64) // data_dir filesystem
-	Watermark float64                     // GC trigger, default 0.80
-	Logf      func(string, ...any)
+	// ContainerdDiskUsage samples the containerd-root filesystem (environments
+	// v1 §6в). Images live under containerd-root, which can be a separate mount
+	// from data_dir — when it is, a data_dir-only watermark is blind to the
+	// filesystem that actually fills up. aboveWatermark takes the MAX usage of
+	// the two. Optional: nil falls back to the single (data_dir) filesystem.
+	ContainerdDiskUsage func() (used, total uint64)
+	Watermark           float64 // GC trigger, default 0.80
+	Logf                func(string, ...any)
 }
 
 // GC is the background image collector. Touch() feeds the protected set.
 type GC struct {
-	rt        Runtime
-	diskUsage func() (used, total uint64)
-	watermark float64
-	logf      func(string, ...any)
+	rt          Runtime
+	diskUsage   func() (used, total uint64)
+	cdDiskUsage func() (used, total uint64) // containerd-root fs; may be nil
+	watermark   float64
+	logf        func(string, ...any)
 
 	mu      sync.Mutex
 	touched map[string]time.Time // ref → last use
@@ -61,7 +68,8 @@ func New(o Options) *GC {
 		o.Logf = func(string, ...any) {}
 	}
 	return &GC{
-		rt: o.Runtime, diskUsage: o.DiskUsage, watermark: o.Watermark, logf: o.Logf,
+		rt: o.Runtime, diskUsage: o.DiskUsage, cdDiskUsage: o.ContainerdDiskUsage,
+		watermark: o.Watermark, logf: o.Logf,
 		touched: map[string]time.Time{}, now: time.Now,
 	}
 }
@@ -85,6 +93,19 @@ func (g *GC) Touch(ref string) {
 		}
 	}
 	delete(g.touched, oldestRef)
+}
+
+// Untouch drops a ref from the protected set (environments v1 §6б, РЕВИЗИЯ
+// M12): once a version is retired and its image removed from the node, the
+// dead ref must not keep occupying a protection slot. A no-op for an unknown
+// or empty ref.
+func (g *GC) Untouch(ref string) {
+	if ref == "" {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.touched, ref)
 }
 
 // Protected returns a copy of the protected ref set.
@@ -160,10 +181,21 @@ func (g *GC) RunOnce(ctx context.Context) ([]string, error) {
 	return deleted, nil
 }
 
+// aboveWatermark reports whether the node needs a GC pass. It takes the MAX
+// usage fraction of the data_dir and (when configured) the containerd-root
+// filesystem (environments v1 §6в): images can fill a containerd mount that is
+// separate from data_dir, and either filesystem crossing the watermark must
+// trigger a collection.
 func (g *GC) aboveWatermark() bool {
-	used, total := g.diskUsage()
-	if total == 0 {
-		return false
+	above := func(usage func() (uint64, uint64)) bool {
+		if usage == nil {
+			return false
+		}
+		used, total := usage()
+		if total == 0 {
+			return false
+		}
+		return float64(used)/float64(total) > g.watermark
 	}
-	return float64(used)/float64(total) > g.watermark
+	return above(g.diskUsage) || above(g.cdDiskUsage)
 }

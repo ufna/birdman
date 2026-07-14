@@ -56,13 +56,18 @@ func (a *RegistryAuth) Token() (string, error) {
 // master_addr / node_token(_file) / tls_* power the `run` daemon mode
 // (iteration 1); run-once ignores them.
 type Config struct {
-	Region        string        `yaml:"region"`
-	CapacitySlots int           `yaml:"capacity_slots"`
-	PortRange     []int         `yaml:"port_range"`
-	LimitsDefault Limits        `yaml:"limits_default"`
-	LogDir        string        `yaml:"log_dir"`
-	DataDir       string        `yaml:"data_dir"`
-	RegistryAuth  *RegistryAuth `yaml:"registry_auth"`
+	Region        string `yaml:"region"`
+	CapacitySlots int    `yaml:"capacity_slots"`
+	PortRange     []int  `yaml:"port_range"`
+	LimitsDefault Limits `yaml:"limits_default"`
+	LogDir        string `yaml:"log_dir"`
+	DataDir       string `yaml:"data_dir"`
+	// ContainerdRoot is the containerd data root where images live (dual-fs
+	// watermark, environments v1 §6в). Defaults to /var/lib/containerd. When it
+	// is a separate mount from data_dir, the image GC watermark and the
+	// birdman_agent_containerd_disk_* metrics sample it in addition to data_dir.
+	ContainerdRoot string        `yaml:"containerd_root"`
+	RegistryAuth   *RegistryAuth `yaml:"registry_auth"`
 
 	// MasterAddr is the gRPC AgentLink endpoint (host:port, always TLS).
 	MasterAddr string `yaml:"master_addr"`
@@ -184,6 +189,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.DataDir == "" {
 		c.DataDir = "/var/lib/birdman"
+	}
+	if c.ContainerdRoot == "" {
+		c.ContainerdRoot = "/var/lib/containerd" // dual-fs watermark (§6в)
 	}
 	// tls_cert_dir tracks data_dir by default (must run after DataDir is set).
 	if c.TLSCertDir == "" {

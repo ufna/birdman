@@ -47,6 +47,10 @@ type Handler interface {
 	// a full snapshot at attach (before pending replay) and on every
 	// registry change; the agent never persists it to disk.
 	SetRegistries(ctx context.Context, cmd *agentlinkv1.SetRegistries)
+	// RemoveImage retires a disabled version's image from the node (environments
+	// v1, §6б). Handled like PrePull — returns immediately, work in a goroutine,
+	// the plain Ack confirms receipt (no Ack extension).
+	RemoveImage(ctx context.Context, cmd *agentlinkv1.RemoveImage)
 }
 
 // Source supplies the current node/server state for Hello and heartbeats.
@@ -426,6 +430,8 @@ func (c *Client) dispatch(ctx context.Context, in *agentlinkv1.MasterMsg) {
 		c.h.TailLogs(ctx, m.Tail)
 	case *agentlinkv1.MasterMsg_SetRegistries:
 		c.h.SetRegistries(ctx, m.SetRegistries)
+	case *agentlinkv1.MasterMsg_RemoveImage:
+		c.h.RemoveImage(ctx, m.RemoveImage)
 	}
 }
 
@@ -452,6 +458,8 @@ func commandID(m *agentlinkv1.MasterMsg) string {
 		return c.Tail.GetCmdId()
 	case *agentlinkv1.MasterMsg_SetRegistries:
 		return c.SetRegistries.GetCmdId()
+	case *agentlinkv1.MasterMsg_RemoveImage:
+		return c.RemoveImage.GetCmdId()
 	}
 	return ""
 }

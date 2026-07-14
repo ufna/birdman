@@ -232,10 +232,12 @@ func (s *Store) SetNodeEnv(ctx context.Context, nodeID, env string) (Node, error
 	}
 	defer tx.Rollback(ctx)
 
-	var projectID, cur, state string
-	err = tx.QueryRow(ctx,
-		`select project_id::text, env, state from nodes where id = $1::uuid for update`, nodeID).
-		Scan(&projectID, &cur, &state)
+	var projectID, project, cur, state string
+	err = tx.QueryRow(ctx, `
+		select n.project_id::text, p.slug, n.env, n.state
+		from nodes n join projects p on p.id = n.project_id
+		where n.id = $1::uuid for update of n`, nodeID).
+		Scan(&projectID, &project, &cur, &state)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Node{}, fmt.Errorf("node %s: %w", nodeID, ErrNotFound)
 	}
@@ -274,6 +276,12 @@ func (s *Store) SetNodeEnv(ctx context.Context, nodeID, env string) (Node, error
 
 	if env != cur {
 		if _, err := tx.Exec(ctx, `update nodes set env = $2 where id = $1::uuid`, nodeID, env); err != nil {
+			// Гонка с DELETE целевого env между in-tx пре-чеком и UPDATE'ом:
+			// nodes_env_fk (23503) → внятный «no such environment» (ErrNotFound →
+			// 404), а не сырой 500 (w5, паритет CreateVersion/PromoteVersion).
+			if mapped := mapEnvFKViolation(err, project, env); mapped != nil {
+				return Node{}, mapped
+			}
 			return Node{}, err
 		}
 		if err := insertEvent(ctx, tx, EventNodeEnvChanged, EventRef{NodeID: &nodeID},
@@ -285,6 +293,34 @@ func (s *Store) SetNodeEnv(ctx context.Context, nodeID, env string) (Node, error
 		return Node{}, err
 	}
 	return s.GetNode(ctx, nodeID)
+}
+
+// EnvNodeIDs returns the ids of every not-`dead` node of (projectID, env) — the
+// RemoveImage dispatch targets (environments v1 §6б). All non-dead states are
+// included (creating/ready/allocated/draining/quarantine/down and offline ones):
+// the at-least-once agentlink queue replays the command when the node reconnects,
+// so an offline node still gets its image retired. A `dead` node's agent is
+// revoked and will never reconnect, so it is skipped (its queue would never
+// drain). Env-скоуп: ноды принадлежат ровно одному env — ноды чужого env не
+// трогаются.
+func (s *Store) EnvNodeIDs(ctx context.Context, projectID, env string) ([]string, error) {
+	rows, err := s.Pool.Query(ctx,
+		`select id::text from nodes
+		 where project_id = $1::uuid and env = $2 and state <> 'dead'
+		 order by created_at`, projectID, env)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }
 
 // ListNodes returns all nodes with project slugs.

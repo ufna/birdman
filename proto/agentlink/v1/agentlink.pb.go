@@ -886,6 +886,7 @@ type MasterMsg struct {
 	//	*MasterMsg_DrainServer
 	//	*MasterMsg_Undrain
 	//	*MasterMsg_SetRegistries
+	//	*MasterMsg_RemoveImage
 	Msg           isMasterMsg_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1027,6 +1028,15 @@ func (x *MasterMsg) GetSetRegistries() *SetRegistries {
 	return nil
 }
 
+func (x *MasterMsg) GetRemoveImage() *RemoveImage {
+	if x != nil {
+		if x, ok := x.Msg.(*MasterMsg_RemoveImage); ok {
+			return x.RemoveImage
+		}
+	}
+	return nil
+}
+
 type isMasterMsg_Msg interface {
 	isMasterMsg_Msg()
 }
@@ -1075,6 +1085,10 @@ type MasterMsg_SetRegistries struct {
 	SetRegistries *SetRegistries `protobuf:"bytes,11,opt,name=set_registries,json=setRegistries,proto3,oneof"` // registries v1: private-registry credential snapshot for image pulls
 }
 
+type MasterMsg_RemoveImage struct {
+	RemoveImage *RemoveImage `protobuf:"bytes,12,opt,name=remove_image,json=removeImage,proto3,oneof"` // environments v1: retire a disabled version's image from the node
+}
+
 func (*MasterMsg_Start) isMasterMsg_Msg() {}
 
 func (*MasterMsg_Stop) isMasterMsg_Msg() {}
@@ -1097,6 +1111,75 @@ func (*MasterMsg_Undrain) isMasterMsg_Msg() {}
 
 func (*MasterMsg_SetRegistries) isMasterMsg_Msg() {}
 
+func (*MasterMsg_RemoveImage) isMasterMsg_Msg() {}
+
+// RemoveImage retires one image from the node when a version goes disabled
+// (environments v1, docs/superpowers/specs/2026-07-13-environments-v1-design.md
+// §6б): the master sends it to every node of the (project, env) over the
+// existing at-least-once FIFO queue whenever a version transitions to disabled
+// (demote of the older deprecated on an activate flip — the main dev-stream
+// path — plus TTL and retention). The agent handles it like PrePull: dispatch
+// returns immediately (the plain Ack confirms receipt, this message does NOT
+// extend Ack) and the work runs in a goroutine — an image referenced by a live
+// container is logged and skipped (the watermark GC picks it up later; the
+// master is not told), an absent image is a no-op (idempotent under replay),
+// otherwise the image is deleted synchronously and its ref dropped from the GC
+// protected set. A deprecated version's image is never removed (the rollback
+// window stays warm); missed removals self-heal (EnsureImage re-pulls on
+// StartServer). The guard against shared refs (same image_ref still referenced
+// by a non-disabled version of the same project/env) lives on the master.
+type RemoveImage struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	CmdId         string                 `protobuf:"bytes,1,opt,name=cmd_id,json=cmdId,proto3" json:"cmd_id,omitempty"`
+	ImageRef      string                 `protobuf:"bytes,2,opt,name=image_ref,json=imageRef,proto3" json:"image_ref,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RemoveImage) Reset() {
+	*x = RemoveImage{}
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RemoveImage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RemoveImage) ProtoMessage() {}
+
+func (x *RemoveImage) ProtoReflect() protoreflect.Message {
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RemoveImage.ProtoReflect.Descriptor instead.
+func (*RemoveImage) Descriptor() ([]byte, []int) {
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *RemoveImage) GetCmdId() string {
+	if x != nil {
+		return x.CmdId
+	}
+	return ""
+}
+
+func (x *RemoveImage) GetImageRef() string {
+	if x != nil {
+		return x.ImageRef
+	}
+	return ""
+}
+
 // SetRegistries carries the full set of private-registry credentials the
 // agent should use for image pulls (docs/superpowers/specs/2026-07-09-registries-design.md
 // §2; master admin API POST/DELETE /v1/registries). This is a full snapshot,
@@ -1118,7 +1201,7 @@ type SetRegistries struct {
 
 func (x *SetRegistries) Reset() {
 	*x = SetRegistries{}
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[12]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1130,7 +1213,7 @@ func (x *SetRegistries) String() string {
 func (*SetRegistries) ProtoMessage() {}
 
 func (x *SetRegistries) ProtoReflect() protoreflect.Message {
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[12]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1143,7 +1226,7 @@ func (x *SetRegistries) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetRegistries.ProtoReflect.Descriptor instead.
 func (*SetRegistries) Descriptor() ([]byte, []int) {
-	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{12}
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *SetRegistries) GetCmdId() string {
@@ -1175,7 +1258,7 @@ type RegistryCred struct {
 
 func (x *RegistryCred) Reset() {
 	*x = RegistryCred{}
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[13]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1187,7 +1270,7 @@ func (x *RegistryCred) String() string {
 func (*RegistryCred) ProtoMessage() {}
 
 func (x *RegistryCred) ProtoReflect() protoreflect.Message {
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[13]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1200,7 +1283,7 @@ func (x *RegistryCred) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegistryCred.ProtoReflect.Descriptor instead.
 func (*RegistryCred) Descriptor() ([]byte, []int) {
-	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{13}
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *RegistryCred) GetHost() string {
@@ -1235,7 +1318,7 @@ type Undrain struct {
 
 func (x *Undrain) Reset() {
 	*x = Undrain{}
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[14]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1247,7 +1330,7 @@ func (x *Undrain) String() string {
 func (*Undrain) ProtoMessage() {}
 
 func (x *Undrain) ProtoReflect() protoreflect.Message {
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[14]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1260,7 +1343,7 @@ func (x *Undrain) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Undrain.ProtoReflect.Descriptor instead.
 func (*Undrain) Descriptor() ([]byte, []int) {
-	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{14}
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *Undrain) GetCmdId() string {
@@ -1289,7 +1372,7 @@ type DrainServer struct {
 
 func (x *DrainServer) Reset() {
 	*x = DrainServer{}
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[15]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1301,7 +1384,7 @@ func (x *DrainServer) String() string {
 func (*DrainServer) ProtoMessage() {}
 
 func (x *DrainServer) ProtoReflect() protoreflect.Message {
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[15]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1314,7 +1397,7 @@ func (x *DrainServer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DrainServer.ProtoReflect.Descriptor instead.
 func (*DrainServer) Descriptor() ([]byte, []int) {
-	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{15}
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *DrainServer) GetCmdId() string {
@@ -1363,7 +1446,7 @@ type AllocateServer struct {
 
 func (x *AllocateServer) Reset() {
 	*x = AllocateServer{}
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[16]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1375,7 +1458,7 @@ func (x *AllocateServer) String() string {
 func (*AllocateServer) ProtoMessage() {}
 
 func (x *AllocateServer) ProtoReflect() protoreflect.Message {
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[16]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1388,7 +1471,7 @@ func (x *AllocateServer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AllocateServer.ProtoReflect.Descriptor instead.
 func (*AllocateServer) Descriptor() ([]byte, []int) {
-	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{16}
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *AllocateServer) GetCmdId() string {
@@ -1433,7 +1516,7 @@ type StartServer struct {
 
 func (x *StartServer) Reset() {
 	*x = StartServer{}
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[17]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1445,7 +1528,7 @@ func (x *StartServer) String() string {
 func (*StartServer) ProtoMessage() {}
 
 func (x *StartServer) ProtoReflect() protoreflect.Message {
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[17]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1458,7 +1541,7 @@ func (x *StartServer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartServer.ProtoReflect.Descriptor instead.
 func (*StartServer) Descriptor() ([]byte, []int) {
-	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{17}
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *StartServer) GetServerId() string {
@@ -1513,7 +1596,7 @@ type Limits struct {
 
 func (x *Limits) Reset() {
 	*x = Limits{}
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[18]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1525,7 +1608,7 @@ func (x *Limits) String() string {
 func (*Limits) ProtoMessage() {}
 
 func (x *Limits) ProtoReflect() protoreflect.Message {
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[18]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1538,7 +1621,7 @@ func (x *Limits) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Limits.ProtoReflect.Descriptor instead.
 func (*Limits) Descriptor() ([]byte, []int) {
-	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{18}
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *Limits) GetCpuMillis() int32 {
@@ -1566,7 +1649,7 @@ type StopServer struct {
 
 func (x *StopServer) Reset() {
 	*x = StopServer{}
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[19]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1578,7 +1661,7 @@ func (x *StopServer) String() string {
 func (*StopServer) ProtoMessage() {}
 
 func (x *StopServer) ProtoReflect() protoreflect.Message {
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[19]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1591,7 +1674,7 @@ func (x *StopServer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StopServer.ProtoReflect.Descriptor instead.
 func (*StopServer) Descriptor() ([]byte, []int) {
-	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{19}
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *StopServer) GetServerId() string {
@@ -1625,7 +1708,7 @@ type PrePull struct {
 
 func (x *PrePull) Reset() {
 	*x = PrePull{}
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[20]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1637,7 +1720,7 @@ func (x *PrePull) String() string {
 func (*PrePull) ProtoMessage() {}
 
 func (x *PrePull) ProtoReflect() protoreflect.Message {
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[20]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1650,7 +1733,7 @@ func (x *PrePull) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrePull.ProtoReflect.Descriptor instead.
 func (*PrePull) Descriptor() ([]byte, []int) {
-	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{20}
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *PrePull) GetCmdId() string {
@@ -1677,7 +1760,7 @@ type Drain struct {
 
 func (x *Drain) Reset() {
 	*x = Drain{}
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[21]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1689,7 +1772,7 @@ func (x *Drain) String() string {
 func (*Drain) ProtoMessage() {}
 
 func (x *Drain) ProtoReflect() protoreflect.Message {
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[21]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1702,7 +1785,7 @@ func (x *Drain) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Drain.ProtoReflect.Descriptor instead.
 func (*Drain) Descriptor() ([]byte, []int) {
-	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{21}
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *Drain) GetCmdId() string {
@@ -1731,7 +1814,7 @@ type UpgradeAgent struct {
 
 func (x *UpgradeAgent) Reset() {
 	*x = UpgradeAgent{}
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[22]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1743,7 +1826,7 @@ func (x *UpgradeAgent) String() string {
 func (*UpgradeAgent) ProtoMessage() {}
 
 func (x *UpgradeAgent) ProtoReflect() protoreflect.Message {
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[22]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1756,7 +1839,7 @@ func (x *UpgradeAgent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpgradeAgent.ProtoReflect.Descriptor instead.
 func (*UpgradeAgent) Descriptor() ([]byte, []int) {
-	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{22}
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *UpgradeAgent) GetCmdId() string {
@@ -1805,7 +1888,7 @@ type TailLogs struct {
 
 func (x *TailLogs) Reset() {
 	*x = TailLogs{}
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[23]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1817,7 +1900,7 @@ func (x *TailLogs) String() string {
 func (*TailLogs) ProtoMessage() {}
 
 func (x *TailLogs) ProtoReflect() protoreflect.Message {
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[23]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1830,7 +1913,7 @@ func (x *TailLogs) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TailLogs.ProtoReflect.Descriptor instead.
 func (*TailLogs) Descriptor() ([]byte, []int) {
-	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{23}
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *TailLogs) GetCmdId() string {
@@ -1936,7 +2019,7 @@ const file_agentlink_v1_agentlink_proto_rawDesc = "" +
 	"\x06status\x18\x03 \x01(\tR\x06status\x12\x16\n" +
 	"\x06detail\x18\x04 \x01(\tR\x06detail\"\x1c\n" +
 	"\x03Ack\x12\x15\n" +
-	"\x06cmd_id\x18\x01 \x01(\tR\x05cmdId\"\xd7\x04\n" +
+	"\x06cmd_id\x18\x01 \x01(\tR\x05cmdId\"\x97\x05\n" +
 	"\tMasterMsg\x121\n" +
 	"\x05start\x18\x01 \x01(\v2\x19.agentlink.v1.StartServerH\x00R\x05start\x12.\n" +
 	"\x04stop\x18\x02 \x01(\v2\x18.agentlink.v1.StopServerH\x00R\x04stop\x121\n" +
@@ -1949,8 +2032,12 @@ const file_agentlink_v1_agentlink_proto_rawDesc = "" +
 	"\fdrain_server\x18\t \x01(\v2\x19.agentlink.v1.DrainServerH\x00R\vdrainServer\x121\n" +
 	"\aundrain\x18\n" +
 	" \x01(\v2\x15.agentlink.v1.UndrainH\x00R\aundrain\x12D\n" +
-	"\x0eset_registries\x18\v \x01(\v2\x1b.agentlink.v1.SetRegistriesH\x00R\rsetRegistriesB\x05\n" +
-	"\x03msg\"b\n" +
+	"\x0eset_registries\x18\v \x01(\v2\x1b.agentlink.v1.SetRegistriesH\x00R\rsetRegistries\x12>\n" +
+	"\fremove_image\x18\f \x01(\v2\x19.agentlink.v1.RemoveImageH\x00R\vremoveImageB\x05\n" +
+	"\x03msg\"A\n" +
+	"\vRemoveImage\x12\x15\n" +
+	"\x06cmd_id\x18\x01 \x01(\tR\x05cmdId\x12\x1b\n" +
+	"\timage_ref\x18\x02 \x01(\tR\bimageRef\"b\n" +
 	"\rSetRegistries\x12\x15\n" +
 	"\x06cmd_id\x18\x01 \x01(\tR\x05cmdId\x12:\n" +
 	"\n" +
@@ -2026,7 +2113,7 @@ func file_agentlink_v1_agentlink_proto_rawDescGZIP() []byte {
 	return file_agentlink_v1_agentlink_proto_rawDescData
 }
 
-var file_agentlink_v1_agentlink_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
+var file_agentlink_v1_agentlink_proto_msgTypes = make([]protoimpl.MessageInfo, 26)
 var file_agentlink_v1_agentlink_proto_goTypes = []any{
 	(*EnrollRequest)(nil),  // 0: agentlink.v1.EnrollRequest
 	(*EnrollResponse)(nil), // 1: agentlink.v1.EnrollResponse
@@ -2040,19 +2127,20 @@ var file_agentlink_v1_agentlink_proto_goTypes = []any{
 	(*PullReport)(nil),     // 9: agentlink.v1.PullReport
 	(*Ack)(nil),            // 10: agentlink.v1.Ack
 	(*MasterMsg)(nil),      // 11: agentlink.v1.MasterMsg
-	(*SetRegistries)(nil),  // 12: agentlink.v1.SetRegistries
-	(*RegistryCred)(nil),   // 13: agentlink.v1.RegistryCred
-	(*Undrain)(nil),        // 14: agentlink.v1.Undrain
-	(*DrainServer)(nil),    // 15: agentlink.v1.DrainServer
-	(*AllocateServer)(nil), // 16: agentlink.v1.AllocateServer
-	(*StartServer)(nil),    // 17: agentlink.v1.StartServer
-	(*Limits)(nil),         // 18: agentlink.v1.Limits
-	(*StopServer)(nil),     // 19: agentlink.v1.StopServer
-	(*PrePull)(nil),        // 20: agentlink.v1.PrePull
-	(*Drain)(nil),          // 21: agentlink.v1.Drain
-	(*UpgradeAgent)(nil),   // 22: agentlink.v1.UpgradeAgent
-	(*TailLogs)(nil),       // 23: agentlink.v1.TailLogs
-	nil,                    // 24: agentlink.v1.StartServer.EnvEntry
+	(*RemoveImage)(nil),    // 12: agentlink.v1.RemoveImage
+	(*SetRegistries)(nil),  // 13: agentlink.v1.SetRegistries
+	(*RegistryCred)(nil),   // 14: agentlink.v1.RegistryCred
+	(*Undrain)(nil),        // 15: agentlink.v1.Undrain
+	(*DrainServer)(nil),    // 16: agentlink.v1.DrainServer
+	(*AllocateServer)(nil), // 17: agentlink.v1.AllocateServer
+	(*StartServer)(nil),    // 18: agentlink.v1.StartServer
+	(*Limits)(nil),         // 19: agentlink.v1.Limits
+	(*StopServer)(nil),     // 20: agentlink.v1.StopServer
+	(*PrePull)(nil),        // 21: agentlink.v1.PrePull
+	(*Drain)(nil),          // 22: agentlink.v1.Drain
+	(*UpgradeAgent)(nil),   // 23: agentlink.v1.UpgradeAgent
+	(*TailLogs)(nil),       // 24: agentlink.v1.TailLogs
+	nil,                    // 25: agentlink.v1.StartServer.EnvEntry
 }
 var file_agentlink_v1_agentlink_proto_depIdxs = []int32{
 	3,  // 0: agentlink.v1.AgentMsg.hello:type_name -> agentlink.v1.Hello
@@ -2064,29 +2152,30 @@ var file_agentlink_v1_agentlink_proto_depIdxs = []int32{
 	6,  // 6: agentlink.v1.Hello.servers:type_name -> agentlink.v1.ServerState
 	5,  // 7: agentlink.v1.Heartbeat.node:type_name -> agentlink.v1.NodeStats
 	6,  // 8: agentlink.v1.Heartbeat.servers:type_name -> agentlink.v1.ServerState
-	17, // 9: agentlink.v1.MasterMsg.start:type_name -> agentlink.v1.StartServer
-	19, // 10: agentlink.v1.MasterMsg.stop:type_name -> agentlink.v1.StopServer
-	20, // 11: agentlink.v1.MasterMsg.prepull:type_name -> agentlink.v1.PrePull
-	21, // 12: agentlink.v1.MasterMsg.drain:type_name -> agentlink.v1.Drain
-	22, // 13: agentlink.v1.MasterMsg.upgrade:type_name -> agentlink.v1.UpgradeAgent
-	23, // 14: agentlink.v1.MasterMsg.tail:type_name -> agentlink.v1.TailLogs
+	18, // 9: agentlink.v1.MasterMsg.start:type_name -> agentlink.v1.StartServer
+	20, // 10: agentlink.v1.MasterMsg.stop:type_name -> agentlink.v1.StopServer
+	21, // 11: agentlink.v1.MasterMsg.prepull:type_name -> agentlink.v1.PrePull
+	22, // 12: agentlink.v1.MasterMsg.drain:type_name -> agentlink.v1.Drain
+	23, // 13: agentlink.v1.MasterMsg.upgrade:type_name -> agentlink.v1.UpgradeAgent
+	24, // 14: agentlink.v1.MasterMsg.tail:type_name -> agentlink.v1.TailLogs
 	10, // 15: agentlink.v1.MasterMsg.ack:type_name -> agentlink.v1.Ack
-	16, // 16: agentlink.v1.MasterMsg.allocate:type_name -> agentlink.v1.AllocateServer
-	15, // 17: agentlink.v1.MasterMsg.drain_server:type_name -> agentlink.v1.DrainServer
-	14, // 18: agentlink.v1.MasterMsg.undrain:type_name -> agentlink.v1.Undrain
-	12, // 19: agentlink.v1.MasterMsg.set_registries:type_name -> agentlink.v1.SetRegistries
-	13, // 20: agentlink.v1.SetRegistries.registries:type_name -> agentlink.v1.RegistryCred
-	24, // 21: agentlink.v1.StartServer.env:type_name -> agentlink.v1.StartServer.EnvEntry
-	18, // 22: agentlink.v1.StartServer.limits:type_name -> agentlink.v1.Limits
-	2,  // 23: agentlink.v1.AgentLink.Session:input_type -> agentlink.v1.AgentMsg
-	0,  // 24: agentlink.v1.AgentLink.Enroll:input_type -> agentlink.v1.EnrollRequest
-	11, // 25: agentlink.v1.AgentLink.Session:output_type -> agentlink.v1.MasterMsg
-	1,  // 26: agentlink.v1.AgentLink.Enroll:output_type -> agentlink.v1.EnrollResponse
-	25, // [25:27] is the sub-list for method output_type
-	23, // [23:25] is the sub-list for method input_type
-	23, // [23:23] is the sub-list for extension type_name
-	23, // [23:23] is the sub-list for extension extendee
-	0,  // [0:23] is the sub-list for field type_name
+	17, // 16: agentlink.v1.MasterMsg.allocate:type_name -> agentlink.v1.AllocateServer
+	16, // 17: agentlink.v1.MasterMsg.drain_server:type_name -> agentlink.v1.DrainServer
+	15, // 18: agentlink.v1.MasterMsg.undrain:type_name -> agentlink.v1.Undrain
+	13, // 19: agentlink.v1.MasterMsg.set_registries:type_name -> agentlink.v1.SetRegistries
+	12, // 20: agentlink.v1.MasterMsg.remove_image:type_name -> agentlink.v1.RemoveImage
+	14, // 21: agentlink.v1.SetRegistries.registries:type_name -> agentlink.v1.RegistryCred
+	25, // 22: agentlink.v1.StartServer.env:type_name -> agentlink.v1.StartServer.EnvEntry
+	19, // 23: agentlink.v1.StartServer.limits:type_name -> agentlink.v1.Limits
+	2,  // 24: agentlink.v1.AgentLink.Session:input_type -> agentlink.v1.AgentMsg
+	0,  // 25: agentlink.v1.AgentLink.Enroll:input_type -> agentlink.v1.EnrollRequest
+	11, // 26: agentlink.v1.AgentLink.Session:output_type -> agentlink.v1.MasterMsg
+	1,  // 27: agentlink.v1.AgentLink.Enroll:output_type -> agentlink.v1.EnrollResponse
+	26, // [26:28] is the sub-list for method output_type
+	24, // [24:26] is the sub-list for method input_type
+	24, // [24:24] is the sub-list for extension type_name
+	24, // [24:24] is the sub-list for extension extendee
+	0,  // [0:24] is the sub-list for field type_name
 }
 
 func init() { file_agentlink_v1_agentlink_proto_init() }
@@ -2114,6 +2203,7 @@ func file_agentlink_v1_agentlink_proto_init() {
 		(*MasterMsg_DrainServer)(nil),
 		(*MasterMsg_Undrain)(nil),
 		(*MasterMsg_SetRegistries)(nil),
+		(*MasterMsg_RemoveImage)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -2121,7 +2211,7 @@ func file_agentlink_v1_agentlink_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_agentlink_v1_agentlink_proto_rawDesc), len(file_agentlink_v1_agentlink_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   25,
+			NumMessages:   26,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

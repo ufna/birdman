@@ -40,13 +40,23 @@ type Sender interface {
 	Send(nodeID string, msg *agentlinkv1.MasterMsg) (cmdID string)
 }
 
+// ImageCleaner dispatches RemoveImage for versions a flip just pushed to
+// `disabled` (environments v1 §6б: the flip-demote of an older deprecated is the
+// main dev-stream retire path). Satisfied by *reconcile.ImageCleaner; a
+// structural interface keeps deploy from importing reconcile. Optional — nil in
+// tests that do not assert on image cleanup.
+type ImageCleaner interface {
+	CleanupImages(ctx context.Context, disabled []store.DisabledVersion) error
+}
+
 // Manager orchestrates deploys. One in-flight prepull per (project, env)
 // (enforced by store.BeginDeploy's env-scoped busy-check).
 type Manager struct {
-	st      *store.Store
-	sender  Sender
-	log     *slog.Logger
-	timeout time.Duration
+	st           *store.Store
+	sender       Sender
+	log          *slog.Logger
+	timeout      time.Duration
+	imageCleaner ImageCleaner // RemoveImage dispatch on flip-demote disabled (§6б); optional
 
 	// observePrepull records the deploy_started→all-pulled duration
 	// (birdman_deploy_prepull_seconds). Optional.
@@ -97,6 +107,7 @@ type Options struct {
 	Log            *slog.Logger
 	Timeout        time.Duration         // default PrePullTimeout
 	ObservePrepull func(seconds float64) // metric hook, optional
+	ImageCleaner   ImageCleaner          // RemoveImage dispatch on flip-demote (§6б), optional
 }
 
 func New(o Options) *Manager {
@@ -109,6 +120,7 @@ func New(o Options) *Manager {
 	return &Manager{
 		st: o.Store, sender: o.Sender, log: o.Log,
 		timeout: o.Timeout, observePrepull: o.ObservePrepull,
+		imageCleaner:  o.ImageCleaner,
 		jobs:          map[string]*job{},
 		lastAttempted: map[projectEnv]store.CreatedID{},
 	}
@@ -255,6 +267,34 @@ func (m *Manager) Resume(ctx context.Context) error {
 	return nil
 }
 
+// SweepOrphans re-arms any version stuck `prepulling` in the DB with no
+// in-memory job — the orphan left when PrePullTargets errored AFTER BeginDeploy
+// (manager.go package comment; environments v1 §4). Resume fixes these at
+// startup; the reconcile loop calls this each pass (W2-реестр) to catch one that
+// appears mid-run (e.g. a transient PrePullTargets error on the auto-deploy
+// path). Idempotent: a version that already has a job is skipped, so a re-armed
+// prepull is never double-fanned-out.
+func (m *Manager) SweepOrphans(ctx context.Context) error {
+	versions, err := m.st.PrepullingVersions(ctx)
+	if err != nil {
+		return err
+	}
+	for _, v := range versions {
+		m.mu.Lock()
+		_, hasJob := m.jobs[v.ID]
+		m.mu.Unlock()
+		if hasJob {
+			continue
+		}
+		m.log.Warn("deploy: sweeping orphan prepulling version (no in-memory job) — re-arming",
+			"version_id", v.ID, "semver", v.Semver, "env", v.Env)
+		if _, err := m.startJob(ctx, v); err != nil {
+			m.log.Error("deploy: orphan sweep re-arm failed", "version_id", v.ID, "err", err)
+		}
+	}
+	return nil
+}
+
 // HandlePullReport consumes agent PullReports (wired into the agentlink
 // service): `pulled` from the last pending node triggers the atomic flip;
 // `failed` aborts the deploy; `pulling` is progress noise.
@@ -334,8 +374,24 @@ func (m *Manager) activate(ctx context.Context, v store.Version, started time.Ti
 		"version_id", res.Version.ID, "semver", res.Version.Semver,
 		"old_semver", res.PrevSemver, "regions", res.Regions,
 		"prepull_seconds", elapsed.Seconds())
+	// Флип-демоут старших deprecated → disabled: снимаем их образы с нод env
+	// (environments v1 §6б, главный путь dev-потока).
+	m.cleanupDisabledImages(ctx, res.Disabled)
 	m.onDeployFinished(v.Project, v.Env)
 	return nil
+}
+
+// cleanupDisabledImages dispatches RemoveImage for versions a flip pushed to
+// `disabled` (environments v1 §6б). Best-effort: a nil cleaner (tests) or a
+// dispatch error never fails the deploy — the agent EnsureImage self-heal and the
+// watermark GC are the backstops.
+func (m *Manager) cleanupDisabledImages(ctx context.Context, disabled []store.DisabledVersion) {
+	if m.imageCleaner == nil || len(disabled) == 0 {
+		return
+	}
+	if err := m.imageCleaner.CleanupImages(ctx, disabled); err != nil {
+		m.log.Error("deploy: RemoveImage dispatch (flip-demote) failed", "err", err)
+	}
 }
 
 // expire aborts a deploy whose prepull timed out.
@@ -383,6 +439,8 @@ func (m *Manager) Rollback(ctx context.Context, project, env string, regions []s
 	m.log.Info("deploy: rolled back",
 		"version_id", res.Version.ID, "semver", res.Version.Semver,
 		"demoted_semver", res.PrevSemver, "regions", res.Regions)
+	// Откат тоже флип: старшие deprecated вне окна → disabled, снимаем их образы.
+	m.cleanupDisabledImages(ctx, res.Disabled)
 	return res, nil
 }
 

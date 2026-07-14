@@ -40,6 +40,12 @@ type Sample struct {
 	DiskUsed  uint64
 	DiskTotal uint64
 
+	// ContainerdDiskUsed/Total sample the containerd-root filesystem — where
+	// images live (environments v1 §6в). On a node where containerd-root shares
+	// the data_dir filesystem these equal DiskUsed/DiskTotal; that is expected.
+	ContainerdDiskUsed  uint64
+	ContainerdDiskTotal uint64
+
 	// CertExpiryUnix is the NotAfter (unix seconds) of the loaded agentlink
 	// client certificate, or 0 when none is loaded (token/insecure session).
 	// The node-local half of the CertExpiry alert (mTLS agentlink v1, design §4).
@@ -114,6 +120,14 @@ func Render(version string, s Sample) string {
 	fmt.Fprintf(&b, "birdman_agent_disk_used_bytes %d\n", s.DiskUsed)
 	gauge("birdman_agent_disk_total_bytes", "Total bytes on the data_dir filesystem.")
 	fmt.Fprintf(&b, "birdman_agent_disk_total_bytes %d\n", s.DiskTotal)
+
+	// Containerd-root filesystem — where images live; the dual-fs watermark and
+	// its DiskHigh alert rule read this pair (environments v1 §6в). Equals the
+	// data_dir pair when containerd-root is not a separate mount.
+	gauge("birdman_agent_containerd_disk_used_bytes", "Used bytes on the containerd-root filesystem (image store).")
+	fmt.Fprintf(&b, "birdman_agent_containerd_disk_used_bytes %d\n", s.ContainerdDiskUsed)
+	gauge("birdman_agent_containerd_disk_total_bytes", "Total bytes on the containerd-root filesystem (image store).")
+	fmt.Fprintf(&b, "birdman_agent_containerd_disk_total_bytes %d\n", s.ContainerdDiskTotal)
 
 	gauge("birdman_agent_ports_used", "Host ports handed out of the pool.")
 	fmt.Fprintf(&b, "birdman_agent_ports_used %d\n", s.PortsUsed)

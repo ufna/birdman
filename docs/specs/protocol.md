@@ -45,6 +45,7 @@ message MasterMsg {
     DrainServer  drain_server = 9;  // (добавлено в итерации 3, аддитивно)
     Undrain      undrain = 10;      // (добавлено в итерации 4, аддитивно) снятие node-level Drain
     SetRegistries set_registries = 11; // (Реестры v1, аддитивно) снапшот кредов приватных registry — см. ниже
+    RemoveImage  remove_image = 12; // (environments v1, аддитивно) снять образ отключённой версии с ноды — см. ниже
   }
 }
 message StartServer { string server_id=1; string image_ref=2; map<string,string> env=3;
@@ -99,6 +100,22 @@ message Undrain { string cmd_id=1; }
 // (`master.md` §6).
 message SetRegistries { string cmd_id=1; repeated RegistryCred registries=2; } // снапшот (replace, не diff)
 message RegistryCred  { string host=1; string username=2; string token=3; } // host нормализован (lowercase, без схемы/пути); token никогда не логируется
+
+// (environments v1, поле 12, аддитивно) RemoveImage снимает образ отключённой
+// (`disabled`) версии с ноды. Master шлёт его каждой ноде (project, env) по той
+// же at-least-once FIFO-очереди при переходе версии в `disabled` (демоут старой
+// deprecated на activate-флипе — основной dev-путь — плюс TTL/ретеншн). Агент
+// обрабатывает как PrePull: диспатч возвращается сразу (обычный `Ack`
+// подтверждает приём, НЕ растягивается на удаление), работа — в горутине.
+// Идемпотентно: образ под живым контейнером логируется и скипается (подберёт
+// watermark-GC `agent.md` §6 позже, мастеру не докладываем); отсутствующий —
+// no-op под реплеем; иначе синхронное удаление + ref выкидывается из
+// protected-set GC. Образ `deprecated`-версии не трогаем (окно отката тёплое);
+// пропуск самолечится (`EnsureImage` до-качивает на StartServer). Guard против
+// общих ссылок (тот же `image_ref` держит НЕ-disabled версия того же
+// project/env) живёт на МАСТЕРЕ (reconcile/imagecleanup, §6б) — WITHHELD там, до
+// постановки в очередь ноды.
+message RemoveImage  { string cmd_id=1; string image_ref=2; }
 ```
 
 Правила: каждое команда-сообщение несёт `cmd_id`, агент подтверждает `Ack{cmd_id}` (или Event с ошибкой) — master ретраит неподтверждённые при реконнекте, поэтому обработка команд на агенте идемпотентна по `cmd_id` (at-least-once). Поля protobuf только добавляем, номера не переиспользуем (`reserved`). (Уточнено в v0: `Ack` добавлен в `AgentMsg` — именно агент подтверждает команды; `MasterMsg.Ack` зарезервирован под подтверждения master'ом агентских сообщений.)

@@ -191,11 +191,14 @@ func (s *Store) AbortDeploy(ctx context.Context, versionID, reason string) error
 
 // ActivateResult describes an ActivateVersion flip.
 type ActivateResult struct {
-	Version    Version  // the new active version
-	OldActive  *Version // the demoted version (nil on the very first deploy)
-	Regions    []string // fleet regions whose active_version now points at Version
-	Disabled   []string // older deprecated version ids pushed to disabled
-	PrevSemver string   // semver of OldActive ("" if none)
+	Version   Version  // the new active version
+	OldActive *Version // the demoted version (nil on the very first deploy)
+	Regions   []string // fleet regions whose active_version now points at Version
+	// Disabled — older deprecated versions pushed to disabled by this flip
+	// (environments v1 §6б: главный путь dev-потока). Несёт image_ref/(project,env)
+	// для диспатча RemoveImage: их образы снимаются с нод env.
+	Disabled   []DisabledVersion
+	PrevSemver string // semver of OldActive ("" if none)
 }
 
 // ActivateVersion is the atomic flip (master.md §5 step 3) shared by deploy
@@ -281,24 +284,26 @@ func (s *Store) ActivateVersion(ctx context.Context, versionID, fromState, event
 		update versions set state = 'disabled'
 		where project_id = $1::uuid and env = $3 and state = 'deprecated'
 		  and not (id::text = any($2::text[]))
-		returning id::text`, v.ProjectID, keep, v.Env)
+		returning id::text, semver, image_ref`, v.ProjectID, keep, v.Env)
 	if err != nil {
 		return ActivateResult{}, err
 	}
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		// image_ref расширяет прежний «только id» — диспатчеру RemoveImage нужен
+		// ref, а (project, env) у всех disabled этого флипа общие (= v).
+		d := DisabledVersion{ProjectID: v.ProjectID, Env: v.Env}
+		if err := rows.Scan(&d.VersionID, &d.Semver, &d.ImageRef); err != nil {
 			rows.Close()
 			return ActivateResult{}, err
 		}
-		res.Disabled = append(res.Disabled, id)
+		res.Disabled = append(res.Disabled, d)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return ActivateResult{}, err
 	}
-	for _, id := range res.Disabled {
-		id := id
+	for _, d := range res.Disabled {
+		id := d.VersionID
 		if err := insertEvent(ctx, tx, EventVersionDisabled, EventRef{VersionID: &id},
 			map[string]any{"project": v.Project, "reason": "superseded"}); err != nil {
 			return ActivateResult{}, err

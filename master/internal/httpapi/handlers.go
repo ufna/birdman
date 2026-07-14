@@ -189,6 +189,13 @@ func (s *Server) handleUpsertFleet(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
+	// Первый флот auto_deploy-env разблокирует зависшую цепочку (environments v1
+	// §4/§6, W2-реестр): версия, зарегистрированная в auto_deploy-env ДО появления
+	// флота, получила AutoDeployQueued (ErrNoFleet, отметка не двигалась) — теперь
+	// катим её. Безусловный вызов: TryAutoDeploy сам no-op'ит на не-auto env и на
+	// исчерпанной цепочке. Результат в ответ PUT /v1/fleets не выносим (админ-роут,
+	// не CI-регистрация) — состояние видно в Deploys/событиях.
+	s.dep.TryAutoDeploy(r.Context(), project, req.Env)
 	writeJSON(w, http.StatusOK, map[string]any{"fleet": f})
 }
 

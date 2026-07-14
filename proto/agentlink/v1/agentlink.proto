@@ -130,7 +130,28 @@ message MasterMsg {
     DrainServer drain_server = 9; // iteration 3: per-server drain (deploy reap)
     Undrain undrain = 10; // iteration 4: lift the node-level drain
     SetRegistries set_registries = 11; // registries v1: private-registry credential snapshot for image pulls
+    RemoveImage remove_image = 12; // environments v1: retire a disabled version's image from the node
   }
+}
+
+// RemoveImage retires one image from the node when a version goes disabled
+// (environments v1, docs/superpowers/specs/2026-07-13-environments-v1-design.md
+// §6б): the master sends it to every node of the (project, env) over the
+// existing at-least-once FIFO queue whenever a version transitions to disabled
+// (demote of the older deprecated on an activate flip — the main dev-stream
+// path — plus TTL and retention). The agent handles it like PrePull: dispatch
+// returns immediately (the plain Ack confirms receipt, this message does NOT
+// extend Ack) and the work runs in a goroutine — an image referenced by a live
+// container is logged and skipped (the watermark GC picks it up later; the
+// master is not told), an absent image is a no-op (idempotent under replay),
+// otherwise the image is deleted synchronously and its ref dropped from the GC
+// protected set. A deprecated version's image is never removed (the rollback
+// window stays warm); missed removals self-heal (EnsureImage re-pulls on
+// StartServer). The guard against shared refs (same image_ref still referenced
+// by a non-disabled version of the same project/env) lives on the master.
+message RemoveImage {
+  string cmd_id = 1;
+  string image_ref = 2;
 }
 
 // SetRegistries carries the full set of private-registry credentials the

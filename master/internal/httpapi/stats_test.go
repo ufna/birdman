@@ -434,8 +434,14 @@ func TestStatsOverviewRollupBacked(t *testing.T) {
 		// Trailing-window matches only; the rollup-maintenance job
 		// (internal/statsrollup) never runs in this sub-case — match_stats_daily/
 		// match_ccu_daily stay completely empty.
+		//
+		// started_at = ровно полночь «сегодня»: StatMatchesOverlapping ограничен
+		// started_at < now, и любой положительный сдвиг (прежде было today+2ч)
+		// делает тест детерминированно красным в первые часы UTC-суток —
+		// сид оказывается в будущем и выпадает из live-tail. now > today всегда
+		// (today выведен из now усечением), так что полночь безопасна.
 		insertStatMatchAt(t, st, srv, "eu", 9,
-			today.Add(2*time.Hour-2*time.Minute), today.Add(2*time.Hour), endAt(today.Add(2*time.Hour+15*time.Minute)))
+			today.Add(-2*time.Minute), today, endAt(today.Add(15*time.Minute)))
 		insertStatMatchAt(t, st, srv, "eu", 4,
 			today.AddDate(0, 0, -1).Add(3*time.Hour-time.Minute), today.AddDate(0, 0, -1).Add(3*time.Hour),
 			endAt(today.AddDate(0, 0, -1).Add(3*time.Hour+10*time.Minute)))

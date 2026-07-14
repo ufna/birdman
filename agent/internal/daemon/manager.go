@@ -63,6 +63,14 @@ type Options struct {
 	// TouchImage feeds the image GC protected set on StartServer/PrePull
 	// (agent.md §6). May be nil.
 	TouchImage func(imageRef string)
+	// UntouchImage drops a ref from the image GC protected set after RemoveImage
+	// retires it (environments v1 §6б, РЕВИЗИЯ M12): a dead ref must not keep
+	// occupying a protection slot. May be nil.
+	UntouchImage func(imageRef string)
+	// ContainerdDiskUsage samples the containerd-root filesystem for the
+	// birdman_agent_containerd_disk_* metrics (dual-fs watermark, §6в). May be
+	// nil (metrics then report zero for the containerd pair).
+	ContainerdDiskUsage func() (used, total uint64)
 }
 
 // Manager supervises the node's dedicated servers: executes master commands,
@@ -83,6 +91,10 @@ type Manager struct {
 	binaryPath   string
 	onUpgraded   func(string)
 	touchImage   func(string)
+	untouchImage func(string)
+	// containerdDiskUsage samples the containerd-root filesystem for the
+	// dual-fs watermark metrics (§6в); may be nil.
+	containerdDiskUsage func() (used, total uint64)
 	// applyUpgrade is upgrade.Apply, injectable for tests.
 	applyUpgrade func(ctx context.Context, url, sha256hex, dest string) error
 	// finalizeLog gzips a stopped server's logs (logrot.Rotator.Finalize).
@@ -146,6 +158,9 @@ func NewManager(ctx context.Context, o Options) (*Manager, error) {
 	if o.TouchImage == nil {
 		o.TouchImage = func(string) {}
 	}
+	if o.UntouchImage == nil {
+		o.UntouchImage = func(string) {}
+	}
 	if o.OnUpgraded == nil {
 		o.OnUpgraded = func(string) {}
 	}
@@ -166,25 +181,27 @@ func NewManager(ctx context.Context, o Options) (*Manager, error) {
 	}
 	dataDir := o.Config.DataDir
 	return &Manager{
-		ctx:          ctx,
-		cfg:          o.Config,
-		rt:           o.Runtime,
-		sink:         o.Sink,
-		logf:         o.Logf,
-		stats:        stats.New(dataDir),
-		pool:         pool,
-		sockDir:      o.SocketDir,
-		logDir:       logDir,
-		agentVersion: o.AgentVersion,
-		binaryPath:   o.BinaryPath,
-		onUpgraded:   o.OnUpgraded,
-		touchImage:   o.TouchImage,
-		applyUpgrade: upgrade.Apply,
-		finalizeLog:  func(string) {},
-		diskUsage:    func() (uint64, uint64) { return stats.DiskUsage(dataDir) },
-		registries:   newRegistryStore(),
-		servers:      map[string]*server{},
-		tails:        map[string]context.CancelFunc{},
+		ctx:                 ctx,
+		cfg:                 o.Config,
+		rt:                  o.Runtime,
+		sink:                o.Sink,
+		logf:                o.Logf,
+		stats:               stats.New(dataDir),
+		pool:                pool,
+		sockDir:             o.SocketDir,
+		logDir:              logDir,
+		agentVersion:        o.AgentVersion,
+		binaryPath:          o.BinaryPath,
+		onUpgraded:          o.OnUpgraded,
+		touchImage:          o.TouchImage,
+		untouchImage:        o.UntouchImage,
+		containerdDiskUsage: o.ContainerdDiskUsage,
+		applyUpgrade:        upgrade.Apply,
+		finalizeLog:         func(string) {},
+		diskUsage:           func() (uint64, uint64) { return stats.DiskUsage(dataDir) },
+		registries:          newRegistryStore(),
+		servers:             map[string]*server{},
+		tails:               map[string]context.CancelFunc{},
 	}, nil
 }
 
@@ -377,6 +394,11 @@ func (m *Manager) MetricsSample() metrics.Sample {
 	s.PortsUsed = m.pool.InUse()
 	s.PortsTotal = m.pool.Capacity()
 	s.DiskUsed, s.DiskTotal = m.diskUsage()
+	// Containerd-root filesystem for the dual-fs watermark (§6в). When it is
+	// not a separate mount this equals the data_dir pair above — expected.
+	if m.containerdDiskUsage != nil {
+		s.ContainerdDiskUsed, s.ContainerdDiskTotal = m.containerdDiskUsage()
+	}
 	return s
 }
 
@@ -508,6 +530,71 @@ func (m *Manager) PrePull(_ context.Context, cmd *agentlinkv1.PrePull) {
 		}
 		m.sink.PullReport(cmd.GetCmdId(), ref, "pulled", "")
 	}()
+}
+
+// RemoveImage retires a disabled version's image from the node (environments
+// v1 §6б, РЕВИЗИЯ I1). Like PrePull, dispatch returns immediately (the plain
+// Ack confirms receipt via the recv loop — RemoveImage does NOT extend Ack)
+// and the runtime work runs in a goroutine: synchronous work here would block
+// the recv loop that acks every command. Branches:
+//   - image backs a live container → logged and skipped (the watermark GC
+//     reclaims it once the container exits; the master is not told);
+//   - image absent → no-op (idempotent under at-least-once replay);
+//   - otherwise → SynchronousDelete, and the ref is dropped from the GC
+//     protected set (РЕВИЗИЯ M12: a dead ref must not hold a protection slot).
+//
+// A deprecated version's image is never targeted (the master's guard keeps the
+// rollback window warm); a missed removal self-heals via EnsureImage on the
+// next StartServer.
+func (m *Manager) RemoveImage(_ context.Context, cmd *agentlinkv1.RemoveImage) {
+	ref := cmd.GetImageRef()
+	if ref == "" {
+		m.logf("[daemon] remove_image: empty image_ref ignored")
+		return
+	}
+	go func() {
+		used, err := m.rt.UsedImageRefs(m.ctx)
+		if err != nil {
+			m.logf("[daemon] remove_image %s: list used refs: %v — skipped (watermark GC is the backstop)", ref, err)
+			return
+		}
+		if used[ref] {
+			m.logf("[daemon] remove_image %s: in use by a live container — skipped (watermark GC reclaims it later)", ref)
+			return
+		}
+		present, err := m.imagePresent(ref)
+		if err != nil {
+			m.logf("[daemon] remove_image %s: list images: %v — skipped (watermark GC is the backstop)", ref, err)
+			return
+		}
+		if !present {
+			// Already gone (replay, or the watermark GC beat us to it): drop any
+			// stale protection slot and treat as a clean no-op.
+			m.untouchImage(ref)
+			m.logf("[daemon] remove_image %s: not present — no-op (idempotent)", ref)
+			return
+		}
+		if err := m.rt.DeleteImage(m.ctx, ref); err != nil {
+			m.logf("[daemon] remove_image %s: delete: %v — skipped (watermark GC is the backstop)", ref, err)
+			return
+		}
+		m.untouchImage(ref)
+		m.logf("[daemon] remove_image %s: removed", ref)
+	}()
+}
+
+// imagePresent reports whether ref is currently in the runtime image store.
+func (m *Manager) imagePresent(ref string) (bool, error) {
+	images, err := m.rt.Images(m.ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, img := range images {
+		if img.Name == ref {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // Drain applies the node-level drain (итерация 4, master.md §6): mark the

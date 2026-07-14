@@ -81,6 +81,34 @@ limits_default: { cpu_millis: 1000, mem_mb: 512 }
 	}
 }
 
+// TestContainerdRootDefault covers the dual-fs watermark config
+// (environments v1 §6в): containerd_root defaults to /var/lib/containerd and
+// is overridable for a node whose image store lives on a separate mount.
+func TestContainerdRootDefault(t *testing.T) {
+	def, err := Load(write(t, `
+region: local
+limits_default: { cpu_millis: 1000, mem_mb: 512 }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def.ContainerdRoot != "/var/lib/containerd" {
+		t.Fatalf("default containerd_root = %q, want /var/lib/containerd", def.ContainerdRoot)
+	}
+
+	set, err := Load(write(t, `
+region: local
+limits_default: { cpu_millis: 1000, mem_mb: 512 }
+containerd_root: /mnt/images/containerd
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if set.ContainerdRoot != "/mnt/images/containerd" {
+		t.Fatalf("containerd_root = %q, want the configured path", set.ContainerdRoot)
+	}
+}
+
 // Незнакомые ключи (конфиги будущих агентов) парсятся без ошибок.
 // TestRegistryAuthHostField covers the optional registry_auth.host field
 // (registries v1, docs/superpowers/specs/2026-07-09-registries-design.md

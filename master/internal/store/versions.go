@@ -350,6 +350,80 @@ func (s *Store) NewestAttemptedMarker(ctx context.Context, projectID, env string
 	return mk, true, nil
 }
 
+// RetireVersions applies per-environment version retention (environments v1
+// §6а, M5): a ~60s reconcile subtick. For every env with retention_keep > 0, it
+// ranks that env's registered|disabled versions by created_at desc (id desc
+// tie-break, consistent with the auto-deploy ordering) and moves the `registered`
+// ones beyond position keep — AND older than 1 hour — to `disabled`. This is the
+// ONLY path registered → disabled; active/prepulling/deprecated are never ranked
+// nor touched. The 1h floor guards the race with the auto-deploy queue (a
+// just-registered build in an auto_deploy burst must not be retired before it is
+// even picked). Each retired version emits version_retired {semver, env}.
+//
+// Returns the retired versions (as DisabledVersion) so the caller dispatches
+// RemoveImage to the env's nodes — the same disabled-transition contract as
+// ActivateVersion/DisableExpiredDeprecated.
+func (s *Store) RetireVersions(ctx context.Context) ([]DisabledVersion, error) {
+	rows, err := s.Pool.Query(ctx, `
+		with ranked as (
+			select v.id, v.project_id, v.semver, v.image_ref, v.env, v.state, v.created_at,
+			       e.retention_keep,
+			       row_number() over (partition by v.project_id, v.env
+			                          order by v.created_at desc, v.id desc) as rn
+			from versions v
+			join environments e on e.project_id = v.project_id and e.name = v.env
+			where e.retention_keep > 0
+			  and v.state in ('registered', 'disabled')
+		)
+		update versions u set state = 'disabled'
+		from ranked r
+		where u.id = r.id
+		  and r.state = 'registered'
+		  and r.rn > r.retention_keep
+		  and r.created_at < now() - interval '1 hour'
+		returning u.id::text, u.project_id::text, u.semver, u.image_ref, u.env`)
+	if err != nil {
+		return nil, err
+	}
+	var out []DisabledVersion
+	for rows.Next() {
+		var d DisabledVersion
+		if err := rows.Scan(&d.VersionID, &d.ProjectID, &d.Semver, &d.ImageRef, &d.Env); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, d := range out {
+		id := d.VersionID
+		if err := insertEvent(ctx, s.Pool, EventVersionRetired, EventRef{VersionID: &id},
+			map[string]any{"semver": d.Semver, "env": d.Env}); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// ImageRefInUse reports whether image_ref still belongs to a NON-disabled version
+// of (projectID, env) — the shared-ref guard for RemoveImage (environments v1
+// §6б). Exact-string match (tag ≠ digest): a live containerd ref must not be
+// deleted, so the dispatcher withholds RemoveImage while any active/prepulling/
+// deprecated/registered version of the same (project, env) still names that ref
+// (e.g. a promote that registered the same ref, or two versions sharing a build).
+func (s *Store) ImageRefInUse(ctx context.Context, projectID, env, imageRef string) (bool, error) {
+	var inUse bool
+	err := s.Pool.QueryRow(ctx, `
+		select exists(select 1 from versions
+		              where project_id = $1::uuid and env = $2
+		                and image_ref = $3 and state <> 'disabled')`,
+		projectID, env, imageRef).Scan(&inUse)
+	return inUse, err
+}
+
 // GetVersion returns one version by id.
 func (s *Store) GetVersion(ctx context.Context, id string) (Version, error) {
 	var v Version
