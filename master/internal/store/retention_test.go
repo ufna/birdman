@@ -411,6 +411,175 @@ func TestEnvNodeIDs(t *testing.T) {
 	}
 }
 
+// Сходящийся sweep снятия образов (Фаза D, дефект стенда): RemoveImage уходил В
+// МОМЕНТ перехода версии в disabled — но ровно тогда её серверы ещё дренятся,
+// агент видит образ занятым живым контейнером и скипает команду, повторить её
+// некому. VersionsPendingImageCleanup отдаёт disabled-версии, у которых не
+// осталось живых серверов, ref не держит не-disabled версия того же (project,
+// env) и sweep ещё не отправлял команду; MarkImageCleanupSent ставит маркер.
+
+// pendingCleanup — выборка sweep'а как map version_id → DisabledVersion.
+func pendingCleanup(t *testing.T, st *store.Store) map[string]store.DisabledVersion {
+	t.Helper()
+	pending, err := st.VersionsPendingImageCleanup(context.Background())
+	if err != nil {
+		t.Fatalf("pending image cleanup: %v", err)
+	}
+	out := map[string]store.DisabledVersion{}
+	for _, d := range pending {
+		out[d.VersionID] = d
+	}
+	return out
+}
+
+// reapServer flips a server to `reaped` — the container is gone from the node,
+// so it no longer pins the image.
+func reapServer(t *testing.T, st *store.Store, serverID string) {
+	t.Helper()
+	if _, err := st.Pool.Exec(context.Background(),
+		`update servers set state='reaped', updated_at=now() where id=$1::uuid`, serverID); err != nil {
+		t.Fatalf("reap server: %v", err)
+	}
+}
+
+func imageCleanupAt(t *testing.T, st *store.Store, versionID string) time.Time {
+	t.Helper()
+	var ts *time.Time
+	if err := st.Pool.QueryRow(context.Background(),
+		`select image_cleanup_at from versions where id = $1::uuid`, versionID).Scan(&ts); err != nil {
+		t.Fatalf("read image_cleanup_at: %v", err)
+	}
+	if ts == nil {
+		t.Fatalf("image_cleanup_at не проставлен для %s", versionID)
+	}
+	return *ts
+}
+
+// TestPendingImageCleanupWaitsForLiveServers (а): пока у disabled-версии жив хоть
+// один сервер (creating/ready/allocated/draining), его контейнер держит ref на
+// ноде — версии в выборке нет; как только сервера не стало (reaped/failed —
+// контейнера уже нет), версия попадает в выборку и sweep снимает образ.
+func TestPendingImageCleanupWaitsForLiveServers(t *testing.T) {
+	st := testdb.New(t)
+	ctx := context.Background()
+	f := testdb.Seed(t, st, "eu", 10)
+
+	for _, state := range []string{"creating", "ready", "allocated", "draining"} {
+		semver := "2.0.0-" + state
+		vid := f.AddVersion(t, semver, "dev")
+		forceVersionState(t, st, vid, "disabled")
+		srv := f.InsertServerOn(t, f.NodeID, vid, state)
+
+		if _, ok := pendingCleanup(t, st)[vid]; ok {
+			t.Fatalf("сервер в %s держит образ живым контейнером — версия не должна попадать в sweep", state)
+		}
+		reapServer(t, st, srv) // дренаж закончился, контейнер снят
+		got, ok := pendingCleanup(t, st)[vid]
+		if !ok {
+			t.Fatalf("серверов версии не осталось (%s → reaped) — версия обязана попасть в sweep", state)
+		}
+		// Выборка несёт всё, что нужно диспатчеру RemoveImage: (project, env) → ноды, ref → что снять.
+		if got.Env != "dev" || got.ImageRef != "ghcr.io/example/game-server:"+semver ||
+			got.ProjectID == "" || got.Semver != semver {
+			t.Fatalf("выборка неполна для диспатча RemoveImage: %+v", got)
+		}
+		// Маркер — чтобы версия не тянулась в следующие итерации таблицы.
+		if err := st.MarkImageCleanupSent(ctx, []string{vid}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// failed-сервер контейнера не держит — версия в выборке сразу.
+	vFailed := f.AddVersion(t, "2.1.0", "dev")
+	forceVersionState(t, st, vFailed, "disabled")
+	f.MarkFailed(t, f.InsertServerOn(t, f.NodeID, vFailed, "creating"), 0)
+	if _, ok := pendingCleanup(t, st)[vFailed]; !ok {
+		t.Fatal("failed-сервер образ не держит — версия обязана быть в выборке")
+	}
+	// registered-версия (фикстурная 1.0.0) — не disabled, снимать нечего.
+	if _, ok := pendingCleanup(t, st)[f.VersionID]; ok {
+		t.Fatal("не-disabled версия в выборке sweep'а делать нечего")
+	}
+}
+
+// TestPendingImageCleanupSharedRefGuard (б): ref, который держит НЕ-disabled версия
+// того же (project, env), из выборки исключён — контент под живой ссылкой (та же
+// семантика, что ImageRefInUse, §6б). Держатель ушёл в disabled → обе версии в
+// выборке (в одну команду их схлопнет дедуп CleanupImages). Версия другого env с
+// тем же ref не мешает: ноды env-скоупны.
+func TestPendingImageCleanupSharedRefGuard(t *testing.T) {
+	st := testdb.New(t)
+	ctx := context.Background()
+	testdb.Seed(t, st, "eu", 10)
+
+	ref := "ghcr.io/example/game-server:shared"
+	vKeep, err := st.CreateVersion(ctx, store.CreateVersionParams{
+		Project: "game", Semver: "3.0.0", ImageRef: ref, Env: "dev",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	vDis, err := st.CreateVersion(ctx, store.CreateVersionParams{
+		Project: "game", Semver: "3.0.1", ImageRef: ref, Env: "dev",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	forceVersionState(t, st, vDis.ID, "disabled")
+
+	if _, ok := pendingCleanup(t, st)[vDis.ID]; ok {
+		t.Fatal("ref держит registered-версия того же env — sweep обязан молчать (shared-ref guard)")
+	}
+	// Прод-версия с тем же ref живёт на других (prod) нодах — dev-выборке не помеха.
+	if _, err := st.CreateVersion(ctx, store.CreateVersionParams{
+		Project: "game", Semver: "3.0.1", ImageRef: ref, Env: "prod",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	forceVersionState(t, st, vKeep.ID, "disabled")
+
+	pending := pendingCleanup(t, st)
+	if _, ok := pending[vDis.ID]; !ok {
+		t.Fatal("не-disabled держателей ref в dev не осталось — версия обязана попасть в sweep")
+	}
+	if _, ok := pending[vKeep.ID]; !ok {
+		t.Fatal("вторая disabled-версия того же ref тоже в выборке (дедуп ref'ов — в CleanupImages)")
+	}
+}
+
+// TestPendingImageCleanupMarkerStopsResend (в): MarkImageCleanupSent убирает версию
+// из выборки навсегда — каждая disabled-версия получает максимум ОДНУ догоняющую
+// RemoveImage, а не команду каждые 60с. Маркер идемпотентен, пустой батч — no-op.
+func TestPendingImageCleanupMarkerStopsResend(t *testing.T) {
+	st := testdb.New(t)
+	ctx := context.Background()
+	f := testdb.Seed(t, st, "eu", 10)
+
+	vid := f.AddVersion(t, "4.0.0", "dev")
+	forceVersionState(t, st, vid, "disabled")
+	if _, ok := pendingCleanup(t, st)[vid]; !ok {
+		t.Fatal("disabled-версия без живых серверов и без держателей ref обязана быть в выборке")
+	}
+
+	if err := st.MarkImageCleanupSent(ctx, []string{vid}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := pendingCleanup(t, st)[vid]; ok {
+		t.Fatal("после маркера версия обязана уйти из выборки — sweep не спамит командами каждый субтик")
+	}
+
+	if err := st.MarkImageCleanupSent(ctx, nil); err != nil {
+		t.Fatalf("пустой батч обязан быть no-op: %v", err)
+	}
+	first := imageCleanupAt(t, st, vid)
+	if err := st.MarkImageCleanupSent(ctx, []string{vid}); err != nil {
+		t.Fatal(err)
+	}
+	if got := imageCleanupAt(t, st, vid); !got.Equal(first) {
+		t.Fatalf("повторный маркер не должен переписывать первую отметку: было %s, стало %s", first, got)
+	}
+}
+
 // versionProjectID returns a version's project uuid (the id EnvNodeIDs /
 // ImageRefInUse take).
 func versionProjectID(t *testing.T, st *store.Store, versionID string) string {

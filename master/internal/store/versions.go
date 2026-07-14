@@ -424,6 +424,75 @@ func (s *Store) ImageRefInUse(ctx context.Context, projectID, env, imageRef stri
 	return inUse, err
 }
 
+// VersionsPendingImageCleanup returns the disabled versions whose image is still
+// on the fleet's nodes and can now be removed — the CONVERGING sweep behind the
+// immediate RemoveImage dispatch (Фаза D, дефект стенда).
+//
+// Гонка disabled×drain: немедленная отправка происходит В МОМЕНТ перехода версии
+// в disabled — но ровно тогда серверы этой версии ещё дренятся (реконсайлер
+// только что выгнал их из окна, grace 30с). Агент видит образ занятым живым
+// контейнером и скипает команду; через 40-60с контейнеры уходят, а повторить
+// команду некому — образ остаётся до watermark-GC. Sweep догоняет этот случай.
+//
+// A version qualifies when ALL of:
+//
+//	state = 'disabled'          — образ флоту больше не нужен;
+//	image_cleanup_at is null    — sweep по ней ещё не отправлял (ровно одна
+//	                              догоняющая команда, без спама каждые 60с);
+//	no live server of it        — creating/ready/allocated/draining ещё держат ref
+//	                              контейнером на ноде (failed/reaped — уже нет);
+//	ref not held by a non-disabled version of the same (project, env) — shared-ref
+//	                              guard, ровно семантика ImageRefInUse (§6б).
+//
+// Дедуп ref'ов и рассылка нодам окружения — на стороне ImageCleaner.CleanupImages;
+// отправив, вызывающий штампует MarkImageCleanupSent.
+func (s *Store) VersionsPendingImageCleanup(ctx context.Context) ([]DisabledVersion, error) {
+	rows, err := s.Pool.Query(ctx, `
+		select v.id::text, v.project_id::text, v.semver, v.image_ref, v.env
+		from versions v
+		where v.state = 'disabled'
+		  and v.image_cleanup_at is null
+		  and v.image_ref <> ''
+		  and not exists (
+		        select 1 from servers s
+		        where s.version_id = v.id
+		          and s.state in ('creating', 'ready', 'allocated', 'draining'))
+		  and not exists (
+		        select 1 from versions o
+		        where o.project_id = v.project_id and o.env = v.env
+		          and o.image_ref = v.image_ref and o.state <> 'disabled')
+		order by v.created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DisabledVersion
+	for rows.Next() {
+		var d DisabledVersion
+		if err := rows.Scan(&d.VersionID, &d.ProjectID, &d.Semver, &d.ImageRef, &d.Env); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// MarkImageCleanupSent stamps image_cleanup_at on the versions the sweep has just
+// dispatched RemoveImage for, so each disabled version gets AT MOST ONE catch-up
+// command — the ~60s subtick must not re-send it forever. The `is null` guard keeps
+// the FIRST stamp (idempotent re-runs); an empty batch is a no-op. Stamped only
+// after a successful dispatch: a failed CleanupImages leaves the marker null, so
+// the next subtick retries (at-least-once, как и вся доставка agentlink).
+func (s *Store) MarkImageCleanupSent(ctx context.Context, versionIDs []string) error {
+	if len(versionIDs) == 0 {
+		return nil
+	}
+	_, err := s.Pool.Exec(ctx, `
+		update versions set image_cleanup_at = now()
+		where id = any($1::uuid[]) and image_cleanup_at is null`, versionIDs)
+	return err
+}
+
 // GetVersion returns one version by id.
 func (s *Store) GetVersion(ctx context.Context, id string) (Version, error) {
 	var v Version

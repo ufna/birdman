@@ -140,6 +140,7 @@ func (r *Reconciler) RunOnce(ctx context.Context) error {
 				r.log.Error("reconcile: RemoveImage dispatch (retention) failed", "err", err)
 			}
 		}
+		r.sweepImageCleanup(ctx)
 	}
 
 	// Adopt any orphan prepulling deploy (W2-реестр): a version stuck `prepulling`
@@ -171,6 +172,45 @@ func (r *Reconciler) RunOnce(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// sweepImageCleanup is the CONVERGING half of image cleanup (Фаза D, дефект
+// стенда), run in the ~60s cleanup subtick next to retention.
+//
+// Немедленная отправка RemoveImage при переходе версии в disabled (флип-демоут,
+// reap-TTL, ретеншн) остаётся быстрым путём — но она гоняется с дренажом: в этот
+// самый момент серверы версии ещё дренятся (их только что выгнали из окна, grace
+// 30с), агент видит образ занятым живым контейнером и скипает команду, а повторить
+// её было НЕКОМУ. Sweep берёт disabled-версии, у которых контейнеров уже не
+// осталось (и ref не держит не-disabled версия того же (project, env)), и шлёт
+// RemoveImage повторно — ровно один раз на версию: маркер image_cleanup_at гасит
+// её в выборке, поэтому команда не спамится каждый субтик.
+//
+// Ошибка диспатча оставляет маркер пустым — следующий субтик повторит (доставка и
+// так at-least-once, а RemoveImage идемпотентна: агент no-op'ит отсутствующий образ).
+func (r *Reconciler) sweepImageCleanup(ctx context.Context) {
+	pending, err := r.st.VersionsPendingImageCleanup(ctx)
+	if err != nil {
+		r.log.Error("reconcile: image cleanup sweep query failed", "err", err)
+		return
+	}
+	if len(pending) == 0 {
+		return
+	}
+	if err := r.cleaner.CleanupImages(ctx, pending); err != nil {
+		r.log.Error("reconcile: RemoveImage dispatch (sweep) failed", "err", err)
+		return // маркер не ставим — догоним на следующем субтике
+	}
+	ids := make([]string, 0, len(pending))
+	for _, d := range pending {
+		ids = append(ids, d.VersionID)
+	}
+	if err := r.st.MarkImageCleanupSent(ctx, ids); err != nil {
+		r.log.Error("reconcile: image cleanup marker failed", "err", err)
+		return
+	}
+	r.log.Info("reconcile: image cleanup sweep dispatched RemoveImage for drained versions",
+		"versions", len(pending))
 }
 
 func (r *Reconciler) reconcileFleet(ctx context.Context, f store.FleetConfig) error {

@@ -219,3 +219,61 @@ func TestRunOnceRetentionDispatchesRemoveImage(t *testing.T) {
 		t.Fatalf("want RemoveImage for vOld ref to node1, got %v", got)
 	}
 }
+
+// reapServer flips a server to `reaped` — the agent has removed the container,
+// so nothing pins the image on the node any more.
+func reapServer(t *testing.T, st *store.Store, serverID string) {
+	t.Helper()
+	if _, err := st.Pool.Exec(context.Background(),
+		`update servers set state='reaped', updated_at=now() where id=$1::uuid`, serverID); err != nil {
+		t.Fatalf("reap server: %v", err)
+	}
+}
+
+// TestImageCleanupSweepConvergesAfterDrain — регрессия дефекта Фазы D (стенд):
+// RemoveImage уходил В МОМЕНТ перехода версии в disabled, но ровно тогда её
+// серверы ещё дренятся (реконсайлер только что выгнал их из окна, grace 30с) —
+// агент видел образ занятым живым контейнером и скипал команду, а повторить её
+// было некому: образ оставался на ноде до watermark-GC. Сходящийся sweep в 60с-
+// субтике чинит это: пока жив хоть один сервер версии — молчим; как только их не
+// осталось — RemoveImage уходит нодам окружения, ровно один раз (image_cleanup_at).
+func TestImageCleanupSweepConvergesAfterDrain(t *testing.T) {
+	st := testdb.New(t)
+	ctx := context.Background()
+	f := testdb.Seed(t, st, "eu", 10) // node1 в dev; фикстурная 1.0.0 живёт своей жизнью
+	vid := f.AddVersion(t, "2.0.0", "dev")
+	ref := "ghcr.io/example/game-server:2.0.0"
+	// Версия ушла в disabled (флип/TTL), но её контейнер ещё дренится — та самая гонка.
+	srv := f.InsertServerOn(t, f.NodeID, vid, "draining")
+	disableRaw(t, st, vid)
+
+	// Пасс 1: контейнер жив → RemoveImage слать бессмысленно (агент скипнет).
+	r1, sender1 := newReconciler(st)
+	if err := r1.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := removeImagesTo(sender1.take()); len(got) != 0 {
+		t.Fatalf("живой сервер версии держит образ — RemoveImage слать рано, got %v", got)
+	}
+
+	// Дренаж закончился, контейнера больше нет — здесь прежний код молчал НАВСЕГДА.
+	reapServer(t, st, srv)
+
+	// Пасс 2 (свежий реконсайлер = ещё не отработавший 60с-субтик): sweep догоняет.
+	r2, sender2 := newReconciler(st)
+	if err := r2.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := removeImagesTo(sender2.take()); got[f.NodeID] != ref {
+		t.Fatalf("контейнеров версии не осталось — sweep обязан снять образ с ноды env, got %v", got)
+	}
+
+	// Пасс 3: маркер проставлен → командой каждые 60с не спамим.
+	r3, sender3 := newReconciler(st)
+	if err := r3.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := removeImagesTo(sender3.take()); len(got) != 0 {
+		t.Fatalf("sweep обязан сработать ровно раз (маркер image_cleanup_at), got %v", got)
+	}
+}
