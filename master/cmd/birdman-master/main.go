@@ -217,10 +217,15 @@ func run() error {
 	// Registries gate (design §3): every SetRegistries skipped for an
 	// untrusted session (neither cert-auth nor loopback) is counted.
 	hub.SetRegistriesWithheldCounter(m.AgentlinkRegistriesWithheld.Inc)
+	// Image cleanup dispatcher (environments v1 §6б): RemoveImage on every
+	// disabled transition. Shared by the deploy manager (flip-demote) and the
+	// reconcile loop (reap-TTL + retention) — one stateless instance over the hub.
+	imageCleaner := reconcile.NewImageCleaner(st, hub, log)
 	// Deploy manager (итерация 3): PrePull fan-out + PullReport-driven flip.
 	dep := deploy.New(deploy.Options{
 		Store: st, Sender: hub, Log: log,
 		ObservePrepull: m.DeployPrepull.Observe,
+		ImageCleaner:   imageCleaner,
 	})
 	if err := dep.Resume(ctx); err != nil {
 		return fmt.Errorf("deploy resume: %w", err)
@@ -266,7 +271,10 @@ func run() error {
 	if rotateServerLeaf {
 		go holder.rotateLoop(loopCtx, caCertPEM, caKeyPEM, hostname, cfg.TLS.ExtraSANs, log)
 	}
-	go reconcile.New(st, hub, log).Run(loopCtx, time.Second)
+	// WithOrphanSweeper wires the deploy manager's orphan-prepull sweep into the
+	// loop (W2-реестр); the reconciler dispatches RemoveImage on reap-TTL/retention
+	// via its own image cleaner (same hub).
+	go reconcile.New(st, hub, log).WithOrphanSweeper(dep).Run(loopCtx, time.Second)
 	go reconcile.NewLeaseChecker(st, log, time.Duration(cfg.NodeDownAfterMin)*time.Minute).Run(loopCtx, time.Second)
 	go mm.Run(loopCtx)
 	// statsrollup's startup Backfill runs inside this goroutine and

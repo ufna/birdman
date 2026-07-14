@@ -41,6 +41,20 @@ type Version struct {
 	PromotedFrom *string `json:"promoted_from,omitempty"`
 }
 
+// DisabledVersion — версия, только что перешедшая в disabled, в объёме, нужном
+// диспатчеру RemoveImage (environments v1 §6б): (ProjectID, Env) чтобы
+// перечислить ноды окружения, ImageRef — что снять. Один и тот же тип отдают все
+// три пути перехода в disabled (флип-демоут старшей deprecated в ActivateVersion,
+// TTL DisableExpiredDeprecated, ретеншн RetireVersions), поэтому снятие образов
+// единообразно. Semver/VersionID — для логов и событий.
+type DisabledVersion struct {
+	VersionID string
+	ProjectID string
+	Env       string
+	ImageRef  string
+	Semver    string
+}
+
 type Server struct {
 	ID        string    `json:"id"`
 	ProjectID string    `json:"project_id"`
@@ -93,16 +107,16 @@ type ServerReport struct {
 
 // Event kinds written by master v0.
 const (
-	EventNodeCreated       = "node_created"
-	EventNodeQuarantine    = "node_quarantine"
-	EventNodeDown          = "node_down" // quarantine дольше node_down_after_min → down (итерация 5 follow-up; dead = ручная ревокация, не отсюда)
-	EventNodeRecovered     = "node_recovered"
-	EventNodeDrain         = "node_drain"   // admin drained a node (итерация 4)
-	EventNodeUndrain       = "node_undrain" // admin lifted a node drain (итерация 4)
+	EventNodeCreated    = "node_created"
+	EventNodeQuarantine = "node_quarantine"
+	EventNodeDown       = "node_down" // quarantine дольше node_down_after_min → down (итерация 5 follow-up; dead = ручная ревокация, не отсюда)
+	EventNodeRecovered  = "node_recovered"
+	EventNodeDrain      = "node_drain"   // admin drained a node (итерация 4)
+	EventNodeUndrain    = "node_undrain" // admin lifted a node drain (итерация 4)
 	// EventNodeEnvChanged — нода переведена в другое окружение (environments v1,
 	// PATCH /v1/nodes/{id} {env}). Payload {from, to}. Разрешён только пустой
 	// ноде в любом стейте, кроме dead (§2).
-	EventNodeEnvChanged = "node_env_changed"
+	EventNodeEnvChanged    = "node_env_changed"
 	EventServerFailed      = "server_failed"
 	EventServerRecovered   = "server_recovered"
 	EventCrashLoop         = "crash_loop"
@@ -123,6 +137,12 @@ const (
 	EventDeployRolledBack = "deploy_rolled_back" // deprecated ↔ active flip back
 	EventVersionDisabled  = "version_disabled"   // deprecated → disabled (TTL/flip)
 	EventServerDrain      = "server_drain"       // per-server drain sent (reap TTL)
+	// EventVersionRetired — версия ушла registered → disabled ретеншном
+	// (environments v1 §6а, RetireVersions): env.retention_keep>0, версия сверх keep
+	// по created_at desc, старше 1ч. Единственный путь registered→disabled.
+	// Payload {semver, env}. Отличается от version_disabled (флип/TTL из
+	// deprecated) намеренно — панель красит и фильтрует его отдельно (§8).
+	EventVersionRetired = "version_retired"
 
 	// Self-upgrade (итерация 4, docs/specs/agent.md §7, master.md §6).
 	EventAgentUpgrade          = "agent_upgrade"           // UpgradeAgent command sent

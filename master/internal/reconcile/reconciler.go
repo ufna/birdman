@@ -19,6 +19,15 @@ type Sender interface {
 	Send(nodeID string, msg *agentlinkv1.MasterMsg) (cmdID string)
 }
 
+// OrphanSweeper re-arms deploy jobs stuck `prepulling` with no in-memory job
+// (the PrePullTargets-errored-after-BeginDeploy orphan, environments v1 §4 /
+// W2-реестр). Satisfied by *deploy.Manager (SweepOrphans); a structural interface
+// keeps reconcile from importing deploy. Optional — nil in tests without a
+// manager.
+type OrphanSweeper interface {
+	SweepOrphans(ctx context.Context) error
+}
+
 const (
 	// Servers stuck in `creating` without agent progress for this long are
 	// failed so the deficit is re-created (уточнено в v0, master.md §2).
@@ -31,22 +40,47 @@ const (
 	crashLoopPause  = 15 * time.Minute
 
 	stopGraceSeconds = 30
+
+	// retentionInterval throttles the version-retention subtick inside the 1 Hz
+	// reconcile loop (environments v1 §6а M5: ~раз в 60с). Time-based (not a tick
+	// counter) so it is robust to the loop interval and fires on the first RunOnce
+	// (zero lastRetention) — a single RunOnce in a test exercises retention.
+	retentionInterval = 60 * time.Second
 )
 
 type Reconciler struct {
-	st     *store.Store
-	sender Sender
-	log    *slog.Logger
+	st      *store.Store
+	sender  Sender
+	log     *slog.Logger
+	cleaner *ImageCleaner // RemoveImage dispatch on every disabled transition (§6б)
+	sweeper OrphanSweeper // optional: adopt orphan prepulling versions (W2-реестр)
 
 	// (version,node) pairs already reported as crash-looping → pausedUntil,
 	// to avoid re-emitting the crash_loop event every tick.
 	reported map[pairKey]time.Time
+
+	// lastRetention throttles the ~60s retention subtick (§6а M5). Written only
+	// from RunOnce, which the loop serialises — no lock needed.
+	lastRetention time.Time
 }
 
 type pairKey struct{ versionID, nodeID string }
 
 func New(st *store.Store, sender Sender, log *slog.Logger) *Reconciler {
-	return &Reconciler{st: st, sender: sender, log: log, reported: map[pairKey]time.Time{}}
+	return &Reconciler{
+		st: st, sender: sender, log: log,
+		cleaner:  NewImageCleaner(st, sender, log),
+		reported: map[pairKey]time.Time{},
+	}
+}
+
+// WithOrphanSweeper wires the deploy manager's orphan sweep into the loop
+// (W2-реестр): a version stuck `prepulling` with no in-memory job is re-armed
+// each pass. Returns the receiver for chaining in main.go. Left nil in tests
+// that construct no deploy manager.
+func (r *Reconciler) WithOrphanSweeper(s OrphanSweeper) *Reconciler {
+	r.sweeper = s
+	return r
 }
 
 // Run ticks RunOnce every interval until ctx is done.
@@ -68,14 +102,52 @@ func (r *Reconciler) Run(ctx context.Context, interval time.Duration) {
 // RunOnce performs a single reconcile pass over all fleets.
 func (r *Reconciler) RunOnce(ctx context.Context) error {
 	// Close expired multi-version windows first (итерация 3, master.md §5):
-	// deprecated versions past reap_ttl_min go disabled, so this very pass
-	// reaps their buffers and drains their live matches below.
-	if disabled, err := r.st.DisableExpiredDeprecated(ctx); err != nil {
+	// deprecated versions past reap_ttl_min go disabled, so this very pass reaps
+	// their buffers and drains their live matches below. Every disabled transition
+	// dispatches RemoveImage to the env's nodes (environments v1 §6б).
+	disabled, err := r.st.DisableExpiredDeprecated(ctx)
+	if err != nil {
 		return err
-	} else {
+	}
+	if len(disabled) > 0 {
+		retired := make([]store.DisabledVersion, 0, len(disabled))
 		for _, v := range disabled {
 			r.log.Info("reconcile: deprecated version disabled by reap_ttl",
 				"version_id", v.ID, "semver", v.Semver)
+			retired = append(retired, store.DisabledVersion{
+				VersionID: v.ID, ProjectID: v.ProjectID, Env: v.Env,
+				ImageRef: v.ImageRef, Semver: v.Semver,
+			})
+		}
+		if err := r.cleaner.CleanupImages(ctx, retired); err != nil {
+			r.log.Error("reconcile: RemoveImage dispatch (reap_ttl) failed", "err", err)
+		}
+	}
+
+	// Version retention subtick (~60s, environments v1 §6а): registered versions
+	// beyond retention_keep and older than 1h go disabled (the only registered→
+	// disabled path); their images are removed from the env's nodes too.
+	if time.Since(r.lastRetention) >= retentionInterval {
+		r.lastRetention = time.Now()
+		if retired, err := r.st.RetireVersions(ctx); err != nil {
+			r.log.Error("reconcile: version retention failed", "err", err)
+		} else if len(retired) > 0 {
+			for _, d := range retired {
+				r.log.Info("reconcile: version retired by retention",
+					"version_id", d.VersionID, "semver", d.Semver, "env", d.Env)
+			}
+			if err := r.cleaner.CleanupImages(ctx, retired); err != nil {
+				r.log.Error("reconcile: RemoveImage dispatch (retention) failed", "err", err)
+			}
+		}
+	}
+
+	// Adopt any orphan prepulling deploy (W2-реестр): a version stuck `prepulling`
+	// with no in-memory job (transient PrePullTargets error after BeginDeploy).
+	// Resume fixes these at startup; this catches one that appears mid-run.
+	if r.sweeper != nil {
+		if err := r.sweeper.SweepOrphans(ctx); err != nil {
+			r.log.Error("reconcile: orphan prepull sweep failed", "err", err)
 		}
 	}
 
