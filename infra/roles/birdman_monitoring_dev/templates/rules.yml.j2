@@ -95,6 +95,33 @@ groups:
 
           description: 'Диск ноды выше critical-порога — GC/прюнинг/докупить диск (ops.md §6 runbook 4).'
 
+      # DiskHigh (containerd-ФС образов): зеркало пары выше по dual-fs watermark
+      # (agent.md §6, environments v1 §6в). Образы дедиков живут под containerd_root
+      # — возможно ОТДЕЛЬНЫЙ маунт от data_dir; отдельная пара по
+      # birdman_agent_containerd_disk_* с ТЕМИ ЖЕ порогами/for. На одной ФС
+      # (containerd_root == маунт data_dir) обе пары показывают один процент и
+      # дублируют друг друга — приемлемо (alertmanager дедупит по severity+node);
+      # на раздельных маунтах эта пара — единственный сигнал по ФС образов.
+      - alert: ContainerdDiskHighWarning
+        expr: 100 * birdman_agent_containerd_disk_used_bytes / birdman_agent_containerd_disk_total_bytes > {{ birdman_disk_warn_pct }}
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: {% raw %}'DiskHigh(warn): containerd-ФС образов ({{ $labels.node }}) {{ $value }}%'{% endraw %}
+
+          description: 'containerd-ФС (образы) ноды выше warning-порога (ops.md §1 DiskHigh).'
+
+      - alert: ContainerdDiskHighCritical
+        expr: 100 * birdman_agent_containerd_disk_used_bytes / birdman_agent_containerd_disk_total_bytes > {{ birdman_disk_crit_pct }}
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: {% raw %}'DiskHigh(crit): containerd-ФС образов ({{ $labels.node }}) {{ $value }}%'{% endraw %}
+
+          description: 'containerd-ФС (образы) ноды выше critical-порога — GC/прюнинг/докупить диск (ops.md §6 runbook 4).'
+
       # AllocationFailures: любые провалы аллокации (по reason).
       - alert: AllocationFailures
         expr: increase(birdman_allocation_failures_total[5m]) > 0

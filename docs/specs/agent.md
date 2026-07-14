@@ -48,6 +48,7 @@
 
 - Watermark: диск >80% → удалить неиспользуемые образы (LRU), кроме версий в состоянии `active`/`prepulling`/`deprecated`.
 - Диск >90% → отказ StartServer + событие `disk_full` (алерт).
+- (environments v1 §6в) **Dual-fs watermark:** образы containerd живут под `containerd_root` (конфиг §10, деф. `/var/lib/containerd`), который может быть ОТДЕЛЬНЫМ маунтом от `data_dir`. Watermark берёт **max двух statfs** — `data_dir` и `containerd_root`: переполнение любой из ФС триггерит GC/отказ выше. Когда это один маунт — второй statfs равен первому, поведение прежнее (нет двойного счёта). Обе ФС экспортятся парой метрик `birdman_agent_containerd_disk_{used,total}_bytes` рядом с `birdman_agent_disk_*` (§9); vmalert поднимает по каждой свою пару DiskHigh (`ops.md` §1).
 
 ## 7. Self-upgrade
 
@@ -77,6 +78,9 @@ port_range: [20000, 29999]
 limits_default: { cpu_millis: 3500, mem_mb: 4096 }
 log_dir: /var/log/birdman
 data_dir: /var/lib/birdman
+containerd_root: ""         # (environments v1) ФС образов, если ОТДЕЛЬНЫЙ маунт от
+                            # data_dir; пусто → /var/lib/containerd (§6, dual-fs
+                            # watermark: max statfs data_dir и этой ФС)
 registry_auth:              # (уточнено в v0) pull приватного registry — bootstrap/
                             # fallback-путь (Реестры v1: основной путь — Админка →
                             # Реестры в панели, ниже)
