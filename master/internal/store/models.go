@@ -116,12 +116,19 @@ const (
 	// EventNodeEnvChanged — нода переведена в другое окружение (environments v1,
 	// PATCH /v1/nodes/{id} {env}). Payload {from, to}. Разрешён только пустой
 	// ноде в любом стейте, кроме dead (§2).
-	EventNodeEnvChanged    = "node_env_changed"
-	EventServerFailed      = "server_failed"
-	EventServerRecovered   = "server_recovered"
-	EventCrashLoop         = "crash_loop"
-	EventAllocationFailed  = "allocation_failed"
-	EventVersionRegistered = "version_registered"
+	EventNodeEnvChanged = "node_env_changed"
+	// EventEnvironmentDeleted — окружение удалено вместе с содержимым (DELETE
+	// /v1/environments/{project}/{name} с подтверждением вводом имени). Payload
+	// {project, name, production, versions, fleets, matches, servers,
+	// api_keys_revoked} — сколько чего снёс каскад; пишется в той же транзакции
+	// ДО удаления самой строки окружения. Ноды не каскадятся никогда (жёсткое
+	// предусловие «ноль нод»), поэтому их в payload нет.
+	EventEnvironmentDeleted = "environment_deleted"
+	EventServerFailed       = "server_failed"
+	EventServerRecovered    = "server_recovered"
+	EventCrashLoop          = "crash_loop"
+	EventAllocationFailed   = "allocation_failed"
+	EventVersionRegistered  = "version_registered"
 	// EventVersionPromoted — версия создана промоутом между окружениями
 	// (environments v1 §4, POST /v1/promote). Payload {project, semver, from_env,
 	// to_env, image_ref}; provenance promoted_from пишется в саму строку версии.
