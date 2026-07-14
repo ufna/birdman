@@ -5,17 +5,21 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ReactElement, ReactNode } from 'react';
+import { ApiError } from '../lib/api';
 import type { ApiEvent, Environment, NodeInfo, SessionInfo } from '../lib/api';
 import { I18nProvider } from '../lib/i18n';
 import { SessionContext } from '../lib/session';
 import {
   EnvContext,
+  EnvProvider,
+  envErrorKind,
   envMatches,
   eventEnvOf,
   keepForEnv,
   orderedEnvs,
   resolveSelection,
   storedEnv,
+  useEnv,
 } from '../lib/env';
 import { EnvChips } from '../components/Shell';
 import { EventsFeed } from '../components/EventsFeed';
@@ -125,6 +129,102 @@ describe('EnvChips', () => {
   it('нет окружений → ничего не рендерит (фильтр по env и так no-op)', () => {
     const { container } = render(withEnv({ ...baseEnv, environments: [] }, <EnvChips />));
     expect(container.querySelector('[role="group"]')).toBeNull();
+  });
+});
+
+// --- деградация: список окружений недоступен (follow-up p2) ---
+
+describe('env — envErrorKind', () => {
+  it('400/409 «several projects» (панель sole-project) → multiProject', () => {
+    const multi = new ApiError(400, 'bad_request', 'project is required: several projects exist, ticket must name one: conflict');
+    expect(envErrorKind(multi)).toBe('multiProject');
+    expect(envErrorKind(new ApiError(409, 'conflict', 'several projects exist'))).toBe('multiProject');
+  });
+  it('прочие отказы (и не-API ошибки) → unavailable', () => {
+    expect(envErrorKind(new ApiError(500, 'internal', 'boom'))).toBe('unavailable');
+    expect(envErrorKind(new ApiError(400, 'bad_request', 'project is required: no projects: not found'))).toBe('unavailable');
+    expect(envErrorKind(new Error('offline'))).toBe('unavailable');
+  });
+});
+
+/** Пробник эффективного выбора из useEnv (внутри EnvProvider) + сами чипы. */
+function EnvProbe() {
+  const { selected, environments } = useEnv();
+  return (
+    <div>
+      <span data-testid="selected">{selected ?? 'ALL'}</span>
+      <span data-testid="count">{environments.length}</span>
+      <EnvChips />
+    </div>
+  );
+}
+
+const jsonRes = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+
+const MULTI_PROJECT_400 = {
+  error: 'bad_request',
+  detail: 'project is required: several projects exist, ticket must name one: conflict',
+};
+
+function renderProvider() {
+  return render(
+    <I18nProvider initialLang="en">
+      <EnvProvider>
+        <EnvProbe />
+      </EnvProvider>
+    </I18nProvider>,
+  );
+}
+
+describe('EnvProvider — деградация при недоступном GET /v1/environments', () => {
+  it('список не приехал → сохранённый фильтр НЕ применяется (эффективный выбор «All»)', async () => {
+    localStorage.setItem('birdman.env', 'prod'); // выбор с прошлой сессии
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(jsonRes({ error: 'internal', detail: 'db down' }, 500))));
+    renderProvider();
+    // Молча резать данные несуществующим (для нас) окружением нельзя.
+    await waitFor(() => {
+      expect(screen.getByTestId('selected').textContent).toBe('ALL');
+    });
+    // Персист цел: список вернётся — вернётся и выбор (проверка ниже).
+    expect(localStorage.getItem('birdman.env')).toBe('prod');
+  });
+
+  it('вместо чипов — чип-предупреждение с тултипом «фильтр отключён»', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(jsonRes({ error: 'internal', detail: 'db down' }, 500))));
+    renderProvider();
+    const chip = await screen.findByRole('button', { name: /Environments unavailable/ });
+    expect(chip.getAttribute('title')).toMatch(/env filter is off/i);
+    expect(screen.queryByRole('button', { name: 'All' })).toBeNull(); // обычных чипов нет
+  });
+
+  it('>1 проекта в master (400) → в тултипе текст про мультипроект', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(jsonRes(MULTI_PROJECT_400, 400))));
+    renderProvider();
+    const chip = await screen.findByRole('button', { name: /Environments unavailable/ });
+    expect(chip.getAttribute('title')).toMatch(/single project/i);
+  });
+
+  it('повтор по клику: список приехал → чипы вернулись и сохранённый выбор восстановлен', async () => {
+    localStorage.setItem('birdman.env', 'prod');
+    let call = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => {
+        call += 1;
+        return Promise.resolve(call === 1 ? jsonRes({ error: 'internal' }, 500) : jsonRes({ environments: [dev, prod] }));
+      }),
+    );
+    renderProvider();
+    const chip = await screen.findByRole('button', { name: /Environments unavailable/ });
+    expect(screen.getByTestId('selected').textContent).toBe('ALL');
+
+    fireEvent.click(chip); // retry
+    await waitFor(() => {
+      expect(screen.getByTestId('count').textContent).toBe('2');
+    });
+    expect(screen.getByTestId('selected').textContent).toBe('prod'); // выбор пережил деградацию
+    expect(screen.getByRole('button', { name: 'All' })).toBeTruthy(); // обычные чипы вернулись
   });
 });
 

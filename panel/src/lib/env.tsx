@@ -10,7 +10,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import { api } from './api';
+import { api, ApiError } from './api';
 import type { ApiEvent, Environment } from './api';
 
 /** Ключ localStorage для выбранного окружения (имя env; отсутствует = «All»). */
@@ -24,12 +24,36 @@ interface EnvContextValue {
   environments: Environment[];
   /** Слаг единственного проекта (sole-project) — из окружений; null, если неизвестен. */
   project: string | null;
-  /** Выбранное окружение или null («All»). */
+  /**
+   * ЭФФЕКТИВНЫЙ выбор: имя окружения или null («All»). Пока окружений нет
+   * (грузятся / список недоступен / их вообще нет) — всегда null: фильтр не
+   * смеет молча резать экраны по списку, которого мы не видим (follow-up p2).
+   * Персистентный выбор при этом цел и вернётся, как только список приедет.
+   */
   selected: EnvSelection;
   setSelected: (env: EnvSelection) => void;
   loading: boolean;
+  /** Ошибка GET /v1/environments: чипы заменяются предупреждением (Shell). */
   error?: Error;
   reload: () => void;
+}
+
+/** Почему список окружений не приехал (подпись деградации в Shell). */
+export type EnvErrorKind = 'multiProject' | 'unavailable';
+
+/**
+ * Классификация отказа GET /v1/environments (follow-up p2). Панель живёт
+ * sole-project допущением: без ?project= master резолвит единственный проект, а
+ * при нескольких отвечает 400 bad_request с «several projects exist …» внутри
+ * detail (SoleProjectSlug → ErrConflict). Это не «мастер лежит», а «панель не
+ * умеет мультипроект» — и текст пользователю нужен другой.
+ */
+export function envErrorKind(error: unknown): EnvErrorKind {
+  const multi =
+    error instanceof ApiError &&
+    (error.status === 400 || error.status === 409) &&
+    /several projects/i.test(error.detail ?? '');
+  return multi ? 'multiProject' : 'unavailable';
 }
 
 // Экспортируется для юнит-тестов (инъекция управляемого контекста, как
@@ -99,7 +123,9 @@ export function eventEnvOf(e: ApiEvent): string | undefined {
 
 export function EnvProvider({ children }: { children: ReactNode }) {
   const [environments, setEnvironments] = useState<Environment[]>([]);
-  const [selected, setSelectedState] = useState<EnvSelection>(() => storedEnv());
+  // ЖЕЛАЕМЫЙ (персистентный) выбор пользователя. Эффективный `selected` ниже —
+  // производный: без списка окружений он всегда «All».
+  const [desired, setDesired] = useState<EnvSelection>(() => storedEnv());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | undefined>(undefined);
   const [reloadKey, setReloadKey] = useState(0);
@@ -114,12 +140,15 @@ export function EnvProvider({ children }: { children: ReactNode }) {
         const ordered = orderedEnvs(envs);
         setEnvironments(ordered);
         // Стёртый/несуществующий сохранённый env — откат на «All».
-        setSelectedState((cur) => resolveSelection(cur, ordered));
+        setDesired((cur) => resolveSelection(cur, ordered));
         setError(undefined);
         setLoading(false);
       })
       .catch((e: unknown) => {
         if (cancelled) return;
+        // Список недоступен → окружений мы не знаем: чипы уходят, а фильтр
+        // деградирует в «All» (см. derived `selected`) — данные не режем молча.
+        setEnvironments([]);
         setError(e instanceof Error ? e : new Error(String(e)));
         setLoading(false);
       });
@@ -135,7 +164,7 @@ export function EnvProvider({ children }: { children: ReactNode }) {
     } catch {
       /* приватный режим — выбор не переживёт перезагрузку */
     }
-    setSelectedState(env);
+    setDesired(env);
   }, []);
 
   const reload = useCallback(() => {
@@ -143,6 +172,14 @@ export function EnvProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const project = environments[0]?.project ?? null;
+
+  // Нет списка (грузится / недоступен / пуст) → «All». Есть — сохранённый выбор,
+  // если такое окружение ещё существует. Персист (localStorage) при деградации
+  // НЕ трогаем: список вернётся — вернётся и выбор.
+  const selected = useMemo(
+    () => (environments.length === 0 ? null : resolveSelection(desired, environments)),
+    [environments, desired],
+  );
 
   const value = useMemo(
     () => ({ environments, project, selected, setSelected, loading, error, reload }),

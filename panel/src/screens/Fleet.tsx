@@ -3,8 +3,9 @@
 
 import { useMemo, useState } from 'react';
 import type { ColumnDef } from '@tanstack/react-table';
-import { api } from '../lib/api';
-import type { ApiEvent, GameServer, NodeInfo } from '../lib/api';
+import * as Dialog from '@radix-ui/react-dialog';
+import { api, ApiError } from '../lib/api';
+import type { ApiEvent, Environment, GameServer, NodeInfo } from '../lib/api';
 import { useData } from '../lib/live';
 import { useEnv, keepForEnv } from '../lib/env';
 import { canAdmin, useSession } from '../lib/session';
@@ -13,9 +14,11 @@ import { useServerDrawer } from '../lib/drawer';
 import { useNow } from '../lib/useNow';
 import { ageOf, heartbeatTone, shortId } from '../lib/format';
 import { useT, useFormat } from '../lib/i18n';
+import type { I18nContextValue } from '../lib/i18n';
 import { DataTable } from '../components/DataTable';
 import { StateBadge, toneOfNodeState, toneOfServerState } from '../components/Badge';
 import { ConfirmButton } from '../components/ConfirmDialog';
+import { useToast } from '../components/Toast';
 import { Card, CardHeader, ErrorNote, LoadingRow } from '../components/ui';
 
 const LIVE_SERVER_STATES = new Set(['creating', 'ready', 'allocated', 'draining']);
@@ -198,19 +201,25 @@ function SlotsCell({ busy, total }: { busy: number; total: number }) {
   );
 }
 
-/** Drain/Undrain тачки (admin, confirm). stopPropagation — чтобы клик по
- *  кнопке не разворачивал строку. */
+/** Drain/Undrain + перевод в другой env (admin, confirm). stopPropagation —
+ *  чтобы клик по кнопке не разворачивал строку. У dead-ноды действий нет:
+ *  мастер откажет и в дрейне, и в переводе (409). */
 function NodeActions({ node, onDone }: { node: NodeInfo; onDone: () => void }) {
   const { t } = useT();
+  const { environments } = useEnv();
   if (node.state === 'dead') return null;
   const draining = node.state === 'draining';
+  // Цели перевода — все окружения проекта, кроме текущего. Список недоступен/
+  // пуст → переводить некуда, кнопки нет (как и Promote на Deploys).
+  const moveTargets = environments.filter((e) => e.name !== node.env);
   return (
     <div
       onClick={(e) => {
         e.stopPropagation();
       }}
-      className="flex justify-end"
+      className="flex justify-end gap-2"
     >
+      {moveTargets.length > 0 && <MoveEnvDialog node={node} targets={moveTargets} onDone={onDone} />}
       {draining ? (
         <ConfirmButton
           label={t('fleet.undrain')}
@@ -237,6 +246,123 @@ function NodeActions({ node, onDone }: { node: NodeInfo; onDone: () => void }) {
       )}
     </div>
   );
+}
+
+/**
+ * Перевод ноды в другое окружение (environments v1 §2): PATCH /v1/nodes/{id}
+ * {env}, admin. Цели — окружения проекта, кроме текущего. Мастер не двигает
+ * ноду с живыми дедиками (409 «has live servers, drain it first») — показываем
+ * это инлайн внятной подсказкой «сначала Drain», а не сырым текстом ошибки;
+ * 400 показываем как есть (detail мастера).
+ */
+function MoveEnvDialog({ node, targets, onDone }: { node: NodeInfo; targets: Environment[]; onDone: () => void }) {
+  const { t } = useT();
+  const toast = useToast();
+  const [open, setOpen] = useState(false);
+  const [target, setTarget] = useState(targets[0]?.name ?? '');
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = () => {
+    if (target === '' || pending) return;
+    setPending(true);
+    setError(null);
+    api
+      .setNodeEnv(node.id, target)
+      .then(() => {
+        setPending(false);
+        setOpen(false);
+        toast.success(t('fleet.moveEnv.toast', { host: node.hostname, env: target }));
+        onDone();
+      })
+      .catch((e: unknown) => {
+        setPending(false);
+        setError(moveErrorText(e, t));
+      });
+  };
+
+  return (
+    <Dialog.Root
+      open={open}
+      onOpenChange={(o) => {
+        if (pending) return; // не закрывать на время запроса
+        setOpen(o);
+        if (o) {
+          setTarget(targets[0]?.name ?? '');
+          setError(null);
+        }
+      }}
+    >
+      <Dialog.Trigger asChild>
+        <button
+          type="button"
+          className="rounded-lg border border-line px-2.5 py-1 text-xs font-medium text-muted transition-colors hover:text-ink"
+        >
+          {t('fleet.moveEnv')}
+        </button>
+      </Dialog.Trigger>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-40 bg-black/40 backdrop-blur-[1px]" />
+        <Dialog.Content className="fixed top-1/2 left-1/2 z-50 w-[min(28rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 rounded-xl border border-line bg-card p-5 shadow-xl">
+          <Dialog.Title className="text-base font-semibold">
+            {t('fleet.moveEnv.title', { host: node.hostname })}
+          </Dialog.Title>
+          <Dialog.Description className="mt-1 text-sm text-muted">{t('fleet.moveEnv.desc')}</Dialog.Description>
+          <label className="mt-4 flex flex-col gap-1 text-sm font-medium">
+            {t('fleet.moveEnv.target')}
+            <select
+              value={target}
+              onChange={(e) => {
+                setTarget(e.target.value);
+              }}
+              className="rounded-lg border border-line bg-paper px-3 py-2 text-sm font-normal"
+            >
+              {targets.map((e) => (
+                <option key={e.name} value={e.name}>
+                  {e.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <p className="mt-1.5 font-mono text-xs text-muted">{t('fleet.moveEnv.current', { env: node.env })}</p>
+          {error !== null && (
+            <p role="alert" className="mt-3 rounded-lg bg-dead-bg px-3 py-2 text-xs text-dead">
+              {error}
+            </p>
+          )}
+          <div className="mt-5 flex justify-end gap-2">
+            <Dialog.Close asChild>
+              <button
+                type="button"
+                disabled={pending}
+                className="rounded-lg border border-line px-3 py-1.5 text-sm text-muted hover:text-ink disabled:opacity-40"
+              >
+                {t('common.cancel')}
+              </button>
+            </Dialog.Close>
+            <button
+              type="button"
+              disabled={target === '' || pending}
+              onClick={submit}
+              className="rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+            >
+              {pending ? t('common.running') : t('fleet.moveEnv.confirm')}
+            </button>
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
+/** Текст ошибки перевода: 409 (живые дедики / dead-нода) → подсказка про drain;
+ *  400 и прочее API — detail мастера как есть; не-API — общий текст. */
+function moveErrorText(e: unknown, t: I18nContextValue['t']): string {
+  if (e instanceof ApiError) {
+    if (e.status === 409) return t('fleet.moveEnv.err.conflict');
+    return e.detail ?? e.code;
+  }
+  return t('fleet.moveEnv.err.generic');
 }
 
 /** Индикация опустошения draining-ноды: сколько allocated ещё доигрывает. */

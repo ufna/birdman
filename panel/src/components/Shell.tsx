@@ -8,7 +8,7 @@ import type { ReactNode } from 'react';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import * as Dialog from '@radix-ui/react-dialog';
 import { useLive } from '../lib/live';
-import { useEnv } from '../lib/env';
+import { envErrorKind, useEnv } from '../lib/env';
 import { canAdmin, useSession } from '../lib/session';
 import type { SessionInfo } from '../lib/api';
 import { useTheme } from '../lib/theme';
@@ -134,10 +134,15 @@ function NavGlyph({ icon }: { icon: NavIcon }) {
  * GET /v1/environments (non-production сначала, потом production, потом «All»),
  * выбор персистится (useEnv). Скрыт, пока окружений нет/не загрузились —
  * тогда фильтр по env панели и так no-op. Экраны сужают данные по selected.
+ *
+ * Список недоступен (ошибка API) → вместо чипов ненавязчивый чип-предупреждение
+ * (follow-up p2): фильтр в этот момент принудительно «All» (env.tsx), и молчать
+ * об этом нельзя — иначе непонятно, почему переключателя нет.
  */
 export function EnvChips() {
-  const { environments, selected, setSelected } = useEnv();
+  const { environments, selected, setSelected, error, reload } = useEnv();
   const { t } = useT();
+  if (error !== undefined) return <EnvUnavailableChip error={error} retry={reload} />;
   if (environments.length === 0) return null;
   const chipCls = (active: boolean) =>
     `inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition-colors ${
@@ -175,6 +180,34 @@ export function EnvChips() {
         className={chipCls(selected === null)}
       >
         {t('env.all')}
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Деградация списка окружений (follow-up p2): чипов нет, фильтр отключён —
+ * говорим об этом одним чипом с тултипом (title) и даём повторить запрос
+ * кликом. Отдельный текст, когда причина — мультипроект в master (панель v1
+ * sole-project: GET /v1/environments без ?project= отвечает 400).
+ */
+function EnvUnavailableChip({ error, retry }: { error: Error; retry: () => void }) {
+  const { t } = useT();
+  const hint = envErrorKind(error) === 'multiProject' ? t('env.unavailable.multiProject') : t('env.unavailable.hint');
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <span aria-hidden className="text-xs font-medium tracking-wide text-muted uppercase">
+        {t('env.switch')}
+      </span>
+      <button
+        type="button"
+        onClick={retry}
+        title={hint}
+        aria-label={`${t('env.unavailable')} — ${hint}`}
+        className="inline-flex items-center gap-1.5 rounded-lg border border-warn/40 bg-warn-bg/40 px-2.5 py-1 text-xs font-medium text-warn transition-opacity hover:opacity-80"
+      >
+        <span aria-hidden className="size-1.5 rounded-full bg-warn" />
+        {t('env.unavailable')}
       </button>
     </div>
   );

@@ -672,6 +672,26 @@ export const ru: Record<MessageKey, string> = {
   'env.all': 'Все',
   'env.productionTitle': 'production-окружение',
 
+  // Список окружений недоступен: фильтр деградирует в «Все» — и говорит об этом.
+  'env.unavailable': 'Окружения недоступны',
+  'env.unavailable.hint':
+    'Не удалось загрузить список окружений — фильтр по окружению отключён, экраны показывают все данные. Нажмите, чтобы повторить.',
+  'env.unavailable.multiProject':
+    'Панель работает с одним проектом (v1), а в master их больше — список окружений недоступен. Фильтр по окружению отключён: экраны показывают все данные.',
+
+  // Флот: перевод ноды в другое окружение (PATCH /v1/nodes/{id}).
+  'fleet.moveEnv': 'Перевести в env…',
+  'fleet.moveEnv.title': 'Перевести {host} в другое окружение',
+  'fleet.moveEnv.desc':
+    'Нода будет обслуживать версии целевого окружения. Живых дедиков на ней быть не должно — сначала выведите её из ротации (Drain).',
+  'fleet.moveEnv.target': 'Целевое окружение',
+  'fleet.moveEnv.current': 'сейчас: {env}',
+  'fleet.moveEnv.confirm': 'Перевести',
+  'fleet.moveEnv.toast': '{host} переведена в {env}',
+  'fleet.moveEnv.err.conflict':
+    'На ноде ещё есть живые дедики — сначала выведите её из ротации (Drain), а когда дедики доиграют, переводите.',
+  'fleet.moveEnv.err.generic': 'Не удалось перевести ноду.',
+
   // Деплои: бейдж env, промоут, provenance, скрытие disabled, карточка настроек env.
   'deploys.hideDisabled': 'Скрыть отключённые',
   'deploys.promote': 'Промоут',

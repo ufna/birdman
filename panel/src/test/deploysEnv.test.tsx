@@ -129,6 +129,21 @@ describe('Deploys — Promote-диалог (тело POST /v1/promote)', () => {
     await screen.findAllByText('2.0.0'); // active-версия видна и в окне, и в таблице
     expect(screen.queryByRole('button', { name: 'Promote' })).toBeNull();
   });
+
+  // follow-up p5: при пустом/недоступном списке окружений isProdEnv() слеп
+  // («всё не production») — раньше Promote вылезал даже у prod-версии и открывал
+  // диалог без целей.
+  it('список окружений пуст/недоступен → Promote скрыт (и у prod-, и у dev-версии)', async () => {
+    const versions = [
+      mkVer({ id: 'v-p', semver: '2.0.0', state: 'active', env: 'prod' }),
+      mkVer({ id: 'v-d', semver: '1.0.0', state: 'deprecated', env: 'dev' }),
+    ];
+    vi.stubGlobal('fetch', deploysFetch(versions, []));
+    renderDeploys({ ...baseEnv, environments: [] });
+    await screen.findAllByText('2.0.0');
+    expect(screen.queryByRole('button', { name: 'Promote' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Deploy' })).toBeTruthy(); // deploy при этом жив
+  });
 });
 
 describe('Deploys — provenance promoted_from', () => {

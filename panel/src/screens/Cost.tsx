@@ -42,10 +42,17 @@ function fmtHours(v: number): string {
 export function Cost() {
   const [days, setDays] = useState(7);
   const { selected } = useEnv();
-  const cost = useAsync(() => api.statsCost(days, selected ?? undefined), [days, selected]);
-  // Данные показываем, только если они за ЗАПРОШЕННЫЙ период; иначе (первая
-  // загрузка или смена периода) — скелетон: раскладка держится, без «прыжка».
-  const ready = cost.data !== undefined && cost.data.days === days;
+  // Ответ /v1/stats/cost НЕ несёт env — помечаем данные окружением, за которое
+  // их запросили (как и Stats, follow-up p3): «готовность» = ТОТ период и ТОТ
+  // env, иначе при смене чипа мгновение показывались бы цифры прежнего env.
+  const cost = useAsync(
+    () => api.statsCost(days, selected ?? undefined).then((data) => ({ env: selected, data })),
+    [days, selected],
+  );
+  // Данные показываем, только если они за ЗАПРОШЕННЫЙ период и env; иначе
+  // (первая загрузка, смена периода/окружения) — скелетон: раскладка держится.
+  const ready =
+    cost.data !== undefined && cost.data.env === selected && cost.data.data.days === days ? cost.data.data : undefined;
 
   if (cost.error !== undefined && cost.data === undefined) {
     return (
@@ -58,7 +65,7 @@ export function Cost() {
   return (
     <div className="flex flex-col gap-4">
       <Header days={days} setDays={setDays} />
-      {ready && cost.data !== undefined ? <CostBody cost={cost.data} /> : <CostSkeleton />}
+      {ready !== undefined ? <CostBody cost={ready} /> : <CostSkeleton />}
     </div>
   );
 }
