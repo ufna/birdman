@@ -7,9 +7,11 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -90,10 +92,12 @@ func New(st *store.Store, m *metrics.Metrics, mm *matchmaker.Matchmaker, dep *de
 	s.mux.HandleFunc("POST /v1/promote", s.requireScope(ScopeDeploy, s.handlePromote))
 	s.mux.HandleFunc("PUT /v1/fleets/{region}", s.requireScope(ScopeAdmin, s.handleUpsertFleet))
 	s.mux.HandleFunc("PUT /v1/projects/{slug}", s.requireScope(ScopeAdmin, s.handleUpsertProject))
-	// Environments CRUD (environments v1 §2, environments.go). List is readonly;
-	// create/patch/delete are admin.
+	// Environments CRUD (environments v1 §2, environments.go). List/usage are
+	// readonly; create/patch/delete are admin. DELETE сносит окружение вместе с
+	// содержимым (нужен confirm с именем), usage — состав для диалога удаления.
 	s.mux.HandleFunc("GET /v1/environments", s.requireScope(ScopeReadonly, s.handleListEnvironments))
 	s.mux.HandleFunc("POST /v1/environments", s.requireScope(ScopeAdmin, s.handleCreateEnvironment))
+	s.mux.HandleFunc("GET /v1/environments/{project}/{name}/usage", s.requireScope(ScopeReadonly, s.handleEnvironmentUsage))
 	s.mux.HandleFunc("PATCH /v1/environments/{project}/{name}", s.requireScope(ScopeAdmin, s.handlePatchEnvironment))
 	s.mux.HandleFunc("DELETE /v1/environments/{project}/{name}", s.requireScope(ScopeAdmin, s.handleDeleteEnvironment))
 	s.mux.HandleFunc("GET /v1/events", s.requireScope(ScopeReadonly, s.handleListEvents))
@@ -200,6 +204,28 @@ func writeError(w http.ResponseWriter, status int, code, detail string) {
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return false
+	}
+	return true
+}
+
+// decodeOptionalJSON — decodeJSON для запросов с НЕОБЯЗАТЕЛЬНЫМ телом (DELETE
+// /v1/environments/{p}/{n} c {"confirm": ...}): пустое тело — не ошибка, v
+// остаётся нулевым. Непустое разбирается по тем же правилам (DisallowUnknownFields).
+// Тело уже ограничено MaxBytesReader в ServeHTTP, поэтому ReadAll безопасен.
+func decodeOptionalJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return false
+	}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return true
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())

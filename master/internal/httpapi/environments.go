@@ -12,8 +12,13 @@ import (
 // Environments API (docs/superpowers/specs/2026-07-13-environments-v1-design.md
 // §2). Read is readonly-scoped; create/patch/delete and the node-move PATCH are
 // admin. Guardrail production⇒!auto_deploy and the name shape/reserved rules are
-// validated in the store (clean 400s), backed by DB CHECKs. A used environment
-// is undeletable (409) — versions rows are never removed (honest I10).
+// validated in the store (clean 400s), backed by DB CHECKs.
+//
+// Удаление окружения («удаление непустого окружения»): GET .../usage отдаёт состав
+// (панель показывает его в диалоге), DELETE сносит окружение ВМЕСТЕ с содержимым —
+// но только при нуле нод (иначе 409) и с подтверждением вводом имени в теле
+// {"confirm":"<name>"} (иначе 400). Пустое окружение удаляется как раньше: 204 без
+// тела и без confirm.
 
 type createEnvironmentRequest struct {
 	Project       string `json:"project"`
@@ -21,6 +26,12 @@ type createEnvironmentRequest struct {
 	Production    bool   `json:"production"`
 	AutoDeploy    bool   `json:"auto_deploy"`
 	RetentionKeep int    `json:"retention_keep"`
+}
+
+// deleteEnvironmentRequest — тело DELETE. Необязательное: у пустого окружения его
+// нет вовсе (совместимость), у непустого confirm обязан ТОЧНО совпасть с именем.
+type deleteEnvironmentRequest struct {
+	Confirm string `json:"confirm"`
 }
 
 // patchEnvironmentRequest is the PATCH body — every field a pointer so an absent
@@ -106,15 +117,52 @@ func (s *Server) handlePatchEnvironment(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]any{"environment": env})
 }
 
-// handleDeleteEnvironment is DELETE /v1/environments/{project}/{name} (admin).
-// 204 for a never-used env; 409 when it is referenced by versions/fleets/nodes/
-// keys (listed in the detail); 404 for an unknown env.
-func (s *Server) handleDeleteEnvironment(w http.ResponseWriter, r *http.Request) {
-	if err := s.st.DeleteEnvironment(r.Context(), r.PathValue("project"), r.PathValue("name")); err != nil {
+// handleEnvironmentUsage is GET /v1/environments/{project}/{name}/usage (readonly):
+// сколько версий/флотов/нод/серверов/матчей/живых ключей держит окружение. Панель
+// зовёт его при открытии диалога удаления: показать состав и заблокировать
+// удаление, пока в окружении есть ноды. 404 для неизвестного окружения.
+func (s *Server) handleEnvironmentUsage(w http.ResponseWriter, r *http.Request) {
+	usage, err := s.st.EnvironmentUsage(r.Context(), r.PathValue("project"), r.PathValue("name"))
+	if err != nil {
 		storeError(w, err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	writeJSON(w, http.StatusOK, map[string]any{"usage": usage})
+}
+
+// handleDeleteEnvironment is DELETE /v1/environments/{project}/{name} (admin).
+// Тело необязательное: {"confirm":"<name>"}.
+//
+//   - 404 — неизвестное окружение;
+//   - 409 — в окружении есть ноды (предусловие; НЕЗАВИСИМО от confirm: сначала
+//     переведите их в другое окружение, PATCH /v1/nodes/{id});
+//   - 204 — окружение пустое (никогда не использовалось): удалено, confirm не нужен;
+//   - 400 — окружение НЕПУСТОЕ, а confirm отсутствует/не равен имени ТОЧНО;
+//   - 200 {"deleted": {...}} — непустое окружение снесено каскадом (состав в теле).
+func (s *Server) handleDeleteEnvironment(w http.ResponseWriter, r *http.Request) {
+	var req deleteEnvironmentRequest
+	if !decodeOptionalJSON(w, r, &req) {
+		return
+	}
+	res, err := s.st.DeleteEnvironment(r.Context(), r.PathValue("project"), r.PathValue("name"), req.Confirm)
+	if errors.Is(err, store.ErrConfirmRequired) {
+		writeError(w, http.StatusBadRequest, "bad_request", "confirm must equal the environment name")
+		return
+	}
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	// Отозванные ключи обязаны умереть сразу: authenticator кэширует проверенные
+	// ключи (и держит сессии панели) — гасим кэш, как это делает revoke-хендлер.
+	for _, id := range res.RevokedKeyIDs {
+		s.auth.invalidateKey(id)
+	}
+	if res.WasEmpty {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": res})
 }
 
 // handleSetNodeEnv is PATCH /v1/nodes/{id} {env} (admin): move a node to another

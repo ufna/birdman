@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -15,9 +14,13 @@ import (
 // Environments v1 (docs/superpowers/specs/2026-07-13-environments-v1-design.md
 // §1–2): окружение — полноценное измерение платформы per-project. Поведение
 // ведёт флаг production (не имя): production=true запрещает auto_deploy
-// (guardrail в БД CHECK + здесь), ретеншн-дефолт безлимитный. CRUD явный;
-// использованный env неудаляем (versions не удаляются — I10). Сиды dev+prod
-// каждому проекту делает ensureProject (nodes.go).
+// (guardrail в БД CHECK + здесь), ретеншн-дефолт безлимитный. CRUD явный. Сиды
+// dev+prod каждому проекту делает ensureProject (nodes.go).
+//
+// Удаление НЕПУСТОГО окружения (снимает тупик I10 «использованный env неудаляем»):
+// DeleteEnvironment каскадит содержимое одной транзакцией — при жёстком
+// предусловии «ноль нод» и подтверждении вводом имени. Состав считает
+// EnvironmentUsage (его же показывает панель перед удалением).
 
 type Environment struct {
 	ProjectID     string    `json:"project_id"`
@@ -229,59 +232,272 @@ func (s *Store) PatchEnvironment(ctx context.Context, project, name string, p En
 	return e, nil
 }
 
-// DeleteEnvironment removes a never-used environment (DELETE, 204). An env
-// referenced by any versions/fleets/nodes/keys (including disabled/dead) is
-// not empty → ErrConflict listing the offenders (§2, honest I10: used envs are
-// effectively undeletable in v1 since versions rows are never removed).
-// ErrNotFound for an unknown env.
+// ErrConfirmRequired — удаление НЕПУСТОГО окружения без корректного confirm
+// (тело DELETE {"confirm":"<name>"} обязано ТОЧНО совпасть с именем). Отдельный
+// sentinel, а не ErrConflict: это плохой ввод (400), а не состояние ресурса.
+var ErrConfirmRequired = errors.New("confirm_required")
+
+// queryRower — общий знаменатель *pgxpool.Pool и pgx.Tx: состав окружения
+// считается и снаружи (GET .../usage), и внутри транзакции удаления (там он
+// авторитетный — под блокировкой строки env).
+type queryRower interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// EnvironmentUsage — состав окружения (GET /v1/environments/{project}/{name}/usage):
+// сколько всего на него ссылается. Панель показывает это в диалоге удаления
+// («будут удалены: N версий, N флотов…»), а API решает по нему, требовать ли
+// подтверждение вводом имени. APIKeys — только ЖИВЫЕ (не отозванные) привязанные
+// ключи: ровно те, что каскад отзовёт.
+type EnvironmentUsage struct {
+	Versions int `json:"versions"`
+	Fleets   int `json:"fleets"`
+	Nodes    int `json:"nodes"`
+	Servers  int `json:"servers"`
+	Matches  int `json:"matches"`
+	APIKeys  int `json:"api_keys"`
+}
+
+// Empty — окружением никто не пользовался: удаляется как раньше, без confirm
+// (204). Роллапы match_stats_daily сюда НЕ входят: это производные строки (их
+// нельзя завести без матчей), и держать из-за них окружение «непустым» — шум.
+func (u EnvironmentUsage) Empty() bool {
+	return u.Versions == 0 && u.Fleets == 0 && u.Nodes == 0 &&
+		u.Servers == 0 && u.Matches == 0 && u.APIKeys == 0
+}
+
+// DeleteEnvironmentResult — состав удалённого окружения: тело ответа 200
+// («что снесли») и payload события environment_deleted.
+type DeleteEnvironmentResult struct {
+	Name           string `json:"name"`
+	Production     bool   `json:"production"`
+	Versions       int    `json:"versions"`
+	Fleets         int    `json:"fleets"`
+	Matches        int    `json:"matches"`
+	Servers        int    `json:"servers"`
+	APIKeysRevoked int    `json:"api_keys_revoked"`
+
+	// RevokedKeyIDs — id отозванных ключей: httpapi гасит по ним auth-кэш, чтобы
+	// ключ умер сразу, а не через authCacheTTL. Не часть тела ответа.
+	RevokedKeyIDs []string `json:"-"`
+	// WasEmpty — окружение было никогда не использованным (каскад ничего не
+	// тронул): API отвечает 204 и не требует confirm (совместимость с v1).
+	WasEmpty bool `json:"-"`
+}
+
+// environmentUsage считает состав окружения (project уже разрешён в projectID).
+func environmentUsage(ctx context.Context, db queryRower, projectID, name string) (EnvironmentUsage, error) {
+	var u EnvironmentUsage
+	err := db.QueryRow(ctx, `
+		select
+			(select count(*) from versions      where project_id = $1::uuid and env = $2),
+			(select count(*) from fleet_configs where project_id = $1::uuid and env = $2),
+			(select count(*) from nodes         where project_id = $1::uuid and env = $2),
+			(select count(*) from servers       where project_id = $1::uuid and env = $2),
+			(select count(*) from matches       where project_id = $1::uuid and env = $2),
+			(select count(*) from api_keys      where project_id = $1::uuid and env = $2 and revoked_at is null)`,
+		projectID, name).
+		Scan(&u.Versions, &u.Fleets, &u.Nodes, &u.Servers, &u.Matches, &u.APIKeys)
+	return u, err
+}
+
+// EnvironmentUsage returns what the environment holds (GET .../usage, readonly):
+// the panel renders it in the delete dialog and blocks deletion while nodes > 0.
+// ErrNotFound for an unknown env (адресуемый ресурс, как PATCH/DELETE — не ссылка).
+func (s *Store) EnvironmentUsage(ctx context.Context, project, name string) (EnvironmentUsage, error) {
+	var projectID string
+	err := s.Pool.QueryRow(ctx, `
+		select e.project_id::text from environments e
+		join projects p on p.id = e.project_id
+		where p.slug = $1 and e.name = $2`, project, name).Scan(&projectID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return EnvironmentUsage{}, fmt.Errorf("environment %s/%s: %w", project, name, ErrNotFound)
+	}
+	if err != nil {
+		return EnvironmentUsage{}, err
+	}
+	return environmentUsage(ctx, s.Pool, projectID, name)
+}
+
+// DeleteEnvironment removes an environment WITH its content — одной транзакцией
+// (DELETE /v1/environments/{project}/{name}; «удаление непустого окружения»).
 //
-// dev и prod — платформенно-гарантированные окружения: ensureProject пересевает
-// их при следующем касании проекта; DELETE действует до этого момента.
-func (s *Store) DeleteEnvironment(ctx context.Context, project, name string) error {
+// Предусловие (жёсткое): в окружении НОЛЬ нод. Ноду нельзя молча осиротить —
+// живой агент остался бы стучаться с node_id из несуществующего env; nodes > 0 →
+// ErrConflict «move them to another environment first» (перевод ноды — PATCH
+// /v1/nodes/{id}). Побочно это гарантирует отсутствие живых серверов: guard
+// перевода ноды их не пускает, а без нод их неоткуда взять.
+//
+// Подтверждение: НЕПУСТОЕ окружение (EnvironmentUsage.Empty() == false) удаляется
+// только с confirm, ТОЧНО равным имени (без trim — лишний пробел не совпал), иначе
+// ErrConfirmRequired (→400). Пустое удаляется как раньше — без confirm (204).
+// Проверка и каскад живут в ОДНОЙ транзакции под `for update` строки env, поэтому
+// «пустое» не может стать «непустым» между решением и удалением.
+//
+// Каскад (порядок продиктован FK):
+//  1. matches (FK на servers/versions);
+//  2. servers (FK на versions; их ноды могли уехать в другой env — I6, история
+//     не переписывается, поэтому чистим по КОЛОНКЕ env, а не по нодам);
+//  3. fleet_configs: active_version = null, затем delete (составной FK на versions);
+//  4. versions: сначала обнуляем promoted_from у версий ДРУГИХ окружений, которые
+//     промоутились из этого (self-FK versions.promoted_from иначе не даст удалить
+//     строку-источник; сама версия-потомок остаётся жива, теряется лишь provenance);
+//  5. match_stats_daily — производные роллапы этого env;
+//  6. api_keys, привязанные к (project, env): revoked_at = now() (ключ умирает —
+//     AuthAPIKey фильтрует revoked_at is null, «раз-отзыва» в API нет);
+//  7. строка environments — последней; событие environment_deleted пишется до неё.
+//
+// ВАЖНО (расхождение с дизайном, вынужденное схемой): привязку (project_id, env)
+// у ключей приходится СНИМАТЬ (оба поля в null) — FK api_keys_env_fk не даст
+// удалить строку environments, пока хоть один ключ на неё ссылается (revoked_at
+// его не волнует). Дыры в безопасности нет: ключ в той же транзакции ОТОЗВАН, а
+// отозванный ключ не аутентифицируется и не воскресает (эндпоинта «раз-отзыв»
+// нет; PurgeAPIKey только удаляет строку). Утраченная привязка сохраняется в
+// аудите — событие apikey_revoked {project, env, reason: environment_deleted}.
+//
+// ErrNotFound для неизвестного окружения. dev/prod — обычные строки: ensureProject
+// пересевает их только при ВСТАВКЕ проекта, воскрешения не будет.
+func (s *Store) DeleteEnvironment(ctx context.Context, project, name, confirm string) (DeleteEnvironmentResult, error) {
+	var res DeleteEnvironmentResult
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
-		return err
+		return res, err
 	}
 	defer tx.Rollback(ctx)
 
 	var projectID string
+	var production bool
 	err = tx.QueryRow(ctx, `
-		select e.project_id::text from environments e
+		select e.project_id::text, e.production from environments e
 		join projects p on p.id = e.project_id
-		where p.slug = $1 and e.name = $2 for update of e`, project, name).Scan(&projectID)
+		where p.slug = $1 and e.name = $2 for update of e`, project, name).Scan(&projectID, &production)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return fmt.Errorf("environment %s/%s: %w", project, name, ErrNotFound)
+		return res, fmt.Errorf("environment %s/%s: %w", project, name, ErrNotFound)
 	}
 	if err != nil {
-		return err
+		return res, err
+	}
+	res.Name, res.Production = name, production
+
+	usage, err := environmentUsage(ctx, tx, projectID, name)
+	if err != nil {
+		return res, err
+	}
+	// Предусловие: ноды — единственное, что не каскадится. Живой агент с
+	// node_id из удалённого окружения — молчаливо осиротевшая машина.
+	if usage.Nodes > 0 {
+		return res, fmt.Errorf("environment %s/%s has %d node(s) — move them to another environment first: %w",
+			project, name, usage.Nodes, ErrConflict)
+	}
+	res.WasEmpty = usage.Empty()
+	if !res.WasEmpty && confirm != name {
+		return res, fmt.Errorf("confirm must equal the environment name %q: %w", name, ErrConfirmRequired)
 	}
 
-	var used []string
-	for _, c := range []struct{ table, label string }{
-		{"versions", "versions"},
-		{"fleet_configs", "fleets"},
-		{"nodes", "nodes"},
-		{"api_keys", "keys"},
-	} {
-		var exists bool
-		if err := tx.QueryRow(ctx,
-			`select exists(select 1 from `+c.table+` where project_id = $1::uuid and env = $2)`,
-			projectID, name).Scan(&exists); err != nil {
-			return err
-		}
-		if exists {
-			used = append(used, c.label)
-		}
+	// (1) матчи → (2) серверы → (3) флоты → (4) версии → (5) роллапы.
+	n, err := tx.Exec(ctx, `delete from matches where project_id = $1::uuid and env = $2`, projectID, name)
+	if err != nil {
+		return res, err
 	}
-	if len(used) > 0 {
-		return fmt.Errorf("environment %s/%s is not empty (%s): %w", project, name, strings.Join(used, ", "), ErrConflict)
+	res.Matches = int(n.RowsAffected())
+
+	n, err = tx.Exec(ctx, `delete from servers where project_id = $1::uuid and env = $2`, projectID, name)
+	if err != nil {
+		return res, err
 	}
+	res.Servers = int(n.RowsAffected())
 
 	if _, err := tx.Exec(ctx,
-		`delete from environments where project_id = $1::uuid and name = $2`, projectID, name); err != nil {
-		return err
+		`update fleet_configs set active_version = null where project_id = $1::uuid and env = $2`,
+		projectID, name); err != nil {
+		return res, err
 	}
-	return tx.Commit(ctx)
+	n, err = tx.Exec(ctx, `delete from fleet_configs where project_id = $1::uuid and env = $2`, projectID, name)
+	if err != nil {
+		return res, err
+	}
+	res.Fleets = int(n.RowsAffected())
+
+	// Provenance промоутов ИЗ этого окружения (self-FK): версия-потомок в другом
+	// env остаётся, но её ссылка на удаляемый источник обнуляется.
+	if _, err := tx.Exec(ctx, `
+		update versions set promoted_from = null
+		where project_id = $1::uuid
+		  and promoted_from in (select id from versions where project_id = $1::uuid and env = $2)`,
+		projectID, name); err != nil {
+		return res, err
+	}
+	n, err = tx.Exec(ctx, `delete from versions where project_id = $1::uuid and env = $2`, projectID, name)
+	if err != nil {
+		return res, err
+	}
+	res.Versions = int(n.RowsAffected())
+
+	// match_stats_daily — платформенная таблица БЕЗ project_id (I5): строки
+	// адресуются (day, region, semver, env). Поэтому чистим её только когда имя
+	// окружения не занято ДРУГИМ проектом — иначе снесли бы чужие роллапы.
+	if _, err := tx.Exec(ctx, `
+		delete from match_stats_daily
+		where env = $2
+		  and not exists (select 1 from environments where name = $2 and project_id <> $1::uuid)`,
+		projectID, name); err != nil {
+		return res, err
+	}
+
+	// (6) Ключи (project, env): отзыв + вынужденное снятие привязки (см. док выше).
+	rows, err := tx.Query(ctx, `
+		update api_keys set revoked_at = now()
+		where project_id = $1::uuid and env = $2 and revoked_at is null
+		returning id::text, name`, projectID, name)
+	if err != nil {
+		return res, err
+	}
+	type revoked struct{ id, name string }
+	var keys []revoked
+	for rows.Next() {
+		var k revoked
+		if err := rows.Scan(&k.id, &k.name); err != nil {
+			rows.Close()
+			return res, err
+		}
+		keys = append(keys, k)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return res, err
+	}
+	for _, k := range keys {
+		res.RevokedKeyIDs = append(res.RevokedKeyIDs, k.id)
+		if err := insertEvent(ctx, tx, EventAPIKeyRevoked, EventRef{}, map[string]any{
+			"key_id": k.id, "name": k.name,
+			"project": project, "env": name, "reason": EventEnvironmentDeleted,
+		}); err != nil {
+			return res, err
+		}
+	}
+	res.APIKeysRevoked = len(keys)
+	if _, err := tx.Exec(ctx,
+		`update api_keys set project_id = null, env = null where project_id = $1::uuid and env = $2`,
+		projectID, name); err != nil {
+		return res, err
+	}
+
+	// (7) Событие — ДО удаления строки env (одна транзакция, порядок для читателя).
+	if err := insertEvent(ctx, tx, EventEnvironmentDeleted, EventRef{}, map[string]any{
+		"project": project, "name": res.Name, "production": res.Production,
+		"versions": res.Versions, "fleets": res.Fleets, "matches": res.Matches,
+		"servers": res.Servers, "api_keys_revoked": res.APIKeysRevoked,
+	}); err != nil {
+		return res, err
+	}
+	if _, err := tx.Exec(ctx,
+		`delete from environments where project_id = $1::uuid and name = $2`, projectID, name); err != nil {
+		return res, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return res, err
+	}
+	return res, nil
 }
 
 // SoleEnvWithActiveNodes returns the single environment of a project that has

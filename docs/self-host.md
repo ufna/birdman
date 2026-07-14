@@ -288,6 +288,10 @@ on busy/error is leaking disk. The disk-watermark GC stays as a backstop.
 
 Manage environments under **Admin → Environments** in the panel, or via
 `GET/POST /v1/environments` and `PATCH /v1/environments/{project}/{name}`.
+Deleting an environment removes everything inside it (versions, fleets, matches,
+servers; bound API keys are revoked), so it asks you to type the environment name
+to confirm — and it refuses while any node still lives there: move the nodes to
+another environment first (Fleet → *Move to env…*, or `PATCH /v1/nodes/{id}`).
 
 ---
 

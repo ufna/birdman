@@ -1,11 +1,12 @@
 // Access × environments v1 §5/§8: привязка ключа (project, env) в теле POST
 // /v1/apikeys, гейт bindable-скоупов (canBindScopes), и админка «Окружения»
-// (создание с guardrail production×auto_deploy, тело POST /v1/environments).
+// (создание с guardrail production×auto_deploy, тело POST /v1/environments,
+// удаление непустого окружения — состав из /usage + подтверждение вводом имени).
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ReactNode } from 'react';
-import type { Environment, Scope, SessionInfo } from '../lib/api';
+import type { Environment, EnvironmentUsage, Scope, SessionInfo } from '../lib/api';
 import { I18nProvider } from '../lib/i18n';
 import { SessionContext } from '../lib/session';
 import { EnvContext } from '../lib/env';
@@ -53,7 +54,9 @@ interface Recorded {
   body: unknown;
 }
 
-function accessFetch(calls: Recorded[], environments: Environment[]) {
+const noUsage: EnvironmentUsage = { versions: 0, fleets: 0, nodes: 0, servers: 0, matches: 0, api_keys: 0 };
+
+function accessFetch(calls: Recorded[], environments: Environment[], usage: EnvironmentUsage = noUsage) {
   return vi.fn((url: string, init?: RequestInit) => {
     const u = String(url);
     const method = init?.method ?? 'GET';
@@ -62,8 +65,23 @@ function accessFetch(calls: Recorded[], environments: Environment[]) {
     }
     const json = (body: unknown, status = 200) =>
       Promise.resolve(new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }));
+    // GET /v1/environments/{p}/{n}/usage — состав окружения для диалога удаления.
+    if (u.includes('/usage')) return json({ usage });
     if (u.includes('/v1/environments')) {
       if (method === 'POST') return json({ environment: dev }, 201);
+      if (method === 'DELETE') {
+        return json({
+          deleted: {
+            name: 'dev',
+            production: false,
+            versions: usage.versions,
+            fleets: usage.fleets,
+            matches: usage.matches,
+            servers: usage.servers,
+            api_keys_revoked: usage.api_keys,
+          },
+        });
+      }
       return json({ environments });
     }
     if (u.includes('/v1/apikeys')) {
@@ -78,8 +96,8 @@ function accessFetch(calls: Recorded[], environments: Environment[]) {
   });
 }
 
-function renderAccess(calls: Recorded[], environments: Environment[] = [dev, prod]) {
-  vi.stubGlobal('fetch', accessFetch(calls, environments));
+function renderAccess(calls: Recorded[], environments: Environment[] = [dev, prod], usage: EnvironmentUsage = noUsage) {
+  vi.stubGlobal('fetch', accessFetch(calls, environments, usage));
   const value = { ...baseEnv, environments };
   const ui: ReactNode = (
     <SessionContext.Provider value={{ session: sess('admin'), login: async () => {}, logout: async () => {}, invalidate: () => {} }}>
@@ -161,5 +179,91 @@ describe('Access — админка Окружения (create + guardrail)', ()
     // production ⇒ auto_deploy снят и заблокирован (guardrail).
     expect((auto as HTMLInputElement).checked).toBe(false);
     expect((auto as HTMLInputElement).disabled).toBe(true);
+  });
+});
+
+// --- Удаление окружения ВМЕСТЕ с содержимым (запрос владельца) ---
+
+/** Открывает диалог удаления первой строки таблицы окружений (dev). */
+async function openDeleteDialog(): Promise<HTMLElement> {
+  const rows = await screen.findAllByRole('button', { name: 'Delete' });
+  fireEvent.click(rows[0]);
+  return screen.findByRole('alertdialog');
+}
+
+const confirmLabel = 'Type the environment name to delete it:';
+
+describe('Окружения — удаление непустого (состав + подтверждение вводом имени)', () => {
+  it('диалог зовёт /usage и показывает состав (что снесём и сколько ключей отзовём)', async () => {
+    const calls: Recorded[] = [];
+    renderAccess(calls, [dev, prod], { versions: 3, fleets: 1, nodes: 0, servers: 2, matches: 5, api_keys: 1 });
+
+    const dialog = await openDeleteDialog();
+    await waitFor(() => {
+      expect(within(dialog).getByTestId('env-usage-versions').textContent).toContain('3');
+    });
+    expect(within(dialog).getByTestId('env-usage-fleets').textContent).toContain('1');
+    expect(within(dialog).getByTestId('env-usage-matches').textContent).toContain('5');
+    expect(within(dialog).getByTestId('env-usage-servers').textContent).toContain('2');
+    // Ключи — отдельной строкой (плюрал): «1 API key will be revoked.»
+    expect(within(dialog).getByText(/1 API key will be revoked/)).toBeTruthy();
+  });
+
+  it('«Удалить» глухая, пока имя не введено ТОЧНО; точное имя → DELETE с {confirm}', async () => {
+    const calls: Recorded[] = [];
+    renderAccess(calls, [dev, prod], { versions: 2, fleets: 1, nodes: 0, servers: 0, matches: 0, api_keys: 0 });
+
+    const dialog = await openDeleteDialog();
+    const del = await within(dialog).findByRole('button', { name: 'Delete' });
+    const input = within(dialog).getByLabelText(confirmLabel);
+    expect((del as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.change(input, { target: { value: 'de' } }); // неполное имя
+    expect((del as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(input, { target: { value: 'dev ' } }); // лишний пробел = не совпало
+    expect((del as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(input, { target: { value: 'DEV' } }); // регистр важен
+    expect((del as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.change(input, { target: { value: 'dev' } });
+    expect((del as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.click(del);
+    await waitFor(() => {
+      expect(calls.some((c) => c.method === 'DELETE')).toBe(true);
+    });
+    const req = calls.find((c) => c.method === 'DELETE');
+    expect(req?.url).toContain('/v1/environments/game/dev');
+    expect(req?.body).toEqual({ confirm: 'dev' });
+  });
+
+  it('ноды в окружении → блокирующее предупреждение, удаление недоступно', async () => {
+    const calls: Recorded[] = [];
+    renderAccess(calls, [dev, prod], { versions: 1, fleets: 1, nodes: 2, servers: 0, matches: 0, api_keys: 0 });
+
+    const dialog = await openDeleteDialog();
+    await waitFor(() => {
+      expect(within(dialog).getByText(/2 nodes still live here/)).toBeTruthy();
+    });
+    // Шага подтверждения нет вовсе, кнопка удаления глухая.
+    expect(within(dialog).queryByLabelText(confirmLabel)).toBeNull();
+    const del = within(dialog).getByRole('button', { name: 'Delete' });
+    expect((del as HTMLButtonElement).disabled).toBe(true);
+    expect(calls.some((c) => c.method === 'DELETE')).toBe(false);
+  });
+
+  it('кнопка копирования кладёт имя окружения в буфер', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    renderAccess([], [dev, prod], { versions: 1, fleets: 0, nodes: 0, servers: 0, matches: 0, api_keys: 0 });
+
+    const dialog = await openDeleteDialog();
+    // aria-label кнопки стабилен («Copy name»), меняется только видимая подпись.
+    const copy = await within(dialog).findByRole('button', { name: 'Copy name' });
+    fireEvent.click(copy);
+    expect(writeText).toHaveBeenCalledWith('dev');
+    await waitFor(() => {
+      expect(copy.textContent).toBe('Copied');
+    });
   });
 });

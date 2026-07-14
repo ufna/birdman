@@ -158,6 +158,7 @@ export const en = {
   'event.apikey_revoked': 'Key revoked',
   'event.apikey_purged': 'Key deleted forever',
   'event.node_env_changed': 'Node moved to env',
+  'event.environment_deleted': 'Environment deleted',
   'event.version_promoted': 'Version promoted',
   'event.version_retired': 'Version retired',
 
@@ -769,11 +770,36 @@ export const en = {
   'access.environments.delete': 'Delete',
   'access.environments.delete.title': 'Delete environment {name}?',
   'access.environments.delete.desc':
-    'Only a never-used environment can be deleted. Once it has versions, fleets, nodes or keys it is undeletable in v1 (version history is kept).',
-  'access.environments.delete.usedHint': "In use — can't be deleted (v1 keeps version history).",
+    'The environment is deleted together with everything in it. This cannot be undone.',
+  'access.environments.delete.usage': 'Will be deleted:',
+  'access.environments.delete.usage.versions': 'Versions',
+  'access.environments.delete.usage.fleets': 'Fleets',
+  'access.environments.delete.usage.matches': 'Matches',
+  'access.environments.delete.usage.servers': 'Servers',
+  // Плюрал: у en только one/other (0 → other), поэтому «0 API keys» — норма.
+  'access.environments.delete.usage.keys.one': '{count} API key will be revoked.',
+  'access.environments.delete.usage.keys.few': '{count} API keys will be revoked.',
+  'access.environments.delete.usage.keys.many': '{count} API keys will be revoked.',
+  'access.environments.delete.usage.keys.other': '{count} API keys will be revoked.',
+  'access.environments.delete.usageErr': "Couldn't load what this environment holds.",
+  // Ноды не каскадятся: их переводят в другое окружение руками (экран «Флот»).
+  'access.environments.delete.nodesBlock.one':
+    '{count} node still lives here. Move it to another environment first (Fleet → Move to env…).',
+  'access.environments.delete.nodesBlock.few':
+    '{count} nodes still live here. Move them to another environment first (Fleet → Move to env…).',
+  'access.environments.delete.nodesBlock.many':
+    '{count} nodes still live here. Move them to another environment first (Fleet → Move to env…).',
+  'access.environments.delete.nodesBlock.other':
+    '{count} nodes still live here. Move them to another environment first (Fleet → Move to env…).',
+  'access.environments.delete.confirmLabel': 'Type the environment name to delete it:',
+  'access.environments.delete.copy': 'Copy name',
+  'access.environments.delete.copied': 'Copied',
+  'access.environments.delete.err': "Couldn't delete the environment.",
   'access.environments.toast.created': 'Environment {name} created',
   'access.environments.toast.updated': 'Environment {name} updated',
   'access.environments.toast.deleted': 'Environment {name} deleted',
+  'access.environments.toast.deletedCascade':
+    'Environment {name} deleted: versions {versions}, fleets {fleets}, matches {matches}, servers {servers}, keys revoked {keys}',
 
   // Stats: CCU is platform-wide (global), noted when an env filter is active.
   'stats.ccu.platformWide': 'platform-wide (not filtered by env)',
