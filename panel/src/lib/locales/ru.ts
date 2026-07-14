@@ -670,7 +670,6 @@ export const ru: Record<MessageKey, string> = {
   // Глобальный переключатель env (чипы в Shell).
   'env.switch': 'Окружение',
   'env.all': 'Все',
-  'env.production': 'production',
   'env.productionTitle': 'production-окружение',
 
   // Деплои: бейдж env, промоут, provenance, скрытие disabled, карточка настроек env.

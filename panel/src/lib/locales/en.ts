@@ -686,7 +686,6 @@ export const en = {
   // Global env switcher (Shell chips).
   'env.switch': 'Environment',
   'env.all': 'All',
-  'env.production': 'production',
   'env.productionTitle': 'production environment',
 
   // Deploys: env badge, promote, provenance, hide-disabled, env settings card.

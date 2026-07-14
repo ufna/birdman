@@ -18,6 +18,7 @@ import {
   storedEnv,
 } from '../lib/env';
 import { EnvChips } from '../components/Shell';
+import { EventsFeed } from '../components/EventsFeed';
 import { Fleet } from '../screens/Fleet';
 
 const dev: Environment = { project: 'game', name: 'dev', production: false, auto_deploy: true, retention_keep: 20, created_at: '2026-07-01T00:00:00Z' };
@@ -188,5 +189,46 @@ describe('переключатель фильтрует — Флот по env', 
     await waitFor(() => {
       expect(screen.getByText('prod-1.host')).toBeTruthy();
     });
+  });
+});
+
+// --- интеграция: лента событий Overview фильтруется по env (I1 ревью, M13) ---
+
+describe('EventsFeed фильтруется по env (I1)', () => {
+  // Микс: dev-событие (payload.env), prod-событие через version_promoted
+  // (env := to_env), событие БЕЗ env (видно только в «All»).
+  const feed: ApiEvent[] = [
+    { id: 1, ts: '2026-07-14T00:00:01Z', kind: 'version_registered', payload: { env: 'dev', semver: '1.0.0' } },
+    { id: 2, ts: '2026-07-14T00:00:02Z', kind: 'version_promoted', payload: { from_env: 'dev', to_env: 'prod' } },
+    { id: 3, ts: '2026-07-14T00:00:03Z', kind: 'node_created', payload: {} },
+  ];
+
+  function feedFetch() {
+    return vi.fn((url: string) => {
+      const body = String(url).includes('/v1/events') ? { events: feed } : {};
+      return Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    });
+  }
+
+  it('selected=dev → только dev-событие; prod и без-env скрыты', async () => {
+    vi.stubGlobal('fetch', feedFetch());
+    render(withEnv({ ...baseEnv, selected: 'dev' }, <EventsFeed />));
+    expect(await screen.findByText('Version registered')).toBeTruthy();
+    expect(screen.queryByText('Version promoted')).toBeNull(); // to_env=prod
+    expect(screen.queryByText('Node registered')).toBeNull(); // без env — только в «All»
+  });
+
+  it('selected=null («All») → видны все три', async () => {
+    vi.stubGlobal('fetch', feedFetch());
+    render(withEnv({ ...baseEnv, selected: null }, <EventsFeed />));
+    expect(await screen.findByText('Version registered')).toBeTruthy();
+    expect(screen.getByText('Version promoted')).toBeTruthy();
+    expect(screen.getByText('Node registered')).toBeTruthy();
+  });
+
+  it('под фильтром пусто, но события есть → «No events for these filters.»', async () => {
+    vi.stubGlobal('fetch', feedFetch());
+    render(withEnv({ ...baseEnv, selected: 'staging' }, <EventsFeed />));
+    expect(await screen.findByText('No events for these filters.')).toBeTruthy();
   });
 });
