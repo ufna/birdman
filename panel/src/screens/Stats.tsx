@@ -15,6 +15,7 @@ import type { ReactNode } from 'react';
 import { api } from '../lib/api';
 import type { StatsOverview, TimeToMatch } from '../lib/api';
 import { useLiveAsync } from '../lib/live';
+import { useEnv } from '../lib/env';
 import { useT, useFormat } from '../lib/i18n';
 import { toSimpleColumns, toStackModel, versionShareModel } from '../lib/stats';
 import {
@@ -58,7 +59,10 @@ export function Stats() {
   const [rangeKey, setRangeKey] = useState(DEFAULT_RANGE_KEY);
   const range = rangeByKey(rangeKey);
   const days = effectiveDays(range);
-  const ov = useLiveAsync(() => api.statsOverview(days), [days]);
+  const { selected } = useEnv();
+  // env сужает историю через ?env= (environments v1 §7, I5). CCU остаётся
+  // глобальным платформенным пиком — StatsBody подписывает его «platform-wide».
+  const ov = useLiveAsync(() => api.statsOverview(days, selected ?? undefined), [days, selected]);
   // Показываем данные, только если они за ЗАПРОШЕННЫЙ период; иначе (первая
   // загрузка или смена периода/режима) — скелетон под финальную раскладку.
   const ready = ov.data !== undefined && ov.data.days === days;
@@ -84,7 +88,7 @@ export function Stats() {
       {range.mode === 'live' ? (
         <LiveBody range={range} days={days} ov={ov} />
       ) : ready && ov.data !== undefined ? (
-        <StatsBody ov={ov.data} />
+        <StatsBody ov={ov.data} envActive={selected !== null} />
       ) : (
         <StatsSkeleton />
       )}
@@ -196,7 +200,7 @@ function StatsSkeleton() {
   );
 }
 
-function StatsBody({ ov }: { ov: StatsOverview }) {
+function StatsBody({ ov, envActive }: { ov: StatsOverview; envActive: boolean }) {
   const { t } = useT();
   const fmt = useFormat();
   const int = (v: number) => String(Math.round(v));
@@ -216,7 +220,11 @@ function StatsBody({ ov }: { ov: StatsOverview }) {
     <div className="flex flex-col gap-4">
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <StatCard label={t('stats.card.matches')} value={int(totalMatches)} detail={t('stats.card.matchesDetail', { days: ov.days })} />
-        <StatCard label={t('stats.card.peakCcu')} value={ov.peak_ccu} detail={t('stats.card.peakCcuDetail')} />
+        <StatCard
+          label={t('stats.card.peakCcu')}
+          value={ov.peak_ccu}
+          detail={envActive ? t('stats.ccu.platformWide') : t('stats.card.peakCcuDetail')}
+        />
         <StatCard label={t('stats.card.avgDuration')} value={dur(ov.avg_match_duration_seconds)} detail={t('stats.card.avgDurationDetail')} />
         <StatCard
           label={t('stats.card.fillRate')}
@@ -256,7 +264,7 @@ function StatsBody({ ov }: { ov: StatsOverview }) {
           />
         </Card>
         <Card className="p-4">
-          <ChartHeading title={t('stats.peakCcuPerDay')} note={t('stats.peakCcuNote')} />
+          <ChartHeading title={t('stats.peakCcuPerDay')} note={envActive ? t('stats.ccu.platformWide') : t('stats.peakCcuNote')} />
           <BarChart
             columns={ccu.columns}
             max={ccu.max}

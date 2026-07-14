@@ -39,6 +39,10 @@ export const EVENT_KINDS = [
   // quarantine молчит дольше node_down_after_min — и state ноды → down, и событие
   // ленты того же kind (store/models.go: EventNodeDown, рядом с quarantine).
   'node_created', 'node_quarantine', 'node_down', 'node_recovered', 'node_drain', 'node_undrain',
+  // environments v1 (§2/§6): node_env_changed — нода переведена в другой env;
+  // version_promoted — версия создана промоутом dev→prod (provenance);
+  // version_retired — версия ушла registered→disabled ретеншном (не флип/TTL).
+  'node_env_changed', 'version_promoted', 'version_retired',
   // mTLS agentlink v1 (docs/superpowers/specs/2026-07-10-mtls-agentlink-design.md
   // §7): node_enrolled — первый обмен node_token→серт; node_cert_renewed —
   // ротация клиентского серта по живой mTLS-сессии.
@@ -175,10 +179,14 @@ export function toneOfEventKind(kind: string): Tone {
     case 'node_enrolled':
     case 'deploy_activated':
     case 'agent_upgrade_succeeded':
+    // version_promoted — успешный шаг «вперёд» dev→prod, как deploy_activated.
+    case 'version_promoted':
       return 'good';
     case 'node_created':
     case 'node_cert_renewed':
     case 'version_registered':
+    // node_env_changed — операционная перенастройка, как node_created/fleet_updated.
+    case 'node_env_changed':
     case 'fleet_updated':
     case 'deploy_started':
     case 'deploy_node_pulled':
@@ -191,6 +199,11 @@ export function toneOfEventKind(kind: string): Tone {
     case 'registry_removed':
     case 'apikey_revoked':
       return 'warn';
+    // version_retired — тихая уборка ретеншном (registered→disabled), прошлое:
+    // neutral (спокойнее, чем warn у version_disabled — флип/TTL). Явно, хоть и
+    // совпадает с default, — решение по тонам зафиксировано спекой (§8).
+    case 'version_retired':
+      return 'neutral';
     default:
       return 'neutral';
   }

@@ -72,18 +72,20 @@ afterEach(() => {
 // --- lib/deployHowto: билдеры curl (чистые функции, точные строки) ---
 
 describe('lib/deployHowto — registerVersionCurl', () => {
-  it('auth-заголовок, URL с origin, JSON-поля project/semver/image_ref/channel', () => {
-    const cmd = registerVersionCurl(ctx, '1.2.3', 'prod');
+  it('auth-заголовок, URL с origin, JSON-поля project/semver/image_ref/env', () => {
+    const cmd = registerVersionCurl(ctx, '1.2.3', 'dev');
     expect(cmd).toContain('curl -H "Authorization: Bearer $BIRDMAN_DEPLOY_KEY"');
     expect(cmd).toContain('http://127.0.0.1:8100/v1/versions');
     expect(cmd).toContain('"project": "ourgame"');
     expect(cmd).toContain('"semver": "1.2.3"');
     expect(cmd).toContain('"image_ref": "ghcr.io/x/y:1.0.0"');
-    expect(cmd).toContain('"channel": "prod"');
+    expect(cmd).toContain('"env": "dev"'); // env заменил channel (environments v1)
+    expect(cmd).not.toContain('channel');
   });
 
-  it('channel staging тоже подставляется как есть', () => {
-    expect(registerVersionCurl(ctx, '1.2.3', 'staging')).toContain('"channel": "staging"');
+  it('любой env подставляется как есть (dev/prod/staging)', () => {
+    expect(registerVersionCurl(ctx, '1.2.3', 'staging')).toContain('"env": "staging"');
+    expect(registerVersionCurl(ctx, '1.2.3', 'prod')).toContain('"env": "prod"');
   });
 });
 
@@ -227,7 +229,7 @@ describe('DeployHowto — сворачивание по умолчанию', () 
 
     fireEvent.click(toggle);
     expect(screen.getByText('1. Build & push the server image')).toBeTruthy();
-    expect(screen.getByText(/staging/)).toBeTruthy(); // channel staging упомянут
+    expect(screen.getByText(/non-production/)).toBeTruthy(); // register-label теперь про env, не channel
     expect(screen.getByRole('button', { name: 'Hide steps' }).getAttribute('aria-expanded')).toBe('true');
   });
 
@@ -289,7 +291,8 @@ describe('DeployHowto — copy-кнопки пишут точную команд
 
     const block = screen.getByTestId('howto-register-cmd');
     fireEvent.click(within(block).getByRole('button', { name: 'Copy register command' }));
-    expect(writeText).toHaveBeenCalledWith(registerVersionCurl(ctx, '1.2.3', 'prod'));
+    // Без EnvProvider useEnv=fallback → exampleEnv по умолчанию 'dev'.
+    expect(writeText).toHaveBeenCalledWith(registerVersionCurl(ctx, '1.2.3', 'dev'));
     expect(await within(block).findByRole('button', { name: 'Copied' })).toBeTruthy();
   });
 
@@ -383,7 +386,7 @@ describe('DeployHowto — inline-создание deploy-ключа (Task 7 §5)
     });
 
     fireEvent.click(within(block).getByRole('button', { name: 'Copy register command' }));
-    expect(writeText).toHaveBeenCalledWith(registerVersionCurl(ctx, '1.2.3', 'prod', { name: 'deploy-fixed', secret: 'bmk_freshsecret' }));
+    expect(writeText).toHaveBeenCalledWith(registerVersionCurl(ctx, '1.2.3', 'dev', { name: 'deploy-fixed', secret: 'bmk_freshsecret' }));
   });
 
   it('ошибка создания (400) показана рядом с формой, секрет не подставляется', async () => {

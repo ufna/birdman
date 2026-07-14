@@ -55,15 +55,15 @@ function bearerToken(key: HowtoKey | undefined): string {
 
 /**
  * curl регистрации версии: POST {origin}/v1/versions (скоуп deploy), тело
- * {project, semver, image_ref, channel} — поля сверены с
- * master/internal/httpapi/handlers.go (createVersionRequest). Без key — только
- * плейсхолдер $BIRDMAN_DEPLOY_KEY, секретов в командах нет (поведение по
- * умолчанию не меняется — Task 7 добавляет key строго опционально). Формат
- * Authorization: Bearer сверен с master/internal/httpapi/auth.go.
+ * {project, semver, image_ref, env} — поля сверены с master/internal/httpapi/
+ * handlers.go (createVersionRequest: env заменил прежний channel в
+ * environments v1; channel как поле УМЕР — старый howto слал нерабочий запрос).
+ * Без key — только плейсхолдер $BIRDMAN_DEPLOY_KEY, секретов в командах нет.
+ * Формат Authorization: Bearer сверен с master/internal/httpapi/auth.go.
  */
-export function registerVersionCurl(ctx: HowtoCtx, semver: string, channel: 'staging' | 'prod', key?: HowtoKey): string {
+export function registerVersionCurl(ctx: HowtoCtx, semver: string, env: string, key?: HowtoKey): string {
   const body = JSON.stringify(
-    { project: ctx.project, semver, image_ref: ctx.exampleImage, channel },
+    { project: ctx.project, semver, image_ref: ctx.exampleImage, env },
     null,
     2,
   );

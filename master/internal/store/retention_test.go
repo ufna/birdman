@@ -225,6 +225,100 @@ func TestRetentionKeepsAutoDeployTarget(t *testing.T) {
 	}
 }
 
+// TestRetentionIdempotent (y3): a second RetireVersions pass over an already-
+// retired env is a no-op — versions disabled by the first pass stay disabled (the
+// update targets r.state='registered' only), nothing new is retired, and no
+// duplicate version_retired events pile up on every reconcile subtick.
+func TestRetentionIdempotent(t *testing.T) {
+	st := testdb.New(t)
+	ctx := context.Background()
+	f := testdb.Seed(t, st, "eu", 10)
+	if _, err := st.CreateEnvironment(ctx, store.CreateEnvironmentParams{
+		Project: "game", Name: "stg", RetentionKeep: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Three registered, all >1h; keep=1 → two retired on the first pass.
+	for _, a := range []struct {
+		semver string
+		age    time.Duration
+	}{{"0.1.0", 4 * time.Hour}, {"0.2.0", 3 * time.Hour}, {"0.3.0", 2 * time.Hour}} {
+		id := f.AddVersion(t, a.semver, "stg")
+		backdateVersion(t, st, id, a.age)
+	}
+
+	first, err := st.RetireVersions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 2 {
+		t.Fatalf("first pass: want 2 retired, got %d: %+v", len(first), first)
+	}
+	n1, _ := st.CountEvents(ctx, store.EventVersionRetired)
+
+	// Second pass over the same state: nothing new, no duplicate events.
+	second, err := st.RetireVersions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 0 {
+		t.Fatalf("second pass must be a no-op, got %d retired: %+v", len(second), second)
+	}
+	n2, _ := st.CountEvents(ctx, store.EventVersionRetired)
+	if n1 != 2 || n2 != 2 {
+		t.Fatalf("version_retired must not double on re-run: first=%d, after=%d (want 2, 2)", n1, n2)
+	}
+}
+
+// TestRetentionPreexistingDisabledFillKeep (y3): retention ranks registered AND
+// disabled versions together (one partition, created_at desc), so a pre-existing
+// disabled version occupies a keep-slot. With keep=2 and the two NEWEST versions
+// already disabled, every registered version below them is beyond keep and gets
+// retired — a naive «count only registered» ranking would have spared two.
+func TestRetentionPreexistingDisabledFillKeep(t *testing.T) {
+	st := testdb.New(t)
+	ctx := context.Background()
+	f := testdb.Seed(t, st, "eu", 10)
+	if _, err := st.CreateEnvironment(ctx, store.CreateEnvironmentParams{
+		Project: "game", Name: "stg", RetentionKeep: 2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Three older registered versions...
+	reg := map[string]string{}
+	for _, a := range []struct {
+		semver string
+		age    time.Duration
+	}{{"0.1.0", 5 * time.Hour}, {"0.2.0", 4 * time.Hour}, {"0.3.0", 3 * time.Hour}} {
+		id := f.AddVersion(t, a.semver, "stg")
+		backdateVersion(t, st, id, a.age)
+		reg[a.semver] = id
+	}
+	// ...and two NEWEST versions already disabled — they consume both keep slots.
+	for _, a := range []struct {
+		semver string
+		age    time.Duration
+	}{{"0.4.0", 2 * time.Hour}, {"0.5.0", 90 * time.Minute}} {
+		id := f.AddVersion(t, a.semver, "stg")
+		backdateVersion(t, st, id, a.age)
+		forceVersionState(t, st, id, "disabled")
+	}
+
+	retired, err := st.RetireVersions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// keep=2 fully consumed by the two disabled → all three registered retired.
+	if len(retired) != 3 {
+		t.Fatalf("pre-existing disabled must occupy keep-slots → 3 registered retired, got %d: %+v", len(retired), retired)
+	}
+	for semver, id := range reg {
+		if got := envVersionState(t, st, id); got != "disabled" {
+			t.Fatalf("%s must be retired (disabled fills keep), got %s", semver, got)
+		}
+	}
+}
+
 // TestImageRefInUseGuard covers the shared-ref guard (environments v1 §6б): a ref
 // is «in use» only while a NON-disabled version of the SAME (project, env) names
 // it; a different env sharing the exact ref string does not count (env-scoped).

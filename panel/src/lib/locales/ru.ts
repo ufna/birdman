@@ -76,6 +76,7 @@ export const ru: Record<MessageKey, string> = {
   'col.playersPeak': 'Пик игроков',
   'col.created': 'Создан',
   'col.node': 'Тачка',
+  'col.env': 'Окр.',
   'col.slots': 'Слоты',
   'col.heartbeat': 'Heartbeat',
   'col.agent': 'Агент',
@@ -140,6 +141,9 @@ export const ru: Record<MessageKey, string> = {
   'event.apikey_created': 'Ключ создан',
   'event.apikey_revoked': 'Ключ отозван',
   'event.apikey_purged': 'Ключ удалён навсегда',
+  'event.node_env_changed': 'Тачка сменила окружение',
+  'event.version_promoted': 'Версия промоутнута',
+  'event.version_retired': 'Версия снята ретеншном',
 
   // — подписи скоупов API-ключа (коды остаются в API) —
   'scope.admin': 'Админ',
@@ -375,7 +379,7 @@ export const ru: Record<MessageKey, string> = {
   'deploys.howto.key.hideSecret': 'Скрыть секрет',
   'deploys.howto.key.toastCreated': 'Ключ {name} создан',
   'deploys.howto.step3.title': '3. Зарегистрируй версию и задеплой',
-  'deploys.howto.step3.registerLabel': 'Регистрация новой версии (тут channel prod — для стейджинга используй staging):',
+  'deploys.howto.step3.registerLabel': 'Регистрация новой версии (env в теле — куда версия ляжет; CI обычно катит в non-production env вроде dev):',
   'deploys.howto.step3.deployLabel': 'Деплой зарегистрированной версии:',
   'deploys.howto.step3.localNote':
     'master слушает только localhost тачки — выполняй эти команды с самой тачки или через SSH-туннель (адрес этой панели — уже туннель).',
@@ -661,4 +665,80 @@ export const ru: Record<MessageKey, string> = {
   'backups.history.result.ok': 'ок',
   'backups.history.result.error': 'ошибка',
   'event.backup_failed': 'Бекап упал',
+
+  // --- Окружения (environments v1 §8) ---
+  // Глобальный переключатель env (чипы в Shell).
+  'env.switch': 'Окружение',
+  'env.all': 'Все',
+  'env.productionTitle': 'production-окружение',
+
+  // Деплои: бейдж env, промоут, provenance, скрытие disabled, карточка настроек env.
+  'deploys.hideDisabled': 'Скрыть отключённые',
+  'deploys.promote': 'Промоут',
+  'deploys.promote.title': 'Промоут {semver} из {from}',
+  'deploys.promote.desc':
+    'Зарегистрировать {semver} в production-окружении (тот же образ, provenance сохраняется) и задеплоить туда. Живые матчи других окружений не затрагиваются.',
+  'deploys.promote.target': 'Целевое окружение',
+  'deploys.promote.confirm': 'Промоутнуть',
+  'deploys.promote.noTargets': 'Нет production-окружения для промоута — создайте его в Админке → Окружения.',
+  'deploys.promote.toast': 'Промоут {semver} → {env}',
+  'deploys.provenance': 'промоут из {from}',
+  'deploys.provenance.unknown': 'промоут из другого окружения',
+  'deploys.env.settings': 'Настройки окружения',
+  'deploys.env.settingsFor': 'Настройки {env}',
+  'deploys.env.autoDeploy': 'Авто-деплой',
+  'deploys.env.autoDeployHint': 'Регистрация версии сразу деплоит её (dev-поток). На production запрещено.',
+  'deploys.env.retention': 'Хранить версий',
+  'deploys.env.retentionHint': '0 = без лимита. Registered/disabled-версии сверх N снимаются ретеншном.',
+  'deploys.env.save': 'Сохранить',
+  'deploys.env.toast': 'Окружение {env} обновлено',
+  'deploys.emptyEnv': 'В этом окружении версий нет.',
+
+  // Доступ: привязка API-ключа к (project, env).
+  'access.col.binding': 'Привязка',
+  'access.binding.global': 'глобальный',
+  'access.create.binding': 'Привязка',
+  'access.create.bindingHint':
+    'Ключи deploy/matchmaking/allocate можно привязать к одному окружению. Admin-ключ привязать нельзя.',
+  'access.create.bindingGlobal': 'Глобальный (все окружения)',
+
+  // Доступ: секция-админка «Окружения».
+  'access.environments': 'Окружения',
+  'access.environments.hint':
+    'Окружения — измерение платформы на проект. Поведение ведёт флаг production, не имя.',
+  'access.environments.empty': 'Окружений пока нет.',
+  'access.environments.col.name': 'Имя',
+  'access.environments.col.production': 'Production',
+  'access.environments.col.autoDeploy': 'Авто-деплой',
+  'access.environments.col.retention': 'Хранить версий',
+  'access.environments.col.created': 'Создано',
+  'access.environments.flag.on': 'вкл',
+  'access.environments.flag.off': 'выкл',
+  'access.environments.retentionUnlimited': 'без лимита',
+  'access.environments.add': 'Добавить окружение',
+  'access.environments.create.title': 'Добавить окружение',
+  'access.environments.create.desc':
+    'Задайте имя в нижнем регистре. Флаг production ведёт поведение: production запрещает авто-деплой и держит версии без лимита.',
+  'access.environments.create.name': 'Имя',
+  'access.environments.create.namePlaceholder': 'напр. staging',
+  'access.environments.create.production': 'Production-окружение',
+  'access.environments.create.autoDeploy': 'Авто-деплой новых версий',
+  'access.environments.create.retention': 'Хранить версий (0 = без лимита)',
+  'access.environments.create.submit': 'Создать',
+  'access.environments.create.err': 'Не удалось сохранить окружение.',
+  'access.environments.guardrail': 'Авто-деплой доступен только при выключенном production.',
+  'access.environments.edit': 'Изменить',
+  'access.environments.edit.title': 'Изменить окружение {name}',
+  'access.environments.edit.desc': 'Имя иммутабельно. Включение авто-деплоя требует выключенного production.',
+  'access.environments.delete': 'Удалить',
+  'access.environments.delete.title': 'Удалить окружение {name}?',
+  'access.environments.delete.desc':
+    'Удалить можно только никогда не использованное окружение. Как только появились версии, флоты, ноды или ключи — в v1 оно неудаляемо (история версий хранится).',
+  'access.environments.delete.usedHint': 'Используется — удалить нельзя (v1 хранит историю версий).',
+  'access.environments.toast.created': 'Окружение {name} создано',
+  'access.environments.toast.updated': 'Окружение {name} обновлено',
+  'access.environments.toast.deleted': 'Окружение {name} удалено',
+
+  // Статистика: CCU — глобальный (платформенный) пик; подпись при активном env-фильтре.
+  'stats.ccu.platformWide': 'по всей платформе (без фильтра по env)',
 };

@@ -45,6 +45,14 @@ describe('маппинг состояний в тона', () => {
     expect(toneOfEventKind('fleet_updated')).toBe('accent');
     expect(toneOfEventKind('something_new')).toBe('neutral');
   });
+  it('env-события (environments v1): promoted→good, retired→neutral, env_changed→accent', () => {
+    expect(toneOfEventKind('version_promoted')).toBe('good');
+    expect(toneOfEventKind('version_retired')).toBe('neutral');
+    expect(toneOfEventKind('node_env_changed')).toBe('accent');
+    for (const k of ['version_promoted', 'version_retired', 'node_env_changed']) {
+      expect(EVENT_KINDS).toContain(k);
+    }
+  });
 });
 
 describe('StateBadge', () => {

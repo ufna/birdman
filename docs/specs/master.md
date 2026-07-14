@@ -18,6 +18,7 @@ create table nodes (
   id                uuid primary key default gen_random_uuid(),
   project_id        uuid not null references projects(id),
   region            text not null,          -- 'eu', 'us-east'
+  env               text not null default 'dev', -- (environments v1) нода принадлежит одному env; FK (project_id, env); перевод пустой ноды — PATCH /v1/nodes/{id}
   hostname          text not null,
   public_ip         inet not null,
   capacity_slots    int  not null,
@@ -49,16 +50,35 @@ create table internal_ca (
   not_after  timestamptz not null
 );
 
+-- (environments v1, миграция 000013) окружение — полноценное измерение per project;
+-- сид dev+prod каждому проекту (ensureProject добавляет их новому). Флаги ведут
+-- политику, не имя (§Окружения).
+create table environments (
+  id             uuid primary key default gen_random_uuid(),
+  project_id     uuid not null references projects(id) on delete cascade,
+  name           text not null check (name ~ '^[a-z0-9][a-z0-9-]{0,31}$'),
+  production     boolean not null default false,
+  auto_deploy    boolean not null default false,
+  retention_keep int not null default 0 check (retention_keep >= 0),
+  created_at     timestamptz not null default now(),
+  unique (project_id, name),
+  check (not (production and auto_deploy)),          -- guardrail и на уровне БД
+  check (name not in ('all', 'global'))              -- зарезервировано под UI/API
+);
+
 create table versions (
-  id         uuid primary key default gen_random_uuid(),
-  project_id uuid not null references projects(id),
-  semver     text not null,                 -- '1.4.2'
-  image_ref  text not null,                 -- 'ghcr.io/org/ourgame-server:1.4.2'
-  channel    text not null check (channel in ('staging','prod')),
-  state      text not null default 'registered'
-             check (state in ('registered','prepulling','active','deprecated','disabled')),
-  created_at timestamptz not null default now(),
-  unique (project_id, semver, channel)
+  id            uuid primary key default gen_random_uuid(),
+  project_id    uuid not null references projects(id),
+  semver        text not null,                 -- '1.4.2'
+  image_ref     text not null,                 -- 'ghcr.io/org/ourgame-server:1.4.2'
+  env           text not null,                 -- (environments v1) заменило channel; FK (project_id, env)→environments
+  promoted_from uuid references versions(id),  -- (environments v1) provenance промоута dev→prod
+  state         text not null default 'registered'
+                check (state in ('registered','prepulling','active','deprecated','disabled')),
+  created_at    timestamptz not null default now(),
+  unique (project_id, env, semver),                       -- было (project_id, semver, channel)
+  unique (id, project_id, env),                           -- опора составного FK флота
+  foreign key (project_id, env) references environments (project_id, name)
 );
 
 create table servers (
@@ -66,6 +86,7 @@ create table servers (
   project_id uuid not null references projects(id),
   node_id    uuid not null references nodes(id),
   version_id uuid not null references versions(id),
+  env        text not null default 'dev',   -- (environments v1) env исполнения (денормализовано; берётся отсюда, НЕ join'ом к nodes — перевод ноды не переписывает историю)
   state      text not null default 'creating'
              check (state in ('creating','ready','allocated','draining','failed','reaped')),
   port       int  not null,
@@ -85,6 +106,7 @@ create table matches (
   server_id    uuid not null references servers(id),
   version_id   uuid not null references versions(id),
   region       text not null,
+  env          text not null default 'dev',  -- (environments v1) env исполнения (денормализовано, для метрик/статистики; I6 — из строки, не из ноды)
   state        text not null default 'pending'
                check (state in ('pending','running','finished','aborted')),
   players_peak int not null default 0,
@@ -93,14 +115,18 @@ create table matches (
   created_at   timestamptz not null default now()
 );
 
-create table fleet_configs (            -- desired state per (project, region)
+create table fleet_configs (            -- desired state per (project, env, region)
   project_id      uuid not null references projects(id),
+  env             text not null,             -- (environments v1) флот скоупится окружением
   region          text not null,
   active_version  uuid references versions(id),
   buffer_ready    int  not null default 2,   -- сколько ready держать
   max_servers     int  not null default 50,
   reap_ttl_min    int  not null default 180, -- добой deprecated-дедиков
-  primary key (project_id, region)
+  primary key (project_id, env, region),
+  foreign key (project_id, env) references environments (project_id, name),
+  -- (environments v1, C3) active_version обязан принадлежать тому же (project, env):
+  foreign key (active_version, project_id, env) references versions (id, project_id, env)
 );
 
 create table events (                    -- аудит + лента для панели/алертов
@@ -117,8 +143,12 @@ create table api_keys (
   name   text not null,
   hash   text not null,                  -- bcrypt ключа
   scopes text[] not null,                -- {admin} {deploy} {matchmaking} {allocate} {readonly}
+  project_id uuid references projects(id),      -- (environments v1) опциональная привязка ключа
+  env    text,                                  -- строго парой с project_id (NULL/NULL = глобальный ключ)
   created_at timestamptz not null default now(),
-  revoked_at timestamptz
+  revoked_at timestamptz,
+  check ((project_id is null) = (env is null)), -- полусвязанных ключей нет (I8)
+  foreign key (project_id, env) references environments (project_id, name)
 );
 ```
 
@@ -174,11 +204,11 @@ returning id, node_id, port;
 - Тикет: `{ticket_id, player_id, client_version, regions: [{region, rtt_ms}]}`. Очереди **in-memory** per (region, compat-bucket). Потеря при рестарте — ок: клиент ре-квьюится (см. `sdk.md`). (Уточнено в v0: статусы тикета `queued | matched | update_required | cancelled | expired`; TTL тикета в очереди — конфиг `ticket_ttl_s`, деф. 120с → `expired`; терминальные тикеты живут в памяти ещё ~2×TTL для поздних GET.)
 - Тик каждые **500мс**: в каждой очереди собрать группы по `match_size` (конфиг per project — колонка `projects.match_size`, деф. 2, правится `PUT /v1/projects/{slug}`; уточнено в v0) → `allocate` (внутренний вызов store с новым `match_id` uuid, регионом и пиненой версией) → всем участникам `matched {host, port, match_id, join_token?}`. `no_capacity` → тикеты остаются в очереди, ретрай следующим тиком (буфер тем временем поднимает reconcile); заодно инкрементится `birdman_allocation_failures_total{no_capacity}` — алерт BufferEmpty видит и внутренние отказы.
 - Выбор региона: минимальный медианный rtt по группе (группа — старейшие `match_size` тикетов, FIFO; тай-брейк — имя региона); если очередь региона < match_size дольше `widen_after_s` (деф. 30с) — расширяем на следующий по rtt регион игрока (ещё один регион за каждый следующий интервал).
-- `client_version` не входит ни в один compat-bucket активных версий → ответ `update_required` (проверка на submit и на каждом тике — смена активной версии не оставляет несовместимые тикеты висеть). (Уточнено в v0: правило по умолчанию major.minor из `ops.md` §3, overrides-таблица — позже; «активные версии» региона = `fleet_configs.active_version` + versions(state=active, channel=prod), пока deploy-менеджер не переводит state — см. §5; при полном отсутствии активных версий тикеты ждут в очереди до TTL, а не получают `update_required`.)
+- `client_version` не входит ни в один compat-bucket активных версий → ответ `update_required` (проверка на submit и на каждом тике — смена активной версии не оставляет несовместимые тикеты висеть). (Уточнено в v0: правило по умолчанию major.minor из `ops.md` §3, overrides-таблица — позже; «активные версии» региона = `fleet_configs.active_version` окружения тикета (+ окно deprecated того же env — §Окружения; прежний ранг `versions(state=active, channel=prod)` снят вместе с `channel`), пока deploy-менеджер не переводит state — см. §5; при полном отсутствии активных версий тикеты ждут в очереди до TTL, а не получают `update_required`.)
 - `join_token` = HMAC(match_id, player_id, exp 60с) — дедик проверяет через liba (анти-«зашёл мимо матчмейкера»); v0 — опционально, включается флагом (`matchmaking.join_token.enabled`, секрет — env `BIRDMAN_MM_JOIN_SECRET`; выдача реализована, проверка на дедике — TODO liba).
 - Анти-дубль: один активный тикет на player_id (новый вытесняет старый → `cancelled`).
 - (Уточнено в v0.) Проект тикета: поле `project` опционально — по умолчанию `matchmaking.default_project` из конфига либо единственный проект в БД; успешная аллокация пишет строку в `matches` (state `pending`).
-- Метрики: `birdman_mm_queue_depth{region}` (по лучшему региону тикета), `birdman_mm_time_to_match_seconds` (histogram), `birdman_mm_tickets_total{result}`.
+- Метрики: `birdman_mm_queue_depth{region,env}` (по лучшему региону тикета и окружению; environments v1 §7), `birdman_mm_time_to_match_seconds` (histogram), `birdman_mm_tickets_total{result}`.
 - Явно вне v0: скиллы, пати, бэкфилл, реконнект в матч.
 
 ## 5. Deploy-менеджер (мягкий деплой)
@@ -203,8 +233,42 @@ POST /v1/rollback: шаг 3 в обратную сторону (образы у�
 > - **Окно закрывает `reap_ttl_min`**: по его истечении (от `versions.deprecated_at`, максимум по флитам проекта) deprecated → `disabled` — reconcile реапит её ready-буфер, живым матчам шлёт per-server `DrainServer{deadline_s=300}` (protocol.md §1; ровно один раз — сервер помечается `draining`), матчмейкер перестаёт её предлагать (старые клиенты получают `update_required`).
 > - PrePull-таргеты — active-ноды с heartbeat <30с в регионах флитов проекта; нет живых нод → флип сразу (образам некуда греться). Repeated `POST /v1/deploy` идемпотентен (prepulling → отчёт о прогрессе, active → no-op); одновременно prepull'ится максимум одна версия проекта; `failed` PullReport абортит деплой сразу. Стейт ожидания prepull — in-memory, маркер — `versions.state=prepulling`: после рестарта master деплой резюмируется с новым 15-мин таймаутом (PrePull идемпотентен и дёшев на тёплом кэше).
 > - `POST /v1/rollback {project?, region?}`: project можно опустить при единственном проекте; `region` ограничивает переключение `fleet_configs.active_version` этим регионом (состояния версий остаются глобальными); наружу — событие `deploy_rolled_back`.
-> - События: `deploy_started`, `deploy_node_pulled`, `deploy_activated`, `deploy_failed`, `deploy_rolled_back`, `version_disabled`, `server_drain`. Метрики: `birdman_deploy_prepull_seconds` (histogram), `birdman_versions{project,state}`.
+> - События: `deploy_started`, `deploy_node_pulled`, `deploy_activated`, `deploy_failed`, `deploy_rolled_back`, `version_disabled`, `server_drain`. Метрики: `birdman_deploy_prepull_seconds` (histogram), `birdman_versions{project,env,state}`.
 > - `PUT /v1/fleets/{region}` больше не сбрасывает `active_version` при отсутствии поля (nil → оставить как есть): владелец флипов — deploy-менеджер, прямое назначение осталось как bootstrap/ops-override.
+
+## Окружения (environments v1)
+
+> Миграция `000013_environments` + сиды в `ensureProject`. Окружение — **полноценное измерение** платформы, не лейбл: колонка `env` у versions/fleets/nodes/servers/matches, active-версия и окно deprecated скоупятся per (project, env). Прежний `versions.channel` (staging/prod) снят — он был **зрелостью билда, а не размещением**. Стейт-машина версий (§5) не изменилась — изменился только скоуп.
+
+**Таблица `environments` (per-project) — флаги ведут политику, не имя:**
+
+| Колонка | Смысл |
+|---|---|
+| `name` | имя (`^[a-z0-9][a-z0-9-]{0,31}$`, кроме `all`/`global`); иммутабельно |
+| `production` (bool) | политика prod: авто-деплой запрещён, ретеншн-дефолт ∞, алерты critical |
+| `auto_deploy` (bool) | регистрация версии сразу prepull→activate |
+| `retention_keep` (int≥0) | сколько версий держать сверх окна; 0 = ∞ |
+
+Сид каждому проекту: `dev` (production=false, auto_deploy=true, keep=20) + `prod` (production=true, auto_deploy=false, keep=0). **Guardrail-инвариант `auto_deploy=true ТОЛЬКО при production=false`** — CHECK в БД (`check (not (production and auto_deploy))`), валидация API и панель. FK-нарушения (нет такого env) в CreateVersion/UpsertFleet/CreateAPIKey мапятся в понятный `400 «no such environment <project>/<env>»`, не сырой 500.
+
+**env как измерение (§1 DDL):**
+- **versions:** unique (project, env, semver); `promoted_from` — provenance промоута; составной unique (id, project, env) — опора для FK флота.
+- **fleet_configs:** PK (project, env, region); `active_version` обязан принадлежать тому же (project, env) — составной FK `fleet_active_version_env_fk` закрывает «dev-флоту prod-версию» на уровне БД.
+- **nodes:** нода принадлежит ровно одному env; новые входят как `dev` (никогда prod неявно); перевод — явный `PATCH /v1/nodes/{id} {env}` (любой стейт кроме `dead`, без живых servers; иначе 409; событие `node_env_changed {from,to}`).
+- **servers/matches:** денормализованный `env` строки исполнения — env ВСЕГДА из этой колонки, НИКОГДА join'ом к nodes (I6: перевод ноды не переписывает историю).
+- **api_keys:** опциональная привязка `(project_id, env)` — строго парой (`check ((project_id is null) = (env is null))`); NULL/NULL = глобальный ключ (существующие работают как раньше).
+
+**Стейт-машина per (project, env):** инвариант «одна active + одно окно deprecated» — per (project, env). `ActivateVersion` флипает строго внутри (project, env) — dev-флип не трогает prod-active; старшие deprecated → disabled. `DisableExpiredDeprecated` берёт `max(reap_ttl_min)` флотов **именно этого env** версии. Reconcile `PlanFleet` идёт по (project, env, region), **все шесть выборок серверов** скоупятся `s.env` (dev-проход не реапит prod-серверы того же региона); advisory-lock `project:env:region`. Deploy-менеджер: prepull-цели — active-ноды `env=version.env`; in-flight-ключ и busy-check — per (project, env); `HandlePullReport` матчит job по **(image_ref, нода ∈ pending)** — параллельные деплои одного ref в dev и prod (промоут!) не съедают отчёты друг друга.
+
+**Промоут (`POST /v1/promote {version_id, to_env}`, scope deploy):** регистрирует версию в to_env (тот же project/semver/image_ref, `promoted_from`, state registered) + немедленный деплой; откат — существующий rollback. Идемпотентен: та же (project, to_env, semver) с **тем же** image_ref в registered → переиспользуется; с иным ref → 409. Привязанный ключ — только в свой env. **Поведение при занятом env:** если в (project, to_env) уже идёт деплой — промоут возвращает **409** (как у deploy), но версия УЖЕ зарегистрирована в to_env; после завершения текущего деплоя **повторите промоут** — он идемпотентно переиспользует registered-строку и запустит деплой. (Цепочка «только вперёд» — механизм auto_deploy-окружений; production-env авто-деплоя не имеет по guardrail'у — автоматического отложенного флипа прода не происходит, осознанно.)
+
+**Авто-деплой — «только вперёд»:** мастер держит per (project, env) отметку `last_attempted` (created_at+id последней версии, которую пытался катить авто-деплой). Регистрация в auto_deploy-env: нет in-flight деплоя (project, env) → BeginDeploy сразу (+отметка); иначе версия ждёт registered. На **любом** завершении деплоя (activate из HandlePullReport, мгновенный activate при нуле живых нод, expire-таймаут, failed-report, abort) менеджер деплоит **новейшую registered строго новее `last_attempted`** (tie-break по id — CI-burst в одну секунду). Упавшая версия НЕ ретраится (вечный цикл битого образа исключён) — её вытеснит следующий билд либо ручной deploy. **Burst-грань:** событие `deploy_started` в авто-пути несёт `{"auto": true, "skipped": N}` — сколько промежуточных версий пропущено (при burst'е активируется только последняя). `Resume` при рестарте восстанавливает и in-flight, и цепочку (включая версию, зависшую prepulling без job'а после ошибки PrePullTargets).
+
+**Ретеншн (`RetireVersions`, субтик реконсайл-лупа ~60с):** для env с `retention_keep>0` версии `registered|disabled` ранжируются по created_at desc; `registered` за позицией keep **и** старше 1ч → `disabled` (единственный путь registered→disabled; active/prepulling/deprecated не ранжируются и не трогаются; 1ч-защита от гонки с auto-deploy-очередью). Событие `version_retired {semver, env}`. Образ снятой версии снимается с нод окружения командой `RemoveImage` (`protocol.md` §1, `agent.md` §6), watermark-GC — страховка.
+
+**Привязка ключей (enforcement, `requireScopeEnv`):** для скоупов deploy/matchmaking/allocate привязанный ключ обязан совпасть с (project, env) целевого ресурса (versions/deploy/promote/rollback — по env версии/цели; тикеты — project+env берутся/валидируются из привязки; allocate — по env флота). Несовпадение → `403 {"detail":"key is bound to <project>/<env>"}`. Привязанный ключ также **дефолтит project** (не только валидирует). NULL-привязка = глобальный ключ. Привязка несовместима со скоупом `admin` (400).
+
+**BIRDMAN_ENV в дедике:** существующий map `StartServer.env` (`protocol.md` §1) несёт `BIRDMAN_ENV=<name>` — игровой сервер знает своё окружение (конфиги/аналитика). Ноль диффов proto/liba.
 
 ## 6. Публичный REST API (сводка; OpenAPI — в `master/api/openapi.yaml`)
 
@@ -213,15 +277,19 @@ POST /v1/rollback: шаг 3 в обратную сторону (образы у�
 | `POST /v1/matchmaking/tickets` | matchmaking | создать тикет |
 | `GET /v1/matchmaking/tickets/{id}` (+`?wait=25s` long-poll / SSE `/stream`) | matchmaking | статус: queued / matched{host,port,match_id,join_token} / update_required / cancelled |
 | `DELETE /v1/matchmaking/tickets/{id}` | matchmaking | отмена |
-| `GET /v1/qos` | public | пинг-эндпоинты регионов `[{region, host, udp_port}]` |
-| `POST /v1/allocate` | allocate | граница флота (см. §3) |
+| `GET /v1/qos?env=&project=` | public | пинг-эндпоинты нод env `[{region, host, udp_port}]`; без env — единственный env с активными нодами, иначе `400 env_required` (environments v1 §3) |
+| `POST /v1/allocate` | allocate | граница флота (см. §3); `env?` резолвится (явное → привязка ключа → единственный env с ready → `409`) |
 | `GET /v1/nodes` · `/v1/servers` · `/v1/matches` · `/v1/versions` | readonly | списки с фильтрами; `/v1/nodes` (v1) отдаёт аддитивные cert-поля `cert_serial`, `cert_not_after`, `enrolled_at` (nullable) |
 | `GET /v1/ca` | readonly | публичный PEM-бандл активных внутренних CA (`text/plain`) — для ansible (кладёт `master-ca.pem` на ноды) и отладки; приватный ключ CA неоткуда прочитать by construction (mTLS v1, `protocol.md` §Auth) |
 | `GET /v1/events/stream` (SSE) | readonly | live-лента для панели |
-| `PUT /v1/fleets/{region}` | admin | buffer, max_servers, reap_ttl |
+| `PUT /v1/fleets/{region}` | admin | buffer, max_servers, reap_ttl; **`env` в теле обязателен** (environments v1 §2; валидация active_version×env — БД-FK + 400) |
 | `PUT /v1/projects/{slug}` | admin | match_size проекта (уточнено в v0) |
-| `POST /v1/versions` | deploy | регистрация билда из CI |
-| `POST /v1/deploy` · `/v1/rollback` | deploy | см. §5 |
+| `POST /v1/versions` | deploy | регистрация билда из CI; **`env` обязателен** (заменил `channel`); привязанный ключ — только свой env |
+| `POST /v1/deploy` · `/v1/rollback` | deploy | см. §5; rollback скоупится env версии — `env` обязателен при >1 env с окном deprecated, иначе sole-fallback |
+| `POST /v1/promote` | deploy | промоут `{version_id, to_env}` → регистрация в to_env (тот же image_ref, `promoted_from`) + деплой; идемпотентен; привязанный ключ — только в свой env (см. §Окружения) |
+| `GET /v1/environments?project=` | readonly | список окружений `[{name, production, auto_deploy, retention_keep, created_at}]` |
+| `POST /v1/environments` · `PATCH /v1/environments/{project}/{name}` · `DELETE …` | admin | CRUD окружений; guardrail production×auto_deploy → 400; DELETE только неиспользованного env, иначе 409 |
+| `PATCH /v1/nodes/{id} {env}` | admin | перевод ноды в env (любой стейт кроме `dead`, без живых servers; иначе 409; событие `node_env_changed`) |
 | `POST /v1/nodes/{id}/drain` · `/undrain` | admin | вывод тачки |
 | `GET /v1/servers/{id}/logs?follow=&tail=` | readonly | проксирование tail с агента (уточнено в v0: readonly — панель показывает логи) |
 | `POST /v1/agent-upgrade` | admin | self-upgrade агента(ов): `{url,sha256,version,node_id?}` (уточнено в v0) |

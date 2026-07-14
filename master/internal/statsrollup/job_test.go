@@ -36,6 +36,25 @@ func insertJobMatch(t *testing.T, st *store.Store, serverID, region string, play
 	}
 }
 
+// insertJobMatchEnv is insertJobMatch with an explicit env (matches.env, the
+// I6 source of truth for a match's environment) — the env grouping test needs
+// dev and prod matches on the same day/region.
+func insertJobMatchEnv(t *testing.T, st *store.Store, serverID, region, env string, playersPeak int, startedAt time.Time, endedAt *time.Time) {
+	t.Helper()
+	state := "finished"
+	if endedAt == nil {
+		state = "running"
+	}
+	_, err := st.Pool.Exec(context.Background(), `
+		insert into matches (project_id, server_id, version_id, region, env, state, players_peak, created_at, started_at, ended_at)
+		select s.project_id, s.id, s.version_id, $2, $3, $4, $5, $6, $6, $7
+		from servers s where s.id = $1::uuid`,
+		serverID, region, env, state, playersPeak, startedAt, endedAt)
+	if err != nil {
+		t.Fatalf("insert env match: %v", err)
+	}
+}
+
 func findDim(dims []store.RollupDim, day time.Time, region string) (store.RollupDim, bool) {
 	for _, d := range dims {
 		if d.Day.Equal(day) && d.Region == region {
@@ -116,7 +135,7 @@ func TestRollupJob(t *testing.T) {
 	// fiveDaysAgo is the long-running match's true start day: Backfill
 	// attributes its matches/players there in full (deterministic — the
 	// match's clamp-to-now end is always past fiveDaysAgo+1day by 5 days).
-	fdDims, err := st.RollupDims(ctx, fiveDaysAgo, fiveDaysAgo)
+	fdDims, err := st.RollupDims(ctx, fiveDaysAgo, fiveDaysAgo, "")
 	if err != nil {
 		t.Fatalf("dims fiveDaysAgo: %v", err)
 	}
@@ -142,11 +161,11 @@ func TestRollupJob(t *testing.T) {
 	}
 	afterTick := time.Now().UTC()
 
-	yestDims, err := st.RollupDims(ctx, yesterday, yesterday)
+	yestDims, err := st.RollupDims(ctx, yesterday, yesterday, "")
 	if err != nil {
 		t.Fatalf("dims yesterday: %v", err)
 	}
-	todayDims, err := st.RollupDims(ctx, today, today)
+	todayDims, err := st.RollupDims(ctx, today, today, "")
 	if err != nil {
 		t.Fatalf("dims today: %v", err)
 	}
@@ -230,11 +249,11 @@ func TestRollupJob(t *testing.T) {
 	if err := job.tick(ctx); err != nil {
 		t.Fatalf("second tick: %v", err)
 	}
-	yestDims2, err := st.RollupDims(ctx, yesterday, yesterday)
+	yestDims2, err := st.RollupDims(ctx, yesterday, yesterday, "")
 	if err != nil {
 		t.Fatalf("dims yesterday (2nd tick): %v", err)
 	}
-	todayDims2, err := st.RollupDims(ctx, today, today)
+	todayDims2, err := st.RollupDims(ctx, today, today, "")
 	if err != nil {
 		t.Fatalf("dims today (2nd tick): %v", err)
 	}
@@ -336,7 +355,7 @@ func TestRollupJobBackfillSelfHeals(t *testing.T) {
 		t.Fatalf("reference computation produced no eu dim on d: %+v", wantDims)
 	}
 
-	gotDims, err := st.RollupDims(ctx, d, d)
+	gotDims, err := st.RollupDims(ctx, d, d, "")
 	if err != nil {
 		t.Fatalf("rollup dims: %v", err)
 	}
@@ -362,6 +381,68 @@ func TestRollupJobBackfillSelfHeals(t *testing.T) {
 	}
 	if gotPeaks[utctime.DayKey(d)] == 0 {
 		t.Fatalf("backfilled peak ccu is still the stale 0 -- day was not recomputed")
+	}
+}
+
+// TestRollupJobEnvGrouping is the environments-v1 (I5) regression for the
+// rollup job: match_stats_daily is grouped by env (source matches.env, I6), so
+// two matches on the same day/region/semver but different env produce two
+// distinct rollup rows — dev's matches must not fold into prod's slice.
+// match_ccu_daily is deliberately left global (PK (day)): the two overlapping
+// matches yield one platform-wide peak (dev 10 + prod 5 = 15), never a per-env
+// peak.
+func TestRollupJobEnvGrouping(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10)
+	ctx := context.Background()
+	srv := f.InsertServer(t, f.NodeID, f.VersionID, "reaped", 20001, 0)
+
+	now := time.Now().UTC()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	// 10 days ago: comfortably inside Backfill's immutable range [today-29,
+	// today-2] regardless of the time of day, and fully settled (no clamp-to-now).
+	day := today.AddDate(0, 0, -10)
+
+	// Same day/region, distinct env, overlapping in time so the platform-wide
+	// peak (15) exceeds either env's own (10 dev / 5 prod).
+	insertJobMatchEnv(t, st, srv, "eu", "dev", 10, day.Add(10*time.Hour), tPtr(day.Add(10*time.Hour+30*time.Minute)))
+	insertJobMatchEnv(t, st, srv, "eu", "prod", 5, day.Add(10*time.Hour+10*time.Minute), tPtr(day.Add(10*time.Hour+40*time.Minute)))
+
+	if err := New(st, time.Minute, testLog()).Backfill(ctx); err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+
+	// Two rollup rows for the day — one per env — with matches attributed to
+	// their own env, not folded together.
+	all, err := st.RollupDims(ctx, day, day, "")
+	if err != nil {
+		t.Fatalf("rollup dims (all): %v", err)
+	}
+	byEnv := map[string]store.RollupDim{}
+	for _, d := range all {
+		byEnv[d.Env] = d
+	}
+	if len(byEnv) != 2 || byEnv["dev"].Matches != 1 || byEnv["dev"].PlayersPeakSum != 10 ||
+		byEnv["prod"].Matches != 1 || byEnv["prod"].PlayersPeakSum != 5 {
+		t.Fatalf("env grouping wrong: %+v", all)
+	}
+
+	// The env filter isolates one environment's slice.
+	prod, err := st.RollupDims(ctx, day, day, "prod")
+	if err != nil {
+		t.Fatalf("rollup dims (prod): %v", err)
+	}
+	if len(prod) != 1 || prod[0].Env != "prod" {
+		t.Fatalf("prod slice = %+v, want sole prod dim", prod)
+	}
+
+	// match_ccu_daily: one global, platform-wide peak for the day (15), not split.
+	peaks, err := st.RollupPeakCCU(ctx, day, day)
+	if err != nil {
+		t.Fatalf("rollup peak ccu: %v", err)
+	}
+	if len(peaks) != 1 || peaks[utctime.DayKey(day)] != 15 {
+		t.Fatalf("peak ccu = %+v, want single global {%s:15}", peaks, utctime.DayKey(day))
 	}
 }
 

@@ -32,6 +32,7 @@ function mkNode(id: string, state: NodeInfo['state']): NodeInfo {
     id,
     project: 'dev',
     region: 'dev',
+    env: 'dev',
     hostname: `${id}.dev`,
     public_ip: '10.0.0.1',
     capacity_slots: 8,

@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import type { ApiEvent } from '../lib/api';
 import { useLive } from '../lib/live';
+import { useEnv, eventEnvOf, keepForEnv } from '../lib/env';
 import { shortId, summarizePayload } from '../lib/format';
 import { useT, useFormat } from '../lib/i18n';
 import type { I18nContextValue } from '../lib/i18n';
@@ -15,6 +16,7 @@ const FEED_CAP = 60;
 
 export function EventsFeed() {
   const { subscribe } = useLive();
+  const { selected } = useEnv();
   const { t } = useT();
   const fmt = useFormat();
   const [events, setEvents] = useState<ApiEvent[] | null>(null);
@@ -49,11 +51,16 @@ export function EventsFeed() {
 
   if (failed) return <EmptyState>{t('events.feedUnavailable')}</EmptyState>;
   if (events === null) return <LoadingRow />;
-  if (events.length === 0) return <EmptyState>{t('events.none')}</EmptyState>;
+  // env-фильтр (environments v1 §8, M13) — то же правило, что экран Events:
+  // события БЕЗ env видны только в «All»; version_promoted несёт env в to_env.
+  const visible = keepForEnv(events, selected, eventEnvOf);
+  if (visible.length === 0) {
+    return <EmptyState>{events.length > 0 ? t('events.emptyFilter') : t('events.none')}</EmptyState>;
+  }
 
   return (
     <ul className="max-h-[420px] divide-y divide-line overflow-y-auto">
-      {events.map((e) => (
+      {visible.map((e) => (
         <li key={e.id} className="flex items-start gap-3 px-4 py-2">
           <span className="tabular shrink-0 pt-0.5 font-mono text-xs text-muted">{fmt.clock(e.ts)}</span>
           <StateBadge state={e.kind} tone={toneOfEventKind(e.kind)} domain="event" />

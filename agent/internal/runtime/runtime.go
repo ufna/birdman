@@ -407,6 +407,20 @@ func (c *Client) Images(ctx context.Context) ([]ImageInfo, error) {
 	return out, nil
 }
 
+// ImagePresent reports whether ref exists in the image store — a point Get
+// against the containerd image-metadata store, far cheaper than List'ing every
+// image just to check one ref (environments v1 §6б, the RemoveImage handler).
+// NotFound → (false, nil).
+func (c *Client) ImagePresent(ctx context.Context, ref string) (bool, error) {
+	if _, err := c.c.ImageService().Get(ctx, ref); err != nil {
+		if errdefs.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("get image %s: %w", ref, err)
+	}
+	return true, nil
+}
+
 // DeleteImage removes an image, synchronously collecting its content
 // (docs/specs/agent.md §6 image GC).
 func (c *Client) DeleteImage(ctx context.Context, name string) error {

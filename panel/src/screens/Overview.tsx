@@ -5,6 +5,7 @@ import { useMemo } from 'react';
 import { api } from '../lib/api';
 import type { GameServer, Match, NodeInfo, VersionInfo } from '../lib/api';
 import { useData } from '../lib/live';
+import { useEnv, keepForEnv } from '../lib/env';
 import { useNow } from '../lib/useNow';
 import { useT, useFormat } from '../lib/i18n';
 import { Card, CardHeader, ErrorNote, LiveValue, LoadingRow, StatCard } from '../components/ui';
@@ -21,6 +22,7 @@ export function Overview() {
   // Матчи за час для спарклайна + live-счётчик; лимита 1000 хватает v0.
   const matches = useData(() => api.listMatches({ limit: 1000 }), []);
   const now = useNow();
+  const { selected } = useEnv();
 
   const error = nodes.error ?? servers.error ?? versions.error ?? matches.error;
   const loading =
@@ -44,11 +46,21 @@ export function Overview() {
   }
   if (loading) return <LoadingRow />;
 
-  const stats = computeStats(nodes.data ?? [], servers.data ?? [], versions.data ?? [], matches.data ?? []);
+  // Клиентский фильтр по выбранному env (environments v1 §8). У серверов/матчей
+  // нет поля env в API — окружение выводим через version_id→version.env (нода
+  // тоже несёт env, но история исполнения живёт в самих строках, I6-инвариант).
+  const allVersions = versions.data ?? [];
+  const envOfVersion = new Map(allVersions.map((v) => [v.id, v.env]));
+  const fNodes = keepForEnv(nodes.data ?? [], selected, (n) => n.env);
+  const fServers = keepForEnv(servers.data ?? [], selected, (s) => envOfVersion.get(s.version_id));
+  const fVersions = keepForEnv(allVersions, selected, (v) => v.env);
+  const fMatches = keepForEnv(matches.data ?? [], selected, (m) => envOfVersion.get(m.version_id));
+
+  const stats = computeStats(fNodes, fServers, fVersions, fMatches);
   // Свежесть = самое недавнее успешное чтение среди источников (все рефетчатся
   // вместе по SSE); индикатор «обновлено N назад».
   const updatedAt = maxDefined([nodes.updatedAt, servers.updatedAt, versions.updatedAt, matches.updatedAt]);
-  return <OverviewBody stats={stats} matches={matches.data ?? []} now={now} updatedAt={updatedAt} />;
+  return <OverviewBody stats={stats} matches={fMatches} now={now} updatedAt={updatedAt} />;
 }
 
 function OverviewBody({

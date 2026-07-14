@@ -2,6 +2,7 @@ import { ThemeProvider } from './lib/theme';
 import { I18nProvider, useT } from './lib/i18n';
 import { SessionProvider, canAdmin, canRead, useSession } from './lib/session';
 import { LiveProvider } from './lib/live';
+import { EnvProvider } from './lib/env';
 import { DrawerProvider } from './lib/drawer';
 import { ToastProvider } from './components/Toast';
 import { usePath } from './lib/usePath';
@@ -66,9 +67,11 @@ function Root() {
   return (
     <LiveProvider>
       <ToastProvider>
-        <DrawerProvider>
-          <Routed />
-        </DrawerProvider>
+        <EnvProvider>
+          <DrawerProvider>
+            <Routed />
+          </DrawerProvider>
+        </EnvProvider>
       </ToastProvider>
     </LiveProvider>
   );

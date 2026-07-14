@@ -40,7 +40,8 @@ const (
 	unitSeconds       = "seconds"
 	unitPeakCCU       = "players (peak concurrent)"
 
-	utilizationNote = "current snapshot (allocated/ready/draining vs active-node capacity); " +
+	utilizationNote = "current, platform-wide snapshot (allocated/ready/draining vs active-node " +
+		"capacity across ALL environments — the ?env filter does not narrow this capacity view); " +
 		"utilization over time is available via the metrics proxy (birdman_servers, query_range)"
 )
 
@@ -193,29 +194,33 @@ type DailyDim = store.RollupDim
 // UTC start day (date(started_at), mirroring stackByRegionDay); slot_seconds
 // are distributed across every axis day the match overlaps (mirroring
 // BuildCost's inner loop, via overlapSeconds — matchEnd clamps a still-running
-// match to now). peakByDay reuses the exact sweep-line peakCCUPerDay uses, so
-// the two paths can never disagree on occupancy.
+// match to now). Dims are keyed by day×region×semver×env (environments v1,
+// I5): a match contributes to its own env's dim only, so the rollup persists
+// one match_stats_daily row per environment and the read path can slice by
+// env. peakByDay reuses the exact sweep-line peakCCUPerDay uses — over ALL
+// matches, no env split — so occupancy stays a platform-wide metric
+// (match_ccu_daily is global, I5) that the two paths can never disagree on.
 //
 // A match's start day need not itself be in axis (e.g. a tail-recompute of a
 // single day D may see a match that started the day before but still
 // overlaps D) — matches/players/duration are still attributed to that match's
 // real start day in that case, per the rule above.
 func AggregateDaily(matches []store.StatMatch, axis []time.Time, now time.Time) (dims []DailyDim, peakByDay map[string]int) {
-	type key struct{ day, region, semver string }
+	type key struct{ day, region, semver, env string }
 	idx := map[key]int{}
-	dimIndex := func(day time.Time, region, semver string) int {
-		k := key{utctime.DayKey(day), region, semver}
+	dimIndex := func(day time.Time, region, semver, env string) int {
+		k := key{utctime.DayKey(day), region, semver, env}
 		if i, ok := idx[k]; ok {
 			return i
 		}
 		i := len(dims)
 		idx[k] = i
-		dims = append(dims, DailyDim{Day: utctime.StartOfDay(day), Region: region, Semver: semver})
+		dims = append(dims, DailyDim{Day: utctime.StartOfDay(day), Region: region, Semver: semver, Env: env})
 		return i
 	}
 
 	for _, m := range matches {
-		si := dimIndex(m.StartedAt, m.Region, m.Semver)
+		si := dimIndex(m.StartedAt, m.Region, m.Semver, m.Env)
 		dims[si].Matches++
 		dims[si].PlayersPeakSum += int64(m.PlayersPeak)
 		if m.EndedAt != nil {
@@ -229,7 +234,7 @@ func AggregateDaily(matches []store.StatMatch, axis []time.Time, now time.Time) 
 			if secs <= 0 {
 				continue
 			}
-			di := dimIndex(day, m.Region, m.Semver)
+			di := dimIndex(day, m.Region, m.Semver, m.Env)
 			dims[di].SlotSeconds += secs
 		}
 	}

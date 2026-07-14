@@ -464,7 +464,7 @@ func TestStatsOverviewRollupBacked(t *testing.T) {
 		}
 
 		// Sanity: the rollup tables really are untouched in this sub-case.
-		dims, err := st.RollupDims(ctx, today.AddDate(0, 0, -6), today)
+		dims, err := st.RollupDims(ctx, today.AddDate(0, 0, -6), today, "")
 		if err != nil {
 			t.Fatalf("rollup dims: %v", err)
 		}
@@ -617,5 +617,208 @@ func TestStatsOccupancyBoundary(t *testing.T) {
 		if vd.Matches == 0 {
 			t.Fatalf("version_distribution has a phantom zero-match entry: %+v (full: %+v)", vd, overview.VersionDistribution)
 		}
+	}
+}
+
+// --- env dimension (environments v1, I5) ---
+
+// insertEnvMatch inserts a matches row with an EXPLICIT env (matches.env is
+// the I6 source of truth for a match's execution env — never joined from
+// versions/nodes), and absolute created_at/started_at/ended_at. The env
+// dimension tests need dev and prod matches side by side.
+func insertEnvMatch(t *testing.T, st *store.Store, serverID, region, env string, playersPeak int, createdAt, startedAt time.Time, endedAt *time.Time) {
+	t.Helper()
+	state := "finished"
+	if endedAt == nil {
+		state = "running"
+	}
+	_, err := st.Pool.Exec(context.Background(), `
+		insert into matches (project_id, server_id, version_id, region, env, state, players_peak, created_at, started_at, ended_at)
+		select s.project_id, s.id, s.version_id, $2, $3, $4, $5, $6, $7, $8
+		from servers s where s.id = $1::uuid`,
+		serverID, region, env, state, playersPeak, createdAt, startedAt, endedAt)
+	if err != nil {
+		t.Fatalf("insert env match: %v", err)
+	}
+}
+
+// getStatus GETs path with a bearer key and returns only the status code —
+// for the nonexistent-env 400 case (httpGetJSON fatals on any non-200).
+func getStatus(t *testing.T, base, path, key string) int {
+	t.Helper()
+	req, err := http.NewRequest("GET", base+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	return resp.StatusCode
+}
+
+// assertSoleVersion checks version_distribution is exactly one entry with the
+// given version and match count — the env-slice isolation assertion.
+func assertSoleVersion(t *testing.T, ov stats.OverviewResponse, version string, matches int) {
+	t.Helper()
+	if len(ov.VersionDistribution) != 1 || ov.VersionDistribution[0].Version != version ||
+		ov.VersionDistribution[0].Matches != matches {
+		t.Fatalf("version_distribution = %+v, want sole {%s, %d}", ov.VersionDistribution, version, matches)
+	}
+}
+
+// TestStatsEnvOverview pins the env dimension (I5) on /v1/stats/overview: with
+// ?env=<name> the matches/players/version/ttm slice is scoped to that env (dev
+// matches must not leak into a prod slice, and vice versa); without ?env= the
+// response sums every env (v0 behaviour); a nonexistent env is a 400. Peak CCU
+// is ALWAYS platform-wide (match_ccu_daily stays global, PK (day)) — the same
+// value regardless of the env filter (the panel labels it "platform-wide").
+//
+// The two matches are anchored to `now` (safely in the past), so they land in
+// the trailing live window recomputed from raw matches on every request — no
+// rollup job needed here (the rollup-row env filter is covered by the store/
+// statsrollup tests and TestStatsEnvRollupBacked). They overlap in time and
+// carry distinct players_peak so the platform-wide peak (15) is strictly
+// greater than either env's own (10 dev / 5 prod): a leak of the env filter
+// into peak CCU would show 5 or 10 instead of 15.
+func TestStatsEnvOverview(t *testing.T) {
+	ts, st, f, roSecret := newStatsAPI(t)
+	now := time.Now().UTC()
+
+	vProd := f.AddVersion(t, "2.0.0", "prod")
+	srvDev := f.InsertServer(t, f.NodeID, f.VersionID, "reaped", 22001, 0)
+	srvProd := f.InsertServer(t, f.NodeID, vProd, "reaped", 22002, 0)
+	// dev 1.0.0 peak 10, prod 2.0.0 peak 5, overlapping [now-19m, now-2m].
+	insertEnvMatch(t, st, srvDev, "eu", "dev", 10,
+		now.Add(-30*time.Minute), now.Add(-29*time.Minute), endAt(now.Add(-2*time.Minute)))
+	insertEnvMatch(t, st, srvProd, "eu", "prod", 5,
+		now.Add(-20*time.Minute), now.Add(-19*time.Minute), endAt(now.Add(-1*time.Minute)))
+
+	// ?env=prod: only the prod match; peak_ccu platform-wide (dev+prod = 15).
+	var prod stats.OverviewResponse
+	httpGetJSON(t, ts.URL, "/v1/stats/overview?days=7&env=prod", roSecret, &prod)
+	assertSoleVersion(t, prod, "2.0.0", 1)
+	if prod.TimeToMatch.Samples != 1 {
+		t.Fatalf("prod ttm samples = %d, want 1 (prod match only)", prod.TimeToMatch.Samples)
+	}
+	if prod.PeakCCU != 15 {
+		t.Fatalf("prod peak_ccu = %d, want 15 (platform-wide, not the prod-only 5)", prod.PeakCCU)
+	}
+
+	// ?env=dev: only the dev match; peak_ccu still platform-wide.
+	var dev stats.OverviewResponse
+	httpGetJSON(t, ts.URL, "/v1/stats/overview?days=7&env=dev", roSecret, &dev)
+	assertSoleVersion(t, dev, "1.0.0", 1)
+	if dev.PeakCCU != 15 {
+		t.Fatalf("dev peak_ccu = %d, want 15 (platform-wide, not the dev-only 10)", dev.PeakCCU)
+	}
+
+	// no env: both matches summed; peak_ccu unchanged.
+	var all stats.OverviewResponse
+	httpGetJSON(t, ts.URL, "/v1/stats/overview?days=7", roSecret, &all)
+	if len(all.VersionDistribution) != 2 {
+		t.Fatalf("no-env version_distribution = %+v, want both versions", all.VersionDistribution)
+	}
+	if all.TimeToMatch.Samples != 2 {
+		t.Fatalf("no-env ttm samples = %d, want 2", all.TimeToMatch.Samples)
+	}
+	if all.PeakCCU != 15 {
+		t.Fatalf("no-env peak_ccu = %d, want 15", all.PeakCCU)
+	}
+
+	// nonexistent env → 400.
+	if code := getStatus(t, ts.URL, "/v1/stats/overview?env=zzz-nope", roSecret); code != 400 {
+		t.Fatalf("nonexistent env: want 400, got %d", code)
+	}
+}
+
+// TestStatsEnvRollupBacked exercises the env filter through the IMMUTABLE
+// (rollup-backed) range end to end: dev and prod matches on a day deep inside
+// the rollup window, rolled up by the real statsrollup job, then read back via
+// HTTP with ?env=. It proves the match_stats_daily env-column filter reaches
+// the response, and that peak CCU — served from the global match_ccu_daily
+// rollup — stays platform-wide (15) under any ?env=.
+func TestStatsEnvRollupBacked(t *testing.T) {
+	ts, st, f, roSecret := newStatsAPI(t)
+	ctx := t.Context()
+	now := time.Now().UTC()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	day := today.AddDate(0, 0, -5) // inside days=7, inside the immutable range (<= today-2)
+
+	vProd := f.AddVersion(t, "2.0.0", "prod")
+	srvDev := f.InsertServer(t, f.NodeID, f.VersionID, "reaped", 22301, 0)
+	srvProd := f.InsertServer(t, f.NodeID, vProd, "reaped", 22302, 0)
+	// Overlapping on `day`, region eu: dev 1.0.0 peak 10, prod 2.0.0 peak 5.
+	insertEnvMatch(t, st, srvDev, "eu", "dev", 10,
+		day.Add(10*time.Hour-time.Minute), day.Add(10*time.Hour), endAt(day.Add(10*time.Hour+30*time.Minute)))
+	insertEnvMatch(t, st, srvProd, "eu", "prod", 5,
+		day.Add(10*time.Hour+9*time.Minute), day.Add(10*time.Hour+10*time.Minute), endAt(day.Add(10*time.Hour+40*time.Minute)))
+
+	if err := statsrollup.New(st, time.Hour, opsLog()).Backfill(ctx); err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+	// Sanity: the rollup table really is env-split for the day.
+	if dims, err := st.RollupDims(ctx, day, day, "prod"); err != nil || len(dims) != 1 || dims[0].Env != "prod" {
+		t.Fatalf("rollup prod slice = %+v (err %v), want sole prod dim", dims, err)
+	}
+
+	// ?env=prod through the rollup read-path: prod version only, peak platform-wide.
+	var prod stats.OverviewResponse
+	httpGetJSON(t, ts.URL, "/v1/stats/overview?days=7&env=prod", roSecret, &prod)
+	assertSoleVersion(t, prod, "2.0.0", 1)
+	if prod.PeakCCU != 15 {
+		t.Fatalf("prod peak_ccu = %d, want 15 (global match_ccu_daily, not prod-only 5)", prod.PeakCCU)
+	}
+	var dev stats.OverviewResponse
+	httpGetJSON(t, ts.URL, "/v1/stats/overview?days=7&env=dev", roSecret, &dev)
+	assertSoleVersion(t, dev, "1.0.0", 1)
+	if dev.PeakCCU != 15 {
+		t.Fatalf("dev peak_ccu = %d, want 15 (global)", dev.PeakCCU)
+	}
+}
+
+// TestStatsEnvCost mirrors TestStatsEnvOverview for /v1/stats/cost: ?env=
+// scopes slot-hours to that env's matches. dev runs in region eu, prod in
+// region us, so a leak surfaces as the other env's region appearing in the
+// slice's stack keys.
+func TestStatsEnvCost(t *testing.T) {
+	ts, st, f, roSecret := newStatsAPI(t)
+	now := time.Now().UTC()
+
+	vProd := f.AddVersion(t, "2.0.0", "prod")
+	srvDev := f.InsertServer(t, f.NodeID, f.VersionID, "reaped", 22101, 0)
+	srvProd := f.InsertServer(t, f.NodeID, vProd, "reaped", 22102, 0)
+	insertEnvMatch(t, st, srvDev, "eu", "dev", 10,
+		now.Add(-61*time.Minute), now.Add(-60*time.Minute), endAt(now.Add(-30*time.Minute)))
+	insertEnvMatch(t, st, srvProd, "us", "prod", 5,
+		now.Add(-41*time.Minute), now.Add(-40*time.Minute), endAt(now.Add(-20*time.Minute)))
+
+	regionKeys := func(c stats.CostResponse) []string { return c.SlotHoursPerDayByRegion.Keys }
+
+	var prod stats.CostResponse
+	httpGetJSON(t, ts.URL, "/v1/stats/cost?days=7&env=prod", roSecret, &prod)
+	if got := regionKeys(prod); len(got) != 1 || got[0] != "us" {
+		t.Fatalf("prod cost region keys = %v, want [us] (dev's eu must not leak)", got)
+	}
+	if prod.SlotHoursTotal <= 0 {
+		t.Fatalf("prod slot_hours_total = %v, want > 0", prod.SlotHoursTotal)
+	}
+
+	var dev stats.CostResponse
+	httpGetJSON(t, ts.URL, "/v1/stats/cost?days=7&env=dev", roSecret, &dev)
+	if got := regionKeys(dev); len(got) != 1 || got[0] != "eu" {
+		t.Fatalf("dev cost region keys = %v, want [eu] (prod's us must not leak)", got)
+	}
+
+	var all stats.CostResponse
+	httpGetJSON(t, ts.URL, "/v1/stats/cost?days=7", roSecret, &all)
+	if got := regionKeys(all); len(got) != 2 {
+		t.Fatalf("no-env cost region keys = %v, want both eu and us", got)
+	}
+
+	if code := getStatus(t, ts.URL, "/v1/stats/cost?env=zzz-nope", roSecret); code != 400 {
+		t.Fatalf("nonexistent env cost: want 400, got %d", code)
 	}
 }

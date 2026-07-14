@@ -120,6 +120,17 @@ func (r *fakeRuntime) Images(context.Context) ([]imagegc.Image, error) {
 	return slices.Clone(r.images), nil
 }
 
+func (r *fakeRuntime) ImagePresent(_ context.Context, ref string) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, img := range r.images {
+		if img.Name == ref {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (r *fakeRuntime) UsedImageRefs(context.Context) (map[string]bool, error) {
 	if r.usedGate != nil {
 		<-r.usedGate
@@ -1131,12 +1142,19 @@ func TestRemoveImageDoesNotBlockDispatch(t *testing.T) {
 	eventually(t, "delete happens after gate release", func() bool { return rt.wasDeleted("img:1") })
 }
 
-// TestRemoveImageEmptyRefIgnored: an empty image_ref never touches the runtime.
+// TestRemoveImageEmptyRefIgnored: an empty image_ref is dropped SYNCHRONOUSLY
+// (before the goroutine) — the guard logs and returns on the calling goroutine,
+// so no runtime work is scheduled at all. Asserting the synchronous log line +
+// zero deletes is deterministic; no sleep to race the (never-spawned) goroutine.
 func TestRemoveImageEmptyRefIgnored(t *testing.T) {
 	rt := newFakeRuntime()
 	m, _, _ := testManager(t, rt)
+	cap := &logCapture{}
+	m.logf = cap.Printf
 	m.RemoveImage(context.Background(), &agentlinkv1.RemoveImage{CmdId: "r1", ImageRef: ""})
-	time.Sleep(50 * time.Millisecond)
+	if cap.count("empty image_ref") == 0 {
+		t.Fatal("empty image_ref must be ignored synchronously with a log line")
+	}
 	if rt.deleteCount() != 0 {
 		t.Fatal("empty image_ref must be ignored without touching the runtime")
 	}

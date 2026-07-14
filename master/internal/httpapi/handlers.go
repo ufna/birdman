@@ -296,7 +296,11 @@ func (s *Server) handleAllocate(w http.ResponseWriter, r *http.Request) {
 			s.writeAllocNoCapacity(w, r, req)
 			return
 		case errors.Is(err, store.ErrConflict):
-			s.m.AllocFailures.WithLabelValues("bad_request").Inc()
+			// 409-ambiguous env (several envs with ready servers): its own
+			// reason label so AllocationFailures dashboards separate «operator
+			// must name env» from malformed requests (environments v1 §7). The
+			// BufferEmpty rule filters {reason="no_capacity"}, so it is untouched.
+			s.m.AllocFailures.WithLabelValues("env_required").Inc()
 			writeError(w, http.StatusConflict, "env_required", err.Error())
 			return
 		case err != nil:

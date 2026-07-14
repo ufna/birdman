@@ -2,11 +2,13 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/ufna/birdman/master/internal/stats"
+	"github.com/ufna/birdman/master/internal/store"
 	"github.com/ufna/birdman/master/internal/utctime"
 )
 
@@ -52,14 +54,18 @@ func (s *Server) handleStatsOverview(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	env, ok := s.statsEnv(w, r)
+	if !ok {
+		return
+	}
 	now := time.Now().UTC()
 	axis := stats.DayAxisUTC(now, days)
-	dims, peak, err := s.statsDims(r.Context(), axis, now)
+	dims, peak, err := s.statsDims(r.Context(), axis, now, env)
 	if err != nil {
 		storeError(w, err)
 		return
 	}
-	ttm, err := s.st.StatMatchesTTM(r.Context(), axis[0])
+	ttm, err := s.st.StatMatchesTTM(r.Context(), axis[0], env)
 	if err != nil {
 		storeError(w, err)
 		return
@@ -72,13 +78,20 @@ func (s *Server) handleStatsCost(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	env, ok := s.statsEnv(w, r)
+	if !ok {
+		return
+	}
 	now := time.Now().UTC()
 	axis := stats.DayAxisUTC(now, days)
-	dims, _, err := s.statsDims(r.Context(), axis, now)
+	dims, _, err := s.statsDims(r.Context(), axis, now, env)
 	if err != nil {
 		storeError(w, err)
 		return
 	}
+	// Utilization is a current, platform-wide capacity snapshot (RegionUtil has
+	// no env dimension), left unscoped by ?env= on purpose: it is orthogonal to
+	// the historical, env-scoped slot-hours the ?env= filter narrows above.
 	util, err := s.st.RegionUtilization(r.Context())
 	if err != nil {
 		storeError(w, err)
@@ -100,6 +113,35 @@ func statsDays(w http.ResponseWriter, r *http.Request) (int, bool) {
 		return 0, false
 	}
 	return n, true
+}
+
+// statsEnv parses the optional ?env= filter (environments v1, I5). Empty →
+// ("", true) = all environments (the v0 behaviour). A named env is validated
+// against the sole project's environments (the single-project convention used
+// across the stats/qos/environments handlers): an unknown env is a 400, so a
+// typo never silently returns an empty slice. Writes its own error response
+// and returns false when the request must not proceed.
+func (s *Server) statsEnv(w http.ResponseWriter, r *http.Request) (string, bool) {
+	env := r.URL.Query().Get("env")
+	if env == "" {
+		return "", true
+	}
+	project, err := s.st.SoleProjectSlug(r.Context())
+	if err != nil {
+		storeError(w, err)
+		return "", false
+	}
+	if _, err := s.st.GetEnvironment(r.Context(), project, env); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			// Тот же формат «no such environment <project>/<env>», что и deploy.go
+			// (M3): единый текст 400 по всем env-хендлерам.
+			writeError(w, http.StatusBadRequest, "bad_request", "no such environment "+project+"/"+env)
+			return "", false
+		}
+		storeError(w, err)
+		return "", false
+	}
+	return env, true
 }
 
 // --- rollup-backed read-path (shared by overview/cost) ---
@@ -127,7 +169,7 @@ func statsDays(w http.ResponseWriter, r *http.Request) (int, bool) {
 // double-count a day already served from the immutable range. This mirrors
 // statsrollup/job.go's recomputeDay, which drops the same kind of stray dim
 // for the same reason.
-func (s *Server) statsDims(ctx context.Context, axis []time.Time, now time.Time) ([]stats.DailyDim, map[string]int, error) {
+func (s *Server) statsDims(ctx context.Context, axis []time.Time, now time.Time, env string) ([]stats.DailyDim, map[string]int, error) {
 	axis0 := axis[0]
 	today := utctime.StartOfDay(now)
 	liveStart := today.AddDate(0, 0, -1)        // 00:00 UTC yesterday
@@ -136,7 +178,10 @@ func (s *Server) statsDims(ctx context.Context, axis []time.Time, now time.Time)
 	var dims []stats.DailyDim
 	peak := map[string]int{}
 	if !axis0.After(immutableEnd) {
-		immutableDims, err := s.st.RollupDims(ctx, axis0, immutableEnd)
+		// Dims are env-scoped (env-column filter, empty = all); peak CCU is read
+		// from the global match_ccu_daily rollup and so is platform-wide by
+		// construction (I5) regardless of env.
+		immutableDims, err := s.st.RollupDims(ctx, axis0, immutableEnd, env)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -154,12 +199,34 @@ func (s *Server) statsDims(ctx context.Context, axis []time.Time, now time.Time)
 	if err != nil {
 		return nil, nil, err
 	}
+	// livePeak is computed over ALL environments' matches so peak CCU stays
+	// platform-wide (I5 — the panel labels it "platform-wide" in env mode),
+	// matching the global match_ccu_daily rollup above; the dims are then
+	// re-derived from the env's matches only when a filter is set, keeping
+	// matches/players/duration/slot env-scoped.
 	liveDims, livePeak := stats.AggregateDaily(matches, liveAxis, now)
+	if env != "" {
+		liveDims, _ = stats.AggregateDaily(filterMatchesByEnv(matches, env), liveAxis, now)
+	}
 	dims = append(dims, filterDimsFrom(liveDims, liveAxis[0])...)
 	for dk, v := range livePeak { // live always wins for its own days
 		peak[dk] = v
 	}
 	return dims, peak, nil
+}
+
+// filterMatchesByEnv keeps only the matches whose execution env (matches.env,
+// I6) equals env — the live-tail counterpart of RollupDims' env-column filter
+// (statsDims uses it for env-scoped dims while keeping the unfiltered set for
+// the platform-wide peak CCU). Only called with a non-empty env.
+func filterMatchesByEnv(matches []store.StatMatch, env string) []store.StatMatch {
+	out := make([]store.StatMatch, 0, len(matches))
+	for _, m := range matches {
+		if m.Env == env {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // statsLiveAxis returns the axis days on/after liveStart, oldest first — the

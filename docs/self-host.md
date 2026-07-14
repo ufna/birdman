@@ -171,9 +171,10 @@ All REST calls use the admin key on the master box (`127.0.0.1:8100`) or through
 the tunnel from §1. `KEY=bmk_…`.
 
 ```bash
-# 1. register a build version (the game image)
+# 1. register a build version (the game image). `env` (dev|prod|…) is required —
+#    it replaced the old `channel`; see "Environments" below.
 curl -s -X POST http://127.0.0.1:8100/v1/versions -H "Authorization: Bearer $KEY" \
-  -d '{"project":"game","semver":"1.0.0","image_ref":"ghcr.io/org/game:1.0.0","channel":"staging"}'
+  -d '{"project":"game","semver":"1.0.0","image_ref":"ghcr.io/org/game:1.0.0","env":"dev"}'
 
 # 2. enable the region warm pool (matches the node's --region from §2)
 curl -s -X PUT http://127.0.0.1:8100/v1/fleets/eu -H "Authorization: Bearer $KEY" \
@@ -224,6 +225,60 @@ the same `host:port` and `match_id` — that's your first match.
 Direct allocation without the matchmaker (for integrating your own backend) —
 `POST /v1/allocate {project,region,match_id}` (idempotent by `match_id`,
 `409 no_capacity` when there's no capacity). Full REST — `master/README.md`.
+
+### Environments: dev, prod, promote
+
+Every project has **environments** — at least `dev` (the CI build stream) and
+`prod` (what real players match into). They are a full dimension, not a label:
+versions, fleets, nodes, servers and matches each belong to one `(project, env)`,
+and the active version is scoped per env — a dev build can never flip what prod
+players play. `POST /v1/versions` (step 1 above) therefore takes `env` (dev|prod),
+not the old `channel`.
+
+Behaviour is driven by two per-env flags, not by the name:
+
+- **`auto_deploy`** (dev default): registering a version immediately prepulls and
+  activates it — every CI push goes live in dev with no extra call. On a burst only
+  the newest is deployed ("forward-only"); a failed build is not retried, the next
+  push supersedes it. Forbidden together with `production` (DB + API guardrail).
+- **`production`** (prod default): auto-deploy is refused, retention keeps versions
+  forever, alerts are critical.
+
+**Promote dev → prod** is one call — it registers the *same image_ref* in the
+target env (provenance `promoted_from`) and deploys it:
+
+```bash
+curl -s -X POST http://127.0.0.1:8100/v1/promote -H "Authorization: Bearer $KEY" \
+  -d '{"version_id":"<the dev version>","to_env":"prod"}'
+```
+
+Idempotent (re-promoting the same ref reuses the registered row). If a prod deploy
+is already in flight the promote returns `409` — the version is already registered
+in the target env; retry the promote once the running deploy finishes (it reuses
+the registered row and starts the deploy).
+
+**Nodes belong to one env.** New nodes join as `dev` (never prod implicitly); move
+an empty node explicitly — any state but `dead`, no live servers on it:
+
+```bash
+curl -s -X PATCH http://127.0.0.1:8100/v1/nodes/<node_id> -H "Authorization: Bearer $KEY" \
+  -d '{"env":"prod"}'
+```
+
+**Keys can be bound** to a `(project, env)` pair (`POST /v1/apikeys {project, env}`)
+— a bound deploy key may only touch its own env (a dev key on a prod deploy → 403).
+Leave both fields unset for a global key (the default; existing keys keep working).
+CI uses two: a dev-bound key on every push (auto-deploy) and a prod-bound key gated
+behind a GitHub environment approval for the promote.
+
+**Retention** (`retention_keep` on the env, dev default 20, prod 0 = unlimited):
+versions past the newest N are moved to `disabled` and their images are removed from
+the env's nodes right away (`RemoveImage`); the disk-watermark GC stays as a
+backstop. `active`/`prepulling`/`deprecated` are never touched — the rollback window
+stays warm.
+
+Manage environments under **Admin → Environments** in the panel, or via
+`GET/POST /v1/environments` and `PATCH /v1/environments/{project}/{name}`.
 
 ---
 

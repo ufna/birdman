@@ -562,9 +562,9 @@ func (m *Manager) RemoveImage(_ context.Context, cmd *agentlinkv1.RemoveImage) {
 			m.logf("[daemon] remove_image %s: in use by a live container — skipped (watermark GC reclaims it later)", ref)
 			return
 		}
-		present, err := m.imagePresent(ref)
+		present, err := m.rt.ImagePresent(m.ctx, ref)
 		if err != nil {
-			m.logf("[daemon] remove_image %s: list images: %v — skipped (watermark GC is the backstop)", ref, err)
+			m.logf("[daemon] remove_image %s: image lookup: %v — skipped (watermark GC is the backstop)", ref, err)
 			return
 		}
 		if !present {
@@ -581,20 +581,6 @@ func (m *Manager) RemoveImage(_ context.Context, cmd *agentlinkv1.RemoveImage) {
 		m.untouchImage(ref)
 		m.logf("[daemon] remove_image %s: removed", ref)
 	}()
-}
-
-// imagePresent reports whether ref is currently in the runtime image store.
-func (m *Manager) imagePresent(ref string) (bool, error) {
-	images, err := m.rt.Images(m.ctx)
-	if err != nil {
-		return false, err
-	}
-	for _, img := range images {
-		if img.Name == ref {
-			return true, nil
-		}
-	}
-	return false, nil
 }
 
 // Drain applies the node-level drain (итерация 4, master.md §6): mark the

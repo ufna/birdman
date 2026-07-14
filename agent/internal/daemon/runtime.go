@@ -84,6 +84,10 @@ type Runtime interface {
 
 	// Images lists the images present in the birdman namespace.
 	Images(ctx context.Context) ([]imagegc.Image, error)
+	// ImagePresent reports whether one ref is in the image store — a point Get
+	// (environments v1 §6б, RemoveImage): cheaper than Images when the handler
+	// only needs to know if a single ref is still there. NotFound → (false, nil).
+	ImagePresent(ctx context.Context, ref string) (bool, error)
 	// DeleteImage removes an image and synchronously collects its content.
 	DeleteImage(ctx context.Context, ref string) error
 	// UsedImageRefs returns the refs backing existing containers — an image in

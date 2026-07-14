@@ -28,6 +28,11 @@ type qt struct {
 // v1 §3).
 type projectEnv struct{ project, env string }
 
+// regionEnv keys the birdman_mm_queue_depth gauge: depth is reported per
+// (region, env) so dev and prod tickets resting in one region stay distinct
+// series (environments v1 §7).
+type regionEnv struct{ region, env string }
+
 // RunOnce performs a single matchmaking pass (master.md §4):
 //
 //	expire TTL → per project: drop update_required tickets →
@@ -41,7 +46,7 @@ func (mm *Matchmaker) RunOnce(ctx context.Context) error {
 	// Pass 1 (locked): TTL, janitor, snapshot of queued tickets per (project, env).
 	mm.mu.Lock()
 	queued := map[projectEnv][]qt{}
-	depth := map[string]int{}
+	depth := map[regionEnv]int{}
 	for id, t := range mm.tickets {
 		switch {
 		case t.status == StatusQueued && now.Sub(t.createdAt) > mm.cfg.TicketTTL:
@@ -52,19 +57,19 @@ func (mm *Matchmaker) RunOnce(ctx context.Context) error {
 				id: t.id, player: t.playerID, bucket: t.bucket,
 				version: t.clientVersion, created: t.createdAt, regions: t.regions,
 			})
-			depth[t.regions[0].Region]++ // depth by the player's best region
+			depth[regionEnv{t.regions[0].Region, t.env}]++ // depth by the player's best (region, env)
 		case now.Sub(t.terminalAt) > mm.retention():
 			delete(mm.tickets, id)
 		}
 	}
-	for r := range mm.regionsSeen {
-		if _, ok := depth[r]; !ok {
-			mm.m.MMQueueDepth.WithLabelValues(r).Set(0)
+	for re := range mm.regionsSeen {
+		if _, ok := depth[re]; !ok {
+			mm.m.MMQueueDepth.WithLabelValues(re.region, re.env).Set(0)
 		}
 	}
-	for r, n := range depth {
-		mm.regionsSeen[r] = true
-		mm.m.MMQueueDepth.WithLabelValues(r).Set(float64(n))
+	for re, n := range depth {
+		mm.regionsSeen[re] = true
+		mm.m.MMQueueDepth.WithLabelValues(re.region, re.env).Set(float64(n))
 	}
 	mm.mu.Unlock()
 

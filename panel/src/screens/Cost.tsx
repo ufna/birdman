@@ -7,6 +7,7 @@ import { useMemo, useState } from 'react';
 import { api } from '../lib/api';
 import type { StatsCost } from '../lib/api';
 import { useAsync } from '../lib/useAsync';
+import { useEnv } from '../lib/env';
 import { useT } from '../lib/i18n';
 import { toStackModel, utilizationModel, versionColor } from '../lib/stats';
 import {
@@ -40,7 +41,8 @@ function fmtHours(v: number): string {
 
 export function Cost() {
   const [days, setDays] = useState(7);
-  const cost = useAsync(() => api.statsCost(days), [days]);
+  const { selected } = useEnv();
+  const cost = useAsync(() => api.statsCost(days, selected ?? undefined), [days, selected]);
   // Данные показываем, только если они за ЗАПРОШЕННЫЙ период; иначе (первая
   // загрузка или смена периода) — скелетон: раскладка держится, без «прыжка».
   const ready = cost.data !== undefined && cost.data.days === days;

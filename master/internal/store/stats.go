@@ -17,10 +17,14 @@ import (
 // StatMatch is one started match, the atom of the Statistics/Cost aggregates.
 // Only matches that actually ran (started_at is not null) are returned: pending
 // tickets that never became a game are noise for product stats. EndedAt is nil
-// for a match still running — the caller clamps its interval to "now".
+// for a match still running — the caller clamps its interval to "now". Env is
+// the match's execution environment (environments v1, I5): always the
+// denormalized matches.env column, never joined from versions/nodes, so a
+// node moved between environments doesn't rewrite match history (I6).
 type StatMatch struct {
 	Region      string
 	Semver      string
+	Env         string
 	PlayersPeak int
 	CreatedAt   time.Time  // match row created = allocation time (time-to-match input)
 	StartedAt   time.Time  // match_start report (never nil here)
@@ -29,10 +33,11 @@ type StatMatch struct {
 
 // StatMatches returns every started match with started_at >= since, oldest
 // first. One query feeds all overview/cost aggregates (matches/day, CCU,
-// duration, version mix, slot-hours).
+// duration, version mix, slot-hours). Env carries matches.env (I5) so callers
+// can slice by environment; the query itself is unfiltered (all env).
 func (s *Store) StatMatches(ctx context.Context, since time.Time) ([]StatMatch, error) {
 	rows, err := s.Pool.Query(ctx, `
-		select m.region, v.semver, m.players_peak, m.created_at, m.started_at, m.ended_at
+		select m.region, v.semver, m.env, m.players_peak, m.created_at, m.started_at, m.ended_at
 		from matches m
 		join versions v on v.id = m.version_id
 		where m.started_at is not null and m.started_at >= $1
@@ -44,7 +49,7 @@ func (s *Store) StatMatches(ctx context.Context, since time.Time) ([]StatMatch, 
 	var out []StatMatch
 	for rows.Next() {
 		var sm StatMatch
-		if err := rows.Scan(&sm.Region, &sm.Semver, &sm.PlayersPeak,
+		if err := rows.Scan(&sm.Region, &sm.Semver, &sm.Env, &sm.PlayersPeak,
 			&sm.CreatedAt, &sm.StartedAt, &sm.EndedAt); err != nil {
 			return nil, err
 		}
@@ -60,13 +65,16 @@ func (s *Store) StatMatches(ctx context.Context, since time.Time) ([]StatMatch, 
 // those other fields need: the narrow read the rollup-backed
 // /v1/stats/overview handler uses for stats.timeToMatchStats, since
 // percentiles are non-additive and so ttm is always recomputed fresh over
-// the whole window rather than served from the match_stats_daily rollup.
-func (s *Store) StatMatchesTTM(ctx context.Context, since time.Time) ([]StatMatch, error) {
+// the whole window rather than served from the match_stats_daily rollup. A
+// non-empty env scopes the fill-rate percentiles to that environment (I5);
+// empty env = all environments (the v0 behaviour).
+func (s *Store) StatMatchesTTM(ctx context.Context, since time.Time, env string) ([]StatMatch, error) {
 	rows, err := s.Pool.Query(ctx, `
 		select created_at, started_at
 		from matches
 		where started_at is not null and started_at >= $1
-		order by started_at`, since)
+		  and ($2 = '' or env = $2)
+		order by started_at`, since, env)
 	if err != nil {
 		return nil, err
 	}

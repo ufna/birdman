@@ -114,7 +114,14 @@ message RegistryCred  { string host=1; string username=2; string token=3; } // h
 // пропуск самолечится (`EnsureImage` до-качивает на StartServer). Guard против
 // общих ссылок (тот же `image_ref` держит НЕ-disabled версия того же
 // project/env) живёт на МАСТЕРЕ (reconcile/imagecleanup, §6б) — WITHHELD там, до
-// постановки в очередь ноды.
+// постановки в очередь ноды. Точечная проверка наличия образа на агенте —
+// containerd `ImageService().Get` (NotFound→нет), не полный листинг (`agent.md` §6).
+// FIFO-очередь ноды упорядочивает ДОСТАВКУ и спавн обработчиков; сами
+// обработчики — конкурентные горутины, так что строгий порядок исполнения не
+// гарантирован. Страховка цикла «сняли → перерегистрировали» — EnsureImage при
+// StartServer (промах перепуллит образ; медленный старт вместо отказа). Старый агент неизвестную
+// команду НЕ ack'ает → RemoveImage висит в pending, шумит `AgentlinkPendingStuck`
+// (`ops.md` §1); отсюда порядок Фазы D — сначала выкатить агентов, потом master.
 message RemoveImage  { string cmd_id=1; string image_ref=2; }
 ```
 
