@@ -136,6 +136,44 @@ func TestCleanupImagesSharedRefGuardAndDeadNode(t *testing.T) {
 	}
 }
 
+// TestCleanupImagesDedupsRefWithinBatch (y2): N disabled versions of one
+// (project, env) sharing the exact image_ref collapse to ONE RemoveImage per node
+// — the env's target nodes and the ref are identical, so repeat sends are noise.
+func TestCleanupImagesDedupsRefWithinBatch(t *testing.T) {
+	st := testdb.New(t)
+	ctx := context.Background()
+	testdb.Seed(t, st, "eu", 10) // node1 in dev, the sole target
+
+	sharedRef := "ghcr.io/example/game-server:dupe"
+	var batch []store.DisabledVersion
+	for _, semver := range []string{"4.0.0", "4.0.1", "4.0.2"} {
+		v, err := st.CreateVersion(ctx, store.CreateVersionParams{
+			Project: "game", Semver: semver, ImageRef: sharedRef, Env: "dev",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		disableRaw(t, st, v.ID)
+		batch = append(batch, disabledRef(t, st, v.ID))
+	}
+
+	sender := &fakeSender{}
+	cleaner := reconcile.NewImageCleaner(st, sender, quietLog())
+	if err := cleaner.CleanupImages(ctx, batch); err != nil {
+		t.Fatal(err)
+	}
+	// removeImagesTo keys by node → can't count repeats; count raw commands.
+	sends := 0
+	for _, c := range sender.take() {
+		if c.Msg.GetRemoveImage() != nil {
+			sends++
+		}
+	}
+	if sends != 1 {
+		t.Fatalf("3 disabled versions sharing a ref → 1 RemoveImage to the sole dev node, got %d", sends)
+	}
+}
+
 // TestRunOnceRetentionDispatchesRemoveImage wires the whole retention subtick:
 // a single RunOnce disables a registered version beyond keep (>1h) and dispatches
 // RemoveImage for its ref to the env's node.

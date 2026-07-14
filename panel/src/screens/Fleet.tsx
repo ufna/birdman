@@ -8,7 +8,7 @@ import type { ApiEvent, GameServer, NodeInfo } from '../lib/api';
 import { useData } from '../lib/live';
 import { useEnv, keepForEnv } from '../lib/env';
 import { canAdmin, useSession } from '../lib/session';
-import { EnvTag } from './Deploys';
+import { EnvTag } from '../components/EnvTag';
 import { useServerDrawer } from '../lib/drawer';
 import { useNow } from '../lib/useNow';
 import { ageOf, heartbeatTone, shortId } from '../lib/format';

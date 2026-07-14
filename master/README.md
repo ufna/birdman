@@ -132,9 +132,9 @@ KEY=bmk_...   # admin-ключ из лога
 curl -s -X POST localhost:8100/v1/nodes -H "Authorization: Bearer $KEY" \
   -d '{"project":"game","region":"eu","hostname":"n1","public_ip":"203.0.113.10","capacity_slots":8}'
 
-# 2. зарегистрировать версию билда
+# 2. зарегистрировать версию билда (env обязателен: dev|prod|…; см. docs/specs/master.md §Окружения)
 curl -s -X POST localhost:8100/v1/versions -H "Authorization: Bearer $KEY" \
-  -d '{"project":"game","semver":"1.0.0","image_ref":"ghcr.io/org/game:1.0.0","channel":"staging"}'
+  -d '{"project":"game","semver":"1.0.0","image_ref":"ghcr.io/org/game:1.0.0","env":"dev"}'
 
 # 3. включить warm pool региона (active_version можно не задавать — его
 #    выставит деплой; отсутствие поля НЕ сбрасывает текущую версию)

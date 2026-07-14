@@ -247,3 +247,47 @@ func TestRollupStoreEnv(t *testing.T) {
 		t.Fatalf("peak ccu = %+v, want single global {%s:42}", peaks, dk(day))
 	}
 }
+
+// TestRollupReupsertPrunesStaleEnv (M1-T2): a full-day recompute replaces the
+// WHOLE day — the day-wide delete in UpsertRollupDay covers every env, so
+// re-upserting the same day with a narrower env set leaves no stale row behind.
+// Guards against a prod match that vanished from a re-aggregation lingering as a
+// ghost match_stats_daily row.
+func TestRollupReupsertPrunesStaleEnv(t *testing.T) {
+	st := testdb.New(t)
+	testdb.Seed(t, st, "eu", 10)
+	ctx := context.Background()
+	day := time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC)
+
+	// First recompute: the day carried both dev and prod matches.
+	if err := st.UpsertRollupDay(ctx, day, []store.RollupDim{
+		{Day: day, Region: "eu", Semver: "1.0.0", Env: "dev", Matches: 3, PlayersPeakSum: 30, SlotSeconds: 900},
+		{Day: day, Region: "eu", Semver: "1.0.0", Env: "prod", Matches: 1, PlayersPeakSum: 5, SlotSeconds: 600},
+	}, 42); err != nil {
+		t.Fatalf("first upsert: %v", err)
+	}
+
+	// Re-upsert the SAME day with a truncated set (dev only) — the prod row must
+	// be pruned, not linger.
+	if err := st.UpsertRollupDay(ctx, day, []store.RollupDim{
+		{Day: day, Region: "eu", Semver: "1.0.0", Env: "dev", Matches: 4, PlayersPeakSum: 40, SlotSeconds: 1200},
+	}, 40); err != nil {
+		t.Fatalf("re-upsert: %v", err)
+	}
+
+	all, err := st.RollupDims(ctx, day, day, "")
+	if err != nil {
+		t.Fatalf("rollup dims: %v", err)
+	}
+	if len(all) != 1 || all[0].Env != "dev" || all[0].Matches != 4 {
+		t.Fatalf("re-upsert must leave only the fresh dev row, got %+v", all)
+	}
+	// The stale prod slice is gone.
+	prod, err := st.RollupDims(ctx, day, day, "prod")
+	if err != nil {
+		t.Fatalf("rollup dims (prod): %v", err)
+	}
+	if len(prod) != 0 {
+		t.Fatalf("stale prod env row must be pruned on re-upsert, got %+v", prod)
+	}
+}

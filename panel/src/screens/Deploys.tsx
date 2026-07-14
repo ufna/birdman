@@ -23,21 +23,8 @@ import { DataTable } from '../components/DataTable';
 import { DeployHowto } from '../components/DeployHowto';
 import { StateBadge, toneOfVersionState } from '../components/Badge';
 import { ConfirmButton } from '../components/ConfirmDialog';
+import { EnvTag } from '../components/EnvTag';
 import { Card, CardHeader, ErrorNote, LoadingRow } from '../components/ui';
-
-/** Компактный бейдж окружения версии/строки (не StateBadge — это не «состояние»). */
-export function EnvTag({ env, production }: { env: string; production?: boolean }) {
-  const { t } = useT();
-  return (
-    <span
-      title={production ? t('env.productionTitle') : undefined}
-      className="inline-flex items-center gap-1 rounded border border-line px-1.5 py-0.5 font-mono text-[11px] text-muted"
-    >
-      {production === true && <span aria-hidden className="size-1.5 rounded-full bg-warn" />}
-      {env}
-    </span>
-  );
-}
 
 const LIVE_SERVER_STATES = new Set(['creating', 'ready', 'allocated', 'draining']);
 const HEARTBEAT_FRESH_MS = 30_000;

@@ -133,7 +133,9 @@ func (s *Server) statsEnv(w http.ResponseWriter, r *http.Request) (string, bool)
 	}
 	if _, err := s.st.GetEnvironment(r.Context(), project, env); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusBadRequest, "bad_request", "no such environment: "+env)
+			// Тот же формат «no such environment <project>/<env>», что и deploy.go
+			// (M3): единый текст 400 по всем env-хендлерам.
+			writeError(w, http.StatusBadRequest, "bad_request", "no such environment "+project+"/"+env)
 			return "", false
 		}
 		storeError(w, err)

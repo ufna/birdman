@@ -43,10 +43,21 @@ func NewImageCleaner(st *store.Store, sender Sender, log *slog.Logger) *ImageCle
 // is returned to the caller (which logs it); a withheld ref (shared) is skipped
 // quietly. An empty image_ref is skipped defensively.
 func (c *ImageCleaner) CleanupImages(ctx context.Context, disabled []store.DisabledVersion) error {
+	// Дедуп внутри батча по (project, env, image_ref): при флип-демоуте/ретеншне
+	// в disabled может уйти сразу N версий одного (project, env) с общим ref —
+	// ноды окружения и сам ref у них совпадают, значит достаточно ОДНОЙ отправки
+	// RemoveImage на ноду. Ключ включает env: один ref в разных окружениях — это
+	// разные ноды (§6б), их не схлопываем.
+	sent := map[string]bool{}
 	for _, d := range disabled {
 		if d.ImageRef == "" {
 			continue
 		}
+		key := d.ProjectID + "\x00" + d.Env + "\x00" + d.ImageRef
+		if sent[key] {
+			continue
+		}
+		sent[key] = true
 		inUse, err := c.st.ImageRefInUse(ctx, d.ProjectID, d.Env, d.ImageRef)
 		if err != nil {
 			return err

@@ -129,7 +129,11 @@ func TestRunOnceStopsOnceBelow(t *testing.T) {
 // of an unknown or empty ref is a harmless no-op.
 func TestUntouchDropsRef(t *testing.T) {
 	g := New(Options{Runtime: nil, DiskUsage: func() (uint64, uint64) { return 0, 0 }, Logf: t.Logf})
-	g.Touch("img:1")
+	base := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	i := 0
+	g.now = func() time.Time { i++; return base.Add(time.Duration(i) * time.Second) }
+
+	g.Touch("img:1") // oldest
 	g.Touch("img:2")
 	if !g.Protected()["img:1"] {
 		t.Fatal("img:1 must be protected after Touch")
@@ -143,12 +147,37 @@ func TestUntouchDropsRef(t *testing.T) {
 		t.Fatal("Untouch of img:1 must not affect img:2")
 	}
 
-	// A dropped ref frees a slot: a later Touch of a fresh ref stays capped and
-	// does not evict img:2 (which would happen only at the cap).
-	g.Untouch("nope") // unknown ref
-	g.Untouch("")     // empty ref
-	if !g.Protected()["img:2"] {
-		t.Fatal("no-op Untouch must not evict anything")
+	// Untouch of an unknown or empty ref is a harmless no-op.
+	g.Untouch("nope")
+	g.Untouch("")
+	if !g.Protected()["img:2"] || len(g.Protected()) != 1 {
+		t.Fatalf("no-op Untouch must not change the set, got %v", g.Protected())
+	}
+
+	// A dropped ref actually frees a cap slot. Fill the set to the cap (img:2,
+	// touched first, is the oldest), then Untouch one entry and Touch a fresh
+	// ref: the freed slot means the newcomer fits WITHOUT evicting the oldest
+	// (img:2). At a full cap that same Touch would evict img:2 (TestTouchLRUCap).
+	for n := range protectedCap - 1 { // + img:2 already present = protectedCap
+		g.Touch(fmt.Sprintf("fill:%d", n))
+	}
+	if len(g.Protected()) != protectedCap {
+		t.Fatalf("precondition: set must be full at cap %d, got %d", protectedCap, len(g.Protected()))
+	}
+	g.Untouch("fill:3") // free one slot (size → cap-1)
+	g.Touch("fresh:1")  // lands in the freed slot, no eviction
+	p := g.Protected()
+	if !p["img:2"] {
+		t.Fatal("oldest ref must survive: the Untouch freed the slot the fresh Touch used")
+	}
+	if !p["fresh:1"] {
+		t.Fatal("fresh ref must be protected")
+	}
+	if p["fill:3"] {
+		t.Fatal("the untouched ref must be gone")
+	}
+	if len(p) != protectedCap {
+		t.Fatalf("set must be back at exactly the cap, got %d", len(p))
 	}
 }
 

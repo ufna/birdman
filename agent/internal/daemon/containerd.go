@@ -59,6 +59,10 @@ func (r *ContainerdRuntime) Images(ctx context.Context) ([]imagegc.Image, error)
 	return out, nil
 }
 
+func (r *ContainerdRuntime) ImagePresent(ctx context.Context, ref string) (bool, error) {
+	return r.Client.ImagePresent(ctx, ref)
+}
+
 func (r *ContainerdRuntime) DeleteImage(ctx context.Context, name string) error {
 	return r.Client.DeleteImage(ctx, name)
 }

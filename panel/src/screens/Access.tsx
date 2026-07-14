@@ -23,7 +23,7 @@ import { StateBadge, toneOfKeyStatus } from '../components/Badge';
 import { ConfirmButton } from '../components/ConfirmDialog';
 import { RegistriesSection } from '../components/RegistriesSection';
 import { EnvironmentsSection } from '../components/EnvironmentsSection';
-import { EnvTag } from './Deploys';
+import { EnvTag } from '../components/EnvTag';
 import { Card, CardHeader, ErrorNote, LoadingRow } from '../components/ui';
 
 /** Скоупы, которые можно выдать ключу (совпадает с validScopes в master). */

@@ -12,6 +12,7 @@
 |---|---|---|
 | `birdman_node_heartbeat_age_seconds` | master | карантин/алерт NodeDown |
 | `birdman_servers{project,env,production,region,version,state}` | master | буферы, окно мультиверсий (env/production — из строки сервера, не из ноды; environments v1 §7) |
+| `birdman_versions{project,env,state}` | master | версии в стейт-машине per (project,env) — окно мультиверсий, ретеншн (environments v1 §7; W4-T1 M3; production несёт `birdman_servers`, не эту серию — (project,env)→production функционально зависимо) |
 | `birdman_allocation_duration_seconds` (hist) | master | SLO p95 <1с |
 | `birdman_allocation_failures_total{reason}` | master | no_capacity, bad_request, env_required (409-ambiguous allocate), internal |
 | `birdman_mm_queue_depth{region,env}` / `birdman_mm_time_to_match_seconds` (hist) | master | здоровье матчмейкера |
@@ -57,11 +58,13 @@ MasterDown обязан приходить **не** через master (внеш�
 ### Пайплайн серверного билда игры
 
 ```
-push в main:        build → push :X.Y.Z-dev.N → POST /v1/versions {channel: staging} → POST /v1/deploy (staging-флот)
-tag vX.Y.Z:         build → push :X.Y.Z → POST /v1/versions {channel: prod} → manual approval (environment) → POST /v1/deploy
+push в main:  build → push :X.Y.Z-dev.N → POST /v1/versions {env:"dev"}   (bound-dev-ключ; env.auto_deploy сам prepull→activate — /v1/deploy НЕ нужен)
+tag vX.Y.Z:   build → push :X.Y.Z       → POST /v1/promote {version_id, to_env:"prod"}   (bound-prod-ключ, под GH environment с manual approval)
 ```
 
-Секреты: `BIRDMAN_DEPLOY_KEY` (API-ключ со скоупом deploy) в GH environment secrets. Rollback — кнопкой в панели или `POST /v1/rollback`, CI не нужен.
+Флоу на окружениях (environments v1 §4–5, `master.md` §Окружения): **dev** — `env.auto_deploy=true`, поэтому регистрация версии сразу гонит prepull→activate (каждый пуш выкатывается без отдельного `/v1/deploy`; при burst'е активируется только новейшая, «только вперёд»). **prod** — `production=true` (авто-деплой запрещён guardrail'ом): релиз идёт **промоутом** уже проверенной dev-версии (тот же `image_ref`, provenance `promoted_from`), а не новой сборкой; промоут запускает обычный деплой-пайплайн.
+
+Секреты — **два привязанных ключа** (§5): `BIRDMAN_DEPLOY_KEY_DEV` (скоуп deploy, bound `(game, dev)`) в обычных repo-secrets — работает на каждый пуш; `BIRDMAN_DEPLOY_KEY_PROD` (скоуп deploy, bound `(game, prod)`) в **GH environment** с обязательным manual approval — только он может промоутить в prod (dev-ключ на prod-деплой/промоут → `403`). Rollback — кнопкой в панели или `POST /v1/rollback` (скоупится env версии), CI не нужен.
 
 > **(Уточнено в v0, итерация 3.)** Реализована механика версий без деплой-хука: `stub-server.yml` умеет `workflow_dispatch` с input `tag` (semver) → build+push `ghcr.io/<org>/birdman-stub-server:<tag>`; регистрация (`POST /v1/versions`) и `POST /v1/deploy` выполняются оператором/скриптом рядом с master. **Автовызов master API из GitHub Actions (`POST /v1/versions` → `/v1/deploy` прямо из workflow) — TODO прод-фазы: master не в интернете** (dev-бокс слушает только localhost); понадобится публичный HTTPS-ингресс master или self-hosted runner в его сети.
 
@@ -84,7 +87,7 @@ compat:
 - Мягкий деплой (master §5): в окне мультиверсий старые клиенты матчатся на deprecated-версию, пока она в compat; вышла из compat → `update_required`.
 - Конвенцию утвердить с командой игры **до итерации 3** (чек-пункт).
 
-> **(Уточнено в v0; итерация 3 — реализовано целиком.)** Матчмейкер реализует правило по умолчанию (равные MAJOR.MINOR, pre-release/build-суффиксы игнорируются) **и `compat.overrides` из конфига master**: паттерны `MAJOR[.MINOR[.PATCH]]` с wildcard `x`/`*` (например `1.4.x`), overrides аддитивны к default-правилу (окно миграции расширяет, а не сужает совместимость); клиенты с разными наборами подходящих overrides не смешиваются в один матч (override-set входит в ключ очереди). Кандидаты региона, в порядке предпочтения: `fleet_configs.active_version` → versions(state=`active`, channel=`prod`) → versions(state=`deprecated`) — окно мультиверсий (`master.md` §5): старые клиенты матчатся на deprecated, пока она не `disabled`; клиент, совместимый с active, на deprecated не попадает; `update_required` — только когда клиент не совместим ни с одной живой версией. Несовместимость проверяется на submit тикета и на каждом тике; клиент, чей `client_version` не парсится как semver, получает `400`.
+> **(Уточнено в v0; итерация 3 — реализовано целиком.)** Матчмейкер реализует правило по умолчанию (равные MAJOR.MINOR, pre-release/build-суффиксы игнорируются) **и `compat.overrides` из конфига master**: паттерны `MAJOR[.MINOR[.PATCH]]` с wildcard `x`/`*` (например `1.4.x`), overrides аддитивны к default-правилу (окно миграции расширяет, а не сужает совместимость); клиенты с разными наборами подходящих overrides не смешиваются в один матч (override-set входит в ключ очереди). Кандидаты региона **скоупятся окружением тикета** (environments v1 §3), в порядке предпочтения: `fleet_configs.active_version` этого env (rank 0) → versions(state=`deprecated`) этого env (rank 1) — окно мультиверсий (`master.md` §5): старые клиенты матчатся на deprecated, пока она не `disabled`; клиент, совместимый с active, на deprecated не попадает; `update_required` — только когда клиент не совместим ни с одной живой версией. **Прежний средний ранг `versions(state=active, channel=prod)` умер вместе с колонкой `channel`** — active-версия окружения и так приходит через `fleet_configs.active_version` (флот теперь per (project, env, region)). Несовместимость проверяется на submit тикета и на каждом тике; клиент, чей `client_version` не парсится как semver, получает `400`.
 
 ## 4. Ansible (`infra/`)
 
@@ -137,6 +140,8 @@ infra/
 3. **Плохой релиз**: CrashLoop-алерт → `POST /v1/rollback` (кнопка в панели) → расследование по логам умерших дедиков.
 4. **Диск полон**: image GC не справился → tail логов виновника, ручной прюнинг, поднять пороги/докупить диск.
 5. **Восстановление master** — см. §5.
+
+> **(environments v1 §6г — граница скоупа гигиены образов.)** birdman чистит образы **на нодах**: ретеншн версий (`retention_keep` окружения → сверхлимитные `registered|disabled` в `disabled`) + `RemoveImage` снимает их образ с нод окружения сразу, watermark-GC диска — страховка (`agent.md` §6, `master.md` §Окружения). **Теги в самом реестре** (ghcr/gar) платформа НЕ удаляет — это ретеншн-политика реестра на стороне владельца (`actions/delete-package-versions`, lifecycle-политика GAR и т.п.). Поток dev-билдов копит теги в реестре независимо от нод — заведи там свою ретенцию.
 
 ## 7. Acceptance
 

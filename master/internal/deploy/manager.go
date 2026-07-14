@@ -286,10 +286,23 @@ func (m *Manager) SweepOrphans(ctx context.Context) error {
 		if hasJob {
 			continue
 		}
+		// TOCTOU: активация (HandlePullReport → activate) могла завершиться МЕЖДУ
+		// выборкой PrepullingVersions и этой map-проверкой — тогда джобы нет по
+		// легитимной причине (деплой завершён), а не потому, что она осиротела.
+		// Ре-чек состояния из БД (дёшево — точечный GetVersion) отсекает лишний
+		// re-arm/fan-out prepull'а по уже-неактуальной строке.
+		fresh, err := m.st.GetVersion(ctx, v.ID)
+		if err != nil {
+			m.log.Error("deploy: orphan sweep re-check failed", "version_id", v.ID, "err", err)
+			continue
+		}
+		if fresh.State != "prepulling" {
+			continue
+		}
 		m.log.Warn("deploy: sweeping orphan prepulling version (no in-memory job) — re-arming",
-			"version_id", v.ID, "semver", v.Semver, "env", v.Env)
-		if _, err := m.startJob(ctx, v); err != nil {
-			m.log.Error("deploy: orphan sweep re-arm failed", "version_id", v.ID, "err", err)
+			"version_id", fresh.ID, "semver", fresh.Semver, "env", fresh.Env)
+		if _, err := m.startJob(ctx, fresh); err != nil {
+			m.log.Error("deploy: orphan sweep re-arm failed", "version_id", fresh.ID, "err", err)
 		}
 	}
 	return nil

@@ -40,7 +40,8 @@ const (
 	unitSeconds       = "seconds"
 	unitPeakCCU       = "players (peak concurrent)"
 
-	utilizationNote = "current snapshot (allocated/ready/draining vs active-node capacity); " +
+	utilizationNote = "current, platform-wide snapshot (allocated/ready/draining vs active-node " +
+		"capacity across ALL environments — the ?env filter does not narrow this capacity view); " +
 		"utilization over time is available via the metrics proxy (birdman_servers, query_range)"
 )
 
