@@ -155,6 +155,13 @@
     path: "{{ birdman_master_admin_key_file }}"
   register: birdman_admin_key_stat
 
+# harvest — best-effort: сам он НИКОГДА не решает «есть ключ / нет», решает
+# единый гейт ниже по birdman_admin_key_raw.stdout (его fail.msg НЕ под no_log
+# → оператор видит подсказку). Поэтому failed_when: false. Под `set -o pipefail`
+# шаг иначе падает САМ раньше гейта: (а) журнал ротирован → grep без совпадений
+# rc=1; (б) даже успешный мульти-матч → rc=141 (SIGPIPE: `head -1` закрывает
+# пайп раньше grep). А no_log спрятал бы вывод такого падения. failed_when: false
+# гасит оба режима (и любой rc journalctl); pipefail оставлен как есть.
 - name: Harvest bootstrap admin key from master journal
   ansible.builtin.shell: >
     set -o pipefail;
@@ -164,6 +171,7 @@
     executable: /bin/bash
   register: birdman_admin_key_raw
   changed_when: false
+  failed_when: false
   no_log: true
   when: not birdman_admin_key_stat.stat.exists
 
