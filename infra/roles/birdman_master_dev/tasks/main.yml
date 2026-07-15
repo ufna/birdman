@@ -35,16 +35,40 @@
     mode: "0600"
   no_log: true
 
+# read-before-create: slurp/set_fact/шаблоны ниже читают пароль из файла,
+# который создаёт copy выше (force:false). В --check на свежем боксе copy файл
+# НЕ материализует → slurp честно падает («file not found»), каскадом валя
+# set_fact и оба шаблона. stat-проба + гард `not ansible_check_mode or exists`
+# пускают --check насквозь: в бою not ansible_check_mode тождественно истинно
+# (файл к тому же только что создан строкой выше) → семантика неизменна; только
+# --check на свежем боксе (файла реально нет) мягко скипает чтение и рендер.
+- name: Probe Postgres password file (check-mode fresh-box guard)
+  ansible.builtin.stat:
+    path: "{{ birdman_master_pg_pass_file }}"
+  register: birdman_pg_pass_stat
+
 - name: Read Postgres password
   ansible.builtin.slurp:
     src: "{{ birdman_master_pg_pass_file }}"
   register: birdman_pg_pass_raw
   no_log: true
+  when: not ansible_check_mode or birdman_pg_pass_stat.stat.exists
 
 - name: Set Postgres password fact
   ansible.builtin.set_fact:
     birdman_pg_password: "{{ birdman_pg_pass_raw.content | b64decode | trim }}"
   no_log: true
+  when: not ansible_check_mode or birdman_pg_pass_stat.stat.exists
+
+- name: Note that Postgres provisioning is bypassed on a fresh box in check mode
+  ansible.builtin.debug:
+    msg: >-
+      check mode: файла пароля Postgres ещё нет (свежий бокс) — чтение пароля и
+      рендер compose.yml/master.yaml пропущены (пароль не материализован под
+      --check). Боевой прогон создаёт пароль и рендерит конфиги как обычно.
+  when:
+    - ansible_check_mode
+    - not birdman_pg_pass_stat.stat.exists
 
 - name: Install docker compose file (postgres only, bound to 127.0.0.1)
   ansible.builtin.template:
@@ -54,6 +78,7 @@
     group: root
     mode: "0600"          # содержит пароль postgres
   no_log: true
+  when: not ansible_check_mode or birdman_pg_pass_stat.stat.exists
 
 - name: Start birdman postgres (docker compose, idempotent)
   ansible.builtin.command:
@@ -92,12 +117,24 @@
   register: birdman_secrets_key_gen
   no_log: true
 
+# read-before-create: file state=file (дефолт) ниже энфорсит владельца/режим
+# ключа, который создаёт shell выше. shell не поддерживает check-режим (движок
+# скипает) → в --check на свежем боксе ключа нет → file state=file падает
+# «file ... is absent, cannot continue». stat-проба + гард пускают --check
+# насквозь; в бою not ansible_check_mode тождественно истинно (ключ создан выше
+# или уже был по creates:) → семантика неизменна.
+- name: Probe master secrets key (check-mode fresh-box guard)
+  ansible.builtin.stat:
+    path: "{{ birdman_master_secrets_key_file }}"
+  register: birdman_secrets_key_stat
+
 - name: Enforce secrets key ownership/mode
   ansible.builtin.file:
     path: "{{ birdman_master_secrets_key_file }}"
     owner: root
     group: root
     mode: "0600"
+  when: not ansible_check_mode or birdman_secrets_key_stat.stat.exists
 
 # Только при первом провижининге: ключ обязателен для DR, но кладётся ТОЛЬКО в
 # менеджер паролей владельца — не в git/vault (инвариант «секреты только на
@@ -119,6 +156,7 @@
     mode: "0600"          # содержит DSN с паролем
   no_log: true
   notify: Restart birdman-master
+  when: not ansible_check_mode or birdman_pg_pass_stat.stat.exists   # DSN содержит pg-пароль (тот же каскад)
 
 - name: Install birdman-master.service unit
   ansible.builtin.copy:
@@ -129,12 +167,24 @@
     mode: "0644"
   notify: Restart birdman-master
 
+# read-before-create: enable/start (и handler Restart birdman-master ниже)
+# действуют на unit, который ставит copy выше. copy в --check unit НЕ пишет →
+# на свежем боксе systemd падает «Could not find the requested service». stat
+# юнита + гард пускают --check насквозь; в бою not ansible_check_mode
+# тождественно истинно (unit всегда на месте — copy строкой выше) → семантика
+# неизменна. Тот же birdman_master_unit_stat гардит и handler (см. handlers).
+- name: Probe birdman-master unit (check-mode fresh-box guard)
+  ansible.builtin.stat:
+    path: /etc/systemd/system/birdman-master.service
+  register: birdman_master_unit_stat
+
 - name: Enable and start birdman-master
   ansible.builtin.systemd_service:
     name: birdman-master.service
     enabled: true
     state: started
     daemon_reload: true
+  when: not ansible_check_mode or birdman_master_unit_stat.stat.exists
 
 - name: Apply pending master restarts before health check
   ansible.builtin.meta: flush_handlers

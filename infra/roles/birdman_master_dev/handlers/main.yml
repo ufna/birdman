@@ -1,6 +1,12 @@
 ---
+# Гард как у enable/start в tasks: в --check на свежем боксе unit не установлен
+# (copy его не пишет в check-режиме) → systemd упал бы «service not found» при
+# flush_handlers. birdman_master_unit_stat зарегистрирован до flush_handlers;
+# default(false) — страховка, если stat не отработал. В бою not
+# ansible_check_mode тождественно истинно → рестарт как раньше.
 - name: Restart birdman-master
   ansible.builtin.systemd_service:
     name: birdman-master.service
     state: restarted
     daemon_reload: true
+  when: not ansible_check_mode or birdman_master_unit_stat.stat.exists | default(false)

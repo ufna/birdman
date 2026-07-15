@@ -34,16 +34,41 @@
     mode: "0600"
   no_log: true
 
+# read-before-create: slurp/set_fact/grafana.env ниже читают пароль из файла,
+# который создаёт copy выше (force:false). В --check на свежем боксе copy файл
+# НЕ материализует → slurp честно падает («file not found»), каскадом валя
+# set_fact и рендер grafana.env. stat-проба + гард `not ansible_check_mode or
+# exists` пускают --check насквозь: в бою not ansible_check_mode тождественно
+# истинно (файл к тому же только что создан) → семантика неизменна; только
+# --check на свежем боксе мягко скипает чтение и рендер env_file. compose.yml
+# мониторинга пароль не дереференсит (env_file 0600) — вне каскада.
+- name: Probe Grafana admin password file (check-mode fresh-box guard)
+  ansible.builtin.stat:
+    path: "{{ birdman_grafana_admin_password_file }}"
+  register: birdman_grafana_pass_stat
+
 - name: Read Grafana admin password
   ansible.builtin.slurp:
     src: "{{ birdman_grafana_admin_password_file }}"
   register: birdman_grafana_pass_raw
   no_log: true
+  when: not ansible_check_mode or birdman_grafana_pass_stat.stat.exists
 
 - name: Set Grafana admin password fact
   ansible.builtin.set_fact:
     birdman_grafana_admin_password: "{{ birdman_grafana_pass_raw.content | b64decode | trim }}"
   no_log: true
+  when: not ansible_check_mode or birdman_grafana_pass_stat.stat.exists
+
+- name: Note that Grafana provisioning is bypassed on a fresh box in check mode
+  ansible.builtin.debug:
+    msg: >-
+      check mode: файла admin-пароля Grafana ещё нет (свежий бокс) — чтение
+      пароля и рендер grafana.env пропущены (пароль не материализован под
+      --check). Боевой прогон создаёт пароль и рендерит env_file как обычно.
+  when:
+    - ansible_check_mode
+    - not birdman_grafana_pass_stat.stat.exists
 
 - name: Render Grafana env_file (0600, contains admin password)
   ansible.builtin.template:
@@ -54,6 +79,7 @@
     mode: "0600"
   no_log: true
   notify: Restart birdman-grafana
+  when: not ansible_check_mode or birdman_grafana_pass_stat.stat.exists
 
 # --- Grafana provisioning: datasource + dashboards ---
 - name: Render Grafana datasource provisioning (VictoriaMetrics)
