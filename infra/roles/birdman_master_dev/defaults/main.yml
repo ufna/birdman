@@ -23,6 +23,11 @@ birdman_master_pg_pass_file: /etc/birdman/pg.pass
 birdman_master_admin_key_file: /etc/birdman/master-admin.key
 birdman_master_secrets_key_file: /etc/birdman/secrets.key
 
+# Порог down для замолчавшей quarantine-ноды, минуты (>= 1). Равен встроенному
+# дефолту master (config.go) — строка рендерится явно, чтобы крутить на боксе
+# без пересборки (tracker #234); поведение при дефолте не меняется.
+birdman_node_down_after_min: 10
+
 # Режим аутентификации agentlink-листенера (mTLS agentlink v1, дизайн §3/§6):
 # token|mixed|mtls. Дефолт mixed — переходный период: листенер принимает и
 # cert-auth, и token-auth, Enroll включён. Флип в mtls (строгий mTLS) — по

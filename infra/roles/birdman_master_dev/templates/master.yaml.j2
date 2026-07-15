@@ -23,3 +23,7 @@ tls:
 
 # Режим аутентификации agentlink-листенера: token|mixed|mtls (mTLS v1, §6).
 agentlink_auth: "{{ birdman_agentlink_auth | default('mixed') }}"
+
+# Quarantine дольше N минут → down + событие node_down (heartbeat живой сессии
+# вернёт в active; dead — только ручная ревокация, не отсюда). Минуты, >= 1.
+node_down_after_min: {{ birdman_node_down_after_min }}
