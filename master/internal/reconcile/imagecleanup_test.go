@@ -525,3 +525,61 @@ func TestImageCleanupReportCounter(t *testing.T) {
 		}
 	}
 }
+
+// TestImageCleanupSweepSurvivesMasterRestartMidRound (tracker #233, факт «а»):
+// окно «рестарт master между Send RemoveImage и ImageReport» закрыто ПО
+// ПОСТРОЕНИЮ, а не отдельным механизмом. Ожидания живут В ПАМЯТИ: рестарт их
+// теряет — но вместе с ними ничего ценного. Маркер versions.image_cleanup_at
+// ставится ТОЛЬКО по отчётам ВСЕХ целевых нод, а до тех пор версия остаётся в
+// выборке — значит следующий субтик просто переотправит RemoveImage, и агент
+// no-op'ит уже снятый образ (absent ≡ removed). Ключевая консервативность:
+// поздний/replay-отчёт, которого на рестартнутом инстансе никто не ждёт, маркер НЕ
+// подделывает — иначе версия с ещё живым где-то образом «схлопнулась» бы вслепую.
+func TestImageCleanupSweepSurvivesMasterRestartMidRound(t *testing.T) {
+	st := testdb.New(t)
+	ctx := context.Background()
+	f := testdb.Seed(t, st, "eu", 10) // node1 в dev
+	node2 := f.AddNode(t, "node-2", "203.0.113.11", 10)
+	vid := f.AddVersion(t, "2.0.0", "dev")
+	ref := "ghcr.io/example/game-server:2.0.0"
+	disableRaw(t, st, vid) // серверов нет → сразу кандидат sweep'а
+
+	// Пасс 1: RemoveImage уходит ОБЕИМ нодам; отчиталась только node1.
+	r1, sender1, cleaner1 := newSweeper(st)
+	if err := r1.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := removeImagesTo(sender1.take()); len(got) != 2 || got[f.NodeID] != ref || got[node2] != ref {
+		t.Fatalf("пасс 1: RemoveImage обязана уйти обеим нодам, got %v", got)
+	}
+	report(cleaner1, f.NodeID, ref, "removed")
+	if imageCleanupMarked(t, st, vid) {
+		t.Fatal("отчиталась только node1 — маркер ставить рано (ждём node2)")
+	}
+
+	// «Рестарт мастера»: свежие инстансы, in-memory ожидания cleaner1 потеряны,
+	// отчёт node2 в прошлой жизни так и не доехал.
+	r2, sender2, cleaner2 := newSweeper(st)
+
+	// Поздний/replay-отчёт node2 прилетает на РЕСТАРТНУТЫЙ cleaner2 ДО переотправки:
+	// его никто не ждёт → маркер НЕ ставится (по отчётам он не подделывается).
+	report(cleaner2, node2, ref, "removed")
+	if imageCleanupMarked(t, st, vid) {
+		t.Fatal("отчёт, которого после рестарта никто не ждёт, маркер подделывать не должен")
+	}
+
+	// Версия осталась в выборке (маркера нет) → субтик переотправляет ОБЕИМ нодам:
+	// окно между Send и Report закрыто по построению, отдельный механизм не нужен.
+	if err := r2.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := removeImagesTo(sender2.take()); len(got) != 2 || got[f.NodeID] != ref || got[node2] != ref {
+		t.Fatalf("непомеченная версия обязана переотправиться обеим нодам, got %v", got)
+	}
+	// Образ уже снят прошлой жизнью — агент no-op'ит и отвечает absent (≡ removed).
+	report(cleaner2, f.NodeID, ref, "absent")
+	report(cleaner2, node2, ref, "absent")
+	if !imageCleanupMarked(t, st, vid) {
+		t.Fatal("обе ноды подтвердили отсутствие образа (absent) — версия обязана быть помечена")
+	}
+}

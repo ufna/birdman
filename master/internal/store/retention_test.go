@@ -627,6 +627,125 @@ func TestPendingImageCleanupBatchLimit(t *testing.T) {
 	}
 }
 
+// TestPendingImageCleanupSkipsEnvWithDownNode (batch-гигиена): окружение, у
+// которого хоть одна нода в `down`, ВООБЩЕ не приходит в выборку. Sweep всё равно
+// пропустил бы его целиком (у down-ноды нет живой сессии — HasSession-гейт M2), но
+// раньше его заблокированные версии занимали слоты в limit-200-выборке с самыми
+// старыми created_at. Фильтр — гигиена, а не боевой гейт: короткий офлайн (сессия
+// упала, `down` ещё не наступил) держит HasSession в SweepImages. Самолечение:
+// heartbeat → active → версии возвращаются; ревокация → dead → нода выпадает из
+// EnvNodeIDs (вырожденный случай «нет живых нод» sweep помечает сразу).
+func TestPendingImageCleanupSkipsEnvWithDownNode(t *testing.T) {
+	st := testdb.New(t)
+	ctx := context.Background()
+	f := testdb.Seed(t, st, "eu", 10) // node1 в dev, state active
+
+	vid := f.AddVersion(t, "5.0.0", "dev")
+	forceVersionState(t, st, vid, "disabled")
+	if _, ok := pendingCleanup(t, st)[vid]; !ok {
+		t.Fatal("нода dev активна, версия disabled без серверов — обязана быть в выборке")
+	}
+
+	setNodeState := func(state string) {
+		t.Helper()
+		if _, err := st.Pool.Exec(ctx, `update nodes set state=$2 where id=$1::uuid`, f.NodeID, state); err != nil {
+			t.Fatalf("set node state %s: %v", state, err)
+		}
+	}
+
+	// down-нода → окружение выпадает из выборки целиком (batch-гигиена).
+	setNodeState("down")
+	if _, ok := pendingCleanup(t, st)[vid]; ok {
+		t.Fatal("в окружении есть down-нода — его версии в выборку попадать не должны")
+	}
+
+	// heartbeat вернул ноду в active → версии снова в выборке (самолечение).
+	setNodeState("active")
+	if _, ok := pendingCleanup(t, st)[vid]; !ok {
+		t.Fatal("нода вернулась в active — версия обязана вернуться в выборку")
+	}
+
+	// dead НЕ блокирует: EnvNodeIDs его исключает, а окружение без живых нод —
+	// вырожденный случай, где sweep помечает версию сразу (удалять негде).
+	setNodeState("dead")
+	if _, ok := pendingCleanup(t, st)[vid]; !ok {
+		t.Fatal("dead-нода не блокирует выборку (EnvNodeIDs её исключает)")
+	}
+
+	// env-скоуп: down-нода dev НЕ выкидывает из выборки версию ЧУЖОГО окружения.
+	setNodeState("active") // вернём dev-ноду, чтобы окружение имело живую машину
+	if _, err := st.CreateEnvironment(ctx, store.CreateEnvironmentParams{
+		Project: "game", Name: "stg", RetentionKeep: 5,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stgNode := f.AddNode(t, "n-stg", "203.0.113.40", 10)
+	if _, err := st.SetNodeEnv(ctx, stgNode, "stg"); err != nil {
+		t.Fatal(err)
+	}
+	stgVer := f.AddVersion(t, "5.1.0", "stg")
+	forceVersionState(t, st, stgVer, "disabled")
+
+	// Роняем ТОЛЬКО dev-ноду — фильтр обязан бить строго по своему окружению.
+	setNodeState("down")
+	pending := pendingCleanup(t, st)
+	if _, ok := pending[vid]; ok {
+		t.Fatal("dev-версия должна выпасть — dev-нода в down")
+	}
+	if _, ok := pending[stgVer]; !ok {
+		t.Fatal("down только в dev — версия stg обязана остаться в выборке (env-скоуп фильтра)")
+	}
+}
+
+// TestPendingImageCleanupDownEnvDoesNotStarveBatch — регрессия batch-starvation:
+// версии окружения с down-нодой висели непомеченными с самыми старыми created_at и
+// занимали голову limit-200-выборки; ≥200 таких → очистка образов замерзала для
+// ВСЕГО парка (здоровые окружения не пробивались сквозь лимит). Store-фильтр по
+// down-ноде выкидывает заблокированное окружение из выборки, и более новая (но НЕ
+// заблокированная) версия здорового окружения проходит.
+func TestPendingImageCleanupDownEnvDoesNotStarveBatch(t *testing.T) {
+	st := testdb.New(t)
+	ctx := context.Background()
+	f := testdb.Seed(t, st, "eu", 10) // node1 в dev
+	projectID := versionProjectID(t, st, f.VersionID)
+
+	// 200 заблокированных disabled-версий в dev с САМЫМИ СТАРЫМИ created_at — ровно
+	// столько, чтобы без фильтра выесть весь limit-200 (образец — TestPendingImageCleanupBatchLimit).
+	const blocked = 200
+	if _, err := st.Pool.Exec(ctx, `
+		insert into versions (project_id, semver, image_ref, env, state, created_at)
+		select $1::uuid, '8.0.' || i, 'ghcr.io/example/game-server:8.0.' || i, 'dev', 'disabled',
+		       now() - interval '1 hour' - (interval '1 second' * (1000 - i))
+		from generate_series(1, $2) as i`, projectID, blocked); err != nil {
+		t.Fatalf("seed blocked dev versions: %v", err)
+	}
+	// dev-нода в down → все 200 dev-версий заблокированы env-фильтром.
+	if _, err := st.Pool.Exec(ctx, `update nodes set state='down' where id=$1::uuid`, f.NodeID); err != nil {
+		t.Fatalf("down dev node: %v", err)
+	}
+
+	// Здоровое окружение stg с ОДНОЙ disabled-версией и БОЛЕЕ НОВЫМ created_at.
+	if _, err := st.CreateEnvironment(ctx, store.CreateEnvironmentParams{
+		Project: "game", Name: "stg", RetentionKeep: 5,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stgNode := f.AddNode(t, "n-stg", "203.0.113.41", 10)
+	if _, err := st.SetNodeEnv(ctx, stgNode, "stg"); err != nil {
+		t.Fatal(err)
+	}
+	stgVer := f.AddVersion(t, "8.9.0", "stg") // created_at = now(), новее заблокированных
+	forceVersionState(t, st, stgVer, "disabled")
+
+	pending := pendingCleanup(t, st)
+	if len(pending) != 1 {
+		t.Fatalf("заблокированное dev-окружение не должно выедать лимит: want ровно 1 (stg), got %d", len(pending))
+	}
+	if _, ok := pending[stgVer]; !ok {
+		t.Fatal("выборка обязана вернуть stg-версию — заблокированные dev-версии её не голодают")
+	}
+}
+
 // versionProjectID returns a version's project uuid (the id EnvNodeIDs /
 // ImageRefInUse take).
 func versionProjectID(t *testing.T, st *store.Store, versionID string) string {

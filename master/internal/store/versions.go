@@ -446,10 +446,28 @@ func (s *Store) ImageRefInUse(ctx context.Context, projectID, env, imageRef stri
 //	no live server of it        — creating/ready/allocated/draining ещё держат ref
 //	                              контейнером на ноде (failed/reaped — уже нет);
 //	ref not held by a non-disabled version of the same (project, env) — shared-ref
-//	                              guard, ровно семантика ImageRefInUse (§6б).
+//	                              guard, ровно семантика ImageRefInUse (§6б);
+//	no `down` node in the env   — окружение с упавшей нодой sweep всё равно пропустил
+//	                              бы целиком (HasSession-гейт M2); фильтр не даёт его
+//	                              версиям выедать выборку (batch-гигиена, см. ниже).
 //
 // Дедуп ref'ов и рассылка нодам окружения — на стороне ImageCleaner.CleanupImages;
 // отправив, вызывающий штампует MarkImageCleanupSent.
+//
+// Down-нода — не боевой гейт, а гигиена батча. Sweep всё равно пропустил бы такое
+// окружение целиком: у down-ноды нет живой сессии (HasSession-гейт M2 в
+// SweepImages). Но раньше эти заблокированные версии занимали слоты в
+// limit-200-выборке — и с самыми СТАРЫМИ created_at, то есть в самой её голове.
+// Окружение с down-нодой висит так днями/неделями (в `dead` уводит только ручная
+// ревокация), успевает накопить ≥200 непомеченных версий — и очистка образов
+// ЗАМЕРЗАЕТ для ВСЕГО парка: здоровые окружения не пробиваются сквозь лимит.
+// Фильтр выкидывает заблокированные окружения из выборки, чтобы они не голодали
+// хвост. Это НЕ подмена HasSession-гейта: короткий офлайн (сессия оборвалась, а
+// node_down_after_min ещё не истёк — нода пока `active`/`quarantine`) фильтр не
+// ловит, его по-прежнему держит HasSession в SweepImages. Самолечение симметрично:
+// heartbeat → нода снова `active` → её версии возвращаются в выборку; ручная ревокация →
+// `dead` → нода выпадает из EnvNodeIDs, и sweep помечает версии сам (вырожденный
+// случай «в окружении нет живых нод»).
 //
 // Выборка ограничена imageCleanupSweepBatch (M-2): разовый всплеск кандидатов —
 // после миграции, на большом парке или после долгого простоя sweep'а — не должен
@@ -472,6 +490,10 @@ func (s *Store) VersionsPendingImageCleanup(ctx context.Context) ([]DisabledVers
 		        select 1 from versions o
 		        where o.project_id = v.project_id and o.env = v.env
 		          and o.image_ref = v.image_ref and o.state <> 'disabled')
+		  and not exists (
+		        select 1 from nodes n
+		        where n.project_id = v.project_id and n.env = v.env
+		          and n.state = 'down')
 		order by v.created_at
 		limit $1`, imageCleanupSweepBatch)
 	if err != nil {
