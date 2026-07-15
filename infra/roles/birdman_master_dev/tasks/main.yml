@@ -167,6 +167,11 @@
   no_log: true
   when: not birdman_admin_key_stat.stat.exists
 
+# shell не поддерживает check-режим (движок его скипает) → в --check на свежем
+# боксе (ключа на диске нет) у birdman_admin_key_raw нет .stdout. В бою при
+# отсутствии ключа harvest выполняется всегда (его when — ровно
+# `not ...exists`) → `is not skipped` тождественно истинен, гард ничего не
+# меняет.
 - name: Fail if bootstrap admin key is not recoverable
   ansible.builtin.fail:
     msg: >-
@@ -177,8 +182,20 @@
       и перезапустите master.
   when:
     - not birdman_admin_key_stat.stat.exists
+    - birdman_admin_key_raw is not skipped
     - birdman_admin_key_raw.stdout | trim | length == 0
 
+- name: Note that admin key harvest is bypassed in check mode
+  ansible.builtin.debug:
+    msg: >-
+      check mode: harvest admin-ключа пропущен движком (shell без
+      check-режима) — наличие ключа в журнале не сверяется. Боевой прогон
+      соберёт ключ из журнала или упадёт с подсказкой, если журнал ротирован.
+  when:
+    - not birdman_admin_key_stat.stat.exists
+    - birdman_admin_key_raw is skipped
+
+# Как у fail-гейта: в --check harvest скипнут → нет .stdout для content.
 - name: Store admin API key (0600, box only)
   ansible.builtin.copy:
     content: "{{ birdman_admin_key_raw.stdout | trim }}"
@@ -187,4 +204,6 @@
     group: root
     mode: "0600"
   no_log: true
-  when: not birdman_admin_key_stat.stat.exists
+  when:
+    - not birdman_admin_key_stat.stat.exists
+    - birdman_admin_key_raw is not skipped
