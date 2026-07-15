@@ -1,9 +1,12 @@
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { I18nProvider } from '../lib/i18n';
+import { ToastProvider } from '../components/Toast';
 import { Backups } from '../screens/Backups';
 
+// Radix (AlertDialog) дёргает эти API при фокусе — в jsdom их нет.
 HTMLElement.prototype.scrollIntoView = () => {};
+if (!HTMLElement.prototype.hasPointerCapture) HTMLElement.prototype.hasPointerCapture = () => false;
 
 const settings = (over: Record<string, unknown> = {}) => ({
   enabled: true, interval_hours: 6, retention_local: 14,
@@ -24,7 +27,12 @@ function backupsMock(state = { settings: settings(), runs: [run()] }) {
       Promise.resolve(new Response(JSON.stringify(v), { status, headers: { 'Content-Type': 'application/json' } }));
     if (url.includes('/v1/backups/settings') && method === 'GET') return json({ settings: state.settings });
     if (url.includes('/v1/backups/settings') && method === 'PATCH') {
-      state.settings = { ...state.settings, ...JSON.parse(String(init?.body)) };
+      // Фиделити реального store (пункт (16) леджер-триажа): s3_secret_key —
+      // write-only, НИКОГДА не эхается в ответ; он лишь флипает has_s3_secret.
+      const body = JSON.parse(String(init?.body));
+      const { s3_secret_key, ...rest } = body;
+      state.settings = { ...state.settings, ...rest };
+      if (s3_secret_key !== undefined) state.settings.has_s3_secret = s3_secret_key !== '';
       return json({ settings: state.settings });
     }
     if (url.includes('/v1/backups/runs')) return json({ runs: state.runs });
@@ -34,6 +42,16 @@ function backupsMock(state = { settings: settings(), runs: [run()] }) {
 }
 
 const renderEn = () => render(<I18nProvider initialLang="en"><Backups /></I18nProvider>);
+// С провайдером тостов — для тестов, где нужен видимый success-тост (иначе
+// useToast падает в no-op фолбэк и тост в DOM не появляется).
+const renderEnToast = () =>
+  render(
+    <I18nProvider initialLang="en">
+      <ToastProvider>
+        <Backups />
+      </ToastProvider>
+    </I18nProvider>,
+  );
 
 const lastBody = (m: ReturnType<typeof vi.fn>, method: string) => {
   const call = [...m.mock.calls].reverse().find(([, init]) => (init as RequestInit)?.method === method);
@@ -92,6 +110,8 @@ describe('Backups screen', () => {
         String(u).endsWith('/v1/backups/run') && (i as RequestInit)?.method === 'POST');
       expect(posted).toBe(true);
     });
+    // enabled=true → прямой POST без подтверждающего диалога.
+    expect(screen.queryByRole('alertdialog')).toBeNull();
   });
 
   // Important из ревью Task 5: 30-с поллинг НЕ должен затирать несохранённые
@@ -122,5 +142,93 @@ describe('Backups screen', () => {
     expect(count('/v1/backups/settings')).toBe(settingsBefore); // settings НЕ поллятся
     // Несохранённая правка цела — фоновое обновление не перегидрировало форму.
     expect((screen.getByLabelText('Interval (hours)') as HTMLInputElement).value).toBe('12');
+  });
+
+  // Гейт run-now: грязная форма блокирует ручной прогон (он идёт по СОХРАНЁННЫМ
+  // настройкам) с title-подсказкой; после Save baseline обновлён → кнопка снова
+  // активна и title исчезает.
+  it('Run now is gated while the form is dirty (title hint), re-enables after save', async () => {
+    const fetchMock = backupsMock(); // enabled=true, последний прогон ok
+    vi.stubGlobal('fetch', fetchMock);
+    renderEn();
+    await screen.findByLabelText('Interval (hours)');
+
+    fireEvent.change(screen.getByLabelText('Interval (hours)'), { target: { value: '12' } });
+    const gated = screen.getByRole('button', { name: 'Run now' });
+    expect((gated as HTMLButtonElement).disabled).toBe(true);
+    expect(gated.getAttribute('title')).toBe('Save or revert your changes first — a manual run uses the saved settings');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(lastBody(fetchMock, 'PATCH')).toBeDefined());
+    await waitFor(() => {
+      expect((screen.getByRole('button', { name: 'Run now' }) as HTMLButtonElement).disabled).toBe(false);
+    });
+    expect(screen.getByRole('button', { name: 'Run now' }).getAttribute('title')).toBeNull();
+  });
+
+  // Гейт run-now: идущий прогон блокирует кнопку с причиной (reuse runBusy).
+  it('Run now is gated with a reason while a run is in progress', async () => {
+    const fetchMock = backupsMock({ settings: settings(), runs: [run({ result: 'running', finished_at: null, size_bytes: null })] });
+    vi.stubGlobal('fetch', fetchMock);
+    renderEn();
+    await screen.findByText('Last backup');
+    const gated = screen.getByRole('button', { name: 'Run now' });
+    expect((gated as HTMLButtonElement).disabled).toBe(true);
+    expect(gated.getAttribute('title')).toBe('A backup run is already in progress');
+  });
+
+  // Плановые бекапы выключены → run-now идёт через подтверждающий диалог: клик по
+  // триггеру не постит сразу; Cancel не постит; confirm постит и даёт success-тост.
+  it('Run now confirms via dialog when scheduled backups are disabled', async () => {
+    const fetchMock = backupsMock({ settings: settings({ enabled: false }), runs: [run()] });
+    vi.stubGlobal('fetch', fetchMock);
+    renderEnToast();
+    await screen.findByText('Last backup');
+
+    const posted = () =>
+      fetchMock.mock.calls.some(([u, i]) => String(u).endsWith('/v1/backups/run') && (i as RequestInit)?.method === 'POST');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Run now' })); // триггер
+    const dialog = await screen.findByRole('alertdialog');
+    expect(within(dialog).getByText('Backups are disabled')).toBeTruthy();
+    expect(posted()).toBe(false);
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
+    expect(posted()).toBe(false);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Run now' })); // триггер снова
+    const dialog2 = await screen.findByRole('alertdialog');
+    fireEvent.click(within(dialog2).getByRole('button', { name: 'Run now' })); // подтверждение
+    await waitFor(() => expect(posted()).toBe(true));
+    await screen.findByText('Backup started');
+  });
+
+  // Фиделити (16): ответ PATCH флипает has_s3_secret по факту ротации, но самого
+  // секрета НИКОГДА не эхает — placeholder Secret key переходит в keep-режим, а
+  // последующий Save другого поля не тащит s3_secret_key.
+  it('rotating the S3 secret flips has_s3_secret via the PATCH response; secret is never echoed', async () => {
+    const fetchMock = backupsMock({
+      settings: settings({ s3_enabled: true, s3_endpoint: 'https://s3.example.com', s3_bucket: 'b', s3_access_key: 'ak', has_s3_secret: false }),
+      runs: [],
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderEn();
+
+    const secretInput = await screen.findByLabelText('Secret key');
+    expect((secretInput as HTMLInputElement).placeholder).toBe(''); // has_s3_secret=false → пусто
+
+    fireEvent.change(secretInput, { target: { value: 'sekret' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(lastBody(fetchMock, 'PATCH')).toBeDefined());
+
+    await waitFor(() => {
+      expect((screen.getByLabelText('Secret key') as HTMLInputElement).placeholder).toBe('Leave empty to keep the current secret');
+    });
+
+    fireEvent.change(screen.getByLabelText('Interval (hours)'), { target: { value: '9' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(lastBody(fetchMock, 'PATCH')?.interval_hours).toBe(9));
+    expect(lastBody(fetchMock, 'PATCH')).not.toHaveProperty('s3_secret_key');
   });
 });

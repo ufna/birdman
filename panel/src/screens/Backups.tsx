@@ -8,6 +8,10 @@
 // от baseline (последняя подтверждённая сервером версия: GET при загрузке,
 // ответ PATCH после save). PATCH несёт ТОЛЬКО изменённые поля (диф против
 // baseline); s3_secret_key шлём лишь при ротации (пустое поле = keep).
+// Run-now гейтится (title-тултип + disabled): при running-прогоне, до загрузки
+// настроек и при грязной форме — ручной прогон идёт по СОХРАНЁННЫМ настройкам.
+// Если плановые бекапы выключены (baseline.enabled=false) — прогон через
+// подтверждающий диалог (ConfirmButton), чтобы разовый ручной запуск был явным.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
@@ -23,8 +27,11 @@ import { DataTable } from '../components/DataTable';
 import { StateBadge } from '../components/Badge';
 import type { Tone } from '../components/Badge';
 import { Card, CardHeader, ErrorNote, LoadingRow } from '../components/ui';
+import { ConfirmButton } from '../components/ConfirmDialog';
 
 const inputClass = 'rounded-lg border border-line bg-paper px-3 py-2 text-sm font-normal placeholder:text-muted';
+// Классы кнопки «Сделать бекап» — общие для обеих веток гейта (plain / confirm).
+const runNowClass = 'rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50';
 
 /** Тон результата прогона: ok → good, error → dead, running → warn. */
 function resultTone(result: BackupRun['result']): Tone {
@@ -136,23 +143,37 @@ export function Backups() {
       });
   }
 
+  // Общий пост-успех run-now (обе ветки гейта): тост + отложенный ре-фетч
+  // истории. Прогон асинхронный — статус/история подтянутся поллингом; лёгкий
+  // ре-фетч чуть раньше, чтобы 'running' проявилось быстрее.
+  function runNowSucceeded() {
+    toast.success(t('backups.toast.runStarted'));
+    if (runReloadTimer.current !== null) clearTimeout(runReloadTimer.current);
+    runReloadTimer.current = setTimeout(() => {
+      runs.reload();
+    }, 2000);
+  }
+
   function runNow() {
     api
       .runBackupNow()
-      .then(() => {
-        toast.success(t('backups.toast.runStarted'));
-        // Прогон асинхронный — статус/история подтянутся поллингом; лёгкий
-        // ре-фетч чуть раньше, чтобы 'running' проявилось быстрее.
-        if (runReloadTimer.current !== null) clearTimeout(runReloadTimer.current);
-        runReloadTimer.current = setTimeout(() => {
-          runs.reload();
-        }, 2000);
-      })
+      .then(runNowSucceeded)
       .catch((e: ApiError) => {
         if (e.status === 409) toast.error(t('backups.toast.runBusy'));
         else toast.error(e.detail ?? e.code);
       });
   }
+
+  // Причина гейта run-now (первая подходящая) — title-тултип и признак disabled.
+  // undefined ⇒ кнопка активна.
+  const runNowReason: string | undefined =
+    lastRun?.result === 'running'
+      ? t('backups.toast.runBusy')
+      : baseline === null
+        ? t('backups.runNow.hint.noSettings')
+        : dirty
+          ? t('backups.runNow.hint.dirty')
+          : undefined;
 
   function testS3() {
     api
@@ -196,14 +217,34 @@ export function Backups() {
         <CardHeader
           title={t('backups.status.title')}
           aside={
-            <button
-              type="button"
-              onClick={runNow}
-              disabled={lastRun?.result === 'running'}
-              className="rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
-            >
-              {t('backups.runNow')}
-            </button>
+            baseline?.enabled === false ? (
+              // Плановые бекапы выключены: разовый ручной прогон — через
+              // подтверждение. 409 в диалоге показываем текстом runBusy.
+              <ConfirmButton
+                label={t('backups.runNow')}
+                title={t('backups.runNow.confirm.title')}
+                description={t('backups.runNow.confirm.desc')}
+                confirmLabel={t('backups.runNow')}
+                triggerClass={runNowClass}
+                disabled={runNowReason !== undefined}
+                triggerTitle={runNowReason}
+                onConfirm={async () => {
+                  await api.runBackupNow();
+                  runNowSucceeded();
+                }}
+                errorOverride={(e) => (e instanceof ApiError && e.status === 409 ? t('backups.toast.runBusy') : undefined)}
+              />
+            ) : (
+              <button
+                type="button"
+                onClick={runNow}
+                disabled={runNowReason !== undefined}
+                title={runNowReason}
+                className={runNowClass}
+              >
+                {t('backups.runNow')}
+              </button>
+            )
           }
         />
         {runs.error !== undefined && runs.data === undefined ? (

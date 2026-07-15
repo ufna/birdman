@@ -21,6 +21,8 @@ interface ConfirmButtonProps {
   onConfirm: () => Promise<void>;
   /** Доп. классы триггера (по умолчанию — компактная обводка). */
   triggerClass?: string;
+  /** title-атрибут триггер-кнопки (тултип-причина дизейбла). */
+  triggerTitle?: string;
   /** Локализованное сообщение для конкретной ошибки (напр. 409 last_admin_key);
    *  вернул undefined — падаем на дефолтный errMessage. */
   errorOverride?: (e: unknown) => string | undefined;
@@ -40,6 +42,7 @@ export function ConfirmButton({
   disabled = false,
   onConfirm,
   triggerClass,
+  triggerTitle,
   errorOverride,
 }: ConfirmButtonProps) {
   const { t } = useT();
@@ -74,6 +77,7 @@ export function ConfirmButton({
         <button
           type="button"
           disabled={disabled}
+          title={triggerTitle}
           className={
             triggerClass ??
             'rounded-lg border border-line px-2.5 py-1 text-xs font-medium text-muted transition-colors hover:text-ink disabled:opacity-40'
