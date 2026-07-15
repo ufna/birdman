@@ -1,7 +1,8 @@
 # Конфиг birdman-master (см. docs/specs/master.md §7; дев-дефолты v0).
 # Любое поле можно переопределить env-переменными:
 #   BIRDMAN_DSN, BIRDMAN_LISTEN_API, BIRDMAN_LISTEN_GRPC, BIRDMAN_VM_URL,
-#   BIRDMAN_VL_URL, BIRDMAN_VMALERT_URL, BIRDMAN_SECRETS_KEY_FILE.
+#   BIRDMAN_VL_URL, BIRDMAN_VMALERT_URL, BIRDMAN_ALERTMANAGER_URL,
+#   BIRDMAN_SECRETS_KEY_FILE.
 
 dsn: "postgres://postgres:birdman@localhost:5432/birdman?sslmode=disable"
 
@@ -37,6 +38,11 @@ metrics:
 alerts:
   vmalert_url: "http://127.0.0.1:8880"
   log_path: "/var/log/birdman/alerts.log"
+  # Зеркалирование mute → настоящий alertmanager silence (best-effort): mute из
+  # панели создаёт реальный silence, sink/Discord замолкают (не только muted:true).
+  # Дефолт — AM на том же боксе; недоступный AM НИКОГДА не ломает mute/unmute.
+  # Пусто "" → зеркалирование выключено, mute-аннотации работают как раньше (v0).
+  alertmanager_url: "http://127.0.0.1:9093"
 
 # Режим аутентификации agentlink-листенера (mTLS agentlink v1, §3):
 #   token — клиентские серты игнорируются (поведение до mTLS, байт-в-байт; экстренный откат);

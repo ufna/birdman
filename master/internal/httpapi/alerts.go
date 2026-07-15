@@ -28,12 +28,14 @@ import (
 // `description` when `description_ru` is absent (self-host operators need not
 // write bilingual rules).
 //
-// Mutes (POST/GET/DELETE /v1/alerts/mutes) are master state, not a vmalert
-// silence: a mute is an annotation master stores and reflects as muted:true on
+// Mutes (POST/GET/DELETE /v1/alerts/mutes) are master state (table alert_mutes,
+// store/alerts.go) — the source of truth. A mute is reflected as muted:true on
 // matching alerts in /v1/alerts/{active,history} so the panel can dim/hide them
-// and an audit trail exists. It does NOT stop vmalert firing or the Discord/log
-// delivery — a real silence needs the alertmanager silence API (ops.md §1 TODO).
-// Mute state lives in store/alerts.go (table alert_mutes).
+// and an audit trail exists, AND is mirrored into a real alertmanager silence
+// best-effort (SilenceMirror below, internal/amsilence, ops.md §1, tracker #245)
+// — real suppression of the log sink/Discord. Without a reachable alertmanager
+// the mirror is a silent no-op and the mute degrades to pure v0 annotation
+// semantics.
 
 const alertsUpstreamTimeout = 15 * time.Second
 
@@ -385,12 +387,22 @@ func anyMuteMatches(mutes []store.AlertMute, name, region string) bool {
 	return false
 }
 
-// --- mute rules (master-level suppression annotations) ---
+// --- mute rules (master-level suppression) ---
 //
 // Contract (docs/specs/master.md §6): POST needs admin, GET needs readonly,
-// DELETE needs admin. A mute is master state; it makes matching alerts report
-// muted:true (handleAlertsActive/handleAlertHistory) but does not silence
-// vmalert/Discord — that is the alertmanager silence API (ops.md §1 TODO).
+// DELETE needs admin. A mute is master state (the source of truth): it makes
+// matching alerts report muted:true (handleAlertsActive/handleAlertHistory) and
+// is mirrored best-effort into a real alertmanager silence (SilenceMirror) —
+// real suppression of the sink/Discord. Without a reachable alertmanager the
+// mute degrades to pure v0 annotation semantics.
+
+// SilenceMirror mirrors mute changes into alertmanager silences best-effort
+// (ops.md §1, tracker #245). Implemented by amsilence.Mirror; nil-safe like
+// the other optional hooks — an unwired mirror means pure v0 semantics.
+type SilenceMirror interface {
+	MuteUpserted(ctx context.Context, m store.AlertMute)
+	MuteDeleted(ctx context.Context, m store.AlertMute)
+}
 
 type createMuteRequest struct {
 	Alertname string  `json:"alertname"`
@@ -448,6 +460,13 @@ func (s *Server) handleCreateAlertMute(w http.ResponseWriter, r *http.Request) {
 	}); err != nil {
 		s.log.Error("alert mute: create event write failed", "mute_id", mute.ID, "err", err)
 	}
+	// Mirror into a real alertmanager silence best-effort (nil-safe). Synchronous
+	// and before writeJSON so a fast AM lets a GET right after this POST already
+	// see silence_id; the 201 body still carries the mute AS UPSERTED (silence_id
+	// may be null here even on success — the mirror stamps the row, not this copy).
+	if s.silences != nil {
+		s.silences.MuteUpserted(r.Context(), mute)
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{"mute": mute})
 }
 
@@ -486,6 +505,11 @@ func (s *Server) handleDeleteAlertMute(w http.ResponseWriter, r *http.Request) {
 		"mute_id": mute.ID, "alertname": mute.Alertname, "region": mute.Region,
 	}); err != nil {
 		s.log.Error("alert mute: delete event write failed", "mute_id", mute.ID, "err", err)
+	}
+	// Remove the mirrored silence best-effort (nil-safe); the 204 never depends on
+	// AM — a failed delete is left to the reconcile orphan sweep.
+	if s.silences != nil {
+		s.silences.MuteDeleted(r.Context(), mute)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

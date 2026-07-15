@@ -20,6 +20,10 @@ secrets_key_file: "/etc/birdman/secrets.key"
 #   victoriametrics_url: "http://127.0.0.1:8428"
 #   victorialogs_url: "http://127.0.0.1:9428"
 
+# alerts:
+#   alertmanager_url: "http://127.0.0.1:9093"  # зеркалирование mute → alertmanager silence (best-effort);
+#                                              # дефолт и так этот URL: без стека тихо деградирует до v0, "" — выключить явно
+
 # backups:                       # Backups v1: политика (интервал/ретеншны/S3) — в панели;
 #   dir: /var/lib/birdman/backups  # здесь только деплой-концерны (дефолты менять не нужно)
 #   pg_dump_path: pg_dump

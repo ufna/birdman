@@ -109,6 +109,88 @@ func TestAlertMutesStore(t *testing.T) {
 	}
 }
 
+// TestAlertMuteSilenceID covers the silence-mirror bookkeeping columns
+// (tracker #245): stamping/clearing silence_id, that a re-upsert of the same
+// target preserves it, and that DeleteAlertMute returns the row carrying it.
+func TestAlertMuteSilenceID(t *testing.T) {
+	st := testdb.New(t)
+	ctx := context.Background()
+
+	m, err := st.UpsertAlertMute(ctx, store.CreateAlertMuteParams{
+		Alertname: "NodeDown", Region: strptr("eu"), Note: "n1", CreatedBy: "admin",
+	})
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	if m.SilenceID != nil {
+		t.Fatalf("fresh mute should have nil silence_id, got %v", *m.SilenceID)
+	}
+
+	// Stamp a silence id.
+	if err := st.SetAlertMuteSilenceID(ctx, m.ID, strptr("sil-1")); err != nil {
+		t.Fatalf("set silence id: %v", err)
+	}
+	got := oneActiveMute(t, st, m.ID)
+	if got.SilenceID == nil || *got.SilenceID != "sil-1" {
+		t.Fatalf("silence_id after set = %v, want sil-1", got.SilenceID)
+	}
+
+	// Re-upsert the same (alertname, region): note changes, silence_id survives.
+	up, err := st.UpsertAlertMute(ctx, store.CreateAlertMuteParams{
+		Alertname: "NodeDown", Region: strptr("eu"), Note: "extended", CreatedBy: "admin",
+	})
+	if err != nil {
+		t.Fatalf("re-upsert: %v", err)
+	}
+	if up.ID != m.ID {
+		t.Fatalf("re-upsert should reuse the row: %s != %s", up.ID, m.ID)
+	}
+	if up.SilenceID == nil || *up.SilenceID != "sil-1" {
+		t.Fatalf("re-upsert must preserve silence_id, got %v", up.SilenceID)
+	}
+
+	// Clear it (nil).
+	if err := st.SetAlertMuteSilenceID(ctx, m.ID, nil); err != nil {
+		t.Fatalf("clear silence id: %v", err)
+	}
+	if got := oneActiveMute(t, st, m.ID); got.SilenceID != nil {
+		t.Fatalf("silence_id after clear = %v, want nil", *got.SilenceID)
+	}
+
+	// A missing row is a no-op, not an error (mute deleted mid-flight).
+	if err := st.SetAlertMuteSilenceID(ctx, "00000000-0000-0000-0000-000000000000", strptr("x")); err != nil {
+		t.Fatalf("set on missing row must be a no-op, got %v", err)
+	}
+
+	// DeleteAlertMute returns the row with its silence_id.
+	if err := st.SetAlertMuteSilenceID(ctx, m.ID, strptr("sil-2")); err != nil {
+		t.Fatalf("re-stamp: %v", err)
+	}
+	del, deleted, err := st.DeleteAlertMute(ctx, m.ID)
+	if err != nil || !deleted {
+		t.Fatalf("delete: deleted=%v err=%v", deleted, err)
+	}
+	if del.SilenceID == nil || *del.SilenceID != "sil-2" {
+		t.Fatalf("deleted row silence_id = %v, want sil-2", del.SilenceID)
+	}
+}
+
+// oneActiveMute fetches the active mute with the given id (test helper).
+func oneActiveMute(t *testing.T, st *store.Store, id string) store.AlertMute {
+	t.Helper()
+	mutes, err := st.ListAlertMutes(context.Background(), false)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	for _, m := range mutes {
+		if m.ID == id {
+			return m
+		}
+	}
+	t.Fatalf("mute %s not found in active list", id)
+	return store.AlertMute{}
+}
+
 // TestAlertMutesEmpty: the list is [] (never nil) when there are no mutes.
 func TestAlertMutesEmpty(t *testing.T) {
 	st := testdb.New(t)

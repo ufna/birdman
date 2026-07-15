@@ -57,6 +57,11 @@ type Server struct {
 	// (the read routes GET settings/runs work regardless — they hit the store).
 	backups      BackupRunner
 	backupS3Test func(context.Context) error
+
+	// silences mirrors mute changes into alertmanager silences (alerts.go),
+	// wired by WithSilenceMirror. nil-safe — an unwired mirror leaves mutes in
+	// pure v0 annotation semantics (tracker #245).
+	silences SilenceMirror
 }
 
 func New(st *store.Store, m *metrics.Metrics, mm *matchmaker.Matchmaker, dep *deploy.Manager, sender CommandSender, logs *agentlink.LogRouter, vmURL, vlURL string, log *slog.Logger) *Server {
@@ -184,6 +189,18 @@ func (s *Server) WithRegistriesHook(fn func(context.Context)) *Server {
 func (s *Server) WithBackups(r BackupRunner, s3Test func(context.Context) error) *Server {
 	s.backups = r
 	s.backupS3Test = s3Test
+	return s
+}
+
+// WithSilenceMirror wires the alertmanager silence mirror (amsilence.Mirror) so
+// POST/DELETE /v1/alerts/mutes mirror into real silences best-effort (alerts.go).
+// Kept a setter rather than a New parameter, like WithAlertsSources/WithBackups,
+// so the existing New signature and its call sites stay untouched. Nil-safe: an
+// unwired mirror leaves mutes in pure v0 annotation semantics — the mute/unmute
+// still succeeds, it just does not create/remove an AM silence. Returns s for
+// chaining.
+func (s *Server) WithSilenceMirror(m SilenceMirror) *Server {
+	s.silences = m
 	return s
 }
 

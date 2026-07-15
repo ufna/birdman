@@ -210,6 +210,60 @@ func TestLoadNodeDownAfterMinRejectsBelowOne(t *testing.T) {
 	}
 }
 
+// mute → alertmanager silence mirroring (tracker #245): alertmanager_url
+// defaults to the same-box AM, is read from the file, overridden by
+// BIRDMAN_ALERTMANAGER_URL, and an explicit "" disables mirroring (yaml.v3
+// overwrites the default with the empty string).
+func TestLoadAlertmanagerURLDefault(t *testing.T) {
+	withDSN(t)
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Alerts.AlertmanagerURL != "http://127.0.0.1:9093" {
+		t.Fatalf("default alertmanager_url = %q, want http://127.0.0.1:9093", cfg.Alerts.AlertmanagerURL)
+	}
+}
+
+func TestLoadAlertmanagerURLFromFile(t *testing.T) {
+	withDSN(t)
+	path := writeConfig(t, "alerts:\n  alertmanager_url: \"http://am.internal:9093\"\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Alerts.AlertmanagerURL != "http://am.internal:9093" {
+		t.Fatalf("alertmanager_url from file = %q", cfg.Alerts.AlertmanagerURL)
+	}
+}
+
+func TestLoadAlertmanagerURLEnvOverride(t *testing.T) {
+	withDSN(t)
+	path := writeConfig(t, "alerts:\n  alertmanager_url: \"http://am.internal:9093\"\n")
+	t.Setenv("BIRDMAN_ALERTMANAGER_URL", "http://other:9093")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Alerts.AlertmanagerURL != "http://other:9093" {
+		t.Fatalf("env override alertmanager_url = %q, want http://other:9093", cfg.Alerts.AlertmanagerURL)
+	}
+}
+
+// An explicit empty string in the file disables mirroring — the self-host case
+// without a monitoring stack. yaml.v3 overwrites the default with "".
+func TestLoadAlertmanagerURLExplicitEmptyDisables(t *testing.T) {
+	withDSN(t)
+	path := writeConfig(t, "alerts:\n  alertmanager_url: \"\"\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Alerts.AlertmanagerURL != "" {
+		t.Fatalf("explicit empty alertmanager_url = %q, want \"\" (mirroring disabled)", cfg.Alerts.AlertmanagerURL)
+	}
+}
+
 func writeKeyFile(t *testing.T, key []byte) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "secrets.key")

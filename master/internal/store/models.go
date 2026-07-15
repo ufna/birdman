@@ -170,9 +170,10 @@ const (
 	// list. Payload carries only {name} — the row (and its id) is gone.
 	EventAPIKeyPurged = "apikey_purged" // DELETE /v1/apikeys/{id}?purge=true
 
-	// Alert mute/suppression annotations (П2 Alerts screen, master.md §6). v0:
-	// a mute is a master-level annotation, not a real vmalert/Discord silence
-	// (ops.md §1 TODO). Payload carries mute_id/alertname/region — no secrets.
+	// Alert mute/suppression (П2 Alerts screen, master.md §6). alert_mutes is the
+	// source of truth; a mute is reflected muted:true AND mirrored best-effort
+	// into a real alertmanager silence (internal/amsilence, ops.md §1, tracker
+	// #245). Payload carries mute_id/alertname/region — no secrets.
 	EventAlertMuted   = "alert_muted"   // POST /v1/alerts/mutes
 	EventAlertUnmuted = "alert_unmuted" // DELETE /v1/alerts/mutes/{id}
 

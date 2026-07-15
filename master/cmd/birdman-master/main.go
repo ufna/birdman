@@ -24,6 +24,7 @@ import (
 	"google.golang.org/grpc/keepalive"
 
 	"github.com/ufna/birdman/master/internal/agentlink"
+	"github.com/ufna/birdman/master/internal/amsilence"
 	"github.com/ufna/birdman/master/internal/backup"
 	"github.com/ufna/birdman/master/internal/config"
 	"github.com/ufna/birdman/master/internal/deploy"
@@ -258,6 +259,10 @@ func run() error {
 	// later task can expose it through the API (manual run / status); it is
 	// started with the other background loops below (go backupRunner.Run).
 	backupRunner := backup.New(st, cfg.DSN, cfg.Backups, log)
+	// Silence mirror (tracker #245): mirrors mute changes into real alertmanager
+	// silences best-effort. An empty alertmanager_url disables it (all no-ops);
+	// its Run loop below migrates v0 mutes and repairs drift.
+	silenceMirror := amsilence.New(st, cfg.Alerts.AlertmanagerURL, log)
 	apiHandler := httpapi.New(st, m, mm, dep, hub, logRouter, cfg.Metrics.VictoriaMetricsURL, cfg.Metrics.VictoriaLogsURL, log).
 		WithAlertsSources(cfg.Alerts.VmalertURL, cfg.Alerts.LogPath).
 		// After every successful POST/DELETE /v1/registries, refresh every
@@ -266,7 +271,9 @@ func run() error {
 		WithRegistriesHook(agentlinkSvc.BroadcastRegistries).
 		// Backups v1 (design §4): manual run-now via the runner, and the
 		// "test connection" button verifying the saved S3 config.
-		WithBackups(backupRunner, func(ctx context.Context) error { return backup.TestS3(ctx, st) })
+		WithBackups(backupRunner, func(ctx context.Context) error { return backup.TestS3(ctx, st) }).
+		// Mirror mute/unmute into alertmanager silences best-effort (tracker #245).
+		WithSilenceMirror(silenceMirror)
 	api := &http.Server{
 		Addr:              cfg.ListenAPI,
 		Handler:           apiHandler,
@@ -301,6 +308,10 @@ func run() error {
 	// Backups v1 scheduler: ticks every minute, dumps when enabled &&
 	// now ≥ last_ok+interval (policy read from backup_settings each run).
 	go backupRunner.Run(loopCtx)
+	// Silence-mirror reconcile (tracker #245): migrates v0 mutes into real
+	// alertmanager silences, re-issues lost/expired ones, repairs endsAt drift
+	// and sweeps orphans. A disabled (empty alertmanager_url) mirror returns at once.
+	go silenceMirror.Run(loopCtx)
 
 	errCh := make(chan error, 2)
 	go func() {

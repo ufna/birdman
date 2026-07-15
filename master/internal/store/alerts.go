@@ -9,15 +9,18 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// AlertMute is one row of alert_mutes — a master-level mute/suppression
-// annotation for alerts (docs/specs/master.md §6). v0 semantics: a mute makes
-// master tag matching alerts muted:true in /v1/alerts/{active,history} so the
-// panel can dim/hide them and an audit trail exists — it is NOT a real
-// vmalert/Discord silence (that needs the alertmanager silence API; ops.md §1
-// TODO), so Discord/the log sink keep receiving the alerts. Region and
-// ExpiresAt are nullable: a nil Region matches every region, a nil ExpiresAt
-// never expires. They serialize as JSON null (not omitted) so the panel always
-// sees the fields.
+// AlertMute is one row of alert_mutes — a master-level mute/suppression for
+// alerts (docs/specs/master.md §6). alert_mutes is the source of truth: master
+// tags matching alerts muted:true in /v1/alerts/{active,history} so the panel
+// can dim/hide them and an audit trail exists, AND mirrors the mute into a real
+// alertmanager silence best-effort (internal/amsilence; ops.md §1, tracker
+// #245) — real suppression of the log sink/Discord. Without a reachable
+// alertmanager the mirror is a silent no-op and the mute degrades to pure v0
+// annotation semantics. Region and ExpiresAt are nullable: a nil Region matches
+// every region, a nil ExpiresAt never expires. SilenceID holds the mirrored
+// silence's id (nil = not yet mirrored — a pre-upgrade v0 mute or AM was down;
+// the reconcile sweep fills it in). All three serialize as JSON null (not
+// omitted) so the panel always sees the fields.
 type AlertMute struct {
 	ID        string     `json:"id"`
 	Alertname string     `json:"alertname"`
@@ -26,6 +29,7 @@ type AlertMute struct {
 	CreatedAt time.Time  `json:"created_at"`
 	ExpiresAt *time.Time `json:"expires_at"`
 	CreatedBy string     `json:"created_by"`
+	SilenceID *string    `json:"silence_id"`
 }
 
 // Matches reports whether this mute covers an alert with the given alertname
@@ -38,7 +42,7 @@ func (m AlertMute) Matches(alertname, region string) bool {
 	return m.Region == nil || *m.Region == region
 }
 
-const alertMuteCols = `id::text, alertname, region, note, created_at, expires_at, created_by`
+const alertMuteCols = `id::text, alertname, region, note, created_at, expires_at, created_by, silence_id`
 
 // CreateAlertMuteParams is the input to UpsertAlertMute. A nil Region means
 // "all regions", a nil ExpiresAt "never expires"; Note/CreatedBy default to "".
@@ -80,7 +84,7 @@ func (s *Store) UpsertAlertMute(ctx context.Context, p CreateAlertMuteParams) (A
 		order by created_at desc
 		limit 1
 		for update`, p.Alertname, p.Region).
-		Scan(&m.ID, &m.Alertname, &m.Region, &m.Note, &m.CreatedAt, &m.ExpiresAt, &m.CreatedBy)
+		Scan(&m.ID, &m.Alertname, &m.Region, &m.Note, &m.CreatedAt, &m.ExpiresAt, &m.CreatedBy, &m.SilenceID)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		err = tx.QueryRow(ctx, `
@@ -88,16 +92,19 @@ func (s *Store) UpsertAlertMute(ctx context.Context, p CreateAlertMuteParams) (A
 			values ($1, $2, $3, $4, $5)
 			returning `+alertMuteCols,
 			p.Alertname, p.Region, p.Note, p.ExpiresAt, p.CreatedBy).
-			Scan(&m.ID, &m.Alertname, &m.Region, &m.Note, &m.CreatedAt, &m.ExpiresAt, &m.CreatedBy)
+			Scan(&m.ID, &m.Alertname, &m.Region, &m.Note, &m.CreatedAt, &m.ExpiresAt, &m.CreatedBy, &m.SilenceID)
 	case err != nil:
 		return AlertMute{}, err
 	default:
+		// Re-mute of the same target updates only note/expires_at — silence_id
+		// is deliberately left untouched so the mirrored silence survives an
+		// "extend/edit"; the mirror call then updates that same silence in place.
 		err = tx.QueryRow(ctx, `
 			update alert_mutes set note = $2, expires_at = $3
 			where id = $1::uuid
 			returning `+alertMuteCols,
 			m.ID, p.Note, p.ExpiresAt).
-			Scan(&m.ID, &m.Alertname, &m.Region, &m.Note, &m.CreatedAt, &m.ExpiresAt, &m.CreatedBy)
+			Scan(&m.ID, &m.Alertname, &m.Region, &m.Note, &m.CreatedAt, &m.ExpiresAt, &m.CreatedBy, &m.SilenceID)
 	}
 	if err != nil {
 		return AlertMute{}, err
@@ -125,7 +132,7 @@ func (s *Store) ListAlertMutes(ctx context.Context, includeExpired bool) ([]Aler
 	out := []AlertMute{}
 	for rows.Next() {
 		var m AlertMute
-		if err := rows.Scan(&m.ID, &m.Alertname, &m.Region, &m.Note, &m.CreatedAt, &m.ExpiresAt, &m.CreatedBy); err != nil {
+		if err := rows.Scan(&m.ID, &m.Alertname, &m.Region, &m.Note, &m.CreatedAt, &m.ExpiresAt, &m.CreatedBy, &m.SilenceID); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -144,7 +151,7 @@ func (s *Store) DeleteAlertMute(ctx context.Context, id string) (AlertMute, bool
 	err := s.Pool.QueryRow(ctx, `
 		delete from alert_mutes where id = $1::uuid
 		returning `+alertMuteCols, id).
-		Scan(&m.ID, &m.Alertname, &m.Region, &m.Note, &m.CreatedAt, &m.ExpiresAt, &m.CreatedBy)
+		Scan(&m.ID, &m.Alertname, &m.Region, &m.Note, &m.CreatedAt, &m.ExpiresAt, &m.CreatedBy, &m.SilenceID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AlertMute{}, false, nil
 	}
@@ -152,6 +159,16 @@ func (s *Store) DeleteAlertMute(ctx context.Context, id string) (AlertMute, bool
 		return AlertMute{}, false, err
 	}
 	return m, true, nil
+}
+
+// SetAlertMuteSilenceID stamps the mirrored alertmanager silence id on a
+// mute (nil clears it). A missing row is a no-op, not an error: the mute may
+// have been deleted while the mirror call was in flight — the reconcile
+// sweep handles the stray silence.
+func (s *Store) SetAlertMuteSilenceID(ctx context.Context, id string, silenceID *string) error {
+	_, err := s.Pool.Exec(ctx,
+		`update alert_mutes set silence_id = $2 where id = $1::uuid`, id, silenceID)
+	return err
 }
 
 // normalizeRegion collapses an empty/whitespace region to nil ("all regions"),

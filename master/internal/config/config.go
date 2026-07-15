@@ -87,6 +87,11 @@ type Alerts struct {
 	// LogPath is the alert-sink log (alertmanager-v2 JSON lines); missing file
 	// → /v1/alerts/history returns an empty list, not 500.
 	LogPath string `yaml:"log_path"`
+	// AlertmanagerURL — base URL alertmanager api/v2 для зеркалирования
+	// mute → настоящий silence (ops.md §1, tracker #238). Пусто →
+	// зеркалирование выключено, mute работает в чистой v0-семантике
+	// (аннотация muted:true), что нормально для self-host без мониторинг-стека.
+	AlertmanagerURL string `yaml:"alertmanager_url"`
 }
 
 // Backups — исполнение бекапов master'ом (Backups v1). Настройки политики
@@ -155,9 +160,12 @@ func defaults() Config {
 		Metrics: Metrics{VictoriaMetricsURL: "http://127.0.0.1:8428", VictoriaLogsURL: "http://127.0.0.1:9428"},
 		// vmalert + alert sink on the same box (ops.md §1); the alerts
 		// endpoints degrade gracefully (503 unset / 502 unreachable / [] no log).
+		// alertmanager of the same box mirrors mutes into real silences
+		// (tracker #245); best-effort — an unreachable AM never breaks mute.
 		Alerts: Alerts{
-			VmalertURL: "http://127.0.0.1:8880",
-			LogPath:    "/var/log/birdman/alerts.log",
+			VmalertURL:      "http://127.0.0.1:8880",
+			LogPath:         "/var/log/birdman/alerts.log",
+			AlertmanagerURL: "http://127.0.0.1:9093",
 		},
 		Matchmaking: Matchmaking{
 			TickMS:      500,
@@ -203,6 +211,9 @@ func Load(path string) (Config, error) {
 	}
 	if v := os.Getenv("BIRDMAN_VMALERT_URL"); v != "" {
 		cfg.Alerts.VmalertURL = v
+	}
+	if v := os.Getenv("BIRDMAN_ALERTMANAGER_URL"); v != "" {
+		cfg.Alerts.AlertmanagerURL = v
 	}
 	if v := os.Getenv("BIRDMAN_AGENTLINK_AUTH"); v != "" {
 		cfg.AgentlinkAuth = v
