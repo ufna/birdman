@@ -52,7 +52,7 @@ services:
       - victoriametrics
     restart: unless-stopped
 
-  # --- алерты: vmalert (query → VM, notify → sink/alertmanager) ---
+  # --- алерты: vmalert → ВСЕГДА alertmanager (настоящий silence, tracker #238) ---
   vmalert:
     image: {{ birdman_vmalert_image }}
     container_name: birdman-vmalert
@@ -60,11 +60,7 @@ services:
       - "-rule=/etc/vmalert/rules.yml"
       - "-datasource.url=http://victoriametrics:{{ birdman_vm_port }}"
       - "-remoteWrite.url=http://victoriametrics:{{ birdman_vm_port }}"
-{% if birdman_alert_discord_webhook | length > 0 %}
       - "-notifier.url=http://alertmanager:{{ birdman_alertmanager_port }}"
-{% else %}
-      - "-notifier.url=http://alert-sink:{{ birdman_alert_sink_port }}"
-{% endif %}
       - "-evaluationInterval={{ birdman_eval_interval }}"
       - "-httpListenAddr=:{{ birdman_vmalert_port }}"
     volumes:
@@ -73,30 +69,33 @@ services:
       - "{{ birdman_bind_addr }}:{{ birdman_vmalert_port }}:{{ birdman_vmalert_port }}"
     depends_on:
       - victoriametrics
-{% if birdman_alert_discord_webhook | length > 0 %}
       - alertmanager
-{% else %}
-      - alert-sink
-{% endif %}
     restart: unless-stopped
 
-{% if birdman_alert_discord_webhook | length > 0 %}
-  # --- alertmanager-путь (webhook задан): реальный Discord-приёмник ---
+  # --- alertmanager: безусловное звено доставки (vmalert → AM → sink+Discord).
+  #     Data-volume хранит silences между рестартами (master зеркалирует mute →
+  #     silence, tracker #245); --storage.path обязателен явно — официальный
+  #     образ задаёт его через CMD, который мы переопределяем. ---
   alertmanager:
     image: {{ birdman_alertmanager_image }}
     container_name: birdman-alertmanager
     command:
       - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
       - "--web.listen-address=:{{ birdman_alertmanager_port }}"
       - "--cluster.listen-address="
     volumes:
       - "{{ birdman_monitoring_conf_dir }}/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro"
+      - amdata:/alertmanager
     ports:
       - "{{ birdman_bind_addr }}:{{ birdman_alertmanager_port }}:{{ birdman_alertmanager_port }}"
+    depends_on:
+      - alert-sink
     restart: unless-stopped
-{% else %}
-  # --- logger-путь (webhook пуст): крошечный stdlib-приёмник, дописывает
-  #     каждый POST от vmalert в {{ birdman_alerts_log }} (одна JSON-строка) ---
+
+  # --- alert-sink: постоянный webhook-receiver alertmanager'а, дописывает
+  #     каждую доставку в {{ birdman_alerts_log }} (одна JSON-строка) —
+  #     история для панели (master парсит этот файл, master.md §6) ---
   alert-sink:
     image: {{ birdman_alert_sink_image }}
     container_name: birdman-alert-sink
@@ -115,7 +114,6 @@ services:
       timeout: 3s
       retries: 5
     restart: unless-stopped
-{% endif %}
 
   # --- Grafana: datasource + 2 дашборда provisioning'ом, пароль из env_file ---
   grafana:
@@ -138,5 +136,7 @@ volumes:
     name: birdman-vmdata
   vldata:
     name: birdman-vldata
+  amdata:
+    name: birdman-amdata
   grafana:
     name: birdman-grafana

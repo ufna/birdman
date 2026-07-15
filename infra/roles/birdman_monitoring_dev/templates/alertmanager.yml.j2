@@ -1,15 +1,27 @@
 # {{ ansible_managed }}
-# Alertmanager-конфиг (используется ТОЛЬКО когда задан birdman_alert_discord_webhook).
-# Discord-приёмник (alertmanager >= 0.25 умеет discord_configs нативно).
+# Alertmanager — безусловное звено доставки (ops.md §1, tracker #238):
+# vmalert → alertmanager → один receiver: webhook → alert-sink ВСЕГДА (пишет
+# alerts.log — история панели) + discord_configs в тот же receiver при заданном
+# birdman_alert_discord_webhook (alertmanager >= 0.25 умеет Discord нативно).
 # Webhook секретный — файл кладётся 0600, в репо его нет.
+#
+# Тайминг первой доставки (acceptance «NodeDown в alerts.log ≤60с»):
+# scrape 5s + eval 5s + for 30s ≈ 40s до firing у vmalert, plus group_wait ниже
+# — 10s держит худший случай ~50s ≤ 60s. Не поднимать group_wait без пересчёта.
 route:
-  receiver: discord
+  receiver: birdman
   group_by: ['alertname', 'severity', 'region']
   group_wait: 10s
   group_interval: 1m
   repeat_interval: 1h
 receivers:
-  - name: discord
+  - name: birdman
+    # send_resolved: true — история в панели различает active/resolved по endsAt
+    webhook_configs:
+      - url: http://alert-sink:{{ birdman_alert_sink_port }}/
+        send_resolved: true
+{% if birdman_alert_discord_webhook | length > 0 %}
     discord_configs:
       - webhook_url: {{ birdman_alert_discord_webhook | to_json }}
         send_resolved: true
+{% endif %}

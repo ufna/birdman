@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-# birdman fake-Alertmanager: локальный sink для vmalert, когда Discord-webhook
-# ещё не настроен (роль birdman_monitoring_dev). Принимает POST на ЛЮБОЙ путь
-# (vmalert шлёт на <notifier.url>/api/v2/alerts), дописывает тело как ОДНУ
-# JSON-строку (с меткой received_at) в файл и отвечает 200. Слушает внутри
-# контейнера 0.0.0.0:PORT, наружу публикуется только на 127.0.0.1. Stdlib-only.
+# birdman alerts sink: постоянный webhook-приёмник ПОЗАДИ alertmanager
+# (vmalert → alertmanager → этот sink), роль birdman_monitoring_dev. Принимает
+# POST на ЛЮБОЙ путь, дописывает тело как ОДНУ JSON-строку (с меткой
+# received_at) в файл и отвечает 200. Понимает и webhook-объект alertmanager
+# (нормализует его в список "alerts"), и прямой список алертов в стиле vmalert.
+# Слушает внутри контейнера 0.0.0.0:PORT, наружу — только на 127.0.0.1. Stdlib-only.
 import json
 import os
 from datetime import datetime, timezone
@@ -29,7 +30,13 @@ class Handler(BaseHTTPRequestHandler):
             "path": self.path,
         }
         try:
-            rec["alerts"] = json.loads(raw.decode("utf-8")) if raw else None
+            body = json.loads(raw.decode("utf-8")) if raw else None
+            # alertmanager шлёт webhook-объект {"alerts":[...], ...} — разворачиваем
+            # его в список алертов; прямой список от vmalert кладём как есть.
+            if isinstance(body, dict) and isinstance(body.get("alerts"), list):
+                rec["alerts"] = body["alerts"]
+            else:
+                rec["alerts"] = body
         except Exception:
             rec["raw"] = raw.decode("utf-8", "replace")
         line = json.dumps(rec, ensure_ascii=False)

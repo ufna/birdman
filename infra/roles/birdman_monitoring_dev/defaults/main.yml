@@ -67,9 +67,10 @@ birdman_grafana_admin_password_file: /etc/birdman/grafana_admin_password
 birdman_grafana_datasource_url: "http://victoriametrics:8428"   # bridge-DNS внутри compose
 
 # --- маршрутизация алертов ---
-# Пусто → локальный logger-sink (пишет /var/log/birdman/alerts.log).
-# Задан → реальный prom/alertmanager с discord_configs на этот webhook.
-# Discord-webhook'а пока НЕТ → работает logger-путь.
+# Alertmanager — безусловное звено доставки (ops.md §1, tracker #238):
+# vmalert → alertmanager → alert-sink ВСЕГДА (пишет /var/log/birdman/alerts.log
+# — история панели); непустой webhook ДОБАВЛЯЕТ discord_configs в тот же
+# receiver, sink из цепочки не выпадает.
 birdman_alert_discord_webhook: ""
 
 # --- пороги алертов (vmalert, ops.md §1) ---

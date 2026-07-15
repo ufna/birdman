@@ -1,8 +1,8 @@
 ---
 # Изменённый bind-mount конфиг сам по себе НЕ пересоздаёт контейнер (compose up
 # не видит смену содержимого файла) — точечно рестартим нужный сервис.
-# failed_when:false — контейнер может отсутствовать (напр. alert-sink при
-# alertmanager-пути): тогда рестарт — безобидный no-op.
+# failed_when:false — контейнера может ещё не быть (первый прогон роли:
+# handler нотифицирован до compose up): тогда рестарт — безобидный no-op.
 - name: Restart birdman-vmagent
   ansible.builtin.command: docker restart birdman-vmagent
   changed_when: true
