@@ -10,12 +10,28 @@
   no_log: true
   when: birdman_registry_legacy
 
+# В --check гейт не стопает прогон (not ansible_check_mode): check-режим
+# должен проходить насквозь и без экспортированного токена. Боевой прогон
+# без токена падает как раньше.
 - name: Fail if BIRDMAN_GHCR_TOKEN is not exported
   ansible.builtin.fail:
     msg: >-
       env BIRDMAN_GHCR_TOKEN пуст. Экспортируй токен перед запуском
       (см. infra/README.md). Токен никогда не хранится в репо.
-  when: birdman_registry_legacy and birdman_ghcr_token | length == 0
+  when:
+    - birdman_registry_legacy
+    - not ansible_check_mode
+    - birdman_ghcr_token | length == 0
+
+- name: Note that GHCR gate is bypassed in check mode
+  ansible.builtin.debug:
+    msg: >-
+      check mode: BIRDMAN_GHCR_TOKEN не экспортирован — legacy-ghcr-гейт
+      пропущен, ghcr.token не сверяется. Боевой прогон без токена упадёт.
+  when:
+    - birdman_registry_legacy
+    - ansible_check_mode
+    - birdman_ghcr_token | length == 0
 
 - name: Create birdman directories
   ansible.builtin.file:
@@ -80,6 +96,9 @@
       no_log: true
       delegate_to: "{{ birdman_master_api_host }}"
 
+    # uri не поддерживает check-режим (движок его скипает) → в --check у
+    # birdman_ca_fetch нет .content; в бою fetch выполняется всегда — гард
+    # ничего не меняет.
     - name: Write master CA cert (0644, публичный серт — не секрет)
       ansible.builtin.copy:
         content: "{{ birdman_ca_fetch.content }}"
@@ -88,6 +107,7 @@
         group: root
         mode: "0644"
       notify: Restart birdman-agent
+      when: birdman_ca_fetch is not skipped
 
 - name: Install agent config /etc/birdman/agent.yaml
   ansible.builtin.template:
@@ -98,6 +118,9 @@
     mode: "0644"
   notify: Restart birdman-agent
 
+# Второе условие — только про --check без токена: не рисовать ложный changed
+# «затёр бы боевой ghcr.token пустым». В боевом прогоне пустой токен сюда не
+# доходит (гейт выше) — условие тождественно прежнему.
 - name: Install GHCR pull token (root-only)
   ansible.builtin.copy:
     content: "{{ birdman_ghcr_token }}\n"
@@ -106,7 +129,9 @@
     group: root
     mode: "0600"
   no_log: true
-  when: birdman_registry_legacy
+  when:
+    - birdman_registry_legacy
+    - birdman_ghcr_token | length > 0 or not ansible_check_mode
 
 - name: Allow birdman dedicated-server port range in UFW (additive)
   community.general.ufw:
@@ -160,6 +185,8 @@
       no_log: true
       delegate_to: "{{ birdman_master_api_host }}"
 
+    # Как у CA-серта: в --check на незарегистрированной ноде POST скипнут
+    # движком (uri без check-режима) → у birdman_node_reg нет .json.
     - name: Store node token (0600, box only)
       ansible.builtin.copy:
         content: "{{ birdman_node_reg.json.node_token }}"
@@ -169,6 +196,7 @@
         mode: "0600"
       no_log: true
       notify: Restart birdman-agent
+      when: birdman_node_reg is not skipped
 
 - name: Install birdman-agent.service unit
   ansible.builtin.copy:
