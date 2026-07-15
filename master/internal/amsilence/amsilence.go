@@ -97,10 +97,14 @@ func New(st *store.Store, baseURL string, log *slog.Logger) *Mirror {
 func (m *Mirror) enabled() bool { return m.base != "" }
 
 // MuteUpserted mirrors a created/updated mute into a silence, best-effort. It
-// sends the mute's stored silence id (so AM updates in place); on any error with
-// an id it retries once WITHOUT the id (a fresh silence), since the stored id
-// may point at an expired/removed silence. AM may return a NEW id either way, so
-// the returned id is persisted when it differs. Every failure is logged and
+// sends the mute's stored silence id (so AM updates in place); when a RESPONDING
+// AM rejects that id'd POST (e.g. a 404 for a stale/expired silence id) it
+// retries once WITHOUT the id, since a fresh silence fixes a dangling id. A
+// transport failure (isUnreachable — AM down entirely) skips the retry: a second
+// POST would fail identically and only double the handler's worst-case delay
+// (callTimeout → 2×callTimeout) against a blackholed AM; the reconcile loop
+// repairs the missing silence once AM returns. AM may return a NEW id either way,
+// so the returned id is persisted when it differs. Every failure is logged and
 // swallowed — the caller's 201/204 never depends on it.
 func (m *Mirror) MuteUpserted(ctx context.Context, mute store.AlertMute) {
 	if !m.enabled() {
@@ -108,7 +112,7 @@ func (m *Mirror) MuteUpserted(ctx context.Context, mute store.AlertMute) {
 	}
 	existing := deref(mute.SilenceID)
 	id, err := m.postSilence(ctx, mute, existing)
-	if err != nil && existing != "" {
+	if err != nil && existing != "" && !isUnreachable(err) {
 		id, err = m.postSilence(ctx, mute, "")
 	}
 	if err != nil {

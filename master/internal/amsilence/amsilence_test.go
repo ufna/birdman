@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -54,6 +55,13 @@ type fakeAM struct {
 	silences map[string]*fakeSilence
 	seq      int
 	lastPost silencePost // the most recent POST body (for asserting id/matchers sent)
+
+	// failPostStatus, when nonzero, makes handlePost record the body then answer
+	// this status WITHOUT creating a silence — a responding AM rejecting the POST
+	// (e.g. 404 for an unknown/stale silence id). Zero value = old behavior.
+	failPostStatus int
+	postCount      int      // number of POSTs received (retry accounting)
+	postIDs        []string // the id field of each POST body, in order
 }
 
 func newFakeAM(t *testing.T) (*fakeAM, string) {
@@ -118,6 +126,12 @@ func (f *fakeAM) handlePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.lastPost = body
+	f.postCount++
+	f.postIDs = append(f.postIDs, body.ID)
+	if f.failPostStatus != 0 { // responding AM rejects the POST without creating a silence
+		w.WriteHeader(f.failPostStatus)
+		return
+	}
 	id := body.ID
 	// A POST with the id of a missing/expired silence mints a NEW id (models AM).
 	if id == "" {
@@ -172,6 +186,21 @@ func (f *fakeAM) setUpdatedAt(id string, at time.Time) {
 	if s, ok := f.silences[id]; ok {
 		s.UpdatedAt = at
 	}
+}
+
+// setFailPostStatus makes every subsequent POST answer status without creating a
+// silence (models a responding AM rejecting the id'd POST, e.g. 404).
+func (f *fakeAM) setFailPostStatus(status int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failPostStatus = status
+}
+
+// posts returns the number of POSTs seen and the id sent in each, in order.
+func (f *fakeAM) posts() (int, []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.postCount, append([]string(nil), f.postIDs...)
 }
 
 // seed inserts a silence directly (orphan-sweep tests). Returns its id.
@@ -318,6 +347,95 @@ func TestMuteUpsertedAMUnreachable(t *testing.T) {
 	}
 	if got := muteByID(t, st, mute.ID); got.SilenceID != nil {
 		t.Fatalf("silence_id should stay nil when AM is unreachable, got %v", *got.SilenceID)
+	}
+}
+
+// TestMuteUpsertedUnreachableSkipsRetry: an AM that blackholes the POST (transport
+// timeout) with the retry branch armed (mute carries a stored silence id) makes
+// exactly ONE attempt — a second POST would fail identically and only double the
+// handler's worst-case delay (callTimeout → 2×callTimeout). Runs ~one callTimeout.
+func TestMuteUpsertedUnreachableSkipsRetry(t *testing.T) {
+	st := testdb.New(t)
+	ctx := context.Background()
+
+	// Blackhole AM: count each POST, then never respond — the client times out at
+	// its per-call timeout (callTimeout), a transport failure, not a non-2xx. The
+	// handler parks on a test-owned channel, NOT r.Context(): with an unread body
+	// the server never observes the client disconnect, so the context would never
+	// fire and srv.Close would wait on the handler forever. LIFO cleanup ordering
+	// closes stop first, releasing the handler before srv.Close waits.
+	var posts atomic.Int32
+	stop := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posts.Add(1)
+		<-stop // released at test end, before srv.Close (LIFO cleanup)
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(stop) }) // registered after srv.Close → runs FIRST, unblocking handlers
+	mr := New(st, srv.URL, testLog())
+
+	// A stored silence id arms the retry branch (existing != "").
+	mute, _ := st.UpsertAlertMute(ctx, store.CreateAlertMuteParams{Alertname: "NodeDown", CreatedBy: "admin"})
+	if err := st.SetAlertMuteSilenceID(ctx, mute.ID, strptr("sil-stale")); err != nil {
+		t.Fatal(err)
+	}
+	mute = muteByID(t, st, mute.ID)
+	if mute.SilenceID == nil {
+		t.Fatal("precondition: stored silence id should arm the retry branch")
+	}
+
+	start := time.Now()
+	done := make(chan struct{})
+	go func() { mr.MuteUpserted(ctx, mute); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("MuteUpserted hung against a blackholed AM")
+	}
+	elapsed := time.Since(start)
+
+	if n := posts.Load(); n != 1 {
+		t.Fatalf("blackholed AM: want exactly 1 POST (no retry), got %d", n)
+	}
+	// One callTimeout (~5s) with slack; a retry would push this toward ~10s.
+	if elapsed >= 8*time.Second {
+		t.Fatalf("elapsed %v suggests a second attempt against a down AM (want ~one callTimeout)", elapsed)
+	}
+}
+
+// TestMuteUpsertedLiveAMErrorStillRetries: a RESPONDING AM that rejects the id'd
+// POST (404 for a stale id) keeps the old semantics — exactly TWO POSTs, first
+// with the stored id, then a retry WITHOUT it (a fresh silence). Both fail, so
+// persistID is never reached and the mute keeps its id for the reconcile loop.
+func TestMuteUpsertedLiveAMErrorStillRetries(t *testing.T) {
+	st := testdb.New(t)
+	fam, url := newFakeAM(t)
+	fam.setFailPostStatus(http.StatusNotFound) // AM v2 answers 404 for an unknown/stale id
+	mr := New(st, url, testLog())
+	ctx := context.Background()
+
+	// A stored silence id arms the retry branch.
+	mute, _ := st.UpsertAlertMute(ctx, store.CreateAlertMuteParams{Alertname: "NodeDown", CreatedBy: "admin"})
+	if err := st.SetAlertMuteSilenceID(ctx, mute.ID, strptr("sil-stale")); err != nil {
+		t.Fatal(err)
+	}
+	mute = muteByID(t, st, mute.ID)
+
+	mr.MuteUpserted(ctx, mute)
+
+	n, ids := fam.posts()
+	if n != 2 {
+		t.Fatalf("live AM 404: want exactly 2 POSTs (id'd, then retry without id), got %d", n)
+	}
+	if ids[0] != "sil-stale" {
+		t.Fatalf("first POST id = %q, want the stored id %q", ids[0], "sil-stale")
+	}
+	if ids[1] != "" {
+		t.Fatalf("retry POST id = %q, want empty (fresh silence)", ids[1])
+	}
+	// Both POSTs 404'd → persistID never runs → silence_id unchanged.
+	if got := muteByID(t, st, mute.ID); got.SilenceID == nil || *got.SilenceID != "sil-stale" {
+		t.Fatalf("silence_id should be unchanged (%q) after two failed POSTs, got %v", "sil-stale", got.SilenceID)
 	}
 }
 
