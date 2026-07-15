@@ -3,6 +3,8 @@
 *.log
 .env
 .env.*
+# токен трекера (vikunja-mcp) — только локально, .env.* его НЕ ловит:
+.vikunja-mcp.env
 node_modules/
 dist/
 bin/
@@ -17,3 +19,9 @@ docs/ACCESS.local.md
 # Процессные доки superpowers переехали в приватный спутник (birdman-internal) —
 # защита от случайного трека в публичный репо.
 docs/superpowers/
+# Локальная обвязка трекера и агента (конвенция selfhost-v1): конфиг трекера
+# светит внутренний URL, остальное — машинно-локальные настройки сессий.
+# Как восстановить на новой машине — birdman-internal/docs/ACCESS.md.
+.vikunja-mcp.toml
+.mcp.json
+.claude/
