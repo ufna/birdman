@@ -53,9 +53,10 @@ func (s *Server) handleGetBackupSettings(w http.ResponseWriter, r *http.Request)
 }
 
 // handlePatchBackupSettings is PATCH /v1/backups/settings (admin). The nil
-// pointers carry keep-semantics straight into the store; validation (bounds,
-// s3_enabled consistency, secret-clear rules) lives in PatchBackupSettings and
-// surfaces here as a 400 bad_request.
+// pointers carry keep-semantics straight into the store. Errors split by class:
+// a validation failure (bounds, s3_enabled consistency, secret-clear rules) is
+// store.ErrBadBackupSettings → 400 bad_request; anything else out of
+// PatchBackupSettings is infra (tx/encrypt/commit) → storeError (default 500).
 func (s *Server) handlePatchBackupSettings(w http.ResponseWriter, r *http.Request) {
 	var req patchBackupSettingsRequest
 	if !decodeJSON(w, r, &req) {
@@ -69,7 +70,11 @@ func (s *Server) handlePatchBackupSettings(w http.ResponseWriter, r *http.Reques
 		S3SecretKey: req.S3SecretKey, RetentionS3: req.RetentionS3,
 	})
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		if errors.Is(err, store.ErrBadBackupSettings) {
+			writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+		storeError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"settings": set})

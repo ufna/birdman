@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -132,6 +133,110 @@ func TestBackupRunsLifecycle(t *testing.T) {
 	runs, _ = st.ListBackupRuns(ctx, 50)
 	if len(runs) != 3 {
 		t.Fatalf("prune kept %d, want 3", len(runs))
+	}
+}
+
+// TestBackupSettingsClearSecret — очистка секрета разрешена только при
+// выключенном S3: PATCH s3_secret_key="" при s3_enabled=true отвергается, а
+// {s3_enabled=false, s3_secret_key=""} чистит колонку (сырое значение ”,
+// HasS3Secret=false, BackupS3Config → «not configured»).
+func TestBackupSettingsClearSecret(t *testing.T) {
+	st := testdb.New(t)
+	ctx := context.Background()
+
+	// Полный S3-набор с секретом.
+	if _, err := st.PatchBackupSettings(ctx, store.BackupSettingsPatch{
+		S3Enabled: boolPtr(true), S3Endpoint: strPtr("https://s3.example.com"),
+		S3Bucket: strPtr("b"), S3AccessKey: strPtr("ak"), S3SecretKey: strPtr("sk"),
+	}); err != nil {
+		t.Fatalf("set secret: %v", err)
+	}
+
+	// Очистка секрета при включённом S3 — отвергается валидацией.
+	if _, err := st.PatchBackupSettings(ctx, store.BackupSettingsPatch{S3SecretKey: strPtr("")}); err == nil {
+		t.Fatal("clearing secret while s3_enabled=true must be rejected")
+	}
+
+	// Выключить S3 и очистить секрет одним PATCH — ок.
+	s, err := st.PatchBackupSettings(ctx, store.BackupSettingsPatch{
+		S3Enabled: boolPtr(false), S3SecretKey: strPtr(""),
+	})
+	if err != nil {
+		t.Fatalf("disable+clear: %v", err)
+	}
+	if s.HasS3Secret {
+		t.Fatal("HasS3Secret must be false after clear")
+	}
+	var raw string
+	if err := st.Pool.QueryRow(ctx, `select s3_secret_key from backup_settings`).Scan(&raw); err != nil {
+		t.Fatalf("raw read: %v", err)
+	}
+	if raw != "" {
+		t.Fatalf("s3_secret_key column must be empty after clear, got %q", raw)
+	}
+	if _, err := st.BackupS3Config(ctx); err == nil {
+		t.Fatal("BackupS3Config must fail when the secret is not configured")
+	}
+}
+
+// TestPruneBackupRunsGuard — keep<=0 не должен сносить всю историю: clamp в 1.
+func TestPruneBackupRunsGuard(t *testing.T) {
+	st := testdb.New(t)
+	ctx := context.Background()
+	for range 3 {
+		id, _ := st.InsertBackupRun(ctx, "scheduled")
+		_ = st.FinishBackupRun(ctx, id, "ok", 0, false, "")
+	}
+	if _, err := st.PruneBackupRuns(ctx, 0); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if runs, _ := st.ListBackupRuns(ctx, 50); len(runs) != 1 {
+		t.Fatalf("prune(0) must clamp to keep 1, kept %d", len(runs))
+	}
+}
+
+// TestBackupSettingsSentinel — ошибка валидации оборачивает ErrBadBackupSettings.
+func TestBackupSettingsSentinel(t *testing.T) {
+	st := testdb.New(t)
+	ctx := context.Background()
+	_, err := st.PatchBackupSettings(ctx, store.BackupSettingsPatch{IntervalHours: intPtr(0)})
+	if err == nil || !errors.Is(err, store.ErrBadBackupSettings) {
+		t.Fatalf("validation error must wrap ErrBadBackupSettings, got %v", err)
+	}
+}
+
+// TestSweepStuckBackupRuns — running-строки финализируются в error, ok не
+// трогается, счётчик корректен и идемпотентен.
+func TestSweepStuckBackupRuns(t *testing.T) {
+	st := testdb.New(t)
+	ctx := context.Background()
+
+	stuckID, _ := st.InsertBackupRun(ctx, "scheduled") // остаётся 'running'
+	okID, _ := st.InsertBackupRun(ctx, "manual")
+	_ = st.FinishBackupRun(ctx, okID, "ok", 64, false, "")
+
+	n, err := st.SweepStuckBackupRuns(ctx)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("sweep count want 1, got %d", n)
+	}
+	runs, _ := st.ListBackupRuns(ctx, 10)
+	for _, r := range runs {
+		switch r.ID {
+		case stuckID:
+			if r.Result != "error" || r.FinishedAt == nil || !strings.Contains(r.Error, "restart") {
+				t.Fatalf("stuck row not finalized: %+v", r)
+			}
+		case okID:
+			if r.Result != "ok" || r.SizeBytes == nil || *r.SizeBytes != 64 {
+				t.Fatalf("ok row must be untouched: %+v", r)
+			}
+		}
+	}
+	if n2, _ := st.SweepStuckBackupRuns(ctx); n2 != 0 {
+		t.Fatalf("second sweep count want 0, got %d", n2)
 	}
 }
 

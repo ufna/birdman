@@ -85,31 +85,38 @@ func (s *Store) GetBackupSettings(ctx context.Context) (BackupSettings, error) {
 		`select `+settingsCols+` from backup_settings where id`))
 }
 
+// ErrBadBackupSettings — валидация клиентского ввода не прошла (→ 400 в httpapi).
+// Всё прочее из PatchBackupSettings (Begin/QueryRow/Encrypt/Commit) — инфра, и
+// httpapi отдаёт её как 500. Валидатор оборачивает свои ошибки этим sentinel,
+// чтобы хэндлер мог развести классы через errors.Is.
+var ErrBadBackupSettings = errors.New("bad backup settings")
+
 // validateBackupSettings проверяет границы и согласованность полей. Вызывается
 // из PatchBackupSettings — та же проверка покрывает и PATCH из httpapi (он
-// ходит через этот store-метод), так что валидатор один на оба входа.
+// ходит через этот store-метод), так что валидатор один на оба входа. Каждая
+// ошибка обёрнута ErrBadBackupSettings (клиентский ввод → 400).
 func validateBackupSettings(intervalHours, retentionLocal, retentionS3 int, s3Enabled bool, endpoint, bucket, accessKey string, hasSecret bool) error {
 	if intervalHours < 1 || intervalHours > 168 {
-		return errors.New("interval_hours must be within 1..168")
+		return fmt.Errorf("%w: interval_hours must be within 1..168", ErrBadBackupSettings)
 	}
 	if retentionLocal < 1 || retentionLocal > 365 {
-		return errors.New("retention_local must be within 1..365")
+		return fmt.Errorf("%w: retention_local must be within 1..365", ErrBadBackupSettings)
 	}
 	if retentionS3 < 1 || retentionS3 > 3650 {
-		return errors.New("retention_s3 must be within 1..3650")
+		return fmt.Errorf("%w: retention_s3 must be within 1..3650", ErrBadBackupSettings)
 	}
 	if !s3Enabled {
 		return nil
 	}
 	if endpoint == "" || bucket == "" || accessKey == "" {
-		return errors.New("s3_enabled requires s3_endpoint, s3_bucket and s3_access_key")
+		return fmt.Errorf("%w: s3_enabled requires s3_endpoint, s3_bucket and s3_access_key", ErrBadBackupSettings)
 	}
 	u, err := url.Parse(endpoint)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return errors.New("s3_endpoint must be an http(s) URL, e.g. https://s3.eu-central-003.backblazeb2.com")
+		return fmt.Errorf("%w: s3_endpoint must be an http(s) URL, e.g. https://s3.eu-central-003.backblazeb2.com", ErrBadBackupSettings)
 	}
 	if !hasSecret {
-		return errors.New("s3_enabled requires s3_secret_key (set it in this request or earlier)")
+		return fmt.Errorf("%w: s3_enabled requires s3_secret_key (set it in this request or earlier)", ErrBadBackupSettings)
 	}
 	return nil
 }
@@ -274,9 +281,28 @@ func (s *Store) ListBackupRuns(ctx context.Context, limit int) ([]BackupRun, err
 }
 
 func (s *Store) PruneBackupRuns(ctx context.Context, keep int) (int64, error) {
+	if keep < 1 {
+		keep = 1 // keep<=0 снёс бы всю историю; clamp в 1 в стиле ListBackupRuns
+	}
 	tag, err := s.Pool.Exec(ctx, `
 		delete from backup_runs where id not in (
 			select id from backup_runs order by started_at desc, id desc limit $1)`, keep)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+// SweepStuckBackupRuns финализирует все строки, зависшие в 'running' — их
+// оставляет kill -9 мастера во время прогона. result='error', причина — рестарт.
+// Возвращает число затронутых строк. Гейтится advisory-локом на стороне
+// вызова (см. runner.sweepStuck): лок у нас ⇒ ни один прогон не ведётся ⇒
+// каждая running-строка гарантированно осиротела.
+func (s *Store) SweepStuckBackupRuns(ctx context.Context) (int64, error) {
+	tag, err := s.Pool.Exec(ctx, `
+		update backup_runs set finished_at = now(), result = 'error',
+			error = 'master restarted while the run was in progress'
+		where result = 'running'`)
 	if err != nil {
 		return 0, err
 	}
@@ -318,8 +344,15 @@ func (s *Store) AcquireBackupLock(ctx context.Context) (func(), bool, error) {
 		return nil, false, nil
 	}
 	release := func() {
-		_, _ = conn.Exec(context.WithoutCancel(ctx),
-			`select pg_advisory_unlock(hashtextextended($1, 42))`, backupLockKey)
+		if _, err := conn.Exec(context.WithoutCancel(ctx),
+			`select pg_advisory_unlock(hashtextextended($1, 42))`, backupLockKey); err != nil {
+			// Unlock не прошёл — на этом конне может остаться висеть session-level
+			// advisory-лок. Закрываем НИЗЛЕЖАЩИЙ конн до Release: pgxpool
+			// уничтожает закрытые конны при Release и НЕ вернёт в пул конн с
+			// застрявшим локом (иначе следующий AcquireBackupLock, если он
+			// поднимет тот же конн, получил бы вечное ok=false).
+			_ = conn.Conn().Close(context.WithoutCancel(ctx))
+		}
 		conn.Release()
 	}
 	return release, true, nil

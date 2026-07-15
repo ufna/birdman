@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -274,5 +275,221 @@ func TestDue(t *testing.T) {
 	}
 	if !due(now, now.Add(-7*time.Hour), true, 6*time.Hour) {
 		t.Fatal("7h > 6h → due")
+	}
+}
+
+// TestBackoffDelay — экспонента tickInterval·2^streak с капом maxBackoff.
+func TestBackoffDelay(t *testing.T) {
+	cases := []struct {
+		streak int
+		want   time.Duration
+	}{
+		{1, 2 * time.Minute},
+		{2, 4 * time.Minute},
+		{3, 8 * time.Minute},
+		{5, 32 * time.Minute},
+		{6, maxBackoff},   // 64м > 1ч → кап
+		{100, maxBackoff}, // большой streak: кап, без переполнения int64
+	}
+	for _, c := range cases {
+		if got := backoffDelay(c.streak); got != c.want {
+			t.Fatalf("backoffDelay(%d) = %v, want %v", c.streak, got, c.want)
+		}
+	}
+}
+
+// TestMaybeRunBackoff — упавший scheduled-прогон не ретраится каждый тик:
+// второй немедленный maybeRun гейтится бэкоффом (nil, нового прогона нет),
+// а после истечения nextRetry прогон повторяется и failStreak растёт.
+func TestMaybeRunBackoff(t *testing.T) {
+	st := testdb.New(t)
+	ctx := context.Background()
+	r, _ := newTestRunner(t, st, "fail", 16) // дефолты settings: enabled, истории нет → due
+
+	// Первый прогон падает: 1 error-строка, бэкофф взведён (failStreak=1).
+	if err := r.maybeRun(ctx); err == nil {
+		t.Fatal("first maybeRun must fail (mode fail)")
+	}
+	if runs, _ := st.ListBackupRuns(ctx, 10); len(runs) != 1 {
+		t.Fatalf("after first fail want 1 history row, got %d", len(runs))
+	}
+	if r.failStreak != 1 {
+		t.Fatalf("failStreak want 1, got %d", r.failStreak)
+	}
+
+	// Немедленный второй вызов: гейт бэкоффа → nil и НИ ОДНОГО нового прогона.
+	if err := r.maybeRun(ctx); err != nil {
+		t.Fatalf("backoff-gated maybeRun must return nil, got %v", err)
+	}
+	if runs, _ := st.ListBackupRuns(ctx, 10); len(runs) != 1 {
+		t.Fatalf("backoff gate must skip the run: want 1 row, got %d", len(runs))
+	}
+
+	// Отматываем nextRetry в прошлое — гейт открыт, третий прогон снова падает.
+	r.nextRetry = time.Now().Add(-time.Second)
+	if err := r.maybeRun(ctx); err == nil {
+		t.Fatal("third maybeRun (backoff elapsed) must fail again")
+	}
+	if runs, _ := st.ListBackupRuns(ctx, 10); len(runs) != 2 {
+		t.Fatalf("after backoff elapsed want 2 rows, got %d", len(runs))
+	}
+	if r.failStreak != 2 {
+		t.Fatalf("failStreak want 2, got %d", r.failStreak)
+	}
+}
+
+// TestSweepStuck — стартовый свип финализирует running-строку, осиротевшую
+// после kill -9 мастера, но только когда advisory-лок свободен: под удержанным
+// локом (легитимный прогон другого master) строку он не трогает.
+func TestSweepStuck(t *testing.T) {
+	st := testdb.New(t)
+	ctx := context.Background()
+	r, _ := newTestRunner(t, st, "ok", 16)
+
+	stuckID, err := st.InsertBackupRun(ctx, "scheduled") // остаётся 'running'
+	if err != nil {
+		t.Fatalf("insert stuck: %v", err)
+	}
+	okID, _ := st.InsertBackupRun(ctx, "manual")
+	if err := st.FinishBackupRun(ctx, okID, "ok", 128, false, ""); err != nil {
+		t.Fatalf("finish ok: %v", err)
+	}
+
+	// Пока лок удержан тестом — свип обязан спасовать: running-строка легитимна.
+	rel, ok, err := st.AcquireBackupLock(ctx)
+	if err != nil || !ok {
+		t.Fatalf("hold lock: ok=%v err=%v", ok, err)
+	}
+	r.sweepStuck(ctx)
+	if res := runResult(t, ctx, st, stuckID); res != "running" {
+		t.Fatalf("sweep under a held lock must not touch the row, got %q", res)
+	}
+	rel()
+
+	// Лок свободен — свип финализирует running как error.
+	r.sweepStuck(ctx)
+
+	byID := map[int64]store.BackupRun{}
+	runs, _ := st.ListBackupRuns(ctx, 10)
+	for _, run := range runs {
+		byID[run.ID] = run
+	}
+	stuck := byID[stuckID]
+	if stuck.Result != "error" || stuck.FinishedAt == nil || !strings.Contains(stuck.Error, "restart") {
+		t.Fatalf("stuck row not swept to error: %+v", stuck)
+	}
+	if okRow := byID[okID]; okRow.Result != "ok" || okRow.SizeBytes == nil || *okRow.SizeBytes != 128 {
+		t.Fatalf("ok row must be untouched: %+v", okRow)
+	}
+	if n, err := st.CountEvents(ctx, store.EventBackupFailed); err != nil || n == 0 {
+		t.Fatalf("sweep must emit backup_failed event: n=%d err=%v", n, err)
+	}
+}
+
+func runResult(t *testing.T, ctx context.Context, st *store.Store, id int64) string {
+	t.Helper()
+	runs, err := st.ListBackupRuns(ctx, 50)
+	if err != nil {
+		t.Fatalf("list runs: %v", err)
+	}
+	for _, r := range runs {
+		if r.ID == id {
+			return r.Result
+		}
+	}
+	t.Fatalf("run %d not found", id)
+	return ""
+}
+
+// TestRunNowHappyPath — ручной прогон доводит строку до ok и снимает флаг
+// running; повторный прогон после полной финализации первого даёт вторую
+// ok-строку. Полл до running==false гарантирует, что фоновая горутина (вместе
+// с release лока) завершилась до конца теста — иначе testdb-cleanup дропнет БД
+// из-под неё.
+func TestRunNowHappyPath(t *testing.T) {
+	st := testdb.New(t)
+	ctx := context.Background()
+	r, _ := newTestRunner(t, st, "ok", 16)
+
+	if err := r.RunNow(ctx); err != nil {
+		t.Fatalf("RunNow: %v", err)
+	}
+	waitOK(t, r, st, 1)
+
+	if err := r.RunNow(ctx); err != nil {
+		t.Fatalf("second RunNow: %v", err)
+	}
+	waitOK(t, r, st, 2)
+}
+
+// waitOK ждёт (дедлайн 10с) ровно wantOK строк result=='ok' И r.running==false.
+func waitOK(t *testing.T, r *Runner, st *store.Store, wantOK int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		runs, err := st.ListBackupRuns(context.Background(), 50)
+		if err != nil {
+			t.Fatalf("list runs: %v", err)
+		}
+		ok := 0
+		for _, run := range runs {
+			if run.Result == "ok" {
+				ok++
+			}
+		}
+		if ok == wantOK && !r.running.Load() {
+			return
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d ok run(s) with the runner idle", wantOK)
+}
+
+// TestScrubDSNPassword — пароль обязан ехать через PGPASSWORD (env), а не в argv.
+func TestScrubDSNPassword(t *testing.T) {
+	cases := []struct {
+		name    string
+		dsn     string
+		wantArg string
+		wantEnv []string
+	}{
+		{
+			name:    "url with password",
+			dsn:     "postgres://user:sekret@127.0.0.1:5432/db?sslmode=disable",
+			wantArg: "postgres://user@127.0.0.1:5432/db?sslmode=disable",
+			wantEnv: []string{"PGPASSWORD=sekret"},
+		},
+		{
+			name:    "url without userinfo",
+			dsn:     "postgres://127.0.0.1:5432/db",
+			wantArg: "postgres://127.0.0.1:5432/db",
+			wantEnv: nil,
+		},
+		{
+			name:    "keyword conninfo",
+			dsn:     "host=x dbname=y",
+			wantArg: "host=x dbname=y",
+			wantEnv: nil,
+		},
+		{
+			name:    "url user without password",
+			dsn:     "postgres://user@127.0.0.1:5432/db",
+			wantArg: "postgres://user@127.0.0.1:5432/db",
+			wantEnv: nil,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			arg, env := scrubDSNPassword(c.dsn)
+			if arg != c.wantArg {
+				t.Fatalf("arg = %q, want %q", arg, c.wantArg)
+			}
+			if !reflect.DeepEqual(env, c.wantEnv) {
+				t.Fatalf("env = %v, want %v", env, c.wantEnv)
+			}
+			if strings.Contains(arg, "sekret") {
+				t.Fatalf("password leaked into argv DSN: %q", arg)
+			}
+		})
 	}
 }

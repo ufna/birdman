@@ -34,6 +34,7 @@ const (
 	runTimeout   = 30 * time.Minute
 	keepRuns     = 200 // ротация истории backup_runs
 	stderrCap    = 4 * 1024
+	maxBackoff   = time.Hour // кап экспоненциального бэкоффа scheduled-ретраев
 )
 
 type Runner struct {
@@ -43,6 +44,12 @@ type Runner struct {
 	pgDump  string
 	log     *slog.Logger
 	running atomic.Bool
+
+	// failStreak/nextRetry — бэкофф scheduled-ретраев. Читает и пишет их ТОЛЬКО
+	// горутина планировщика (Run→maybeRun), последовательно, поэтому без локов
+	// и без atomic. RunNow (ручной прогон) их не трогает.
+	failStreak int
+	nextRetry  time.Time
 }
 
 func New(st *store.Store, dsn string, cfg config.Backups, log *slog.Logger) *Runner {
@@ -55,6 +62,7 @@ func (r *Runner) Run(ctx context.Context) {
 		r.log.Error("backup: mkdir failed", "dir", r.dir, "err", err)
 	}
 	r.cleanupPartials()
+	r.sweepStuck(ctx)
 	t := time.NewTicker(tickInterval)
 	defer t.Stop()
 	for {
@@ -70,9 +78,15 @@ func (r *Runner) Run(ctx context.Context) {
 }
 
 func (r *Runner) maybeRun(ctx context.Context) error {
+	// Гейт бэкоффа — ПЕРВОЙ проверкой, до походов в БД: упавший scheduled-прогон
+	// не должен ретраиться каждый тик. failStreak/nextRetry читает/пишет только
+	// эта горутина (см. поля Runner), поэтому без синхронизации.
+	if time.Now().UTC().Before(r.nextRetry) {
+		return nil
+	}
 	s, err := r.st.GetBackupSettings(ctx)
 	if err != nil {
-		return err
+		return err // ранние ошибки бэкофф не трогают: события они не пишут
 	}
 	if !s.Enabled {
 		return nil
@@ -96,7 +110,34 @@ func (r *Runner) maybeRun(ctx context.Context) error {
 		return nil // другой master уже бекапит
 	}
 	defer release()
-	return r.runOnce(ctx, "scheduled")
+
+	err = r.runOnce(ctx, "scheduled")
+	if err != nil {
+		r.failStreak++
+		r.nextRetry = time.Now().UTC().Add(backoffDelay(r.failStreak))
+	} else {
+		r.failStreak = 0
+		r.nextRetry = time.Time{}
+	}
+	return err
+}
+
+// backoffDelay — экспоненциальный бэкофф scheduled-ретраев: tickInterval·2^streak
+// с капом maxBackoff (streak=1 → 2м, 2 → 4м, 3 → 8м, … кап 1ч). Цикл вместо
+// сдвига tickInterval<<streak — чтобы большой streak не переполнял int64: как
+// только удвоение достигает капа, возвращаем кап.
+func backoffDelay(streak int) time.Duration {
+	if streak < 1 {
+		streak = 1
+	}
+	d := tickInterval
+	for range streak {
+		d *= 2
+		if d >= maxBackoff {
+			return maxBackoff
+		}
+	}
+	return d
 }
 
 // due — чистая функция планирования (юнит-тестируется без тикера).
@@ -133,6 +174,39 @@ func (r *Runner) RunNow(ctx context.Context) error {
 	return nil
 }
 
+// sweepStuck — стартовый свип строк, зависших в 'running' после kill -9 мастера.
+// Гейт advisory-локом принципиален: если лок УДАЛОСЬ взять — ни один master
+// прогон не ведёт (kill -9 отпускает session-lock смертью PG-сессии), значит
+// КАЖДАЯ running-строка гарантированно осиротела и её можно финализировать без
+// какой-либо возрастной эвристики. Если лок занят — прогон реально идёт в другом
+// master, его running-строка легитимна: свип пропускаем.
+func (r *Runner) sweepStuck(ctx context.Context) {
+	release, got, err := r.st.AcquireBackupLock(ctx)
+	if err != nil {
+		r.log.Error("backup: startup sweep lock failed", "err", err)
+		return
+	}
+	if !got {
+		r.log.Info("backup: startup sweep skipped — another master holds the run lock")
+		return
+	}
+	defer release()
+	n, err := r.st.SweepStuckBackupRuns(ctx)
+	if err != nil {
+		r.log.Error("backup: startup sweep failed", "err", err)
+		return
+	}
+	if n > 0 {
+		msg := fmt.Sprintf("swept %d stuck running backup_run(s) after master restart", n)
+		r.log.Warn("backup: " + msg)
+		// payload-форма {kind,error} — как в fail() runOnce.
+		if err := r.st.InsertEvent(ctx, store.EventBackupFailed, store.EventRef{},
+			map[string]any{"kind": "startup_sweep", "error": msg}); err != nil {
+			r.log.Error("backup: startup sweep event insert failed", "err", err)
+		}
+	}
+}
+
 // runOnce — один прогон: версия → дамп → ротация → S3 → финализация строки
 // истории. Ошибка любого шага фиксируется fail-loud: событием backup_failed
 // и (когда строка истории уже создана) error-строкой в backup_runs;
@@ -157,6 +231,11 @@ func (r *Runner) runOnce(ctx context.Context, kind string) error {
 		if runID != 0 {
 			if err := r.st.FinishBackupRun(fctx, runID, "error", 0, false, msg); err != nil {
 				r.log.Error("backup: finish(error) failed", "err", err)
+			}
+			// Ротацию истории делаем и на fail-пути: серия падений иначе
+			// раздувала бы backup_runs (успешный prune бывает только на ok-пути).
+			if _, err := r.st.PruneBackupRuns(fctx, keepRuns); err != nil {
+				r.log.Error("backup: prune runs failed", "err", err)
 			}
 		}
 		if err := r.st.InsertEvent(fctx, store.EventBackupFailed, store.EventRef{},

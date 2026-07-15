@@ -19,15 +19,20 @@ import (
 
 // fakeBackupRunner stands in for *backup.Runner over the BackupRunner interface
 // so the httpapi tests exercise the run-now route without a real pg_dump: it
-// counts successful calls and, when busy, returns backup.ErrBusy (→ 409).
+// counts successful calls, returns backup.ErrBusy when busy (→ 409), and returns
+// a preset arbitrary error (err) to exercise the non-busy → 500 path.
 type fakeBackupRunner struct {
 	calls atomic.Int64
 	busy  bool
+	err   error
 }
 
 func (f *fakeBackupRunner) RunNow(ctx context.Context) error {
 	if f.busy {
 		return backup.ErrBusy
+	}
+	if f.err != nil {
+		return f.err
 	}
 	f.calls.Add(1)
 	return nil
@@ -170,5 +175,57 @@ func TestBackupsRunsList(t *testing.T) {
 	runs := body["runs"].([]any)
 	if len(runs) != 1 || runs[0].(map[string]any)["result"] != "ok" {
 		t.Fatalf("runs body: %v", runs)
+	}
+}
+
+// TestBackupsPatchInfraError: a PATCH failure that is NOT a validation error is
+// infra, so it must be a 500 (not the blanket 400 the handler used to return).
+// We warm the auth cache with a live request first, then close the pool so the
+// 500 comes from PatchBackupSettings (tx.Begin on a closed pool) rather than
+// from the auth lookup.
+func TestBackupsPatchInfraError(t *testing.T) {
+	st, admin, _ := backupsServer(t, &fakeBackupRunner{}, nil)
+
+	if code, _ := admin.do("GET", "/v1/backups/settings", nil); code != 200 {
+		t.Fatalf("warm-up GET must succeed, got %d", code)
+	}
+	st.Pool.Close() // infra failure: the pool is gone
+
+	// interval_hours=12 is valid input, so this reaches the store and fails
+	// there — a 500, not a 400 bad_request.
+	code, body := admin.do("PATCH", "/v1/backups/settings", map[string]any{"interval_hours": 12})
+	if code != 500 {
+		t.Fatalf("infra failure must be 500 (not 400), got %d: %v", code, body)
+	}
+}
+
+// TestBackupsRunNowInternalError: a non-busy runner error is a 500 internal (a
+// busy runner is the 409 covered by TestBackupsRunNow).
+func TestBackupsRunNowInternalError(t *testing.T) {
+	_, admin, _ := backupsServer(t, &fakeBackupRunner{err: errors.New("pg_dump missing")}, nil)
+	code, body := admin.do("POST", "/v1/backups/run", nil)
+	if code != 500 || body["error"] != "internal" {
+		t.Fatalf("non-busy runner error must be 500 internal, got %d: %v", code, body)
+	}
+}
+
+// TestBackupsUnwiredGuards: a server built WITHOUT WithBackups still registers
+// the write routes, and the nil runner/s3-test answers 503 rather than 404.
+func TestBackupsUnwiredGuards(t *testing.T) {
+	st := testdb.New(t)
+	log := opsLog()
+	m := metrics.New(st, log)
+	mm := matchmaker.New(st, m, matchmaker.Config{}, log)
+	dep := deploy.New(deploy.Options{Store: st, Sender: &testdb.CommandRecorder{}, Log: log})
+	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", "", log)) // no WithBackups
+	t.Cleanup(ts.Close)
+	ctx := t.Context()
+	_, adminSecret, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "admin", Scopes: []string{httpapi.ScopeAdmin}})
+	admin := &client{t: t, base: ts.URL, key: adminSecret}
+
+	for _, path := range []string{"/v1/backups/run", "/v1/backups/s3/test"} {
+		if code, body := admin.do("POST", path, nil); code != 503 {
+			t.Fatalf("POST %s without WithBackups: want 503, got %d %v", path, code, body)
+		}
 	}
 }
