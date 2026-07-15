@@ -4,6 +4,12 @@
 # обёрнуты в {% raw %}...{% endraw %}, чтобы Jinja их НЕ трогала.
 # Дисциплина файла: expr — только Jinja-переменные (без $); annotations.summary —
 # только {% raw %}{{ $... }}{% endraw %} (без Jinja-переменных).
+# Двуязычие (ops.md §1): annotations.description — EN (каноничный),
+# annotations.description_ru — RU-перевод; обе — статические строки без шаблонов.
+# Панель выбирает текст по локали и фоллбэчится на description, поэтому
+# description обязателен, description_ru — опционален (свои правила self-host-
+# операторов работают без него). summary остаётся одноязычной динамической
+# ops-строкой (Discord/лог).
 groups:
   - name: birdman-availability
     rules:
@@ -17,7 +23,8 @@ groups:
         annotations:
           summary: {% raw %}'NodeDown {{ $labels.node }} ({{ $labels.region }}): heartbeat_age={{ $value }}s'{% endraw %}
 
-          description: 'Нода молчит > порога; сработал карантин (ops.md §1 NodeDown).'
+          description: 'Node has been silent beyond the threshold; quarantine engaged (ops.md §1 NodeDown).'
+          description_ru: 'Нода молчит > порога; сработал карантин (ops.md §1 NodeDown).'
 
       # Очередь agentlink не пустеет: pending>0 держится дольше
       # {{ birdman_pending_stuck_for }} при живом линке — Ack/реплей опустошают
@@ -33,7 +40,8 @@ groups:
         annotations:
           summary: {% raw %}'AgentlinkPendingStuck: node {{ $labels.node }} держит {{ $value }} unacked-команд дольше порога'{% endraw %}
 
-          description: 'Очередь команд master→agent не пустеет (спека followups §3).'
+          description: 'The master→agent command queue is not draining (followups spec §3).'
+          description_ru: 'Очередь команд master→agent не пустеет (спека followups §3).'
 
       # BufferEmpty (1/2): ready-буфер региона опустел и держится. Расщеплён на
       # ПАРУ по production (environments v1 §7): birdman_servers несёт лейбл
@@ -52,7 +60,8 @@ groups:
         annotations:
           summary: {% raw %}'BufferEmpty(prod): регион {{ $labels.region }} без ready-серверов'{% endraw %}
 
-          description: 'sum(birdman_servers{state="ready", production="true"}) == 0 дольше порога (ops.md §1 BufferEmpty).'
+          description: 'sum(birdman_servers{state="ready", production="true"}) == 0 for longer than the threshold (ops.md §1 BufferEmpty).'
+          description_ru: 'sum(birdman_servers{state="ready", production="true"}) == 0 дольше порога (ops.md §1 BufferEmpty).'
 
       - alert: BufferEmptyReadyNonProd
         expr: sum by (region) (birdman_servers{state="ready", production="false"}) == 0
@@ -62,7 +71,8 @@ groups:
         annotations:
           summary: {% raw %}'BufferEmpty(non-prod): регион {{ $labels.region }} без ready-серверов'{% endraw %}
 
-          description: 'sum(birdman_servers{state="ready", production="false"}) == 0 дольше порога (ops.md §1 BufferEmpty).'
+          description: 'sum(birdman_servers{state="ready", production="false"}) == 0 for longer than the threshold (ops.md §1 BufferEmpty).'
+          description_ru: 'sum(birdman_servers{state="ready", production="false"}) == 0 дольше порога (ops.md §1 BufferEmpty).'
 
       # BufferEmpty (2/2): аллокации падают из-за отсутствия ёмкости. Метрика
       # birdman_allocation_failures_total НЕ несёт лейбла production (пары по
@@ -78,7 +88,8 @@ groups:
         annotations:
           summary: {% raw %}'BufferEmpty: no_capacity аллокаций за 1м: {{ $value }}'{% endraw %}
 
-          description: 'Нет свободных слотов под аллокацию (ops.md §1 BufferEmpty).'
+          description: 'No free slots available for allocation (ops.md §1 BufferEmpty).'
+          description_ru: 'Нет свободных слотов под аллокацию (ops.md §1 BufferEmpty).'
 
   - name: birdman-health
     rules:
@@ -91,7 +102,8 @@ groups:
         annotations:
           summary: {% raw %}'CrashLoop: событий crash_loop за 5м: {{ $value }}'{% endraw %}
 
-          description: 'Вероятен плохой релиз — rollback (ops.md §6 runbook 3).'
+          description: 'A bad release is likely — roll back (ops.md §6 runbook 3).'
+          description_ru: 'Вероятен плохой релиз — rollback (ops.md §6 runbook 3).'
 
       # DiskHigh: диск агента. warning > {{ birdman_disk_warn_pct }}%, critical > {{ birdman_disk_crit_pct }}%
       # (две severities; при > crit сработают обе — это ок, alertmanager дедупит).
@@ -103,7 +115,8 @@ groups:
         annotations:
           summary: {% raw %}'DiskHigh(warn): диск агента ({{ $labels.node }}) {{ $value }}%'{% endraw %}
 
-          description: 'Диск ноды выше warning-порога (ops.md §1 DiskHigh).'
+          description: 'Node disk usage is above the warning threshold (ops.md §1 DiskHigh).'
+          description_ru: 'Диск ноды выше warning-порога (ops.md §1 DiskHigh).'
 
       - alert: DiskHighCritical
         expr: 100 * birdman_agent_disk_used_bytes / birdman_agent_disk_total_bytes > {{ birdman_disk_crit_pct }}
@@ -113,7 +126,8 @@ groups:
         annotations:
           summary: {% raw %}'DiskHigh(crit): диск агента ({{ $labels.node }}) {{ $value }}%'{% endraw %}
 
-          description: 'Диск ноды выше critical-порога — GC/прюнинг/докупить диск (ops.md §6 runbook 4).'
+          description: 'Node disk usage is above the critical threshold — GC/prune/add disk (ops.md §6 runbook 4).'
+          description_ru: 'Диск ноды выше critical-порога — GC/прюнинг/докупить диск (ops.md §6 runbook 4).'
 
       # DiskHigh (containerd-ФС образов): зеркало пары выше по dual-fs watermark
       # (agent.md §6, environments v1 §6в). Образы дедиков живут под containerd_root
@@ -130,7 +144,8 @@ groups:
         annotations:
           summary: {% raw %}'DiskHigh(warn): containerd-ФС образов ({{ $labels.node }}) {{ $value }}%'{% endraw %}
 
-          description: 'containerd-ФС (образы) ноды выше warning-порога (ops.md §1 DiskHigh).'
+          description: 'Node containerd filesystem (images) is above the warning threshold (ops.md §1 DiskHigh).'
+          description_ru: 'containerd-ФС (образы) ноды выше warning-порога (ops.md §1 DiskHigh).'
 
       - alert: ContainerdDiskHighCritical
         expr: 100 * birdman_agent_containerd_disk_used_bytes / birdman_agent_containerd_disk_total_bytes > {{ birdman_disk_crit_pct }}
@@ -140,7 +155,8 @@ groups:
         annotations:
           summary: {% raw %}'DiskHigh(crit): containerd-ФС образов ({{ $labels.node }}) {{ $value }}%'{% endraw %}
 
-          description: 'containerd-ФС (образы) ноды выше critical-порога — GC/прюнинг/докупить диск (ops.md §6 runbook 4).'
+          description: 'Node containerd filesystem (images) is above the critical threshold — GC/prune/add disk (ops.md §6 runbook 4).'
+          description_ru: 'containerd-ФС (образы) ноды выше critical-порога — GC/прюнинг/докупить диск (ops.md §6 runbook 4).'
 
       # AllocationFailures: любые провалы аллокации (по reason).
       - alert: AllocationFailures
@@ -151,7 +167,8 @@ groups:
         annotations:
           summary: {% raw %}'AllocationFailures: reason={{ $labels.reason }} за 5м: {{ $value }}'{% endraw %}
 
-          description: 'Растут ошибки аллокации (ops.md §1 AllocationFailures).'
+          description: 'Allocation failures are increasing (ops.md §1 AllocationFailures).'
+          description_ru: 'Растут ошибки аллокации (ops.md §1 AllocationFailures).'
 
       # TickDegraded: тик игрового сервера выше порога игры дольше 5м.
       # (ops.md §1 говорит про p95 tick_ms; в v0 agent отдаёт gauge
@@ -164,7 +181,8 @@ groups:
         annotations:
           summary: {% raw %}'TickDegraded: server {{ $labels.server_id }} tick={{ $value }}ms'{% endraw %}
 
-          description: 'game-health: тик деградировал дольше порога (ops.md §1 TickDegraded).'
+          description: 'game-health: server tick has been degraded for longer than the threshold (ops.md §1 TickDegraded).'
+          description_ru: 'game-health: тик деградировал дольше порога (ops.md §1 TickDegraded).'
 
       # AgentUpgradeFailed: self-upgrade агента не завершился Hello с новой
       # версией в окне (master пишет событие agent_upgrade_failed, итерация 4).
@@ -176,7 +194,8 @@ groups:
         annotations:
           summary: {% raw %}'AgentUpgradeFailed: неудачных апгрейдов агента за 10м: {{ $value }}'{% endraw %}
 
-          description: 'Агент не вышел на связь с новой версией (agent.md §7; откат — ansible).'
+          description: 'Agent did not come back online with the new version (agent.md §7; rollback via ansible).'
+          description_ru: 'Агент не вышел на связь с новой версией (agent.md §7; откат — ansible).'
 
       # CertExpiry (mTLS agentlink v1, дизайн §3/§4): любой серт линка близок к
       # истечению. Три источника метрик:
@@ -202,7 +221,8 @@ groups:
         annotations:
           summary: {% raw %}'CertExpiry: {{ $labels.instance }} {{ $labels.cert }}{{ $labels.node }} — истекает через {{ $value | humanizeDuration }}'{% endraw %}
 
-          description: 'Серт mTLS-agentlink (CA/сервер master, серт ноды, взгляд агента) истекает < порога (ops.md §1 CertExpiry). Проверь enrollment/renewal и ротацию CA.'
+          description: 'An mTLS agentlink cert (master CA/server cert, node cert, agent-side view) expires in less than the threshold (ops.md §1 CertExpiry). Check enrollment/renewal and CA rotation.'
+          description_ru: 'Серт mTLS-agentlink (CA/сервер master, серт ноды, взгляд агента) истекает < порога (ops.md §1 CertExpiry). Проверь enrollment/renewal и ротацию CA.'
 
       # Backups v1 (spec 2026-07-13): Stale — страховка «тихо перестал ходить»
       # (метрика деривится из БД и отдаёт 0, если успехов не было вовсе);
@@ -215,7 +235,8 @@ groups:
         annotations:
           summary: {% raw %}'BackupStale: последний успешный бекап старше 2×интервала'{% endraw %}
 
-          description: 'Планировщик бекапов master не приносит успехов (ops.md §5, Backups v1).'
+          description: 'The last successful backup is older than 2× the interval — the master backup scheduler is not producing successes (ops.md §5, Backups v1).'
+          description_ru: 'Планировщик бекапов master не приносит успехов (ops.md §5, Backups v1).'
 
       - alert: BackupFailed
         expr: birdman_backup_last_error_timestamp_seconds > 0 and (time() - birdman_backup_last_error_timestamp_seconds) < 3600
@@ -225,7 +246,8 @@ groups:
         annotations:
           summary: {% raw %}'BackupFailed: прогон бекапа падал за последний час'{% endraw %}
 
-          description: 'Смотри Админку → Бекапы (история с текстом ошибки) и событие backup_failed. Горит до истечения часа после ошибки — осознанно (rotation-immune гейдж вместо increase по немонотонному runs_total).'
+          description: 'A backup run failed within the last hour — see Admin → Backups (history with the error text) and the backup_failed event. Keeps firing until an hour has passed since the error — by design (a rotation-immune gauge instead of increase over the non-monotonic runs_total).'
+          description_ru: 'Смотри Админку → Бекапы (история с текстом ошибки) и событие backup_failed. Горит до истечения часа после ошибки — осознанно (rotation-immune гейдж вместо increase по немонотонному runs_total).'
 
 # ---------------------------------------------------------------------------
 # MasterDown — НАМЕРЕННО не реализовано здесь. Его НЕЛЬЗЯ определить с самого

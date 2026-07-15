@@ -236,7 +236,9 @@ export interface StatsCost {
 
 // --- П2: алерты (GET /v1/alerts/*, master проксирует vmalert + лог-синк) ---
 
-/** Правило vmalert: имя, severity, выражение, «for», состояние, описание (как есть). */
+/** Правило vmalert: имя, severity, выражение, «for», состояние, описание.
+ *  `description` — EN (каноничный); `description_ru` — опциональный RU-перевод
+ *  (панель выбирает по локали с фоллбэком на `description`). */
 export interface AlertRule {
   name: string;
   group: string;
@@ -245,9 +247,11 @@ export interface AlertRule {
   for: string;
   state: string; // inactive|pending|firing
   description: string;
+  description_ru?: string;
 }
 
-/** Активный (firing) алерт из vmalert. `muted` — подавлен ли mute'ом (панель). */
+/** Активный (firing) алерт из vmalert. `muted` — подавлен ли mute'ом (панель).
+ *  `description` — EN; `description_ru` — опциональный RU (фоллбэк на EN). */
 export interface ActiveAlert {
   name: string;
   severity: string;
@@ -257,10 +261,12 @@ export interface ActiveAlert {
   active_at: string;
   value: string;
   description: string;
+  description_ru?: string;
   muted?: boolean;
 }
 
-/** Срабатывание из истории (alerts.log). active — ещё ли горит (по endsAt). */
+/** Срабатывание из истории (alerts.log). active — ещё ли горит (по endsAt).
+ *  `description` — EN; `description_ru` — опциональный RU (фоллбэк на EN). */
 export interface AlertEvent {
   name: string;
   severity: string;
@@ -269,6 +275,7 @@ export interface AlertEvent {
   startsAt: string;
   endsAt: string;
   description: string;
+  description_ru?: string;
   active: boolean;
   received_at?: string;
   muted?: boolean;

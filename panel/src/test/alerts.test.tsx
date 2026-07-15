@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { ApiError } from '../lib/api';
-import { alertsUnavailable } from '../lib/alerts';
+import { alertDescription, alertsUnavailable } from '../lib/alerts';
 import { toneOfAlertActive, toneOfSeverity } from '../components/Badge';
 import { I18nProvider } from '../lib/i18n';
 import { Alerts } from '../screens/Alerts';
@@ -98,5 +98,72 @@ describe('Alerts — vmalert не настроен', () => {
     );
     const hits = await screen.findAllByText('Alerts are not configured on this master (vmalert_url is empty).');
     expect(hits.length).toBeGreaterThan(0);
+  });
+});
+
+// --- двуязычные описания алертов (EN канон + опциональный RU, фоллбэк на EN) ---
+
+describe('alertDescription — выбор описания по локали', () => {
+  it('RU-локаль + непустой description_ru → RU', () => {
+    expect(alertDescription({ description: 'node is unreachable', description_ru: 'нода недоступна' }, 'ru')).toBe(
+      'нода недоступна',
+    );
+  });
+  it('RU-локаль без description_ru (или пустой) → фоллбэк на EN', () => {
+    expect(alertDescription({ description: 'node is unreachable' }, 'ru')).toBe('node is unreachable');
+    expect(alertDescription({ description: 'node is unreachable', description_ru: '' }, 'ru')).toBe('node is unreachable');
+  });
+  it('EN-локаль → всегда EN description (даже если есть description_ru)', () => {
+    expect(alertDescription({ description: 'node is unreachable', description_ru: 'нода недоступна' }, 'en')).toBe(
+      'node is unreachable',
+    );
+  });
+});
+
+const activeBilingual = {
+  name: 'NodeDown',
+  severity: 'critical',
+  region: 'eu',
+  node: 'n1',
+  state: 'firing',
+  active_at: '2026-07-08T09:00:00Z',
+  value: '42',
+  description: 'node is unreachable',
+  description_ru: 'нода недоступна',
+  muted: false,
+};
+
+function renderAlertsWith(lang: 'en' | 'ru', active: unknown[]) {
+  vi.stubGlobal(
+    'fetch',
+    routeFetch((url) => {
+      if (url.includes('/alerts/active')) return { status: 200, body: { alerts: active } };
+      if (url.includes('/alerts/rules')) return { status: 200, body: { rules: [] } };
+      return { status: 200, body: { alerts: [] } }; // history / mutes
+    }),
+  );
+  render(
+    <I18nProvider initialLang={lang}>
+      <Alerts />
+    </I18nProvider>,
+  );
+}
+
+describe('Alerts — описание активного алерта по локали', () => {
+  it('RU-локаль показывает description_ru, когда он есть', async () => {
+    renderAlertsWith('ru', [activeBilingual]);
+    expect(await screen.findByText('нода недоступна')).toBeTruthy();
+    expect(screen.queryByText('node is unreachable')).toBeNull();
+  });
+  it('RU-локаль фоллбэчится на description, когда description_ru нет', async () => {
+    const { description_ru, ...noRu } = activeBilingual;
+    void description_ru;
+    renderAlertsWith('ru', [noRu]);
+    expect(await screen.findByText('node is unreachable')).toBeTruthy();
+  });
+  it('EN-локаль показывает description', async () => {
+    renderAlertsWith('en', [activeBilingual]);
+    expect(await screen.findByText('node is unreachable')).toBeTruthy();
+    expect(screen.queryByText('нода недоступна')).toBeNull();
   });
 });

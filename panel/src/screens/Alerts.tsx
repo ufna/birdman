@@ -2,8 +2,9 @@
 // alerts.log. Правила/active — read-only (это состояние vmalert). Заглушки
 // (mute) — панельное подавление + аудит: admin ставит/снимает mute, readonly
 // только видит. Секции: Заглушённые, Активные, Правила, История (newest-first).
-// Описания алертов приходят с бэка КАК ЕСТЬ (сейчас по-русски из vmalert) —
-// показываем контент как пришёл, переводим только обвязку UI.
+// Описания алертов приходят с бэка двуязычно: description (EN) + description_ru
+// (опционально) — выбираем по локали с фоллбэком на EN (alertDescription).
+// Обвязку UI переводим через каталог как обычно.
 
 import { useMemo, useState } from 'react';
 import type { ColumnDef } from '@tanstack/react-table';
@@ -12,6 +13,7 @@ import { api } from '../lib/api';
 import type { ActiveAlert, AlertEvent, AlertMute, AlertRule } from '../lib/api';
 import {
   MUTE_PRESETS,
+  alertDescription,
   alertSoundEnabled,
   alertsUnavailable,
   muteErrorMessage,
@@ -372,7 +374,7 @@ function ActiveSection({
   mayMute: boolean;
   onMuted: () => void;
 }) {
-  const { t } = useT();
+  const { t, lang } = useT();
   const fmt = useFormat();
   const soft = useSoftNote(error);
   return (
@@ -401,7 +403,9 @@ function ActiveSection({
                   <span className="font-mono text-sm font-medium">{a.name}</span>
                   {a.muted === true && <MutedChip />}
                 </div>
-                {a.description !== '' && <p className="mt-1 text-xs text-muted">{a.description}</p>}
+                {alertDescription(a, lang) !== '' && (
+                  <p className="mt-1 text-xs text-muted">{alertDescription(a, lang)}</p>
+                )}
               </div>
               <div className="flex shrink-0 flex-col items-end gap-1.5 text-right">
                 <div className="font-mono text-xs text-muted">{[a.region, a.node].filter((x) => x !== '').join(' · ') || '—'}</div>
@@ -523,7 +527,7 @@ function HistorySection({
   mayMute: boolean;
   onMuted: () => void;
 }) {
-  const { t } = useT();
+  const { t, lang } = useT();
   const fmt = useFormat();
   const columns = useMemo<ColumnDef<AlertEvent, unknown>[]>(() => {
     const cols: ColumnDef<AlertEvent, unknown>[] = [
@@ -536,9 +540,9 @@ function HistorySection({
               <span className="font-mono text-sm font-medium">{row.original.name}</span>
               {row.original.muted === true && <MutedChip />}
             </div>
-            {row.original.description !== '' && (
-              <p className="truncate text-[11px] text-muted" title={row.original.description}>
-                {row.original.description}
+            {alertDescription(row.original, lang) !== '' && (
+              <p className="truncate text-[11px] text-muted" title={alertDescription(row.original, lang)}>
+                {alertDescription(row.original, lang)}
               </p>
             )}
           </div>
@@ -585,7 +589,7 @@ function HistorySection({
       });
     }
     return cols;
-  }, [t, fmt, mayMute, onMuted]);
+  }, [t, fmt, lang, mayMute, onMuted]);
 
   const select = 'rounded-lg border border-line bg-card px-2.5 py-1.5 text-xs';
   return (

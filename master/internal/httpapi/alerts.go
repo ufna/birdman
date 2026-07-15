@@ -22,9 +22,11 @@ import (
 // Alerts endpoints for the panel П2 Alerts screen (docs/specs/panel.md §3,
 // ops.md §1). master proxies the vmalert stack on the box: rules and live
 // firing state come from the vmalert HTTP API, history from the alert sink log
-// (/var/log/birdman/alerts.log). Alert descriptions are passed through verbatim
-// (they are currently Russian, from the vmalert rules — bilingual alerts are a
-// vmalert-config concern, out of master's scope; noted in ops.md).
+// (/var/log/birdman/alerts.log). Alert rules carry a `description` annotation
+// (EN, canonical) plus an optional `description_ru`; master passes both through
+// verbatim and the panel picks the text by locale, falling back to
+// `description` when `description_ru` is absent (self-host operators need not
+// write bilingual rules).
 //
 // Mutes (POST/GET/DELETE /v1/alerts/mutes) are master state, not a vmalert
 // silence: a mute is an annotation master stores and reflects as muted:true on
@@ -57,13 +59,14 @@ type vmRulesResponse struct {
 }
 
 type alertRule struct {
-	Name        string `json:"name"`
-	Group       string `json:"group"`
-	Severity    string `json:"severity"`
-	Expr        string `json:"expr"`
-	For         string `json:"for"`
-	State       string `json:"state"`
-	Description string `json:"description"`
+	Name          string `json:"name"`
+	Group         string `json:"group"`
+	Severity      string `json:"severity"`
+	Expr          string `json:"expr"`
+	For           string `json:"for"`
+	State         string `json:"state"`
+	Description   string `json:"description"`              // EN, canonical
+	DescriptionRu string `json:"description_ru,omitempty"` // optional RU; panel falls back to Description
 }
 
 func (s *Server) handleAlertRules(w http.ResponseWriter, r *http.Request) {
@@ -84,13 +87,14 @@ func (s *Server) handleAlertRules(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			rules = append(rules, alertRule{
-				Name:        ru.Name,
-				Group:       g.Name,
-				Severity:    ru.Labels["severity"],
-				Expr:        ru.Query,
-				For:         durationSeconds(ru.Duration),
-				State:       ru.State,
-				Description: annotation(ru.Annotations),
+				Name:          ru.Name,
+				Group:         g.Name,
+				Severity:      ru.Labels["severity"],
+				Expr:          ru.Query,
+				For:           durationSeconds(ru.Duration),
+				State:         ru.State,
+				Description:   annotation(ru.Annotations),
+				DescriptionRu: ru.Annotations["description_ru"],
 			})
 		}
 	}
@@ -112,15 +116,16 @@ type vmAlertsResponse struct {
 }
 
 type activeAlert struct {
-	Name        string    `json:"name"`
-	Severity    string    `json:"severity"`
-	Region      string    `json:"region"`
-	Node        string    `json:"node"`
-	State       string    `json:"state"`
-	ActiveAt    time.Time `json:"active_at"`
-	Value       string    `json:"value"`
-	Description string    `json:"description"`
-	Muted       bool      `json:"muted"` // an active master mute covers this alertname+region
+	Name          string    `json:"name"`
+	Severity      string    `json:"severity"`
+	Region        string    `json:"region"`
+	Node          string    `json:"node"`
+	State         string    `json:"state"`
+	ActiveAt      time.Time `json:"active_at"`
+	Value         string    `json:"value"`
+	Description   string    `json:"description"`              // EN, canonical
+	DescriptionRu string    `json:"description_ru,omitempty"` // optional RU; panel falls back to Description
+	Muted         bool      `json:"muted"`                    // an active master mute covers this alertname+region
 }
 
 func (s *Server) handleAlertsActive(w http.ResponseWriter, r *http.Request) {
@@ -144,14 +149,15 @@ func (s *Server) handleAlertsActive(w http.ResponseWriter, r *http.Request) {
 			name = a.Labels["alertname"]
 		}
 		out = append(out, activeAlert{
-			Name:        name,
-			Severity:    a.Labels["severity"],
-			Region:      a.Labels["region"],
-			Node:        alertNode(a.Labels),
-			State:       a.State,
-			ActiveAt:    a.ActiveAt,
-			Value:       a.Value,
-			Description: annotation(a.Annotations),
+			Name:          name,
+			Severity:      a.Labels["severity"],
+			Region:        a.Labels["region"],
+			Node:          alertNode(a.Labels),
+			State:         a.State,
+			ActiveAt:      a.ActiveAt,
+			Value:         a.Value,
+			Description:   annotation(a.Annotations),
+			DescriptionRu: a.Annotations["description_ru"],
 		})
 	}
 	mutes, err := s.st.ListAlertMutes(r.Context(), false)
@@ -217,16 +223,17 @@ func alertNode(labels map[string]string) string {
 
 // alertEvent is one normalized firing/resolution from the alert log.
 type alertEvent struct {
-	Name        string `json:"name"`
-	Severity    string `json:"severity"`
-	Region      string `json:"region"`
-	Node        string `json:"node"`
-	StartsAt    string `json:"startsAt"`
-	EndsAt      string `json:"endsAt"`
-	Description string `json:"description"`
-	Active      bool   `json:"active"`
-	ReceivedAt  string `json:"received_at,omitempty"`
-	Muted       bool   `json:"muted"` // an active master mute covers this alertname+region
+	Name          string `json:"name"`
+	Severity      string `json:"severity"`
+	Region        string `json:"region"`
+	Node          string `json:"node"`
+	StartsAt      string `json:"startsAt"`
+	EndsAt        string `json:"endsAt"`
+	Description   string `json:"description"`              // EN, canonical
+	DescriptionRu string `json:"description_ru,omitempty"` // optional RU; panel falls back to Description
+	Active        bool   `json:"active"`
+	ReceivedAt    string `json:"received_at,omitempty"`
+	Muted         bool   `json:"muted"` // an active master mute covers this alertname+region
 }
 
 // amAlert is one alert in the alertmanager-v2 webhook shape written to the log.
@@ -321,15 +328,16 @@ func parseAlertsLog(data []byte, now time.Time, limit int) []alertEvent {
 
 func normalizeAlert(a amAlert, receivedAt string, now time.Time) alertEvent {
 	return alertEvent{
-		Name:        a.Labels["alertname"],
-		Severity:    a.Labels["severity"],
-		Region:      a.Labels["region"],
-		Node:        alertNode(a.Labels),
-		StartsAt:    a.StartsAt,
-		EndsAt:      a.EndsAt,
-		Description: annotation(a.Annotations),
-		Active:      alertActive(a.Status, a.EndsAt, now),
-		ReceivedAt:  receivedAt,
+		Name:          a.Labels["alertname"],
+		Severity:      a.Labels["severity"],
+		Region:        a.Labels["region"],
+		Node:          alertNode(a.Labels),
+		StartsAt:      a.StartsAt,
+		EndsAt:        a.EndsAt,
+		Description:   annotation(a.Annotations),
+		DescriptionRu: a.Annotations["description_ru"],
+		Active:        alertActive(a.Status, a.EndsAt, now),
+		ReceivedAt:    receivedAt,
 	}
 }
 

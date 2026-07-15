@@ -21,7 +21,7 @@ func TestParseAlertsLog(t *testing.T) {
 	lines := []string{
 		// batch delivery: one firing (zero endsAt), one resolved.
 		`{"received_at":"2026-07-08T09:00:00Z","alerts":[` +
-			`{"status":"firing","labels":{"alertname":"NodeDown","severity":"critical","node":"n1","region":"eu"},"annotations":{"description":"нода недоступна"},"startsAt":"2026-07-08T08:59:00Z","endsAt":"0001-01-01T00:00:00Z"},` +
+			`{"status":"firing","labels":{"alertname":"NodeDown","severity":"critical","node":"n1","region":"eu"},"annotations":{"description":"node is unreachable","description_ru":"нода недоступна"},"startsAt":"2026-07-08T08:59:00Z","endsAt":"0001-01-01T00:00:00Z"},` +
 			`{"status":"resolved","labels":{"alertname":"CrashLoop","severity":"critical","node":"n2","region":"us"},"annotations":{"description":"краш-луп"},"startsAt":"2026-07-08T09:30:00Z","endsAt":"2026-07-08T09:45:00Z"}]}`,
 		// bare single-alert object; node falls back to instance; summary annotation.
 		`{"status":"firing","labels":{"alertname":"DiskHigh","severity":"warning","instance":"host3","region":"eu"},"annotations":{"summary":"диск"},"startsAt":"2026-07-08T11:00:00Z","endsAt":""}`,
@@ -48,13 +48,21 @@ func TestParseAlertsLog(t *testing.T) {
 	if !disk.Active || disk.Node != "host3" || disk.Description != "диск" || disk.Severity != "warning" {
 		t.Fatalf("disk (bare line, node from instance, summary annotation): %+v", disk)
 	}
+	// No description_ru annotation → empty (panel falls back to Description).
+	if disk.DescriptionRu != "" {
+		t.Fatalf("disk should have no description_ru: %+v", disk)
+	}
 	crash := byName["CrashLoop"]
 	if crash.Active || crash.Node != "n2" { // resolved → inactive
 		t.Fatalf("crashloop (resolved should be inactive): %+v", crash)
 	}
 	nd := byName["NodeDown"]
-	if !nd.Active || nd.Node != "n1" || nd.Region != "eu" || nd.Description != "нода недоступна" {
+	if !nd.Active || nd.Node != "n1" || nd.Region != "eu" || nd.Description != "node is unreachable" {
 		t.Fatalf("nodedown: %+v", nd)
+	}
+	// Bilingual: description_ru carries the RU text alongside the EN description.
+	if nd.DescriptionRu != "нода недоступна" {
+		t.Fatalf("nodedown description_ru: %+v", nd)
 	}
 	if nd.ReceivedAt != "2026-07-08T09:00:00Z" { // batch received_at propagated
 		t.Fatalf("received_at propagation: %+v", nd)

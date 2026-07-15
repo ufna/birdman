@@ -2,12 +2,13 @@
 // проксирует); когда vmalert_url не задан, master отвечает 503
 // alerts_unconfigured, а при недоступном апстриме — 502 upstream. Оба случая —
 // не ошибка панели, а «мягкое» состояние (как metrics.ts для VM). Описания
-// алертов приходят с бэка как есть (сейчас по-русски из vmalert) — их НЕ
-// переводим, показываем контент как пришёл.
+// алертов приходят с бэка двуязычно: `description` (EN, каноничный) и
+// опциональный `description_ru` — выбираем текст по локали с фоллбэком на EN
+// (alertDescription). Обвязку UI переводим через каталог как обычно.
 
 import { ApiError } from './api';
 import type { ActiveAlert } from './api';
-import type { I18nContextValue } from './i18n';
+import type { I18nContextValue, Lang } from './i18n';
 
 export type AlertsUnavailable = 'unconfigured' | 'upstream';
 
@@ -23,6 +24,18 @@ export function alertsUnavailable(e: unknown): AlertsUnavailable | null {
     return 'upstream';
   }
   return null;
+}
+
+/**
+ * Двуязычный выбор описания алерта: под RU-локалью берём непустой
+ * `description_ru`, иначе — каноничный `description` (EN). Фоллбэк обязателен:
+ * self-host-операторы пишут свои правила без `description_ru`.
+ */
+export function alertDescription(a: { description: string; description_ru?: string }, lang: Lang): string {
+  if (lang === 'ru' && a.description_ru !== undefined && a.description_ru !== '') {
+    return a.description_ru;
+  }
+  return a.description;
 }
 
 // --- mute вью-модель (чистые функции — точки тестирования) ---

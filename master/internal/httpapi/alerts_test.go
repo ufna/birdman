@@ -17,11 +17,11 @@ import (
 
 const (
 	vmRulesJSON = `{"status":"success","data":{"groups":[{"name":"birdman","file":"/etc/vmalert/birdman.yml","rules":[
-		{"name":"NodeDown","query":"birdman_node_heartbeat_age_seconds > 30","duration":30,"labels":{"severity":"critical"},"annotations":{"description":"нода недоступна"},"state":"inactive","type":"alerting"},
+		{"name":"NodeDown","query":"birdman_node_heartbeat_age_seconds > 30","duration":30,"labels":{"severity":"critical"},"annotations":{"description":"node is unreachable","description_ru":"нода недоступна"},"state":"inactive","type":"alerting"},
 		{"name":"cpu:rate5m","query":"rate(cpu[5m])","type":"recording"}
 	]}]}}`
 	vmAlertsJSON = `{"status":"success","data":{"alerts":[
-		{"state":"firing","name":"NodeDown","labels":{"alertname":"NodeDown","severity":"critical","node":"n1","region":"eu"},"annotations":{"description":"нода недоступна"},"activeAt":"2026-07-08T09:00:00Z","value":"42"},
+		{"state":"firing","name":"NodeDown","labels":{"alertname":"NodeDown","severity":"critical","node":"n1","region":"eu"},"annotations":{"description":"node is unreachable","description_ru":"нода недоступна"},"activeAt":"2026-07-08T09:00:00Z","value":"42"},
 		{"state":"pending","name":"DiskHigh","labels":{"alertname":"DiskHigh","severity":"warning"},"activeAt":"2026-07-08T10:00:00Z"}
 	]}}`
 )
@@ -56,8 +56,8 @@ func TestAlertsEndpoints(t *testing.T) {
 
 	// A log file with two deliveries (one firing, one resolved).
 	logPath := filepath.Join(t.TempDir(), "alerts.log")
-	logBody := `{"received_at":"2026-07-08T09:00:00Z","alerts":[{"status":"firing","labels":{"alertname":"NodeDown","severity":"critical","node":"n1","region":"eu"},"annotations":{"description":"нода недоступна"},"startsAt":"2026-07-08T08:59:00Z","endsAt":"0001-01-01T00:00:00Z"}]}
-{"received_at":"2026-07-08T10:00:00Z","alerts":[{"status":"resolved","labels":{"alertname":"CrashLoop","severity":"critical","node":"n2"},"annotations":{"description":"краш-луп"},"startsAt":"2026-07-08T09:30:00Z","endsAt":"2026-07-08T09:45:00Z"}]}
+	logBody := `{"received_at":"2026-07-08T09:00:00Z","alerts":[{"status":"firing","labels":{"alertname":"NodeDown","severity":"critical","node":"n1","region":"eu"},"annotations":{"description":"node is unreachable","description_ru":"нода недоступна"},"startsAt":"2026-07-08T08:59:00Z","endsAt":"0001-01-01T00:00:00Z"}]}
+{"received_at":"2026-07-08T10:00:00Z","alerts":[{"status":"resolved","labels":{"alertname":"CrashLoop","severity":"critical","node":"n2"},"annotations":{"description":"crash loop"},"startsAt":"2026-07-08T09:30:00Z","endsAt":"2026-07-08T09:45:00Z"}]}
 `
 	if err := os.WriteFile(logPath, []byte(logBody), 0o644); err != nil {
 		t.Fatal(err)
@@ -79,8 +79,12 @@ func TestAlertsEndpoints(t *testing.T) {
 	}
 	nd := rules[0].(map[string]any)
 	if nd["name"] != "NodeDown" || nd["severity"] != "critical" || nd["for"] != "30s" ||
-		nd["state"] != "inactive" || nd["description"] != "нода недоступна" {
+		nd["state"] != "inactive" || nd["description"] != "node is unreachable" {
 		t.Fatalf("rule normalization: %v", nd)
+	}
+	// Bilingual: description is EN (canonical), description_ru carries the RU text.
+	if nd["description_ru"] != "нода недоступна" {
+		t.Fatalf("rule description_ru not passed through: %v", nd)
 	}
 
 	// active: only firing.
@@ -92,6 +96,9 @@ func TestAlertsEndpoints(t *testing.T) {
 	if len(active) != 1 || active[0].(map[string]any)["name"] != "NodeDown" ||
 		active[0].(map[string]any)["node"] != "n1" {
 		t.Fatalf("active alerts: %v", active)
+	}
+	if a0 := active[0].(map[string]any); a0["description"] != "node is unreachable" || a0["description_ru"] != "нода недоступна" {
+		t.Fatalf("active bilingual description: %v", a0)
 	}
 
 	// history: both deliveries, newest first, active flags per endsAt.
@@ -108,6 +115,14 @@ func TestAlertsEndpoints(t *testing.T) {
 	}
 	if hist[1].(map[string]any)["name"] != "NodeDown" || hist[1].(map[string]any)["active"] != true {
 		t.Fatalf("history[1] (firing): %v", hist[1])
+	}
+	// NodeDown carries a RU translation; CrashLoop has none → description_ru
+	// omitted (omitempty), leaving the panel to fall back to the EN description.
+	if h1 := hist[1].(map[string]any); h1["description"] != "node is unreachable" || h1["description_ru"] != "нода недоступна" {
+		t.Fatalf("history bilingual description: %v", h1)
+	}
+	if _, ok := hist[0].(map[string]any)["description_ru"]; ok {
+		t.Fatalf("history without description_ru should omit the field: %v", hist[0])
 	}
 	// bad limit.
 	if code, _ := ro.do("GET", "/v1/alerts/history?limit=0", nil); code != 400 {
