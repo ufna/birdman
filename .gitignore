@@ -8,6 +8,9 @@
 node_modules/
 dist/
 bin/
+# Python bytecode (Ansible-роли под infra/):
+__pycache__/
+*.py[cod]
 deploy/.env
 deploy/secrets.key
 # шаблон коммитим (иначе .env.* выше его проглотит):
