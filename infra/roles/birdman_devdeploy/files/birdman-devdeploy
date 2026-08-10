@@ -209,7 +209,6 @@ deploy_master() {
 {"master_sha256":"$want","commit":"$commit","agent_version":"$agent_version","at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
 EOF
     log "мастер поднялся, /healthz ok"
-    AGENT_VERSION_TARGET="$agent_version"
     return 0
   fi
 
@@ -300,7 +299,11 @@ wait_agent_version() {
 }
 
 upgrade_agents() {
-  local target="$AGENT_VERSION_TARGET"
+  # Целевая версия берётся из MANIFEST, а НЕ из результата шага мастера:
+  # типичный тик — мастер уже актуален (no-op), и если бы версия приезжала
+  # только вместе с выкатом, отставшие агенты не сошлись бы никогда.
+  local target
+  target="$(fetch MANIFEST | awk -F= '/^agent_version=/{print $2}' | tr -d ' \t\r\n')"
   [ -n "$target" ] || return 0
   if rejected_has "agent:$target"; then
     return 0
@@ -368,7 +371,6 @@ main() {
   mkdir -p "$STATE_DIR"
   load_metrics
 
-  AGENT_VERSION_TARGET=""
   deploy_master
   local rc=$?
   case "$rc" in

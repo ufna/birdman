@@ -86,6 +86,21 @@
   register: birdman_compose_up
   changed_when: "'Started' in birdman_compose_up.stderr or 'Created' in birdman_compose_up.stderr"
 
+# Кто владеет бинарём мастера.
+#
+# Без pull-деплоера — эта роль: каждый прогон кладёт локально собранный бинарь.
+# С включённым деплоером владелец ОДИН, и это деплоер: иначе каждый прогон
+# ansible возвращал бы локальную сборку, а следующий тик через минуту менял её
+# обратно на релизную — лишний рестарт мастера на ровном месте.
+#
+# Bootstrap не ломается: на боксе, где бинаря ещё нет, роль ставит его и при
+# включённом деплоере (дальше по роли нужен ЖИВОЙ мастер — регистрация ноды и
+# сбор admin-ключа), а деплоер подтянет релизную сборку следующим тиком.
+- name: Check whether the master binary is already installed
+  ansible.builtin.stat:
+    path: /usr/local/bin/birdman-master
+  register: birdman_master_binary_stat
+
 - name: Install birdman-master binary
   ansible.builtin.copy:
     src: "{{ birdman_master_binary }}"
@@ -93,7 +108,17 @@
     owner: root
     group: root
     mode: "0755"
+  when: not (birdman_devdeploy_enabled | default(false) | bool) or not birdman_master_binary_stat.stat.exists
   notify: Restart birdman-master
+
+- name: Note that the pull deployer owns the master binary
+  ansible.builtin.debug:
+    msg: >-
+      Бинарь мастера не трогаю: им владеет birdman-devdeploy (выкат из develop).
+      Ручная замена — останови таймер или положи /etc/birdman/devdeploy.disabled.
+  when:
+    - birdman_devdeploy_enabled | default(false) | bool
+    - birdman_master_binary_stat.stat.exists
 
 # Мастер-ключ шифрования обратимых секретов at-rest (registries.token,
 # internal_ca.key_pem — дизайн secrets-encryption §2/§6). openssl rand, а НЕ

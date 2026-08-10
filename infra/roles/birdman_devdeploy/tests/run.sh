@@ -193,6 +193,17 @@ grep -q 'dev-abc1234' "$T/upgrades.log" 2>/dev/null && ok "версия из MAN
 grep -q 'birdman_devdeploy_agent_upgrades_total{status="ok"} 2' "$T/textfile/birdman-devdeploy.prom" 2>/dev/null &&
   ok "оба апгрейда посчитаны" || no "счётчик успешных апгрейдов неверен"
 
+# Типичный случай в жизни: мастер уже актуален (тик — no-op), а агенты отстали.
+# Целевая версия агента обязана браться из MANIFEST независимо от того,
+# понадобился ли выкат мастера, иначе агенты не сойдутся НИКОГДА.
+setup "агенты: мастер актуален, агенты отстали"
+fleet
+printf 'MASTER-BINARY-V2' >"$T/usr/birdman-master"
+run
+n="$(wc -l <"$T/upgrades.log" 2>/dev/null | tr -d ' ')"
+[ ! -f "$T/systemctl.log" ] && ok "мастер не перевыкачивался" || no "лишний выкат мастера"
+[ "$n" = 2 ] && ok "агенты обновились на no-op тике" || no "агенты не тронуты: $n команд"
+
 setup "агенты: уже на целевой версии — команды нет"
 fleet
 python3 - "$T/nodes.json" <<'PY'
