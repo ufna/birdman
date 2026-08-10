@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -368,16 +369,41 @@ func (c *dbCollector) Collect(ch chan<- prometheus.Metric) {
 	if erows, err := c.st.Pool.Query(ctx, `select kind, count(*) from events group by kind`); err != nil {
 		c.log.Error("metrics: events query failed", "err", err)
 	} else {
+		seen := make(map[string]bool, len(alertEventKinds))
+		ok := true
 		for erows.Next() {
 			var kind string
 			var n float64
 			if err := erows.Scan(&kind, &n); err != nil {
 				c.log.Error("metrics: events scan failed", "err", err)
+				ok = false
 				break
 			}
+			seen[kind] = true
 			ch <- prometheus.MustNewConstMetric(eventsTotalDesc, prometheus.CounterValue, n, kind)
 		}
 		erows.Close()
+		if err := erows.Err(); ok && err != nil {
+			c.log.Error("metrics: events rows failed", "err", err)
+			ok = false
+		}
+		// Zero baseline for the alert-feeding kinds (tracker #960). This series
+		// is DB-derived, so a kind that has never happened has NO row and thus
+		// no series — and it springs into existence reading 1 the moment the
+		// first such event lands. increase() over a series that has only ever
+		// read 1 is 0, so CrashLoop/AgentUpgradeFailed used to miss the FIRST
+		// event of their kind and only fire from the second one on. An explicit
+		// 0 gives increase() something to rise from; it costs two series. Only
+		// on a clean read — inventing a 0 after a failed/partial query would
+		// fake a counter reset and could fire the alert on the next real event
+		// twice over.
+		if ok {
+			for _, kind := range alertEventKinds {
+				if !seen[kind] {
+					ch <- prometheus.MustNewConstMetric(eventsTotalDesc, prometheus.CounterValue, 0, kind)
+				}
+			}
+		}
 	}
 	var running float64
 	if err := c.st.Pool.QueryRow(ctx, `select count(*) from matches where state = 'running'`).Scan(&running); err != nil {
@@ -499,8 +525,14 @@ func (c *dbCollector) Collect(ch chan<- prometheus.Metric) {
 		join projects p on p.id = s.project_id
 		join environments e on e.project_id = s.project_id and e.name = s.env
 		group by 1, 2, 3, 4, 5, 6`)
+	// readySeen remembers the ready labelsets that ARE backed by rows, so the
+	// zero-fill below never emits a duplicate labelset (Gather rejects
+	// duplicates and the whole /metrics endpoint would go blank).
+	readySeen := make(map[string]bool)
+	countedServers := true
 	if err != nil {
 		c.log.Error("metrics: servers query failed", "err", err)
+		countedServers = false
 	} else {
 		for rows.Next() {
 			var project, env, state, region, semver string
@@ -508,12 +540,27 @@ func (c *dbCollector) Collect(ch chan<- prometheus.Metric) {
 			var count float64
 			if err := rows.Scan(&project, &env, &production, &state, &region, &semver, &count); err != nil {
 				c.log.Error("metrics: servers scan failed", "err", err)
+				countedServers = false
 				break
 			}
+			productionStr := strconv.FormatBool(production)
+			if state == "ready" {
+				readySeen[readyKey(project, env, productionStr, region, semver)] = true
+			}
 			ch <- prometheus.MustNewConstMetric(serversDesc, prometheus.GaugeValue,
-				count, project, env, strconv.FormatBool(production), state, region, semver)
+				count, project, env, productionStr, state, region, semver)
 		}
 		rows.Close()
+		if err := rows.Err(); countedServers && err != nil {
+			c.log.Error("metrics: servers rows failed", "err", err)
+			countedServers = false
+		}
+	}
+	// The zeros are DERIVED from a successful count: after a failed or partial
+	// read "no ready servers" is unknown, not zero, and emitting it would turn
+	// a database hiccup into a false critical page.
+	if countedServers {
+		c.collectReadyZeros(ctx, ch, readySeen)
 	}
 
 	rows, err = c.st.Pool.Query(ctx, `
@@ -543,6 +590,79 @@ func (c *dbCollector) Collect(ch chan<- prometheus.Metric) {
 	for _, vc := range counts {
 		ch <- prometheus.MustNewConstMetric(versionsDesc, prometheus.GaugeValue,
 			float64(vc.Count), vc.Project, vc.Env, vc.State)
+	}
+}
+
+// alertEventKinds are the event kinds an alert rule reads through increase()
+// (rules.yml.j2: CrashLoop, AgentUpgradeFailed). They carry an explicit 0
+// baseline on every scrape so the FIRST event of a kind is visible — see the
+// events block of dbCollector.Collect (tracker #960).
+var alertEventKinds = []string{store.EventCrashLoop, store.EventAgentUpgradeFailed}
+
+// readyKey is the comparison key of one birdman_servers ready labelset
+// (state is fixed to "ready", so it is not part of the key). NUL separates the
+// parts: no label value here can contain it.
+func readyKey(project, env, production, region, semver string) string {
+	return strings.Join([]string{project, env, production, region, semver}, "\x00")
+}
+
+// collectReadyZeros emits an explicit birdman_servers{state="ready"} = 0 for
+// every fleet that wants a warm buffer and currently has no ready server at
+// all (tracker #960).
+//
+// Why it must exist: birdman_servers is a grouped COUNT, so a combination with
+// no rows produces NO series — and a Prometheus aggregation over a missing
+// series is EMPTY, not 0. BufferEmptyReadyProd/NonProd
+// (`sum by (region, project) (...) == 0`) could therefore never hold: both
+// alerts were dead in every fleet state, which is worse than having no alert —
+// the case looked covered. The explicit zero is what makes `== 0` reachable;
+// the rule expression needs no change.
+//
+// Where the live combinations come from: fleet_configs — the DESIRED state,
+// i.e. exactly the (project, env, region) triples an operator asked to keep
+// warm. version is the fleet's active semver (empty when nothing is deployed
+// yet: a configured fleet with no version is precisely the "next player gets
+// no dedic" state the alert is for). Cardinality is therefore bounded by the
+// number of fleet rows — one series each, never a cartesian product over
+// versions or states, and only for triples that have no ready row already.
+//
+// buffer_ready = 0 is skipped on purpose: a fleet that deliberately keeps no
+// warm buffer is not an incident, and paging on it would be noise. Keeping
+// that filter in the metric is also what keeps the alert expression free of a
+// buffer_ready join.
+func (c *dbCollector) collectReadyZeros(ctx context.Context, ch chan<- prometheus.Metric, readySeen map[string]bool) {
+	// production joins environments by (project_id, env) — same derivation as
+	// the server rows (I6), so a zero and a real count share one labelset shape.
+	rows, err := c.st.Pool.Query(ctx, `
+		select p.slug, f.env, e.production, f.region, coalesce(v.semver, '')
+		from fleet_configs f
+		join projects p on p.id = f.project_id
+		join environments e on e.project_id = f.project_id and e.name = f.env
+		left join versions v on v.id = f.active_version
+		where f.buffer_ready > 0`)
+	if err != nil {
+		c.log.Error("metrics: ready-buffer fleets query failed", "err", err)
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var project, env, region, semver string
+		var production bool
+		if err := rows.Scan(&project, &env, &production, &region, &semver); err != nil {
+			c.log.Error("metrics: ready-buffer fleets scan failed", "err", err)
+			return
+		}
+		productionStr := strconv.FormatBool(production)
+		key := readyKey(project, env, productionStr, region, semver)
+		if readySeen[key] {
+			continue
+		}
+		readySeen[key] = true // fleet rows are unique per (project, env, region), but never risk a duplicate labelset
+		ch <- prometheus.MustNewConstMetric(serversDesc, prometheus.GaugeValue, 0,
+			project, env, productionStr, "ready", region, semver)
+	}
+	if err := rows.Err(); err != nil {
+		c.log.Error("metrics: ready-buffer fleets rows failed", "err", err)
 	}
 }
 

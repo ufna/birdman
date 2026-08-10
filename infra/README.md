@@ -85,6 +85,13 @@ ansible-playbook playbooks/monitoring.yml
 
 Конфиги шаблонятся в `/etc/birdman/monitoring/…` и монтируются ro в контейнеры.
 
+Правила алертов проверяются **локально, без выката** — `roles/birdman_monitoring_dev/tests/run.sh`:
+рендерит `rules.yml.j2` дефолтами роли во временный каталог и гоняет по нему
+`promtool test rules` (локальный бинарь, иначе контейнер `prom/prometheus`).
+Оттуда же берётся регрессия на мёртвый `BufferEmptyReady` (tracker #960):
+агрегация по отсутствующей серии даёт пусто, а не 0, поэтому master эмитит
+явные нули ready-серий — правила без них не могли загореться вовсе.
+
 Бэкапы Postgres исполняет сам master (Backups v1, настройка — в панели);
 restore-drill — `/usr/local/bin/birdman-pg-restore-test` (роль также сносит
 legacy-таймер `birdman-pg-backup`).

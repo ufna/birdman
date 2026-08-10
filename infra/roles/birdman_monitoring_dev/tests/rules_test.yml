@@ -1,0 +1,165 @@
+# promtool unit tests for the vmalert rules of birdman_monitoring_dev.
+# Run: ./run.sh (renders rules.yml.j2 with the role defaults, no host touched).
+#
+# The subject is tracker #960: an alert that is PRESENT in the rules and cannot
+# fire is worse than a missing one — everyone believes the case is covered.
+rule_files:
+  - rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  # --- BufferEmptyReady: the dead-alert mechanism (#960) ---
+
+  # WITNESS of the defect. A prod fleet with servers but ZERO ready ones: the
+  # master emits a grouped COUNT, so the ready series does not exist at all,
+  # and `sum by (region, project) (...) == 0` yields an EMPTY result — not 0.
+  # This case is here so that removing the explicit zeros (master
+  # metrics.go, collectReadyZeros) visibly turns the alert back into a corpse.
+  - interval: 1m
+    name: 'ready series ABSENT — the alert cannot fire (why explicit zeros exist)'
+    input_series:
+      - series: 'birdman_servers{project="game",env="prod",production="true",state="allocated",region="eu",version="1.0.0"}'
+        values: '3+0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: BufferEmptyReadyProd
+        exp_alerts: []
+
+  # THE FIX. Same fleet, now with the explicit zero the master emits for every
+  # fleet_config with buffer_ready > 0 — the alert fires.
+  - interval: 1m
+    name: 'explicit ready zero — BufferEmptyReadyProd fires (critical)'
+    input_series:
+      - series: 'birdman_servers{project="game",env="prod",production="true",state="allocated",region="eu",version="1.0.0"}'
+        values: '3+0x10'
+      - series: 'birdman_servers{project="game",env="prod",production="true",state="ready",region="eu",version="1.0.0"}'
+        values: '0+0x10'
+    alert_rule_test:
+      # for: 3m — nothing before the threshold, firing after it.
+      - eval_time: 2m
+        alertname: BufferEmptyReadyProd
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: BufferEmptyReadyProd
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              project: game
+              region: eu
+            exp_annotations:
+              summary: 'BufferEmpty(prod): проект game, регион eu без ready-серверов'
+              description: 'sum(birdman_servers{state="ready", production="true"}) == 0 for a (region, project) pair for longer than the threshold (ops.md §1 BufferEmpty).'
+              description_ru: 'sum(birdman_servers{state="ready", production="true"}) == 0 по паре (регион, проект) дольше порога (ops.md §1 BufferEmpty).'
+
+  # The non-prod twin of the pair — warning, not critical.
+  - interval: 1m
+    name: 'explicit ready zero — BufferEmptyReadyNonProd fires (warning)'
+    input_series:
+      - series: 'birdman_servers{project="game",env="dev",production="false",state="ready",region="eu",version="1.0.0"}'
+        values: '0+0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: BufferEmptyReadyNonProd
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              project: game
+              region: eu
+            exp_annotations:
+              summary: 'BufferEmpty(non-prod): проект game, регион eu без ready-серверов'
+              description: 'sum(birdman_servers{state="ready", production="false"}) == 0 for a (region, project) pair for longer than the threshold (ops.md §1 BufferEmpty).'
+              description_ru: 'sum(birdman_servers{state="ready", production="false"}) == 0 по паре (регион, проект) дольше порога (ops.md §1 BufferEmpty).'
+      # ...and the prod twin stays silent on a non-prod fleet.
+      - eval_time: 6m
+        alertname: BufferEmptyReadyProd
+        exp_alerts: []
+
+  # A warm buffer that is actually warm must never page.
+  - interval: 1m
+    name: 'ready > 0 — silence'
+    input_series:
+      - series: 'birdman_servers{project="game",env="prod",production="true",state="ready",region="eu",version="1.0.0"}'
+        values: '2+0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: BufferEmptyReadyProd
+        exp_alerts: []
+
+  # Project scoping (#955) — correct all along, but LATENT until the zeros
+  # above made the alert able to fire at all: an empty buffer of project "a"
+  # must not be masked by servers of project "b" in the same region.
+  - interval: 1m
+    name: 'per-project buffers do not mask each other'
+    input_series:
+      - series: 'birdman_servers{project="a",env="prod",production="true",state="ready",region="eu",version="1.0.0"}'
+        values: '0+0x10'
+      - series: 'birdman_servers{project="b",env="prod",production="true",state="ready",region="eu",version="1.0.0"}'
+        values: '5+0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: BufferEmptyReadyProd
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              project: a
+              region: eu
+            exp_annotations:
+              summary: 'BufferEmpty(prod): проект a, регион eu без ready-серверов'
+              description: 'sum(birdman_servers{state="ready", production="true"}) == 0 for a (region, project) pair for longer than the threshold (ops.md §1 BufferEmpty).'
+              description_ru: 'sum(birdman_servers{state="ready", production="true"}) == 0 по паре (регион, проект) дольше порога (ops.md §1 BufferEmpty).'
+
+  # --- The same class next door: increase() over a series born at 1 ---
+
+  # WITNESS. birdman_events_total{kind} is DB-derived, so the series of a kind
+  # that never happened does not exist and springs into being reading 1 —
+  # increase() over a constant 1 is 0, so the FIRST crash_loop ever was
+  # invisible and CrashLoop only fired from the second one on.
+  - interval: 1m
+    name: 'events counter born at 1 — the first event of a kind is invisible'
+    input_series:
+      - series: 'birdman_events_total{kind="crash_loop"}'
+        values: '_ _ 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: CrashLoop
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: CrashLoop
+        exp_alerts: []
+
+  # THE FIX: the master keeps a 0 baseline for the alert-feeding kinds
+  # (metrics.go, alertEventKinds), so the first event rises from it.
+  - interval: 1m
+    name: 'zero baseline — the first crash_loop fires'
+    input_series:
+      - series: 'birdman_events_total{kind="crash_loop"}'
+        values: '0 0 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: CrashLoop
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              kind: crash_loop
+            exp_annotations:
+              summary: 'CrashLoop: событий crash_loop за 5м: 1'
+              description: 'A bad release is likely — roll back (ops.md §6 runbook 3).'
+              description_ru: 'Вероятен плохой релиз — rollback (ops.md §6 runbook 3).'
+
+  - interval: 1m
+    name: 'zero baseline — the first agent_upgrade_failed fires'
+    input_series:
+      - series: 'birdman_events_total{kind="agent_upgrade_failed"}'
+        values: '0 0 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: AgentUpgradeFailed
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              kind: agent_upgrade_failed
+            exp_annotations:
+              summary: 'AgentUpgradeFailed: неудачных апгрейдов агента за 10м: 1'
+              description: 'Agent did not come back online with the new version (agent.md §7; rollback via ansible).'
+              description_ru: 'Агент не вышел на связь с новой версией (agent.md §7; откат — ansible).'

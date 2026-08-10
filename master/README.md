@@ -70,7 +70,9 @@
     из живых нод — сам UDP-echo появится в агенте в итерации 4, адреса уже
     правильные;
   - rate-limit матчмейкинга: 5 rps per player_id → `429 rate_limited`;
-- **/metrics** (Prometheus): `birdman_servers{project,env,production,state,region,version}`,
+- **/metrics** (Prometheus): `birdman_servers{project,env,production,state,region,version}`
+  (ready-срез несёт **явные нули** для флотов с `buffer_ready > 0` — иначе серия
+  просто исчезает и алерт `ready == 0` не может сработать, tracker #960),
   `birdman_allocation_duration_seconds`,
   `birdman_allocation_failures_total{reason,project}`,
   `birdman_node_heartbeat_age_seconds`, `birdman_mm_queue_depth{region,env}`,
