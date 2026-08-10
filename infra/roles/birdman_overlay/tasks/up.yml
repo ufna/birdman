@@ -43,6 +43,15 @@
     mode: "0644"
   notify: Restart birdman-overlay
 
+# ПРОВЕРЕНО (tracker #265, ansible-core 2.16 и 2.21): гард `... is not skipped`
+# перед деref'ом регистра здесь НЕ нужен — в отличие от 236/248/257. Класс тех
+# задач — модули БЕЗ поддержки check-режима (uri, wait_for): их скипает движок,
+# у регистра остаётся голый {skipped, msg}, и любой деref под --check падает.
+# command/shell check-режим поддерживают и скипаются САМИ, уже внутри модуля,
+# возвращая полноформатный результат (rc=0, stdout='', stderr='', skipped=true)
+# — .stderr/.rc под --check есть. Сверх того, changed_when у скипнутого таска
+# движок не вычисляет вовсе (task_executor: `if not utr.skipped`). Оба регистра
+# (compose_up, ping) больше нигде в репо не разыменовываются.
 - name: Start birdman-overlay (docker compose, идемпотентно)
   ansible.builtin.command:
     cmd: docker compose -f {{ birdman_overlay_dir }}/compose.yml up -d --wait
@@ -60,6 +69,10 @@
   loop: "{{ birdman_overlay_forwards }}"
   when: birdman_overlay_mode == 'hub'
 
+# until, в отличие от changed_when, у скипнутого таска ВЫЧИСЛЯЕТСЯ (ветка
+# retries в task_executor про skipped не знает) — но .rc в check-результате
+# command есть и равен 0, поэтому условие истинно с первой попытки: ни стопа,
+# ни ретрай-шторма на delay*retries. Подробности — в блоке выше (#265).
 - name: Assert hub reachable through tunnel (только спок)
   ansible.builtin.command:
     cmd: ping -c 1 -W 3 {{ hostvars[birdman_overlay_hub_host].birdman_overlay_ip }}
