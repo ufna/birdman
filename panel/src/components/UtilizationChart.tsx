@@ -84,6 +84,11 @@ function Plot({
   const { t } = useT();
   // Цвета серий читаем из CSS-переменных (canvas не понимает var()).
   const colors = states.map((s) => resolveVar(s.color));
+  // Ключ по ЗНАЧЕНИЮ, а не по идентичности: `colors` — новый массив каждый
+  // рендер, в deps он бы пересоздавал график постоянно. Отдельной переменной
+  // (а не выражением прямо в deps), чтобы список зависимостей оставался
+  // статически проверяемым — иначе линтер не видит, что там.
+  const colorsKey = colors.join(',');
 
   useEffect(() => {
     const el = holder.current;
@@ -122,7 +127,8 @@ function Plot({
       plot.current = null;
     };
     // Данные обновляет setData ниже; пересоздание — тема/высота/набор серий.
-  }, [theme, height, colors.join(',')]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- aligned.x/ys здесь только начальные данные canvas'а (дальше setData из эффекта ниже), а `colors` отслеживается по значению через colorsKey: набор серий меняется вместе с ним, идентичность массива — нет.
+  }, [theme, height, colorsKey]);
 
   useEffect(() => {
     plot.current?.setData([aligned.x, ...aligned.ys] as uPlot.AlignedData);

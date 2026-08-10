@@ -37,7 +37,7 @@ export function useAsync<T>(
       stale = true;
     };
     // deps задаёт вызывающий экран (период/лимит и т.п.)
-
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- ДВЕ находки, обе по устройству хука. (1) deps не литерал: их прокидывает вызывающий экран — в этом весь смысл `useAsync(fetcher, deps)`; сами call-site'ы линтер проверяет через additionalHooks в eslint.config.js, так что дыра закрыта на уровне выше. (2) `fetcher` не может быть в deps: это свежая стрелка каждый рендер, зависимость от неё = перезапрос в бесконечном цикле.
   }, deps);
 
   useEffect(() => load(), [load]);

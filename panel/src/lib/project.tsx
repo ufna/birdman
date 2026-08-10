@@ -12,6 +12,8 @@
 // грузится, не приехал, либо в базе нет ни одного проекта (свежая установка —
 // проект заводится неявно первой нодой или версией, ensureProject).
 
+/* eslint-disable react-refresh/only-export-components -- контекст, провайдер, useProject/useProjectList и чистые resolveProject/keepForProject — одна единица смысла. Правило про гранулярность Fast Refresh в dev-сервере, не про корректность; разносить файл по модулям ради него дороже, чем оно стоит. Политика — в eslint.config.js. */
+
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { api } from './api';

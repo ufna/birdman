@@ -6,6 +6,8 @@
 // язык, для него DOM-раскладка даёт корректные темы и отсутствие
 // горизонтального скролла «из коробки». Раскладка — чистые функции (charts.test).
 
+/* eslint-disable react-refresh/only-export-components -- axisTickIndices — чистая арифметика подписей оси, тестируется без рендера. Правило про гранулярность Fast Refresh в dev-сервере, не про корректность; разносить файл по модулям ради него дороже, чем оно стоит. Политика — в eslint.config.js. */
+
 import { useId } from 'react';
 import type { ReactNode } from 'react';
 import * as Tooltip from '@radix-ui/react-tooltip';

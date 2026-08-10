@@ -35,6 +35,9 @@ jobs:
       - name: Typecheck (tsc --noEmit)
         run: npm run check
 
+      - name: Lint (eslint)
+        run: npm run lint
+
       - name: Test (vitest)
         run: npm test
 

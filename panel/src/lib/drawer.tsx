@@ -3,6 +3,8 @@
 // — без прокидывания пропсов. Хост рендерит оба дровера и живёт внутри
 // LiveProvider (детали используют useData/SSE).
 
+/* eslint-disable react-refresh/only-export-components -- useServerDrawer/useMatchDrawer — хуки доступа к контексту рядом со своим провайдером. Правило про гранулярность Fast Refresh в dev-сервере, не про корректность; разносить файл по модулям ради него дороже, чем оно стоит. Политика — в eslint.config.js. */
+
 import { createContext, useCallback, useContext, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { ServerDrawer } from '../components/ServerDrawer';

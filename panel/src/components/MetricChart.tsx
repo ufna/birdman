@@ -113,6 +113,7 @@ function Plot({ aligned, unit, height }: { aligned: { x: number[]; ys: (number |
       plot.current = null;
     };
     // Данные обновляет setData ниже; пересоздание — только тема/высота/unit.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- aligned.x/ys здесь только НАЧАЛЬНЫЕ данные canvas'а; дальше их везёт setData из эффекта ниже. Добавить их сюда = сносить и создавать uPlot заново на каждом дозапросе (раз в 15с) — мигание графика и потеря позиции курсора.
   }, [theme, height, unit]);
 
   useEffect(() => {

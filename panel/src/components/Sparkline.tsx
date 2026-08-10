@@ -1,6 +1,8 @@
 // Спарклайн «матчи за час» на uPlot: одна серия в акценте, тонкая линия,
 // лёгкая заливка, без осей и легенды — подпись и итог несёт карточка.
 
+/* eslint-disable react-refresh/only-export-components -- bucketPerMinute — чистая раскладка по минутным корзинам, тестируется без рендера. Правило про гранулярность Fast Refresh в dev-сервере, не про корректность; разносить файл по модулям ради него дороже, чем оно стоит. Политика — в eslint.config.js. */
+
 import { useEffect, useRef } from 'react';
 import uPlot from 'uplot';
 import 'uplot/dist/uPlot.min.css';
@@ -68,6 +70,7 @@ export function Sparkline({ points, height = 72 }: { points: SparkPoint[]; heigh
     };
     // Данные не в deps: их обновляет setData ниже, пересоздание —
     // только на смену темы/высоты.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- см. выше: `points` здесь только начальные данные canvas'а, дальше их везёт setData. В deps они означали бы пересоздание uPlot на каждом обновлении ленты матчей.
   }, [theme, height]);
 
   useEffect(() => {

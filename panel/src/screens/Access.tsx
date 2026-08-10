@@ -8,6 +8,8 @@
 // (RegistriesSection) — приватные registry-креды, см. её файл. Экран скрыт
 // из навигации/роутинга для не-admin (эндпоинты admin-scoped).
 
+/* eslint-disable react-refresh/only-export-components -- SCOPE_OPTIONS/BINDABLE_SCOPES/canBindScopes — таблица скоупов и её предикаты рядом с экраном, покрыты юнит-тестами напрямую. Правило про гранулярность Fast Refresh в dev-сервере, не про корректность; разносить файл по модулям ради него дороже, чем оно стоит. Политика — в eslint.config.js. */
+
 import { useMemo, useState } from 'react';
 import type { ColumnDef } from '@tanstack/react-table';
 import * as Dialog from '@radix-ui/react-dialog';

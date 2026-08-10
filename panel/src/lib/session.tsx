@@ -1,6 +1,8 @@
 // Сессия панели: cookie-логин по API-ключу (POST /v1/session), скоупы — из
 // ключа. При старте пробуем существующую cookie (GET /v1/session).
 
+/* eslint-disable react-refresh/only-export-components -- контекст, провайдер, useSession и чистые предикаты прав canRead/canDeploy/canAdmin. Правило про гранулярность Fast Refresh в dev-сервере, не про корректность; разносить файл по модулям ради него дороже, чем оно стоит. Политика — в eslint.config.js. */
+
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { api, ApiError } from './api';

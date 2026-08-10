@@ -2,6 +2,8 @@
 // для экранов. Данные обновляются по событиям стрима, а при упавшем стриме
 // экраны переходят на частый поллинг (см. useData ниже).
 
+/* eslint-disable react-refresh/only-export-components -- контекст, провайдер и data-хуки useData/useLiveAsync — одна единица смысла. Правило про гранулярность Fast Refresh в dev-сервере, не про корректность; разносить файл по модулям ради него дороже, чем оно стоит. Политика — в eslint.config.js. */
+
 import {
   createContext,
   useCallback,
@@ -104,6 +106,7 @@ export function useData<T>(fetcher: () => Promise<T>, deps: unknown[]): DataStat
       stale = true;
     };
     // deps задаёт вызывающий экран (фильтры и т.п.)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- ДВЕ находки, обе по устройству хука. (1) deps не литерал: их прокидывает вызывающий экран — в этом весь смысл `useData(fetcher, deps)`; сами call-site'ы линтер проверяет через additionalHooks в eslint.config.js. (2) `fetcher` не может быть в deps: свежая стрелка каждый рендер — зависимость от неё зациклила бы перезапрос.
   }, deps);
 
   useEffect(() => load(), [load]);
@@ -175,6 +178,7 @@ export function useLiveAsync<T>(
       stale = true;
     };
     // deps задаёт вызывающий экран (период и т.п.)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- см. useData выше: deps прокидывает вызывающий экран (call-site'ы проверяются через additionalHooks), а `fetcher` — свежая стрелка каждый рендер.
   }, deps);
 
   useEffect(() => load(), [load]);

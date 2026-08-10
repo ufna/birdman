@@ -4,6 +4,8 @@
 // закрытие. Провайдер вешается высоко (App), хук — с no-op фолбэком, чтобы
 // изолированные юнит-тесты экранов монтировались без обёртки (как useLive/i18n).
 
+/* eslint-disable react-refresh/only-export-components -- useToast — хук доступа к контексту тостов, живёт рядом со своим провайдером. Правило про гранулярность Fast Refresh в dev-сервере, не про корректность; разносить файл по модулям ради него дороже, чем оно стоит. Политика — в eslint.config.js. */
+
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useT } from '../lib/i18n';

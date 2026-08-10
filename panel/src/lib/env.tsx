@@ -11,6 +11,8 @@
 // приходит из ProjectContext — иначе админка Environments и привязка ключей
 // в Access не знали бы, к какому проекту относится их правка.
 
+/* eslint-disable react-refresh/only-export-components -- контекст, провайдер, useEnv и чистые хелперы выбора окружения (resolveSelection, keepForEnv…) — одна единица смысла; хелперы покрыты юнит-тестами напрямую. Правило про гранулярность Fast Refresh в dev-сервере, не про корректность; разносить файл по модулям ради него дороже, чем оно стоит. Политика — в eslint.config.js. */
+
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { api } from './api';

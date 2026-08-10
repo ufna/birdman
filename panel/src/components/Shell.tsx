@@ -3,6 +3,8 @@
 // таблицы скроллятся внутри карточек. <768px навигация сворачивается в
 // гамбургер-дровер (Radix Dialog: фокус-трап, Esc, возврат фокуса).
 
+/* eslint-disable react-refresh/only-export-components -- navItemsFor — чистый состав меню по правам сессии, тестируется отдельно от оболочки. Правило про гранулярность Fast Refresh в dev-сервере, не про корректность; разносить файл по модулям ради него дороже, чем оно стоит. Политика — в eslint.config.js. */
+
 import { useState } from 'react';
 import type { ReactNode } from 'react';
 import * as Tooltip from '@radix-ui/react-tooltip';

@@ -1,7 +1,7 @@
 // Флот: таблица тачек с живым heartbeat age; раскрытие строки — дедики
 // этой тачки (state, версия, игроки, порт, аптайм).
 
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import type { ColumnDef } from '@tanstack/react-table';
 import * as Dialog from '@radix-ui/react-dialog';
 import { api, ApiError } from '../lib/api';
@@ -40,7 +40,14 @@ export function Fleet() {
   const { selected, environments } = useEnv();
   const { selected: project } = useProject();
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const isProdEnv = (envName: string) => environments.find((e) => e.name === envName)?.production === true;
+  // useCallback, а не голая функция: `columns` ниже зовёт isProdEnv, и раньше
+  // в его deps стоял транзитивный `environments` — то есть замыкание хелпера
+  // отслеживалось вручную. Работало, но ровно на этой ручной цепочке и подорвался
+  // #948. Мемоизированный хелпер в deps проверяется линтером сам.
+  const isProdEnv = useCallback(
+    (envName: string) => environments.find((e) => e.name === envName)?.production === true,
+    [environments],
+  );
 
   const semverOf = useMemo(
     () => new Map((versions.data ?? []).map((v) => [v.id, v.semver])),
@@ -149,7 +156,7 @@ export function Fleet() {
         ),
       },
     ],
-    [t, serversByNode, expandedId, quarantineReason, mayAdmin, nodes.reload, environments],
+    [t, serversByNode, expandedId, quarantineReason, mayAdmin, nodes.reload, isProdEnv],
   );
 
   const error = nodes.error ?? servers.error ?? versions.error;

@@ -57,14 +57,21 @@ export function Backups() {
   // НЕ поллим: их меняет только эта форма, а фоновое перечитывание затирало бы
   // несохранённые правки и набранный секрет (ревью Task 5, Important);
   // baseline после save обновляется ответом PATCH.
+  //
+  // reload вынут в переменную намеренно: в deps нужен именно он (стабилен —
+  // useAsync мемоизирует его по своим deps, здесь пустым), а НЕ объект `runs`
+  // целиком — он пересоздаётся каждый рендер, и интервал бы сбрасывался,
+  // не доживая до срабатывания. Линтер иначе требует `runs`: вызов метода
+  // `runs.reload()` он обязан считать зависящим от receiver'а.
+  const reloadRuns = runs.reload;
   useEffect(() => {
     const id = setInterval(() => {
-      runs.reload();
+      reloadRuns();
     }, 30_000);
     return () => {
       clearInterval(id);
     };
-  }, [runs.reload]);
+  }, [reloadRuns]);
 
   // Отложенный ре-фетч истории после run-now: id в ref, чистим на unmount.
   const runReloadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);

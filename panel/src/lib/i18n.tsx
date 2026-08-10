@@ -6,6 +6,8 @@
 // RU, everything else → EN (the default). A manual switch persists and from
 // then on auto-detection never overrides it.
 
+/* eslint-disable react-refresh/only-export-components -- провайдер, useT/useFormat и чистые detectLang/storedLang/resolveInitialLang — одна единица смысла. Правило про гранулярность Fast Refresh в dev-сервере, не про корректность; разносить файл по модулям ради него дороже, чем оно стоит. Политика — в eslint.config.js. */
+
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { en } from './locales/en';

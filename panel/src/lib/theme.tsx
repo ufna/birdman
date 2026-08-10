@@ -1,6 +1,8 @@
 // Тема: системная по умолчанию, явный выбор хранится в localStorage и
 // ставится как data-theme на <html> (до первого рендера — см. index.html).
 
+/* eslint-disable react-refresh/only-export-components -- useTheme и cssVar рядом со своим провайдером темы. Правило про гранулярность Fast Refresh в dev-сервере, не про корректность; разносить файл по модулям ради него дороже, чем оно стоит. Политика — в eslint.config.js. */
+
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 
