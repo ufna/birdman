@@ -83,10 +83,12 @@ func TestAlertMutesStore(t *testing.T) {
 	}
 
 	// Region matching: eu-scoped A matches only eu; null-region B matches any.
-	if !a.Matches("NodeDown", "eu") || a.Matches("NodeDown", "us") || a.Matches("DiskHigh", "eu") {
+	// (Project is null on both here — the project dimension has its own file,
+	// alerts_project_test.go.)
+	if !a.Matches("NodeDown", "eu", "") || a.Matches("NodeDown", "us", "") || a.Matches("DiskHigh", "eu", "") {
 		t.Fatalf("A.Matches region/name scoping wrong")
 	}
-	if !b.Matches("NodeDown", "us") || !b.Matches("NodeDown", "eu") {
+	if !b.Matches("NodeDown", "us", "") || !b.Matches("NodeDown", "eu", "") {
 		t.Fatalf("B (null region) should match any region")
 	}
 

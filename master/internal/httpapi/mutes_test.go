@@ -170,6 +170,129 @@ func TestAlertMutesEndpoints(t *testing.T) {
 	}
 }
 
+// muteProjectServer wires a server whose vmalert reports three firing alerts —
+// one of project alpha, one of beta, and a PLATFORM NodeDown with no project
+// label at all — with the alert log carrying the same three, so the muted flag
+// can be exercised on /active and /history alike (tracker #957).
+func muteProjectServer(t *testing.T) (*client, *client) {
+	t.Helper()
+	st := testdb.New(t)
+	log := opsLog()
+	m := metrics.New(st, log)
+	mm := matchmaker.New(st, m, matchmaker.Config{}, log)
+	dep := deploy.New(deploy.Options{Store: st, Sender: &testdb.CommandRecorder{}, Log: log})
+	ctx := t.Context()
+	_, adminSecret, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "admin", Scopes: []string{httpapi.ScopeAdmin}})
+	_, roSecret, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ro", Scopes: []string{httpapi.ScopeReadonly}})
+
+	vm := fakeVmalertWith(t, vmAlertsProjectJSON)
+	logPath := filepath.Join(t.TempDir(), "alerts.log")
+	logBody := `{"received_at":"2026-07-08T09:00:00Z","alerts":[{"status":"firing","labels":{"alertname":"BufferEmptyReadyProd","severity":"critical","region":"eu","project":"alpha"},"annotations":{"description":"no ready servers"},"startsAt":"2026-07-08T08:59:00Z","endsAt":"0001-01-01T00:00:00Z"}]}
+{"received_at":"2026-07-08T09:10:00Z","alerts":[{"status":"firing","labels":{"alertname":"AllocationFailures","severity":"warning","region":"eu","project":"beta"},"annotations":{"description":"alloc failures"},"startsAt":"2026-07-08T09:09:00Z","endsAt":"0001-01-01T00:00:00Z"}]}
+{"received_at":"2026-07-08T09:20:00Z","alerts":[{"status":"firing","labels":{"alertname":"NodeDown","severity":"critical","region":"eu","node":"n1"},"annotations":{"description":"node is unreachable"},"startsAt":"2026-07-08T09:19:00Z","endsAt":"0001-01-01T00:00:00Z"}]}
+`
+	if err := os.WriteFile(logPath, []byte(logBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", "", log).
+		WithAlertsSources(vm.URL, logPath))
+	t.Cleanup(ts.Close)
+
+	return &client{t: t, base: ts.URL, key: adminSecret}, &client{t: t, base: ts.URL, key: roSecret}
+}
+
+// TestAlertMuteProjectScoping is the heart of tracker #957: a mute carries a
+// project, and the match is strict on it.
+//
+// The load-bearing case is the last one — a PROJECT mute must never cover a
+// PLATFORM alert. Muting NodeDown "for alpha" and having master go quiet for
+// everyone would be the worst kind of defect here: it looks like the mute
+// works, while project beta loses a signal it never agreed to lose.
+func TestAlertMuteProjectScoping(t *testing.T) {
+	admin, ro := muteProjectServer(t)
+
+	// mutedEverywhere asserts the same flag on /active and /history — the two
+	// paths compute it separately, and a fix landing in only one of them would
+	// leave the panel showing two different truths for one alert.
+	mutedEverywhere := func(name string) (bool, bool) {
+		t.Helper()
+		_, act := ro.do("GET", "/v1/alerts/active", nil)
+		_, hist := ro.do("GET", "/v1/alerts/history?limit=50", nil)
+		return muted(t, act, name), muted(t, hist, name)
+	}
+
+	// A mute scoped to alpha covers alpha's alert only.
+	code, body := admin.do("POST", "/v1/alerts/mutes", map[string]any{
+		"alertname": "BufferEmptyReadyProd", "project": "alpha",
+	})
+	if code != 201 {
+		t.Fatalf("mute alpha: %d %v", code, body)
+	}
+	if got := body["mute"].(map[string]any)["project"]; got != "alpha" {
+		t.Fatalf("mute shape must carry the project: %v", body["mute"])
+	}
+	if a, h := mutedEverywhere("BufferEmptyReadyProd"); !a || !h {
+		t.Fatalf("alpha's alert must be muted by alpha's mute (active=%v history=%v)", a, h)
+	}
+
+	// The same alertname muted for beta does NOT touch alpha's alert — proven
+	// on a second alertname so the assertion cannot pass by accident.
+	if code, _ := admin.do("POST", "/v1/alerts/mutes", map[string]any{
+		"alertname": "AllocationFailures", "project": "alpha",
+	}); code != 201 {
+		t.Fatalf("mute AllocationFailures for alpha: %d", code)
+	}
+	if a, h := mutedEverywhere("AllocationFailures"); a || h {
+		t.Fatalf("beta's alert must NOT be muted by an alpha mute (active=%v history=%v)", a, h)
+	}
+
+	// THE trap: a project mute must not silence the platform alert.
+	if code, _ := admin.do("POST", "/v1/alerts/mutes", map[string]any{
+		"alertname": "NodeDown", "project": "alpha",
+	}); code != 201 {
+		t.Fatalf("mute NodeDown for alpha: %d", code)
+	}
+	if a, h := mutedEverywhere("NodeDown"); a || h {
+		t.Fatalf("a PROJECT mute must never cover the PLATFORM alert — "+
+			"alpha would be silencing master for beta too (active=%v history=%v)", a, h)
+	}
+
+	// Muting it WITHOUT a project is how you silence a platform alert: visible,
+	// deliberate, and still the pre-#957 meaning of a project-less mute.
+	if code, _ := admin.do("POST", "/v1/alerts/mutes", map[string]any{"alertname": "NodeDown"}); code != 201 {
+		t.Fatalf("mute NodeDown for all projects: %d", code)
+	}
+	if a, h := mutedEverywhere("NodeDown"); !a || !h {
+		t.Fatalf("a project-less mute must cover the platform alert (active=%v history=%v)", a, h)
+	}
+
+	// …and that same project-less mute covers project alerts too (all projects).
+	if code, _ := admin.do("POST", "/v1/alerts/mutes", map[string]any{"alertname": "AllocationFailures"}); code != 201 {
+		t.Fatalf("mute AllocationFailures for all projects: %d", code)
+	}
+	if a, h := mutedEverywhere("AllocationFailures"); !a || !h {
+		t.Fatalf("a project-less mute must cover a project alert (active=%v history=%v)", a, h)
+	}
+
+	// The five mutes are five distinct rows: the target is a triple, so alpha's
+	// NodeDown mute never overwrote the project-less one (and vice versa).
+	code, body = ro.do("GET", "/v1/alerts/mutes", nil)
+	if code != 200 || len(body["mutes"].([]any)) != 5 {
+		t.Fatalf("want 5 distinct mutes (targets differ by project), got %v", body["mutes"])
+	}
+	// An empty project string is the wildcard spelled sloppily, not a target of
+	// its own: it upserts the project-less NodeDown mute in place.
+	if code, _ := admin.do("POST", "/v1/alerts/mutes", map[string]any{
+		"alertname": "NodeDown", "project": "", "note": "same target",
+	}); code != 201 {
+		t.Fatalf("empty project mute: %d", code)
+	}
+	_, body = ro.do("GET", "/v1/alerts/mutes", nil)
+	if len(body["mutes"].([]any)) != 5 {
+		t.Fatalf(`"project":"" must mean "all projects", not a sixth row: %v`, body["mutes"])
+	}
+}
+
 // TestAlertMuteRegionScoping: a region-scoped mute only covers that region; a
 // null-region mute covers every region.
 func TestAlertMuteRegionScoping(t *testing.T) {

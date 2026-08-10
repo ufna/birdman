@@ -16,15 +16,17 @@ import (
 // alertmanager silence best-effort (internal/amsilence; ops.md §1, tracker
 // #245) — real suppression of the log sink/Discord. Without a reachable
 // alertmanager the mirror is a silent no-op and the mute degrades to pure v0
-// annotation semantics. Region and ExpiresAt are nullable: a nil Region matches
-// every region, a nil ExpiresAt never expires. SilenceID holds the mirrored
-// silence's id (nil = not yet mirrored — a pre-upgrade v0 mute or AM was down;
-// the reconcile sweep fills it in). All three serialize as JSON null (not
-// omitted) so the panel always sees the fields.
+// annotation semantics. Region, Project and ExpiresAt are nullable: a nil
+// Region matches every region, a nil Project every project (tracker #957), a
+// nil ExpiresAt never expires. SilenceID holds the mirrored silence's id (nil =
+// not yet mirrored — a pre-upgrade v0 mute or AM was down; the reconcile sweep
+// fills it in). All four serialize as JSON null (not omitted) so the panel
+// always sees the fields.
 type AlertMute struct {
 	ID        string     `json:"id"`
 	Alertname string     `json:"alertname"`
 	Region    *string    `json:"region"`
+	Project   *string    `json:"project"`
 	Note      string     `json:"note"`
 	CreatedAt time.Time  `json:"created_at"`
 	ExpiresAt *time.Time `json:"expires_at"`
@@ -32,42 +34,71 @@ type AlertMute struct {
 	SilenceID *string    `json:"silence_id"`
 }
 
-// Matches reports whether this mute covers an alert with the given alertname
-// and region. A nil Region ("all regions") matches any region; otherwise the
-// region must be exactly equal. Callers pre-filter to active mutes.
-func (m AlertMute) Matches(alertname, region string) bool {
+// Matches reports whether this mute covers an alert with the given alertname,
+// region and project. A nil Region ("all regions") matches any region, a nil
+// Project ("all projects") any project; otherwise the value must be exactly
+// equal. Callers pre-filter to active mutes.
+//
+// The project comparison is STRICT, deliberately the opposite of the ?project=
+// screen filter (httpapi.keepAlertForProject), which lets an alert with no
+// project through under every selection. Copying that idiom here — "an empty
+// alert project passes any mute" — would hand a project mute power over the
+// PLATFORM signal: the operator of project A mutes MasterDown "for himself" and
+// master goes quiet for everyone, including project B, which never hears about
+// it. So a project-scoped mute never covers a platform alert (project == "");
+// to silence a platform alert you mute it WITHOUT a project — visibly, on
+// purpose. Both rules pick the same safe side: showing one alert too many beats
+// hiding one, and muting one alert too few beats muting one too many.
+func (m AlertMute) Matches(alertname, region, project string) bool {
 	if m.Alertname != alertname {
 		return false
 	}
-	return m.Region == nil || *m.Region == region
+	if m.Region != nil && *m.Region != region {
+		return false
+	}
+	return m.Project == nil || *m.Project == project
 }
 
-const alertMuteCols = `id::text, alertname, region, note, created_at, expires_at, created_by, silence_id`
+const alertMuteCols = `id::text, alertname, region, project, note, created_at, expires_at, created_by, silence_id`
+
+// scanTargets are the Scan destinations for alertMuteCols, in order. Five
+// queries read that column list, and a silent drift between it and the
+// destinations would land the region in the project field — so both live side
+// by side and are edited together.
+func (m *AlertMute) scanTargets() []any {
+	return []any{&m.ID, &m.Alertname, &m.Region, &m.Project, &m.Note,
+		&m.CreatedAt, &m.ExpiresAt, &m.CreatedBy, &m.SilenceID}
+}
 
 // CreateAlertMuteParams is the input to UpsertAlertMute. A nil Region means
-// "all regions", a nil ExpiresAt "never expires"; Note/CreatedBy default to "".
+// "all regions", a nil Project "all projects", a nil ExpiresAt "never expires";
+// Note/CreatedBy default to "".
 type CreateAlertMuteParams struct {
 	Alertname string
 	Region    *string
+	Project   *string
 	Note      string
 	ExpiresAt *time.Time
 	CreatedBy string
 }
 
 // UpsertAlertMute creates a mute or — when an ACTIVE mute for the same
-// (alertname, region) already exists — updates that row's note/expires_at in
-// place. This makes POST /v1/alerts/mutes an idempotent upsert: re-muting the
-// same target doubles as "extend/edit" instead of piling up duplicates or 409.
-// Region is matched null-aware (`is not distinct from`), so a NULL-region ("all
-// regions") mute is a distinct target from a specific-region one. The
-// lookup+write share one transaction with FOR UPDATE so concurrent re-mutes of
-// the same target converge on one row.
+// (alertname, region, project) already exists — updates that row's
+// note/expires_at in place. This makes POST /v1/alerts/mutes an idempotent
+// upsert: re-muting the same target doubles as "extend/edit" instead of piling
+// up duplicates or 409. Region AND project are matched null-aware (`is not
+// distinct from`), so a NULL-region ("all regions") / NULL-project ("all
+// projects") mute is a distinct target from a specific one — muting NodeDown
+// for project A must not overwrite the mute project B put on the same alert.
+// The lookup+write share one transaction with FOR UPDATE so concurrent
+// re-mutes of the same target converge on one row.
 func (s *Store) UpsertAlertMute(ctx context.Context, p CreateAlertMuteParams) (AlertMute, error) {
 	p.Alertname = strings.TrimSpace(p.Alertname)
 	if p.Alertname == "" {
 		return AlertMute{}, errors.New("alertname is required")
 	}
-	p.Region = normalizeRegion(p.Region)
+	p.Region = normalizeMuteTarget(p.Region)
+	p.Project = normalizeMuteTarget(p.Project)
 
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
@@ -80,19 +111,20 @@ func (s *Store) UpsertAlertMute(ctx context.Context, p CreateAlertMuteParams) (A
 		select `+alertMuteCols+`
 		from alert_mutes
 		where alertname = $1 and region is not distinct from $2
+		  and project is not distinct from $3
 		  and (expires_at is null or expires_at > now())
 		order by created_at desc
 		limit 1
-		for update`, p.Alertname, p.Region).
-		Scan(&m.ID, &m.Alertname, &m.Region, &m.Note, &m.CreatedAt, &m.ExpiresAt, &m.CreatedBy, &m.SilenceID)
+		for update`, p.Alertname, p.Region, p.Project).
+		Scan(m.scanTargets()...)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		err = tx.QueryRow(ctx, `
-			insert into alert_mutes (alertname, region, note, expires_at, created_by)
-			values ($1, $2, $3, $4, $5)
+			insert into alert_mutes (alertname, region, project, note, expires_at, created_by)
+			values ($1, $2, $3, $4, $5, $6)
 			returning `+alertMuteCols,
-			p.Alertname, p.Region, p.Note, p.ExpiresAt, p.CreatedBy).
-			Scan(&m.ID, &m.Alertname, &m.Region, &m.Note, &m.CreatedAt, &m.ExpiresAt, &m.CreatedBy, &m.SilenceID)
+			p.Alertname, p.Region, p.Project, p.Note, p.ExpiresAt, p.CreatedBy).
+			Scan(m.scanTargets()...)
 	case err != nil:
 		return AlertMute{}, err
 	default:
@@ -104,7 +136,7 @@ func (s *Store) UpsertAlertMute(ctx context.Context, p CreateAlertMuteParams) (A
 			where id = $1::uuid
 			returning `+alertMuteCols,
 			m.ID, p.Note, p.ExpiresAt).
-			Scan(&m.ID, &m.Alertname, &m.Region, &m.Note, &m.CreatedAt, &m.ExpiresAt, &m.CreatedBy, &m.SilenceID)
+			Scan(m.scanTargets()...)
 	}
 	if err != nil {
 		return AlertMute{}, err
@@ -132,7 +164,7 @@ func (s *Store) ListAlertMutes(ctx context.Context, includeExpired bool) ([]Aler
 	out := []AlertMute{}
 	for rows.Next() {
 		var m AlertMute
-		if err := rows.Scan(&m.ID, &m.Alertname, &m.Region, &m.Note, &m.CreatedAt, &m.ExpiresAt, &m.CreatedBy, &m.SilenceID); err != nil {
+		if err := rows.Scan(m.scanTargets()...); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -151,7 +183,7 @@ func (s *Store) DeleteAlertMute(ctx context.Context, id string) (AlertMute, bool
 	err := s.Pool.QueryRow(ctx, `
 		delete from alert_mutes where id = $1::uuid
 		returning `+alertMuteCols, id).
-		Scan(&m.ID, &m.Alertname, &m.Region, &m.Note, &m.CreatedAt, &m.ExpiresAt, &m.CreatedBy, &m.SilenceID)
+		Scan(m.scanTargets()...)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AlertMute{}, false, nil
 	}
@@ -171,15 +203,18 @@ func (s *Store) SetAlertMuteSilenceID(ctx context.Context, id string, silenceID 
 	return err
 }
 
-// normalizeRegion collapses an empty/whitespace region to nil ("all regions"),
-// so `"region":""` and an absent region behave identically.
-func normalizeRegion(r *string) *string {
-	if r == nil {
+// normalizeMuteTarget collapses an empty/whitespace component of a mute's
+// target to nil ("all regions" / "all projects"), so `"region":""` and an
+// absent region — likewise for project — behave identically. One helper for
+// both because the rule is the same one: the empty string is never a target of
+// its own, it is the wildcard spelled sloppily.
+func normalizeMuteTarget(v *string) *string {
+	if v == nil {
 		return nil
 	}
-	v := strings.TrimSpace(*r)
-	if v == "" {
+	s := strings.TrimSpace(*v)
+	if s == "" {
 		return nil
 	}
-	return &v
+	return &s
 }

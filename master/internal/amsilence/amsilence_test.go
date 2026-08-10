@@ -306,6 +306,116 @@ func TestMuteUpsertedNilRegionNoRegionMatcher(t *testing.T) {
 	}
 }
 
+// TestMuteUpsertedProjectMatcher: a project-scoped mute puts a `project`
+// matcher into the silence (tracker #957). Without it the mirror and the panel
+// would tell different stories — the panel dims one project's alert while
+// alertmanager silences that alertname for EVERY project, so project B goes
+// quiet because project A pressed mute. The nil-project case is guarded by
+// TestMuteUpsertedNilRegionNoRegionMatcher, which asserts exactly one matcher.
+func TestMuteUpsertedProjectMatcher(t *testing.T) {
+	st := testdb.New(t)
+	fam, url := newFakeAM(t)
+	mr := New(st, url, testLog())
+	ctx := context.Background()
+
+	mute, err := st.UpsertAlertMute(ctx, store.CreateAlertMuteParams{
+		Alertname: "BufferEmptyReadyProd", Region: strptr("eu"), Project: strptr("alpha"), CreatedBy: "admin",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mr.MuteUpserted(ctx, mute)
+
+	sil, ok := fam.get(*muteByID(t, st, mute.ID).SilenceID)
+	if !ok {
+		t.Fatal("silence missing")
+	}
+	got := map[string]string{}
+	for _, m := range sil.Matchers {
+		if !m.IsEqual || m.IsRegex {
+			t.Fatalf("matcher %+v must be a plain equality", m)
+		}
+		got[m.Name] = m.Value
+	}
+	want := map[string]string{"alertname": "BufferEmptyReadyProd", "region": "eu", "project": "alpha"}
+	if len(got) != len(want) {
+		t.Fatalf("matchers = %+v, want %v", sil.Matchers, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Fatalf("matcher %s = %q, want %q (all: %+v)", k, got[k], v, sil.Matchers)
+		}
+	}
+
+	// A project-less mute of the SAME alertname keeps the alertname matcher
+	// alone — that is what "all projects" means on the wire, and it is how a
+	// platform alert gets silenced at all.
+	global, err := st.UpsertAlertMute(ctx, store.CreateAlertMuteParams{
+		Alertname: "BufferEmptyReadyProd", Region: strptr("eu"), CreatedBy: "admin",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if global.ID == mute.ID {
+		t.Fatal("precondition: a project-less mute is a distinct target from a project one")
+	}
+	mr.MuteUpserted(ctx, global)
+	gsil, ok := fam.get(*muteByID(t, st, global.ID).SilenceID)
+	if !ok {
+		t.Fatal("silence for the project-less mute missing")
+	}
+	for _, m := range gsil.Matchers {
+		if m.Name == "project" {
+			t.Fatalf("a project-less mute must carry no project matcher: %+v", gsil.Matchers)
+		}
+	}
+}
+
+// TestReconcileKeepsSilencesOfSiblingProjects: two mutes of the SAME alertname
+// in different projects are two rows with two silence ids, and the orphan sweep
+// (which matches by id, never by matchers) must keep both. A sweep that
+// compared matchers would delete one of them every pass and the mirror would
+// flap forever.
+func TestReconcileKeepsSilencesOfSiblingProjects(t *testing.T) {
+	st := testdb.New(t)
+	fam, url := newFakeAM(t)
+	mr := New(st, url, testLog())
+	ctx := context.Background()
+
+	ids := map[string]string{}
+	for _, project := range []string{"alpha", "beta"} {
+		mute, err := st.UpsertAlertMute(ctx, store.CreateAlertMuteParams{
+			Alertname: "BufferEmptyReadyProd", Project: strptr(project), CreatedBy: "admin",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		mr.MuteUpserted(ctx, mute)
+		sid := *muteByID(t, st, mute.ID).SilenceID
+		ids[project] = sid
+		// Age past orphanGrace so only "backed by a mute" can save it.
+		fam.setUpdatedAt(sid, time.Now().Add(-10*time.Minute))
+	}
+	if ids["alpha"] == ids["beta"] {
+		t.Fatalf("sibling projects must hold two distinct silences, both %q", ids["alpha"])
+	}
+
+	mr.reconcileOnce(ctx)
+
+	for project, sid := range ids {
+		sil, ok := fam.get(sid)
+		if !ok {
+			t.Fatalf("silence of project %s was swept though its mute is active", project)
+		}
+		if sil.State != "active" {
+			t.Fatalf("silence of project %s is %q after reconcile", project, sil.State)
+		}
+	}
+	if n := fam.count(); n != 2 {
+		t.Fatalf("reconcile must neither drop nor duplicate sibling silences, count=%d", n)
+	}
+}
+
 func TestMuteUpsertedReusesID(t *testing.T) {
 	st := testdb.New(t)
 	fam, url := newFakeAM(t)

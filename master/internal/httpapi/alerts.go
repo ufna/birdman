@@ -142,7 +142,7 @@ type activeAlert struct {
 	Value         string    `json:"value"`
 	Description   string    `json:"description"`              // EN, canonical
 	DescriptionRu string    `json:"description_ru,omitempty"` // optional RU; panel falls back to Description
-	Muted         bool      `json:"muted"`                    // an active master mute covers this alertname+region
+	Muted         bool      `json:"muted"`                    // an active master mute covers this alertname+region+project
 }
 
 func (s *Server) handleAlertsActive(w http.ResponseWriter, r *http.Request) {
@@ -189,7 +189,7 @@ func (s *Server) handleAlertsActive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for i := range out {
-		out[i].Muted = anyMuteMatches(mutes, out[i].Name, out[i].Region)
+		out[i].Muted = anyMuteMatches(mutes, out[i].Name, out[i].Region, out[i].Project)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"alerts": out})
 }
@@ -307,7 +307,7 @@ type alertEvent struct {
 	DescriptionRu string `json:"description_ru,omitempty"` // optional RU; panel falls back to Description
 	Active        bool   `json:"active"`
 	ReceivedAt    string `json:"received_at,omitempty"`
-	Muted         bool   `json:"muted"` // an active master mute covers this alertname+region
+	Muted         bool   `json:"muted"` // an active master mute covers this alertname+region+project
 }
 
 // amAlert is one alert in the alertmanager-v2 webhook shape written to the log.
@@ -355,7 +355,7 @@ func (s *Server) handleAlertHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for i := range events {
-		events[i].Muted = anyMuteMatches(mutes, events[i].Name, events[i].Region)
+		events[i].Muted = anyMuteMatches(mutes, events[i].Name, events[i].Region, events[i].Project)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"alerts": events})
 }
@@ -460,9 +460,12 @@ func alertSortTime(a alertEvent) time.Time {
 }
 
 // anyMuteMatches reports whether any of the (active) mutes covers the alert.
-func anyMuteMatches(mutes []store.AlertMute, name, region string) bool {
+// The project is part of the match (tracker #957) and is matched STRICTLY —
+// see store.AlertMute.Matches: a project-scoped mute never covers a platform
+// alert, unlike the deliberately non-hiding keepAlertForProject above.
+func anyMuteMatches(mutes []store.AlertMute, name, region, project string) bool {
 	for _, m := range mutes {
-		if m.Matches(name, region) {
+		if m.Matches(name, region, project) {
 			return true
 		}
 	}
@@ -489,15 +492,22 @@ type SilenceMirror interface {
 type createMuteRequest struct {
 	Alertname string  `json:"alertname"`
 	Region    *string `json:"region"`     // absent/empty → all regions
+	Project   *string `json:"project"`    // absent/empty → all projects (tracker #957)
 	Note      string  `json:"note"`       // optional, defaults to ""
 	ExpiresAt *string `json:"expires_at"` // absent/empty → never; else RFC3339 in the future
 }
 
 // handleCreateAlertMute is POST /v1/alerts/mutes (admin). It is an idempotent
-// upsert: muting an alertname+region that already has an active mute updates
-// that mute's note/expires_at in place (store.UpsertAlertMute) rather than
-// stacking duplicates — so a repeat POST doubles as "extend/edit" and still
-// returns 201 with the resulting mute.
+// upsert: muting an alertname+region+project that already has an active mute
+// updates that mute's note/expires_at in place (store.UpsertAlertMute) rather
+// than stacking duplicates — so a repeat POST doubles as "extend/edit" and
+// still returns 201 with the resulting mute.
+//
+// project is NOT validated against the DB, same as ?project= on the reads: an
+// unknown slug simply produces a mute that matches nothing, never an error
+// page, and the panel only ever sends a slug from its own selector. A mute
+// WITHOUT a project keeps the pre-#957 meaning — every project, including the
+// platform alerts that belong to none.
 func (s *Server) handleCreateAlertMute(w http.ResponseWriter, r *http.Request) {
 	var req createMuteRequest
 	if !decodeJSON(w, r, &req) {
@@ -527,6 +537,7 @@ func (s *Server) handleCreateAlertMute(w http.ResponseWriter, r *http.Request) {
 	mute, err := s.st.UpsertAlertMute(r.Context(), store.CreateAlertMuteParams{
 		Alertname: req.Alertname,
 		Region:    req.Region,
+		Project:   req.Project,
 		Note:      req.Note,
 		ExpiresAt: expiresAt,
 		CreatedBy: createdBy,
@@ -535,10 +546,10 @@ func (s *Server) handleCreateAlertMute(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	// Audit — payload carries no secrets (region/expires_at may be null).
+	// Audit — payload carries no secrets (region/project/expires_at may be null).
 	if err := s.st.InsertEvent(r.Context(), store.EventAlertMuted, store.EventRef{}, map[string]any{
 		"mute_id": mute.ID, "alertname": mute.Alertname, "region": mute.Region,
-		"expires_at": mute.ExpiresAt, "created_by": mute.CreatedBy,
+		"project": mute.Project, "expires_at": mute.ExpiresAt, "created_by": mute.CreatedBy,
 	}); err != nil {
 		s.log.Error("alert mute: create event write failed", "mute_id", mute.ID, "err", err)
 	}
@@ -585,6 +596,7 @@ func (s *Server) handleDeleteAlertMute(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.st.InsertEvent(r.Context(), store.EventAlertUnmuted, store.EventRef{}, map[string]any{
 		"mute_id": mute.ID, "alertname": mute.Alertname, "region": mute.Region,
+		"project": mute.Project,
 	}); err != nil {
 		s.log.Error("alert mute: delete event write failed", "mute_id", mute.ID, "err", err)
 	}

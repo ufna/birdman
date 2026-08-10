@@ -527,6 +527,7 @@ export const ru: Record<MessageKey, string> = {
   'alerts.mute.section': 'Заглушённые',
   'alerts.mute.semantics': 'Mute скрывает алерт в панели и пишет запись в аудит — vmalert и Discord продолжают слать.',
   'alerts.mute.allRegions': 'все регионы',
+  'alerts.mute.allProjects': 'все проекты',
   'alerts.mute.badge': 'заглушён',
   'alerts.mute.action': 'Заглушить',
   'alerts.mute.unmute': 'Снять',

@@ -7,7 +7,7 @@ import {
   MUTE_PRESETS,
   countCriticalAlerts,
   muteErrorMessage,
-  normalizeMuteRegion,
+  normalizeMuteLabel,
   presetExpiry,
 } from '../lib/alerts';
 import { I18nProvider } from '../lib/i18n';
@@ -55,7 +55,9 @@ function alertsFetch(data: { active?: ActiveAlert[]; rules?: unknown[]; history?
     else if (url.includes('/alerts/mutes')) {
       if (method === 'POST') {
         status = 201;
-        body = { mute: { id: 'new', alertname: 'NodeDown', region: 'dev', note: '', created_at: '', expires_at: null, created_by: 'k' } };
+        body = {
+          mute: { id: 'new', alertname: 'NodeDown', region: 'dev', project: null, note: '', created_at: '', expires_at: null, created_by: 'k' },
+        };
       } else if (method === 'DELETE') {
         return Promise.resolve(new Response(null, { status: 204 }));
       } else body = { mutes };
@@ -82,11 +84,12 @@ describe('mute вью-модель (чистые функции)', () => {
     expect(countCriticalAlerts([])).toBe(0);
     expect(countCriticalAlerts([activeCrit(), activeCrit({ muted: true }), activeCrit({ severity: 'warning' })])).toBe(1);
   });
-  it('normalizeMuteRegion: пусто/пробелы → undefined', () => {
-    expect(normalizeMuteRegion(undefined)).toBeUndefined();
-    expect(normalizeMuteRegion('')).toBeUndefined();
-    expect(normalizeMuteRegion('  ')).toBeUndefined();
-    expect(normalizeMuteRegion('dev')).toBe('dev');
+  it('normalizeMuteLabel: пусто/пробелы → undefined (обе оси цели)', () => {
+    expect(normalizeMuteLabel(undefined)).toBeUndefined();
+    expect(normalizeMuteLabel('')).toBeUndefined();
+    expect(normalizeMuteLabel('  ')).toBeUndefined();
+    expect(normalizeMuteLabel('dev')).toBe('dev');
+    expect(normalizeMuteLabel('  alpha ')).toBe('alpha');
   });
   it('muteErrorMessage: статусы → локализованные ключи', () => {
     const t = ((k: string) => k) as Parameters<typeof muteErrorMessage>[1];
@@ -125,6 +128,7 @@ describe('Alerts — секция «Заглушённые»', () => {
     id: 'm1',
     alertname: 'CrashLoop',
     region: null,
+    project: null,
     note: 'flapping node',
     created_at: '2026-07-08T09:00:00Z',
     expires_at: null,
@@ -137,6 +141,20 @@ describe('Alerts — секция «Заглушённые»', () => {
     expect(screen.getByText('all regions')).toBeTruthy();
     expect(screen.getByText('flapping node')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Unmute' })).toBeTruthy();
+  });
+  // Область mute'а показывается ОБЕИМИ осями: mute без проекта глушит алерт и
+  // соседям, и это должно быть видно в списке, а не выводиться из отсутствия
+  // подписи.
+  it('область mute: «all projects» у безпроектного, слаг — у проектного', async () => {
+    vi.stubGlobal(
+      'fetch',
+      alertsFetch({ mutes: [mute, { ...mute, id: 'm2', alertname: 'BufferEmptyReadyProd', project: 'alpha', region: 'eu' }] }),
+    );
+    render(withSession(sess('readonly'), <Alerts />));
+    expect(await screen.findByText('CrashLoop')).toBeTruthy();
+    expect(screen.getByText('all projects')).toBeTruthy();
+    expect(screen.getByText('alpha')).toBeTruthy();
+    expect(screen.getByText('eu')).toBeTruthy();
   });
   it('readonly видит список, но не «Unmute»', async () => {
     vi.stubGlobal('fetch', alertsFetch({ mutes: [mute] }));
@@ -162,6 +180,53 @@ describe('Alerts — постановка mute (диалог → POST) и воз
     await waitFor(() => {
       expect(screen.queryByRole('dialog')).toBeNull();
     });
+  });
+
+  // Тело POST'а — единственное место, где видно, какой именно mute уедет на
+  // мастер. Проверяем его напрямую, а не «диалог открылся»: разница между
+  // проектным и платформенным mute'ом живёт ровно здесь.
+  async function muteAndReadBody(alert: ActiveAlert): Promise<Record<string, unknown>> {
+    const fetchMock = alertsFetch({ active: [alert] });
+    vi.stubGlobal('fetch', fetchMock);
+    render(withSession(sess('admin'), <Alerts />));
+    await screen.findByText(alert.name);
+    fireEvent.click(screen.getAllByRole('button', { name: 'Mute' })[0]);
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Mute' }));
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith('/v1/alerts/mutes', expect.objectContaining({ method: 'POST' }));
+    });
+    const post = fetchMock.mock.calls.find(
+      ([url, init]) => url === '/v1/alerts/mutes' && (init as RequestInit | undefined)?.method === 'POST',
+    );
+    return JSON.parse(String((post?.[1] as RequestInit).body)) as Record<string, unknown>;
+  }
+
+  it('mute с ПРОЕКТНОГО алерта наследует его проект', async () => {
+    const body = await muteAndReadBody(
+      activeCrit({ name: 'BufferEmptyReadyProd', project: 'alpha', scope: 'project', region: 'eu' }),
+    );
+    expect(body.project).toBe('alpha');
+    expect(body.region).toBe('eu');
+  });
+
+  // Несущий тест панельной половины #957: платформенному алерту проектный mute
+  // не поставить. Уехал бы project — оператор проекта А заглушил бы «мастер
+  // лёг» так, что это выглядело бы работающим, а мастер такой mute всё равно не
+  // засчитал бы (матч по проекту строгий) — панель и подавление разошлись бы.
+  it('mute с ПЛАТФОРМЕННОГО алерта уходит БЕЗ проекта', async () => {
+    const body = await muteAndReadBody(activeCrit({ name: 'NodeDown', scope: 'platform' }));
+    expect(body.project).toBeUndefined();
+    expect(body.alertname).toBe('NodeDown');
+  });
+
+  it('диалог платформенного алерта честно показывает «all projects»', async () => {
+    vi.stubGlobal('fetch', alertsFetch({ active: [activeCrit({ name: 'NodeDown', scope: 'platform' })] }));
+    render(withSession(sess('admin'), <Alerts />));
+    await screen.findByText('NodeDown');
+    fireEvent.click(screen.getAllByRole('button', { name: 'Mute' })[0]);
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText('all projects')).toBeTruthy();
   });
 
   it('фокус возвращается на триггер при закрытии диалога (Cancel)', async () => {

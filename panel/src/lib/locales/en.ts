@@ -543,6 +543,7 @@ export const en = {
   'alerts.mute.section': 'Muted',
   'alerts.mute.semantics': 'A mute hides the alert in this panel and records an audit entry — vmalert and Discord keep firing.',
   'alerts.mute.allRegions': 'all regions',
+  'alerts.mute.allProjects': 'all projects',
   'alerts.mute.badge': 'muted',
   'alerts.mute.action': 'Mute',
   'alerts.mute.unmute': 'Unmute',

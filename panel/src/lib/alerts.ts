@@ -112,9 +112,14 @@ export function countCriticalAlerts(alerts: ActiveAlert[] | undefined): number {
   return alerts.filter((a) => a.severity === 'critical' && a.muted !== true).length;
 }
 
-/** Нормализация региона mute к тексту: пустой/undefined → null (все регионы). */
-export function normalizeMuteRegion(region: string | undefined): string | undefined {
-  const trimmed = region?.trim();
+/**
+ * Нормализация составляющей цели mute'а (регион, проект): пустая строка или
+ * пробелы → undefined, то есть «все». Одна функция на обе оси — правило общее:
+ * пустая строка никогда не является целью сама по себе, это неаккуратно
+ * записанный wildcard (и master нормализует ровно так же, normalizeMuteTarget).
+ */
+export function normalizeMuteLabel(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
   return trimmed !== undefined && trimmed !== '' ? trimmed : undefined;
 }
 

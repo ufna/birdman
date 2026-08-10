@@ -9,8 +9,17 @@
 //
 // Mute → silence mapping:
 //   - matchers: always {alertname == m.Alertname}; when m.Region != nil also
-//     {region == *m.Region}. A nil region omits the region matcher, so the
-//     silence covers every region — matching the mute's own semantics.
+//     {region == *m.Region}, and when m.Project != nil also
+//     {project == *m.Project}. A nil region/project omits its matcher, so the
+//     silence covers every region/project — matching the mute's own semantics.
+//     The project matcher is what keeps the mirror from drifting away from the
+//     panel (tracker #957): without it a project-scoped mute would read "muted"
+//     in the panel while alertmanager silenced the alert for EVERY project, so
+//     project B would go quiet because project A pressed mute. It also
+//     reproduces the strict half of store.AlertMute.Matches for free —
+//     alertmanager treats a missing label as the empty string, so
+//     {project == "game"} never matches a platform alert that carries no
+//     project label at all.
 //   - startsAt = now; endsAt = *m.ExpiresAt, or now+indefiniteHorizon for an
 //     open-ended (nil) mute (alertmanager demands a finite endsAt; the reconcile
 //     loop re-issues the silence long before that far horizon lapses).
@@ -226,6 +235,13 @@ func (m *Mirror) driftsEndsAt(mute store.AlertMute, view silenceView) bool {
 // yet in an earlier snapshot — is seen here and spared. Only active,
 // birdman-prefixed silences older than orphanGrace with no matching mute are
 // deleted; operator silences (no prefix) are never touched.
+//
+// "Backed by a mute" is decided by silence ID, never by comparing matchers —
+// which is why the target growing a third component (project, tracker #957)
+// needs nothing here: two mutes of the same alertname in different projects are
+// two rows holding two ids, and both ids are known. A matcher-based sweep would
+// have had to learn the new component or start deleting live silences every
+// pass.
 func (m *Mirror) orphanSweep(ctx context.Context) error {
 	silences, err := m.listSilences(ctx)
 	if err != nil {
@@ -479,8 +495,13 @@ func (m *Mirror) roundtrip(ctx context.Context, method, path string, reqBody []b
 
 func muteMatchers(mute store.AlertMute) []matcher {
 	ms := []matcher{{Name: "alertname", Value: mute.Alertname, IsRegex: false, IsEqual: true}}
-	if mute.Region != nil {
-		ms = append(ms, matcher{Name: "region", Value: *mute.Region, IsRegex: false, IsEqual: true})
+	for _, l := range []struct {
+		name  string
+		value *string
+	}{{"region", mute.Region}, {"project", mute.Project}} {
+		if l.value != nil {
+			ms = append(ms, matcher{Name: l.name, Value: *l.value, IsRegex: false, IsEqual: true})
+		}
 	}
 	return ms
 }

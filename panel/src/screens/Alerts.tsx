@@ -13,8 +13,14 @@
 // (MasterDown/NodeDown/DiskHigh*/CertExpiry/Backup*) виден при любом выборе — и
 // подписан чипом, иначе оператор прочитает «мастер лёг» как беду текущего
 // проекта. Молча спрятать такой алерт — худший исход этого экрана.
+//
+// Заглушки тоже знают про проект (трекер #957, шаг 3/3): область mute'а — это
+// проект И регион, и оба наследуются от алерта, с которого mute поставлен.
+// Проектный mute кроет только свой проект, платформенный алерт им не заглушить
+// — иначе оператор проекта А тушил бы общий сигнал проекту Б.
 
 import { useMemo, useState } from 'react';
+import type { ReactNode } from 'react';
 import type { ColumnDef } from '@tanstack/react-table';
 import * as Dialog from '@radix-ui/react-dialog';
 import { api } from '../lib/api';
@@ -27,7 +33,7 @@ import {
   alertsUnavailable,
   isPlatformAlert,
   muteErrorMessage,
-  normalizeMuteRegion,
+  normalizeMuteLabel,
   presetExpiry,
   setAlertSoundEnabled,
 } from '../lib/alerts';
@@ -56,8 +62,10 @@ export function Alerts() {
   // — там проект забыли в deps, и экран показывал прежний проект).
   const active = useProjectAsync((project) => api.alertsActive({ project }), []);
   const history = useProjectAsync((project) => api.alertHistory({ limit, project }), [limit]);
-  // Правила и заглушки — платформенные: каталог конфигурации и панельные mute
-  // (привязка mute к проекту — отдельный шаг эпика, #957).
+  // Правила — каталог конфигурации, у правила проекта нет. Список заглушек тоже
+  // НЕ сужается: mute'ы с этого шага (#957) знают про проект, но список
+  // показывает их все — заглушка соседа объясняет, почему его алерт молчит, а
+  // спрятать её значило бы оставить оператора наедине с тишиной без причины.
   const rules = useAsync(() => api.alertRules(), []);
   const mutes = useAsync(() => api.alertMutes(), []);
   // Подписи про сужение показываем, только когда сужать есть по чему.
@@ -142,24 +150,35 @@ function useSoftNote(error?: Error): string | null {
   return null;
 }
 
-/** Чип области действия mute: конкретный регион или «все регионы». */
-function ScopeChip({ region }: { region: string | null }) {
+/** Общий мелкий чип-подпись (область mute, «muted», «платформенный»). */
+function Chip({ title, children }: { title?: string; children: ReactNode }) {
+  return (
+    <span title={title} className="rounded border border-line px-1.5 py-0.5 text-[10px] tracking-wide text-muted uppercase">
+      {children}
+    </span>
+  );
+}
+
+/**
+ * Область действия mute — ОБЕ оси: проект и регион, каждая либо конкретная,
+ * либо «все». Проект показываем всегда, в том числе «все проекты»: mute без
+ * проекта глушит алерт и соседям, и оператор обязан видеть это до нажатия, а
+ * не узнавать по тишине в чужом Discord.
+ */
+function ScopeChip({ project, region }: { project: string | null; region: string | null }) {
   const { t } = useT();
   return (
-    <span className="rounded border border-line px-1.5 py-0.5 text-[10px] tracking-wide text-muted uppercase">
-      {region ?? t('alerts.mute.allRegions')}
-    </span>
+    <>
+      <Chip>{project ?? t('alerts.mute.allProjects')}</Chip>
+      <Chip>{region ?? t('alerts.mute.allRegions')}</Chip>
+    </>
   );
 }
 
 /** Маленький бейдж «muted» на приглушённом алерте. */
 function MutedChip() {
   const { t } = useT();
-  return (
-    <span className="rounded border border-line px-1.5 py-0.5 text-[10px] tracking-wide text-muted uppercase">
-      {t('alerts.mute.badge')}
-    </span>
-  );
+  return <Chip>{t('alerts.mute.badge')}</Chip>;
 }
 
 /**
@@ -171,14 +190,7 @@ function MutedChip() {
 function PlatformChip({ alert }: { alert: AlertScoped }) {
   const { t } = useT();
   if (!isPlatformAlert(alert)) return null;
-  return (
-    <span
-      title={t('alerts.scope.platformHint')}
-      className="rounded border border-line px-1.5 py-0.5 text-[10px] tracking-wide text-muted uppercase"
-    >
-      {t('alerts.scope.platform')}
-    </span>
-  );
+  return <Chip title={t('alerts.scope.platformHint')}>{t('alerts.scope.platform')}</Chip>;
 }
 
 /** Подпись про не скрывающее сужение — под шапкой сужаемой секции. */
@@ -209,7 +221,7 @@ function MutedSection({ mutes, mayMute, reload }: { mutes?: AlertMute[]; mayMute
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="font-mono text-sm font-medium">{m.alertname}</span>
-                <ScopeChip region={m.region} />
+                <ScopeChip project={m.project} region={m.region} />
               </div>
               {m.note !== '' && <p className="mt-1 text-xs text-muted">{m.note}</p>}
               <p className="mt-1 text-[11px] text-muted">{t('alerts.mute.byWhen', { who: m.created_by, when: fmt.stamp(m.created_at) })}</p>
@@ -249,7 +261,31 @@ function UnmuteButton({ mute, onDone }: { mute: AlertMute; onDone: () => void })
 
 // --- Кнопка + диалог постановки mute (admin) ---
 
-function MuteButton({ alertname, region, onMuted }: { alertname: string; region?: string; onMuted: () => void }) {
+/**
+ * Кнопка и диалог постановки mute. Область (проект + регион) НАСЛЕДУЕТСЯ от
+ * самого алерта, выбора у оператора нет — и это несущее решение, а не
+ * упрощение UI:
+ *  • у проектного алерта mute всегда своего проекта — оператор проекта А не
+ *    может нечаянно заглушить соседа;
+ *  • у платформенного алерта проекта нет вовсе, значит и mute у него без
+ *    проекта: поставить платформенному сигналу ПРОЕКТНУЮ заглушку просто нечем
+ *    (мастер такой mute всё равно не засчитал бы — матч по проекту строгий),
+ *    зато диалог честно показывает «все проекты», и оператор видит, что глушит
+ *    сигнал всем, ДО нажатия.
+ * Правила (каталог конфигурации) мьютятся без проекта и без региона — у
+ * правила ни того, ни другого нет, они живут внутри expr.
+ */
+function MuteButton({
+  alertname,
+  region,
+  project,
+  onMuted,
+}: {
+  alertname: string;
+  region?: string;
+  project?: string;
+  onMuted: () => void;
+}) {
   const { t } = useT();
   const fmt = useFormat();
   const toast = useToast();
@@ -260,7 +296,8 @@ function MuteButton({ alertname, region, onMuted }: { alertname: string; region?
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const scope = normalizeMuteRegion(region);
+  const scopeRegion = normalizeMuteLabel(region);
+  const scopeProject = normalizeMuteLabel(project);
 
   const reset = () => {
     setNote('');
@@ -280,7 +317,13 @@ function MuteButton({ alertname, region, onMuted }: { alertname: string; region?
     setPending(true);
     setError(null);
     api
-      .createAlertMute({ alertname, region: scope, note: note.trim() !== '' ? note.trim() : undefined, expires_at: expiresAt() })
+      .createAlertMute({
+        alertname,
+        region: scopeRegion,
+        project: scopeProject,
+        note: note.trim() !== '' ? note.trim() : undefined,
+        expires_at: expiresAt(),
+      })
       .then(() => {
         setPending(false);
         setOpen(false);
@@ -328,7 +371,7 @@ function MuteButton({ alertname, region, onMuted }: { alertname: string; region?
           <div className="mt-4 flex flex-col gap-3">
             <div className="flex items-center gap-2 rounded-lg border border-line bg-paper px-3 py-2 text-sm">
               <span className="font-mono font-medium">{alertname}</span>
-              <ScopeChip region={scope ?? null} />
+              <ScopeChip project={scopeProject ?? null} region={scopeRegion ?? null} />
             </div>
 
             <label className="flex flex-col gap-1 text-sm font-medium">
@@ -465,7 +508,9 @@ function ActiveSection({
               <div className="flex shrink-0 flex-col items-end gap-1.5 text-right">
                 <div className="font-mono text-xs text-muted">{whereOf(a)}</div>
                 <div className="font-mono text-xs text-muted">{fmt.stamp(a.active_at)}</div>
-                {mayMute && a.muted !== true && <MuteButton alertname={a.name} region={a.region} onMuted={onMuted} />}
+                {mayMute && a.muted !== true && (
+                  <MuteButton alertname={a.name} region={a.region} project={alertProjectOf(a)} onMuted={onMuted} />
+                )}
               </div>
             </li>
           ))}
@@ -642,7 +687,12 @@ function HistorySection({
         cell: ({ row }) =>
           row.original.muted === true ? null : (
             <div className="flex justify-end">
-              <MuteButton alertname={row.original.name} region={row.original.region} onMuted={onMuted} />
+              <MuteButton
+                alertname={row.original.name}
+                region={row.original.region}
+                project={alertProjectOf(row.original)}
+                onMuted={onMuted}
+              />
             </div>
           ),
       });

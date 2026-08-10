@@ -307,24 +307,31 @@ export interface AlertEvent {
 }
 
 /**
- * Заглушка алерта (mute): подавляет показ в панели и ведёт аудит. region=null —
- * все регионы; expires_at=null — бессрочно. Апсертится по (alertname, region).
- * Семантика v0: mute — панельное подавление; vmalert/Discord продолжают слать.
+ * Заглушка алерта (mute): подавляет показ в панели, зеркалится в alertmanager
+ * silence и ведёт аудит. region=null — все регионы; project=null — все проекты
+ * (#957); expires_at=null — бессрочно. Апсертится по тройке
+ * (alertname, region, project).
+ *
+ * Проектный mute кроет ТОЛЬКО свой проект — платформенный алерт (у него
+ * проекта нет) им не заглушить, иначе оператор одного проекта тушил бы общий
+ * сигнал всем. Чтобы заглушить платформенный алерт, mute ставится без проекта.
  */
 export interface AlertMute {
   id: string;
   alertname: string;
   region: string | null;
+  project: string | null;
   note: string;
   created_at: string;
   expires_at: string | null;
   created_by: string;
 }
 
-/** Тело создания mute: region/note/expires_at опциональны (пустое = все/бессрочно). */
+/** Тело создания mute: region/project/note/expires_at опциональны (пустое = все/бессрочно). */
 export interface AlertMuteInput {
   alertname: string;
   region?: string;
+  project?: string;
   note?: string;
   expires_at?: string;
 }
