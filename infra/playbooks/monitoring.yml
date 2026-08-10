@@ -15,3 +15,5 @@
   become: true
   roles:
     - birdman_monitoring_dev
+    # Последней: сверяет, что все birdman-контейнеры на боксе переживут ребут.
+    - birdman_restart_guard

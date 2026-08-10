@@ -1,0 +1,33 @@
+---
+# Гарантия «стенд переживёт ребут».
+#
+# Ребут дев-бокса 27.07.2026 унёс весь стек birdman: в compose-файлах политика
+# `restart: unless-stopped` уже стояла, но контейнеры были СОЗДАНЫ раньше этой
+# правки и несли `no` — `docker compose up -d` их только запускает, политику
+# существующего контейнера он не меняет. Расхождение «файл поправлен, рантайм
+# старый» невидимо ровно до следующего ребута, поэтому ловим его прогоном.
+#
+# Роль read-only: ничего не чинит, только падает с точной подсказкой. Чинится
+# пересозданием — `docker compose up -d --force-recreate <service>`.
+
+- name: List restart policy of running birdman containers
+  ansible.builtin.shell:
+    cmd: >-
+      {% raw %}docker ps --filter name=birdman- --format '{{.Names}}'
+      | xargs -r -n1 docker inspect --format '{{.Name}} {{.HostConfig.RestartPolicy.Name}}'
+      | sed 's|^/||'{% endraw %}
+  register: birdman_restart_policies
+  changed_when: false
+  check_mode: false
+
+- name: Fail if any birdman container would not survive a reboot
+  ansible.builtin.assert:
+    that:
+      - birdman_restart_policies.stdout_lines | select('search', ' no$') | list | length == 0
+    fail_msg: >-
+      Эти birdman-контейнеры не переживут ребут (политика `no`):
+      {{ birdman_restart_policies.stdout_lines | select('search', ' no$') | list | join(', ') }}.
+      Пересоздай их: `docker compose -f <проект>/compose.yml up -d --force-recreate <service>`.
+    success_msg: >-
+      Все birdman-контейнеры переживут ребут
+      ({{ birdman_restart_policies.stdout_lines | length }} шт.).
