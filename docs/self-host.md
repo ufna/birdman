@@ -71,6 +71,45 @@ reverse proxy with TLS and authentication in front of it, or go through a tunnel
 ssh -L 8100:127.0.0.1:8100 <user>@<MASTER_PUB_IP>   # then http://127.0.0.1:8100 on your machine
 ```
 
+### Panel over a domain (optional)
+
+If the master box already runs nginx (Debian/Ubuntu `sites-available` layout)
+and a certificate for the name already exists, the `birdman_master_dev` role
+publishes the panel for you — set two inventory variables and re-run
+`playbooks/dev-node.yml`:
+
+```yaml
+birdman_panel_domain: panel.example.com
+# under a wildcard cert this is the directory of the BASE name, not of the host:
+birdman_panel_tls_dir: /etc/letsencrypt/live/example.com
+```
+
+An empty `birdman_panel_domain` (the default) means the role never touches nginx
+at all. The role installs neither nginx nor certificates: on a box that serves
+other sites that would be an intrusion, so it fails with a hint instead. It
+writes exactly one file (`sites-available/birdman-panel` plus its symlink), runs
+`nginx -t`, and if the test fails it removes the symlink again — a broken vhost
+never survives to break somebody else's reload.
+
+What the generated vhost does:
+
+- terminates TLS, redirects `:80` → `:443`, proxies everything to
+  `127.0.0.1:8100` and passes `X-Forwarded-Proto` — that is what makes the
+  master mark the session cookie `Secure`;
+- returns **403 on `/metrics`**: the master serves Prometheus metrics without
+  authentication (they are meant for a loopback scrape), so they must not reach
+  the internet — a local vmagent scraping `127.0.0.1:8100` is unaffected;
+- rate-limits **`POST /v1/session`** (login) to 10/min per IP plus a 30 r/s
+  overall cap, answering `429`; `GET`/`DELETE` on the same path are not counted,
+  so the panel's session check is never throttled;
+- turns proxy buffering off and gives SSE/log-tail endpoints a 1h read timeout,
+  so realtime in the panel keeps flowing.
+
+Weigh what a public name means: the login endpoint becomes reachable by anyone
+and the admin key is the only thing in front of the panel. Keep that key long,
+or put an extra layer (VPN, IP allowlist, an identity proxy) before it. The SSH
+tunnel above keeps working as a fallback.
+
 **Two self-host secrets, both git-ignored** (`deploy/.env`, `deploy/secrets.key`):
 
 - `secrets.key` — the key that encrypts secrets in the DB at-rest. Loss = the DB

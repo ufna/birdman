@@ -265,3 +265,10 @@
   when:
     - not birdman_admin_key_stat.stat.exists
     - birdman_admin_key_raw is not skipped
+
+# Публичный вхост панели — последним шагом: мастер к этому моменту уже отвечает
+# на healthz, так что проксировать есть что. Пустой домен (дефолт) = nginx не
+# трогаем вовсе.
+- name: Publish the panel over a domain (optional)
+  ansible.builtin.include_tasks: nginx.yml
+  when: birdman_panel_domain | length > 0
