@@ -44,3 +44,18 @@ birdman_node_down_after_min: 10
 # этом флоте больше не нужен: все ноды заходят mTLS через Enroll с первого
 # коннекта.
 birdman_agentlink_auth: mtls
+
+# ── Публичный вхост панели/REST (спека panel-public-domain) ────────────────
+# Пусто (дефолт) = роль НЕ КАСАЕТСЯ nginx вовсе: мастер как и раньше слушает
+# только 127.0.0.1, наружу его пускает SSH-туннель. Задай домен — роль положит
+# отдельный вхост в sites-available/-enabled системного nginx (чужие файлы не
+# правятся ни строкой) и проксирует его на birdman_master_api_addr.
+# Предпосылки на боксе: уже установленный nginx с раскладкой sites-available и
+# уже выпущенный сертификат — роль не ставит первое и не выпускает второе.
+birdman_panel_domain: ""
+# Каталог с fullchain.pem/privkey.pem. Дефолт — каталог самого хоста (обычный
+# certbot certonly -d <домен>); под WILDCARD-сертом это каталог базового имени
+# (напр. /etc/letsencrypt/live/dev.example.com для панели panel.dev.example.com).
+birdman_panel_tls_dir: "/etc/letsencrypt/live/{{ birdman_panel_domain }}"
+# Имя файла вхоста в sites-available/sites-enabled (и префикс его логов).
+birdman_panel_nginx_site: birdman-panel

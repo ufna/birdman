@@ -1,0 +1,123 @@
+---
+# Публичный вхост панели/REST (спека panel-public-domain). Включается только
+# при заданном birdman_panel_domain — пустая переменная (дефолт) означает, что
+# роль nginx не касается вовсе.
+#
+# Роль СОЗНАТЕЛЬНО не ставит nginx и не выпускает сертификаты: на общем боксе
+# это было бы вторжением в чужую инфраструктуру, а на self-host — молчаливым
+# захватом :80/:443. Нет nginx или серта — падаем с внятной подсказкой.
+
+- name: Probe nginx sites-available layout
+  ansible.builtin.stat:
+    path: /etc/nginx/sites-available
+  register: birdman_panel_sites_dir
+
+- name: Fail if the box has no nginx sites-available layout
+  ansible.builtin.fail:
+    msg: >-
+      birdman_panel_domain={{ birdman_panel_domain }} задан, но на боксе нет
+      /etc/nginx/sites-available. Роль не ставит nginx сама: поставь nginx
+      (Debian/Ubuntu-раскладка с sites-available/sites-enabled) или убери
+      birdman_panel_domain — тогда панель остаётся на 127.0.0.1 и доступна
+      через SSH-туннель.
+  when: not birdman_panel_sites_dir.stat.isdir | default(false)
+
+- name: Probe TLS certificate for the panel domain
+  ansible.builtin.stat:
+    path: "{{ birdman_panel_tls_dir }}/{{ item }}"
+  register: birdman_panel_tls_stat
+  loop:
+    - fullchain.pem
+    - privkey.pem
+
+- name: Fail if the TLS certificate is missing
+  ansible.builtin.fail:
+    msg: >-
+      Нет сертификата для {{ birdman_panel_domain }}: ожидались
+      {{ birdman_panel_tls_dir }}/{fullchain,privkey}.pem. Выпусти его
+      (например `certbot certonly -d {{ birdman_panel_domain }}`) или укажи
+      birdman_panel_tls_dir на существующий каталог — под wildcard-сертом это
+      каталог базового имени, а не хоста. Роль сертификаты не выпускает: certbot
+      на общем боксе — чужое хозяйство со своим методом валидации.
+  when: birdman_panel_tls_stat.results | rejectattr('stat.exists') | list | length > 0
+
+# Файл в sites-available ещё никуда не включён — сам по себе он не может
+# сломать чужой nginx. Валидация и симлинк — ниже.
+- name: Install nginx vhost for the panel
+  ansible.builtin.template:
+    src: nginx-panel.conf.j2
+    dest: "/etc/nginx/sites-available/{{ birdman_panel_nginx_site }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload nginx
+
+# read-before-create (та же конвенция, что у гардов в main.yml): симлинк ниже
+# указывает на файл, который создаёт template выше, а в --check на боксе без
+# вхоста template его НЕ материализует → file state=link падает «src file does
+# not exist». stat-проба + гард пускают --check насквозь; в бою
+# not ansible_check_mode тождественно истинно (файл только что отрендерен) →
+# семантика неизменна.
+- name: Probe rendered panel vhost (check-mode fresh-box guard)
+  ansible.builtin.stat:
+    path: "/etc/nginx/sites-available/{{ birdman_panel_nginx_site }}"
+  register: birdman_panel_vhost_stat
+
+- name: Enable the panel vhost
+  ansible.builtin.file:
+    src: "/etc/nginx/sites-available/{{ birdman_panel_nginx_site }}"
+    dest: "/etc/nginx/sites-enabled/{{ birdman_panel_nginx_site }}"
+    state: link
+  notify: Reload nginx
+  when: not ansible_check_mode or birdman_panel_vhost_stat.stat.exists
+
+- name: Note that enabling the vhost is bypassed on a box without it in check mode
+  ansible.builtin.debug:
+    msg: >-
+      check mode: вхоста ещё нет на боксе, а template его в --check не пишет —
+      симлинк и проверка конфига пропущены. Боевой прогон отрендерит вхост,
+      включит его и провалидирует `nginx -t`.
+  when:
+    - ansible_check_mode
+    - not birdman_panel_vhost_stat.stat.exists
+
+# Проверяем ВЕСЬ конфиг бокса, а не только свой файл: включённый вхост может
+# конфликтовать с чужими (дубль server_name, занятая зона лимитов).
+# command не поддерживает check-режим → в --check шаг скипается, и гард ниже
+# читает это по `is not skipped` (в бою шаг выполняется всегда).
+- name: Validate the whole nginx configuration
+  ansible.builtin.command:
+    cmd: nginx -t
+  register: birdman_panel_nginx_test
+  changed_when: false
+  failed_when: false
+
+# ИНВАРИАНТ: после любого исхода прогона конфиг бокса остаётся релоадабельным.
+# Без отката битый вхост дожил бы до ближайшего ЧУЖОГО reload (автопродление
+# certbot, правка соседнего сайта) и уронил бы чужие сайты — единственный
+# способ навредить соседям, который тут вообще есть.
+- name: Disable the panel vhost if the configuration does not validate
+  ansible.builtin.file:
+    path: "/etc/nginx/sites-enabled/{{ birdman_panel_nginx_site }}"
+    state: absent
+  when:
+    - birdman_panel_nginx_test is not skipped
+    - birdman_panel_nginx_test.rc != 0
+
+- name: Fail loudly on an invalid nginx configuration
+  ansible.builtin.fail:
+    msg: >-
+      nginx -t не прошёл — вхост {{ birdman_panel_nginx_site }} отключён
+      (симлинк снят), конфиг бокса остался рабочим. Вывод:
+      {{ birdman_panel_nginx_test.stderr | default('') }}
+  when:
+    - birdman_panel_nginx_test is not skipped
+    - birdman_panel_nginx_test.rc != 0
+
+- name: Note that nginx validation is bypassed in check mode
+  ansible.builtin.debug:
+    msg: >-
+      check mode: `nginx -t` пропущен движком (command без check-режима), да и
+      шаблон вхоста в --check не материализован. Боевой прогон валидирует конфиг
+      и откатывает симлинк, если тест не прошёл.
+  when: birdman_panel_nginx_test is skipped

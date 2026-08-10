@@ -1,0 +1,108 @@
+# {{ ansible_managed }}
+# birdman: публичный вхост панели + REST мастера (спека panel-public-domain).
+# Файл целиком генерится ролью birdman_master_dev (tasks/nginx.yml) — правки
+# руками затрёт следующий прогон. Мастер слушает ТОЛЬКО
+# {{ birdman_master_api_addr }}; наружу его пускает этот файл и больше ничто.
+
+# Зоны лимитов объявляются здесь же: sites-enabled/* включается внутрь http{},
+# поэтому nginx.conf (общий для всех вхостов бокса) трогать не нужно. Префикс
+# birdman_ — чтобы не столкнуться именами с чужими зонами на общем боксе.
+#
+# Ключ зоны логина считается через map: учитываем ТОЛЬКО POST /v1/session
+# (собственно попытку входа). Для остальных методов ключ пуст, а записи с
+# пустым ключом nginx не учитывает вовсе — так лимит не душит GET /v1/session
+# (панель проверяет сессию на каждой загрузке) и DELETE (логаут).
+map $request_method $birdman_login_key {
+    POST    $binary_remote_addr;
+    default "";
+}
+limit_req_zone $birdman_login_key  zone=birdman_login:1m rate=10r/m;
+limit_req_zone $binary_remote_addr zone=birdman_all:10m  rate=30r/s;
+# Дефолтный 503 врал бы про «сервис недоступен» — отвечаем честным 429.
+limit_req_status 429;
+
+# HTTP → HTTPS. Блок НЕ default_server: дефолтный вхост бокса не задет.
+server {
+    listen      80;
+    listen      [::]:80;
+    server_name {{ birdman_panel_domain }};
+
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen      443 ssl;
+    listen      [::]:443 ssl;
+    http2       on;
+    server_name {{ birdman_panel_domain }};
+
+    ssl_certificate     {{ birdman_panel_tls_dir }}/fullchain.pem;
+    ssl_certificate_key {{ birdman_panel_tls_dir }}/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache   shared:birdman_panel_ssl:1m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
+    # Свои логи: чужие на общем боксе не засоряем.
+    access_log /var/log/nginx/{{ birdman_panel_nginx_site }}.access.log;
+    error_log  /var/log/nginx/{{ birdman_panel_nginx_site }}.error.log;
+
+    # HSTS БЕЗ includeSubDomains/preload: имя живёт в общей DNS-зоне с чужими
+    # сервисами, распространять на них политику мы не вправе.
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header X-Content-Type-Options    "nosniff"          always;
+    add_header X-Frame-Options           "DENY"             always;
+    add_header Referrer-Policy           "strict-origin-when-cross-origin" always;
+
+    # Панель ничего не загружает, тела REST — мелкий JSON.
+    client_max_body_size 1m;
+
+    # Общий лимит от тупого скана. Панель при загрузке экрана делает пачку
+    # запросов — burst с запасом, чтобы живой UI в него не упирался.
+    limit_req zone=birdman_all burst=60 nodelay;
+
+    # Проксирование задано на уровне server → наследуется всеми location
+    # (ни один из них не переопределяет proxy_set_header, иначе наследование
+    # оборвалось бы). X-Forwarded-Proto включает Secure на сессионной куке
+    # мастера (httpapi/session.go: requestIsHTTPS).
+    proxy_set_header  Host              $host;
+    proxy_set_header  X-Real-IP         $remote_addr;
+    proxy_set_header  X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header  X-Forwarded-Proto $scheme;
+    proxy_http_version 1.1;
+    # Буферизацию выключаем на весь вхост: SSE и live-tail логов иначе копятся
+    # в буфере и реалтайм в панели «залипает». Статика панели мелкая (go:embed),
+    # терять на этом нечего.
+    proxy_buffering    off;
+    # С запасом покрывает long-poll матчмейкинга (?wait=25s).
+    proxy_read_timeout 75s;
+
+    # /metrics мастер отдаёт БЕЗ аутентификации (httpapi/server.go) — он
+    # рассчитан на loopback-скрейп. Локальный vmagent ходит на
+    # {{ birdman_master_api_addr }} и этого гейта не видит; наружу — 403.
+    location = /metrics {
+        return 403;
+    }
+
+    # Логин: обе директивы перечислены явно — location со своим limit_req НЕ
+    # наследует серверную, иначе общий лимит здесь бы пропал.
+    location = /v1/session {
+        limit_req zone=birdman_all   burst=60 nodelay;
+        limit_req zone=birdman_login burst=5  nodelay;
+
+        proxy_pass http://{{ birdman_master_api_addr }};
+    }
+
+    # Долгоживущие ответы: SSE-события панели и live-tail логов дедика.
+    location ~ ^/v1/(events/stream|servers/[^/]+/logs) {
+        proxy_read_timeout 1h;
+
+        proxy_pass http://{{ birdman_master_api_addr }};
+    }
+
+    # Панель (SPA) + весь остальной REST.
+    location / {
+        proxy_pass http://{{ birdman_master_api_addr }};
+    }
+}

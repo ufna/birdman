@@ -10,3 +10,13 @@
     state: restarted
     daemon_reload: true
   when: not ansible_check_mode or birdman_master_unit_stat.stat.exists | default(false)
+
+# reload, а НЕ restart: nginx на боксе может обслуживать чужие сайты — их
+# соединения рвать нельзя. Хендлер дёргается только после успешного `nginx -t`
+# (tasks/nginx.yml падает раньше флаша, если тест не прошёл; force_handlers в
+# ansible.cfg не включён).
+- name: Reload nginx
+  ansible.builtin.systemd_service:
+    name: nginx.service
+    state: reloaded
+
