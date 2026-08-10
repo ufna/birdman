@@ -1,0 +1,14 @@
+[Unit]
+# Ansible managed.
+Description=birdman dev-stand pull deployer (every {{ birdman_devdeploy_interval_s }}s)
+
+[Timer]
+# После ребута даём боксу подняться: мастеру нужен живой postgres.
+OnBootSec=2min
+OnUnitActiveSec={{ birdman_devdeploy_interval_s }}s
+# Разброс, чтобы тики не липли к секунде и не совпадали с чужими таймерами бокса.
+RandomizedDelaySec=15
+Unit=birdman-devdeploy.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,16 @@
+# Ansible managed. Конфиг birdman-devdeploy.
+# Секретов здесь нет (admin-ключ читается из отдельного 0600-файла), поэтому 0644.
+#
+# Присваивание через `: "${VAR:=…}"` — переменные окружения сильнее файла:
+# ручной прогон и тесты могут переопределить любую строку.
+: "${BIRDMAN_DEVDEPLOY_REPO:={{ birdman_devdeploy_repo }}}"
+: "${BIRDMAN_DEVDEPLOY_TAG:={{ birdman_devdeploy_tag }}}"
+: "${BIRDMAN_DEVDEPLOY_BIN:={{ birdman_devdeploy_bin }}}"
+: "${BIRDMAN_DEVDEPLOY_SERVICE:={{ birdman_devdeploy_service }}}"
+: "${BIRDMAN_DEVDEPLOY_STATE_DIR:={{ birdman_devdeploy_state_dir }}}"
+: "${BIRDMAN_DEVDEPLOY_MASTER_API:={{ birdman_devdeploy_master_api }}}"
+: "${BIRDMAN_DEVDEPLOY_ADMIN_KEY_FILE:={{ birdman_devdeploy_admin_key_file }}}"
+: "${BIRDMAN_DEVDEPLOY_HEALTH_TIMEOUT:={{ birdman_devdeploy_health_timeout_s }}}"
+: "${BIRDMAN_DEVDEPLOY_AGENT_TIMEOUT:={{ birdman_devdeploy_agent_timeout_s }}}"
+: "${BIRDMAN_DEVDEPLOY_POLL_INTERVAL:={{ birdman_devdeploy_poll_interval_s }}}"
+: "${BIRDMAN_DEVDEPLOY_TEXTFILE_DIR:={{ birdman_devdeploy_textfile_dir }}}"

@@ -42,13 +42,21 @@ setup() {
   # master API логируются в $T/api.log для проверок шага агентов.
   cat >"$T/bin/curl" <<'STUB'
 #!/usr/bin/env bash
-url="${!#}"; out=""; prev=""; body=""
+url="${!#}"; out=""; prev=""; body=""; follow=""
 for a in "$@"; do
   [ "$prev" = "-o" ] && out="$a"
   [ "$prev" = "-d" ] && body="$a"
+  case "$a" in -*L*) follow=1 ;; esac
   prev="$a"
 done
 echo "$url ${body}" >> "$T/api.log"
+# GitHub отдаёт ассеты релиза 302-редиректом на objects.githubusercontent.com.
+# Без -L curl вернёт ПУСТОЕ тело и код 0 — молча, без ошибки. Моделируем это:
+# запрос к релизу без -L отдаёт пустоту.
+case "$url" in
+  */releases/download/*|file://*)
+    [ -n "$follow" ] || exit 0 ;;
+esac
 case "$url" in
   */healthz)
     if [ -f "$T/health_bad" ]; then echo '{"status":"degraded"}'; exit 22; fi

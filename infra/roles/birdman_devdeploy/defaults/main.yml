@@ -1,0 +1,27 @@
+---
+# Pull-деплоер дев-стенда (спека 2026-08-10 §4–§5). Ставится только на
+# master-бокс: он и держит admin-ключ, и слушает master API на localhost.
+#
+# Это дев-обвязка, НЕ часть self-host по умолчанию: у self-host-оператора свой
+# релизный цикл, и авто-выкат из чужого develop ему не нужен.
+birdman_devdeploy_enabled: true
+
+birdman_devdeploy_repo: ufna/birdman
+birdman_devdeploy_tag: dev
+# Тик таймера. 60с — компромисс между «увидел билд сразу» и шумом в журнале.
+birdman_devdeploy_interval_s: 60
+# Сколько ждать 200 от /healthz после рестарта мастера, прежде чем откатывать.
+birdman_devdeploy_health_timeout_s: 60
+# Сколько ждать, пока нода перепредставится с целевой версией агента. С запасом
+# к 70-секундному watchdog'у мастера, чтобы два механизма не спорили.
+birdman_devdeploy_agent_timeout_s: 90
+birdman_devdeploy_poll_interval_s: 2
+
+birdman_devdeploy_bin: /usr/local/bin/birdman-master
+birdman_devdeploy_service: birdman-master
+birdman_devdeploy_state_dir: /var/lib/birdman-master
+birdman_devdeploy_master_api: "http://127.0.0.1:8100"
+birdman_devdeploy_admin_key_file: /etc/birdman/master-admin.key
+# Каталог textfile-коллектора node_exporter бокса. Пустая строка → метрики не
+# пишутся (скрипт это переживает), останутся только записи в журнале.
+birdman_devdeploy_textfile_dir: /var/lib/node_exporter/textfile_collector

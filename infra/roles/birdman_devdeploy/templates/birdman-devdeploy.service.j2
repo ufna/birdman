@@ -1,0 +1,12 @@
+[Unit]
+# Ansible managed. Один тик pull-деплоера дев-стенда.
+Description=birdman dev-stand pull deployer (one tick)
+After=network-online.target {{ birdman_devdeploy_service }}.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/birdman-devdeploy
+# Тик обязан завершаться: health-gate + возможный откат укладываются в два
+# окна ожидания, всё остальное — зависание, которое лучше прибить.
+TimeoutStartSec={{ (birdman_devdeploy_health_timeout_s | int) * 2 + (birdman_devdeploy_agent_timeout_s | int) * 4 + 120 }}

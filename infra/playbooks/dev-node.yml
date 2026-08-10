@@ -11,5 +11,8 @@
   roles:
     - birdman_master_dev
     - birdman_agent_dev
+    # Pull-деплоер: раз в тик забирает сборку из develop и катит её на стенд.
+    # Только на master-боксе — тут admin-ключ и master API на localhost.
+    - birdman_devdeploy
     # Последней: сверяет, что все birdman-контейнеры на боксе переживут ребут.
     - birdman_restart_guard

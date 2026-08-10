@@ -1,0 +1,60 @@
+---
+# Всё аддитивно и только birdman-объекты: общий бокс, чужого не трогаем.
+# Футпринт роли: один скрипт, один конфиг, два юнита, каталог состояния и
+# один .prom-файл в textfile-каталоге бокса.
+
+- name: Install birdman-devdeploy script
+  ansible.builtin.copy:
+    src: birdman-devdeploy
+    dest: /usr/local/bin/birdman-devdeploy
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Create devdeploy state dir
+  ansible.builtin.file:
+    path: "{{ birdman_devdeploy_state_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install devdeploy config
+  ansible.builtin.template:
+    src: devdeploy.conf.j2
+    dest: /etc/birdman/devdeploy.conf
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install devdeploy systemd units
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - birdman-devdeploy.service
+    - birdman-devdeploy.timer
+  notify: Reload systemd for devdeploy
+
+# Флаг-файл — второй kill-switch рядом с остановкой таймера: пережидает
+# прогоны ansible, виден в файловой системе и не требует systemctl.
+- name: Drop kill-switch file when the deployer is disabled
+  ansible.builtin.file:
+    path: /etc/birdman/devdeploy.disabled
+    state: "{{ 'absent' if birdman_devdeploy_enabled else 'touch' }}"
+    owner: root
+    group: root
+    mode: "0644"
+  changed_when: false
+
+- name: Flush handlers so the timer starts against fresh units
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start devdeploy timer
+  ansible.builtin.systemd:
+    name: birdman-devdeploy.timer
+    enabled: "{{ birdman_devdeploy_enabled }}"
+    state: "{{ 'started' if birdman_devdeploy_enabled else 'stopped' }}"

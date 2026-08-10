@@ -53,12 +53,17 @@ else
 fi
 
 # fetch <относительное-имя> [выходной-файл] — тело в stdout либо в файл.
+#
+# -L обязателен: GitHub отдаёт ассеты релиза 302-редиректом на
+# objects.githubusercontent.com, и без него curl вернёт ПУСТОЕ тело с кодом 0 —
+# отказ, который выглядит как «релиза нет». Именно на этом первый боевой тик и
+# споткнулся 11.08.2026.
 fetch() {
   local name="$1" out="${2:-}"
   if [ -n "$out" ]; then
-    curl -fsS --max-time 120 -o "$out" "$BASE_URL/$name"
+    curl -fsSL --max-time 120 -o "$out" "$BASE_URL/$name"
   else
-    curl -fsS --max-time 30 "$BASE_URL/$name"
+    curl -fsSL --max-time 30 "$BASE_URL/$name"
   fi
 }
 
