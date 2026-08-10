@@ -1,0 +1,112 @@
+name: dev-build
+
+# Пуш в develop собирает платформу и публикует rolling-prerelease `dev`.
+# Выкатывает НЕ этот workflow: на дев-боксе крутится pull-деплоер
+# (infra/roles/birdman_devdeploy), который сам ходит за этим релизом,
+# сверяет sha256, ставит и откатывается при провале health-gate.
+#
+# Почему pull, а не push: репозиторий публичный, и схема «CI заходит на бокс»
+# означала бы приватный ключ к инфраструктуре в настройках публичного репо.
+# Здесь секретов нет вообще — хватает встроенного GITHUB_TOKEN.
+on:
+  push:
+    branches: [develop]
+    paths:
+      - 'master/**'
+      - 'agent/**'
+      - 'panel/**'
+      - 'proto/**'
+      - '.github/workflows/dev-build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Burst из пушей схлопывается в последнюю сборку — та же семантика «только
+# вперёд», что у auto_deploy версий: промежуточные на стенд не едут.
+concurrency:
+  group: dev-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 — agent/build.sh и наш VERSION опираются на git-историю.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: panel/package-lock.json
+
+      # Красная сборка на стенд не уезжает: тесты идут ДО публикации.
+      - name: Test master
+        run: cd master && go test ./...
+
+      - name: Test agent
+        run: cd agent && go test ./...
+
+      - name: Build panel
+        run: |
+          cd panel
+          npm ci
+          npm run build
+
+      # Версия задаётся ЯВНО и обязана совпадать в трёх местах: ldflags агента,
+      # поле agent_version в MANIFEST и тело POST /v1/agent-upgrade у деплоера.
+      # Разъехались — watchdog мастера сверит re-Hello с чужой строкой и будет
+      # слать ложные agent_upgrade_failed.
+      - name: Build binaries
+        id: build
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          set -euo pipefail
+          VERSION="dev-${GITHUB_SHA::7}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          mkdir -p dist
+          (cd master && go build -trimpath -ldflags "-s -w" -o ../dist/birdman-master ./cmd/birdman-master)
+          (cd agent && go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o ../dist/birdman-agent ./cmd/birdman-agent)
+
+      - name: Checksums and manifest
+        env:
+          AGENT_VERSION: ${{ steps.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum birdman-master | awk '{print $1}' > birdman-master.sha256
+          sha256sum birdman-agent  | awk '{print $1}' > birdman-agent.sha256
+          {
+            echo "commit=$GITHUB_SHA"
+            echo "agent_version=$AGENT_VERSION"
+            echo "run_id=$GITHUB_RUN_ID"
+            echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > MANIFEST
+          cat MANIFEST
+
+      # Тег фиксированный: у деплоера стабильный URL вида
+      # https://github.com/<repo>/releases/download/dev/<asset>, листать релизы
+      # не нужно. Пересоздание вместо правки — атомарнее; короткое окно 404
+      # деплоер переживает как обычный no-op.
+      - name: Publish rolling dev prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release delete dev --yes --cleanup-tag || true
+          gh release create dev --prerelease --target "$GITHUB_SHA" \
+            --title "dev (${GITHUB_SHA::7})" \
+            --notes "Автосборка из develop. Выкатывается pull-деплоером дев-стенда (infra/roles/birdman_devdeploy). Не релиз — не использовать в self-host." \
+            dist/birdman-master dist/birdman-master.sha256 \
+            dist/birdman-agent dist/birdman-agent.sha256 dist/MANIFEST
