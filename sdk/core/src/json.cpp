@@ -228,7 +228,9 @@ class Parser {
       SkipWs();
       Value member;
       if (!ParseValue(&member, depth + 1)) return false;
-      out->object.emplace_back(std::move(key), std::move(member));
+      // Braced, not emplace_back(k, v): Member is an aggregate and parenthesised
+      // aggregate init inside emplace is C++20 -- core is C++17.
+      out->object.push_back(Value::Member{std::move(key), std::move(member)});
       SkipWs();
       if (Eat(',')) continue;
       return Eat('}');

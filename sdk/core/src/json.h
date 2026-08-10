@@ -57,7 +57,13 @@ struct Value {
   bool boolean = false;
   double number = 0.0;
   std::string str;
-  std::vector<std::pair<std::string, Value>> object;
+  // Object members, in arrival order. A dedicated struct rather than
+  // std::pair<std::string, Value>: pair instantiates its type traits against the
+  // still-incomplete Value (libstdc++ 16 rejects that outright), while
+  // vector<Member> with Member merely forward-declared is guaranteed to work
+  // since C++17. Field names keep pair's, so no call site moves.
+  struct Member;
+  std::vector<Member> object;
   std::vector<Value> array;
 
   bool IsObject() const { return type == Type::kObject; }
@@ -67,6 +73,11 @@ struct Value {
   std::string GetString(std::string_view key, std::string_view def = "") const;
   double GetNumber(std::string_view key, double def = 0.0) const;
   int64_t GetInt(std::string_view key, int64_t def = 0) const;
+};
+
+struct Value::Member {
+  std::string first;
+  Value second;
 };
 
 // Parses exactly one JSON value (plus surrounding whitespace) from text.
