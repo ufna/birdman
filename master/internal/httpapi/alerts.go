@@ -30,7 +30,9 @@ import (
 //
 // Project scoping (tracker #955): /v1/alerts/{active,history} report `project`
 // (from the alert's label) and a derived `scope` ("project"|"platform"), and
-// accept ?project= — a NON-hiding filter, see keepAlertForProject below.
+// accept ?project= — a NON-hiding filter, see keepAlertForProject below. The
+// slug itself is validated against the DB (projectFilter, tracker #961): a typo
+// is a 400, never a quietly narrowed screen.
 //
 // Mutes (POST/GET/DELETE /v1/alerts/mutes) are master state (table alert_mutes,
 // store/alerts.go) — the source of truth. A mute is reflected as muted:true on
@@ -151,12 +153,18 @@ func (s *Server) handleAlertsActive(w http.ResponseWriter, r *http.Request) {
 			"vmalert_url is not set on this master")
 		return
 	}
+	// Валидация ?project= — ДО апстрима: опечатка не тратит запрос к vmalert и не
+	// превращается в 502, когда vmalert лежит. После 503 alerts_unconfigured выше:
+	// «на этом мастере алертов нет вовсе» — факт более фундаментальный, чем ввод.
+	project, ok := s.projectFilter(w, r)
+	if !ok {
+		return
+	}
 	var va vmAlertsResponse
 	if err := s.vmalertGet(r.Context(), "/api/v1/alerts", &va); err != nil {
 		writeError(w, http.StatusBadGateway, "upstream", err.Error())
 		return
 	}
-	project := r.URL.Query().Get("project")
 	out := make([]activeAlert, 0)
 	for _, a := range va.Data.Alerts {
 		if a.State != "firing" { // active = currently firing
@@ -281,12 +289,12 @@ func alertScope(project string) string {
 // keepForProject for the event feed (panel/src/lib/project.tsx) and the
 // platform slice of peak CCU (store/rollup.go, decision I5/W3).
 //
-// The requested project is NOT validated against the DB — same as the other
-// screens the panel narrows in W2 (?project= on /v1/{nodes,servers,versions,
-// matches}), and unlike /v1/stats/* which 400s on a typo because it had a
-// legacy env fallback to kill. Alerts are an ops screen: an unknown project
-// degrades to "platform alerts only", never to an error page, and the panel
-// only ever sends a slug from its own DB-backed selector.
+// The requested slug IS validated against the DB before this filter ever runs
+// (projectFilter in server.go, tracker #961) — so `want` here is always a real
+// project. Non-hiding and validated are two different questions and both are
+// answered "yes": a typo can no longer masquerade as "platform alerts only",
+// which on THIS screen is indistinguishable from the desired state of "all
+// quiet", while a real project still keeps every platform alert in view.
 func keepAlertForProject(alertProject, want string) bool {
 	return want == "" || alertProject == "" || alertProject == want
 }
@@ -326,6 +334,12 @@ type webhookLine struct {
 }
 
 func (s *Server) handleAlertHistory(w http.ResponseWriter, r *http.Request) {
+	// Валидация ?project= — до чтения лога: опечатка обязана давать 400 и на
+	// мастере, где лог-сина ещё нет (там ответ иначе неотличим от «всё спокойно»).
+	project, ok := s.projectFilter(w, r)
+	if !ok {
+		return
+	}
 	limit := 100
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		n, err := strconv.Atoi(raw)
@@ -348,7 +362,7 @@ func (s *Server) handleAlertHistory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	events := parseAlertsLog(data, time.Now(), limit, r.URL.Query().Get("project"))
+	events := parseAlertsLog(data, time.Now(), limit, project)
 	mutes, err := s.st.ListAlertMutes(r.Context(), false)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
@@ -503,11 +517,22 @@ type createMuteRequest struct {
 // than stacking duplicates — so a repeat POST doubles as "extend/edit" and
 // still returns 201 with the resulting mute.
 //
-// project is NOT validated against the DB, same as ?project= on the reads: an
-// unknown slug simply produces a mute that matches nothing, never an error
-// page, and the panel only ever sends a slug from its own selector. A mute
-// WITHOUT a project keeps the pre-#957 meaning — every project, including the
-// platform alerts that belong to none.
+// project is NOT validated against the DB — deliberately, and no longer "same
+// as the reads": ?project= on the reads IS validated since tracker #961. The
+// line is drawn between a FILTER over existing data and a MATCHER of a stored
+// rule. Three reasons this field stays on the matcher side:
+//   - its neighbour `region` cannot be validated at all (there is no registry of
+//     regions), and validating one target component but not the other would be a
+//     fresh inconsistency;
+//   - the panel fills it from the ALERT'S LABEL (out of the monitoring stack),
+//     not from the DB-backed project selector — a label left over from an older
+//     series would make the alert unmutable;
+//   - a wrong slug here is VISIBLE: the mute shows up in GET /v1/alerts/mutes
+//     with its project on display, unlike a filter typo which silently narrows a
+//     screen.
+//
+// A mute WITHOUT a project keeps the pre-#957 meaning — every project, including
+// the platform alerts that belong to none.
 func (s *Server) handleCreateAlertMute(w http.ResponseWriter, r *http.Request) {
 	var req createMuteRequest
 	if !decodeJSON(w, r, &req) {

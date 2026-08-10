@@ -264,6 +264,50 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// projectFilter разбирает необязательный `?project=` — ОДИН общий вход для всех
+// чтений, которые сужаются по проекту (tracker #961). Пусто = вся платформа
+// (поведение до мультипроекта). Непустой слаг ВАЛИДИРУЕТСЯ по БД: опечатка даёт
+// `400 bad_request "no such project <slug>"`, а не молча суженную выдачу. Пишет
+// свой ответ об ошибке и возвращает ok=false, когда запрос продолжать нельзя.
+//
+// ПРАВИЛО (docs/specs/master.md §6): `?project=` на аутентифицированном чтении
+// валидируется ВСЕГДА. Раньше правила не было, и каждая волна выбирала сама:
+// листинги W2 (`/v1/{nodes,servers,versions,matches}`) и алерты #955 не
+// валидировали, stats W3 — валидировал, то есть API отвечал на один и тот же
+// параметр двумя способами. Хуже всего это било по алертам: там пустой экран —
+// ЖЕЛАННОЕ состояние, поэтому «алертов нет» и «я опечатался в проекте»
+// выглядели одинаково и оба радовали.
+//
+// 400, а не 404: сам ресурс (список/статистика) существует, плох ВВОД в
+// query-параметре — тот же класс, что `?days=`/`?limit=`/`?state=`. Оракулом
+// существования чужих сущностей ручка при этом не становится: все они
+// readonly-скоупа, а `GET /v1/projects` (тот же скоуп) и так перечисляет все
+// слаги. Панель опечатку послать не может по построению — `resolveProject`
+// (panel/src/lib/project.tsx) отдаёт только слаг из ответа `/v1/projects`.
+//
+// Исключения — только три, каждое по своей причине:
+//   - `GET /v1/qos?project=` — ручка ПУБЛИЧНАЯ, там 400 «no such project» был бы
+//     бесплатным оракулом слагов для кого угодно (аргумент «у вызывающего уже
+//     есть readonly» не работает);
+//   - `GET /v1/alerts/rules` — фильтр не принимает вовсе (каталог конфигурации);
+//   - `project` в теле `POST /v1/alerts/mutes` — матчер хранимого правила, а не
+//     фильтр над данными (см. handleCreateAlertMute).
+func (s *Server) projectFilter(w http.ResponseWriter, r *http.Request) (string, bool) {
+	project := r.URL.Query().Get("project")
+	if project == "" { // пусто = вся платформа, к БД не ходим
+		return "", true
+	}
+	if _, err := s.st.GetProject(r.Context(), project); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusBadRequest, "bad_request", "no such project "+project)
+			return "", false
+		}
+		storeError(w, err)
+		return "", false
+	}
+	return project, true
+}
+
 // storeError maps store sentinel errors to HTTP responses. ErrBadEnv (окружение,
 // названное запросом, не существует) — это плохой ВВОД, а не отсутствующий ресурс:
 // единый 400 {"error":"bad_request","detail":"no such environment <project>/<env>"}

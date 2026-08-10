@@ -18,10 +18,17 @@ var matchStates = map[string]bool{
 	"pending": true, "running": true, "finished": true, "aborted": true,
 }
 
+// handleListMatches is GET /v1/matches?project=&region=&state=&limit=&offset=
+// (readonly). `project` валидируется по БД (projectFilter, tracker #961) — тот
+// же класс плохого ввода, что и неизвестный `state` ниже.
 func (s *Server) handleListMatches(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	project, ok := s.projectFilter(w, r)
+	if !ok {
+		return
+	}
 	f := store.MatchFilter{
-		Project: q.Get("project"),
+		Project: project,
 		Region:  q.Get("region"),
 		State:   q.Get("state"),
 	}
@@ -30,7 +37,6 @@ func (s *Server) handleListMatches(w http.ResponseWriter, r *http.Request) {
 			"state must be one of pending|running|finished|aborted")
 		return
 	}
-	var ok bool
 	if f.Limit, ok = queryInt(w, q.Get("limit"), 100); !ok {
 		return
 	}

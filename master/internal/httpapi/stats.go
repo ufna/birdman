@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -120,6 +119,10 @@ func statsDays(w http.ResponseWriter, r *http.Request) (int, bool) {
 // понятный 400, а не молча пустой ряд. Пишет свой ответ об ошибке и
 // возвращает false, когда запрос продолжать нельзя.
 //
+// Проектная половина — общий `projectFilter` (server.go): с tracker #961 это
+// ОДИН вход для всех чтений, сужаемых по проекту, а не частная валидация
+// статистики. Env-половина остаётся здесь: пары (project, env) больше нигде нет.
+//
 // Проектный фильтр (мультипроект W3) СНЯЛ последний sole-project fallback в
 // статистике: раньше env проверялся против SoleProjectSlug, и при нескольких
 // проектах любой ?env= отвечал 400 «several projects exist» — то есть фильтр
@@ -131,21 +134,11 @@ func statsDays(w http.ResponseWriter, r *http.Request) (int, bool) {
 //     существовало хоть у одного проекта: без выбранного проекта пары нет, но
 //     защита от опечатки остаётся.
 func (s *Server) statsScope(w http.ResponseWriter, r *http.Request) (project, env string, ok bool) {
-	project = r.URL.Query().Get("project")
-	env = r.URL.Query().Get("env")
-
-	if project != "" {
-		if _, err := s.st.GetProject(r.Context(), project); err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				// Опечатка в query — плохой ВВОД (400), а не «ресурса нет» (404):
-				// сам ресурс тут — статистика, и она существует.
-				writeError(w, http.StatusBadRequest, "bad_request", "no such project "+project)
-				return "", "", false
-			}
-			storeError(w, err)
-			return "", "", false
-		}
+	project, ok = s.projectFilter(w, r)
+	if !ok {
+		return "", "", false
 	}
+	env = r.URL.Query().Get("env")
 	if env == "" {
 		return project, "", true
 	}

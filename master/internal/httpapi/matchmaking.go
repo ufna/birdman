@@ -134,6 +134,13 @@ func (s *Server) handleQoS(w http.ResponseWriter, r *http.Request) {
 	// Public endpoint: project and env are optional query params (environments
 	// v1 §3, M8). project falls back to the sole project; env to the sole
 	// environment with active nodes — ambiguous env → 400 env_required.
+	//
+	// This is the one read where ?project= is deliberately NOT validated against
+	// the DB (tracker #961 draws the line here): the endpoint is unauthenticated,
+	// so a "no such project <slug>" would hand every player a free oracle over
+	// project slugs. Elsewhere the 400 tells an authorized caller nothing that
+	// readonly GET /v1/projects wouldn't; here there is no such caller. An unknown
+	// project simply resolves to an empty QoS list.
 	project := r.URL.Query().Get("project")
 	if project == "" {
 		var err error

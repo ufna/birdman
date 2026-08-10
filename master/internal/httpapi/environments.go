@@ -47,9 +47,16 @@ type setNodeEnvRequest struct {
 }
 
 // handleListEnvironments is GET /v1/environments?project= (readonly). project is
-// resolved to the sole project when omitted (single-project convention).
+// resolved to the sole project when omitted (single-project convention), and an
+// explicitly named one is validated against the DB (projectFilter, tracker
+// #961): раньше опечатка отдавала пустой список окружений — неотличимо от
+// «у проекта их нет». Резолв проверять незачем — такой проект существует
+// по построению.
 func (s *Server) handleListEnvironments(w http.ResponseWriter, r *http.Request) {
-	project := r.URL.Query().Get("project")
+	project, ok := s.projectFilter(w, r)
+	if !ok {
+		return
+	}
 	if project == "" {
 		p, err := s.st.SoleProjectSlug(r.Context())
 		if err != nil {

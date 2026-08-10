@@ -54,10 +54,16 @@ func (s *Server) handleCreateNode(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleListNodes is GET /v1/nodes?project=&env= (readonly). Оба фильтра
-// необязательны; пустые = весь флот (поведение до мультипроекта W2).
+// необязательны; пустые = весь флот (поведение до мультипроекта W2). `project`
+// валидируется по БД — опечатка даёт 400, а не молча суженный флот
+// (projectFilter, tracker #961).
 func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
+	project, ok := s.projectFilter(w, r)
+	if !ok {
+		return
+	}
 	nodes, err := s.st.ListNodes(r.Context(), store.NodeFilter{
-		Project: r.URL.Query().Get("project"),
+		Project: project,
 		Env:     r.URL.Query().Get("env"),
 	})
 	if err != nil {
@@ -69,9 +75,15 @@ func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
 
 // --- servers ---
 
+// handleListServers is GET /v1/servers?project=&region=&state= (readonly).
+// `project` валидируется по БД (projectFilter, tracker #961).
 func (s *Server) handleListServers(w http.ResponseWriter, r *http.Request) {
+	project, ok := s.projectFilter(w, r)
+	if !ok {
+		return
+	}
 	servers, err := s.st.ListServers(r.Context(), store.ServerFilter{
-		Project: r.URL.Query().Get("project"),
+		Project: project,
 		Region:  r.URL.Query().Get("region"),
 		State:   r.URL.Query().Get("state"),
 	})
@@ -152,10 +164,15 @@ func (s *Server) handleCreateVersion(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleListVersions is GET /v1/versions?project=&env= (readonly). Оба фильтра
-// необязательны; пустые = все версии (поведение до мультипроекта W2).
+// необязательны; пустые = все версии (поведение до мультипроекта W2). `project`
+// валидируется по БД (projectFilter, tracker #961).
 func (s *Server) handleListVersions(w http.ResponseWriter, r *http.Request) {
+	project, ok := s.projectFilter(w, r)
+	if !ok {
+		return
+	}
 	versions, err := s.st.ListVersions(r.Context(), store.VersionFilter{
-		Project: r.URL.Query().Get("project"),
+		Project: project,
 		Env:     r.URL.Query().Get("env"),
 	})
 	if err != nil {

@@ -150,6 +150,9 @@ func TestAlertsEndpoints(t *testing.T) {
 // non-hiding, so a platform alert (no `project` label) must survive a project
 // selection — silently swallowing NodeDown/MasterDown would be worse than
 // showing a neighbour's alert, and a project has no "All" mode to get it back.
+//
+// The three slugs are REAL projects here (tracker #961): ?project= is validated
+// against the DB now, so a made-up slug tests the typo path, not the filter.
 func TestAlertsProjectScope(t *testing.T) {
 	st := testdb.New(t)
 	log := opsLog()
@@ -158,6 +161,11 @@ func TestAlertsProjectScope(t *testing.T) {
 	dep := deploy.New(deploy.Options{Store: st, Sender: &testdb.CommandRecorder{}, Log: log})
 	ctx := t.Context()
 	_, roSecret, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ro", Scopes: []string{httpapi.ScopeReadonly}})
+	for _, slug := range []string{"alpha", "beta", "gamma"} {
+		if _, err := st.SetProjectMatchSize(ctx, slug, 2); err != nil {
+			t.Fatalf("project %s: %v", slug, err)
+		}
+	}
 
 	vm := fakeVmalertWith(t, vmAlertsProjectJSON)
 
@@ -228,6 +236,12 @@ func TestAlertsProjectScope(t *testing.T) {
 		}
 		if _, ok := none["NodeDown"]; !ok {
 			t.Fatalf("%s?project=gamma: platform alert missing (%v)", path, none)
+		}
+
+		// 4. …and a project that does NOT exist is a typo, not a quiet screen
+		// (tracker #961): case 3 above is exactly what a typo used to look like.
+		if code, body := ro.do("GET", path+"?project=gama", nil); code != 400 {
+			t.Fatalf("%s?project=gama (typo): want 400, got %d (%v)", path, code, body)
 		}
 	}
 
