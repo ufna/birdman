@@ -75,11 +75,53 @@ func (s *Server) handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, t)
 }
 
+// ticketNotFound is the single answer for «no such ticket» — both when the id is
+// genuinely unknown and when the ticket belongs to another (project, env) than
+// the request key is bound to (requireTicketBinding). One byte-identical body,
+// by design: see the comment there.
+func ticketNotFound(w http.ResponseWriter, id string) {
+	writeError(w, http.StatusNotFound, "not_found", "ticket "+id+" not found")
+}
+
+// requireTicketBinding enforces the request key's (project, env) binding against
+// an EXISTING ticket — the read/cancel counterpart of requireBinding
+// (environments v1 §5, tracker #963). Returns true when the request may proceed;
+// otherwise it writes the answer and returns false. A global (unbound) key
+// passes everywhere, exactly as before: binding is optional by design
+// (NULL/NULL = global key), and the game backend that never bound its key must
+// keep working.
+//
+// 404, NOT the 403 requireBinding writes on the deploy surface, and with the
+// very same body a genuinely unknown id gets: a 403 «key is bound to X/Y» would
+// answer «this ticket exists, it is just not yours» and turn the handle into an
+// existence oracle over foreign tickets keyed by uuid. Ownership of a ticket
+// inside one's own (project, env) is still not checked at all — that is a
+// deliberate v0 gap (architecture.md, «Модель доверия»); this only restores the
+// (project, env) containment the binding promises.
+//
+// ORDER MATTERS: callers must run this BEFORE the per-player_id rate limiter.
+// The limiter is keyed by the TICKET's player_id, i.e. by the victim — checking
+// it first would (a) let a foreign caller burn someone else's budget knowing
+// only a ticket_id, and (b) leak existence anyway, since an unknown uuid never
+// touches a bucket while a foreign ticket would start answering 429 instead of
+// 404 on the sixth request.
+func (s *Server) requireTicketBinding(w http.ResponseWriter, r *http.Request, t matchmaker.Ticket) bool {
+	key, _ := keyFromContext(r.Context())
+	if keyAllowed(key, t.Project, t.Env) {
+		return true
+	}
+	ticketNotFound(w, t.ID)
+	return false
+}
+
 func (s *Server) handleGetTicket(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	t, ok := s.mm.Get(id)
 	if !ok {
-		writeError(w, http.StatusNotFound, "not_found", "ticket "+id+" not found")
+		ticketNotFound(w, id)
+		return
+	}
+	if !s.requireTicketBinding(w, r, t) {
 		return
 	}
 	if !s.mmLimit.allow(t.PlayerID) {
@@ -99,9 +141,11 @@ func (s *Server) handleGetTicket(w http.ResponseWriter, r *http.Request) {
 		wait = min(d, maxWait)
 	}
 
+	// The (project, env) of a ticket is immutable and Wait returns the same id,
+	// so the binding checked above still holds — no re-check needed.
 	t, ok = s.mm.Wait(r.Context(), id, wait)
 	if !ok {
-		writeError(w, http.StatusNotFound, "not_found", "ticket "+id+" not found")
+		ticketNotFound(w, id)
 		return
 	}
 	writeJSON(w, http.StatusOK, t)
@@ -111,7 +155,10 @@ func (s *Server) handleCancelTicket(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	t, ok := s.mm.Get(id)
 	if !ok {
-		writeError(w, http.StatusNotFound, "not_found", "ticket "+id+" not found")
+		ticketNotFound(w, id)
+		return
+	}
+	if !s.requireTicketBinding(w, r, t) {
 		return
 	}
 	if !s.mmLimit.allow(t.PlayerID) {
@@ -121,7 +168,7 @@ func (s *Server) handleCancelTicket(w http.ResponseWriter, r *http.Request) {
 	}
 	t, ok = s.mm.Cancel(id)
 	if !ok {
-		writeError(w, http.StatusNotFound, "not_found", "ticket "+id+" not found")
+		ticketNotFound(w, id)
 		return
 	}
 	writeJSON(w, http.StatusOK, t)

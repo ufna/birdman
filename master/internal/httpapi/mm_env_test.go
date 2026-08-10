@@ -139,6 +139,114 @@ func TestTicketBindingEnforcement(t *testing.T) {
 	}
 }
 
+// Привязка ключа держится и на ЧТЕНИИ, и на ОТМЕНЕ тикета, а не только на
+// создании (tracker #963). До фикса `requireBinding` вызывался ровно один раз —
+// в handleCreateTicket, — поэтому ключ, привязанный к projectA/dev, читал и
+// отменял тикет ЛЮБОГО проекта, зная только ticket_id (а чтение сматченного
+// отдаёт ещё и host/port/match_id/join_token).
+//
+// Тест держит обе стороны: чужое недоступно (404, не 403 — иначе ручка стала бы
+// оракулом существования чужих тикетов), своё и глобальный ключ работают ровно
+// как раньше.
+func TestTicketBindingOnReadAndCancel(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10) // проект game + нода + версия в dev
+	f.UpsertFleet(t, 2, 50)
+	ctx := t.Context()
+	// Второй проект: ensureProject сеет ему dev+prod (environments v1).
+	if _, err := st.SetProjectMatchSize(ctx, "arena", 2); err != nil {
+		t.Fatalf("second project: %v", err)
+	}
+	ts, _, _ := deployServer(t, st)
+
+	mkKey := func(project, env *string) string {
+		t.Helper()
+		_, secret, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{
+			Name: "mm", Scopes: []string{httpapi.ScopeMatchmaking}, Project: project, Env: env,
+		})
+		if err != nil {
+			t.Fatalf("create key: %v", err)
+		}
+		return secret
+	}
+	game, arena, dev := "game", "arena", "dev"
+	boundGame := &client{t: t, base: ts.URL, key: mkKey(&game, &dev)}
+	boundArena := &client{t: t, base: ts.URL, key: mkKey(&arena, &dev)}
+	global := &client{t: t, base: ts.URL, key: mkKey(nil, nil)}
+
+	// Тикет в arena/dev (заводит свой же привязанный ключ) и тикет в game/dev.
+	code, body := boundArena.do("POST", "/v1/matchmaking/tickets", ticketBody("arena-player", "1.0.0", "eu", 10))
+	if code != 201 || body["project"] != "arena" || body["env"] != "dev" {
+		t.Fatalf("arena ticket: %d %v", code, body)
+	}
+	arenaTicket := body["ticket_id"].(string)
+	code, body = boundGame.do("POST", "/v1/matchmaking/tickets", ticketBody("game-player", "1.0.0", "eu", 10))
+	if code != 201 || body["project"] != "game" {
+		t.Fatalf("game ticket: %d %v", code, body)
+	}
+	gameTicket := body["ticket_id"].(string)
+
+	// 1. Чужое ЧТЕНИЕ: 404 и тело БАЙТ-В-БАЙТ такое же, как у честного промаха, —
+	// иначе ответ сам сообщает «тикет есть, но не твой». И ни одного поля тикета
+	// в ответе (player_id — первое, что утекало).
+	unknown := uuid.NewString()
+	code, miss := boundGame.do("GET", "/v1/matchmaking/tickets/"+unknown, nil)
+	if code != 404 {
+		t.Fatalf("unknown ticket: want 404, got %d %v", code, miss)
+	}
+	code, body = boundGame.do("GET", "/v1/matchmaking/tickets/"+arenaTicket, nil)
+	if code != 404 {
+		t.Fatalf("чужой тикет на чтении: want 404, got %d %v", code, body)
+	}
+	if body["error"] != miss["error"] || body["detail"] != "ticket "+arenaTicket+" not found" {
+		t.Fatalf("404 на чужом тикете обязан быть неотличим от промаха: %v vs %v", body, miss)
+	}
+	if _, leaked := body["player_id"]; leaked {
+		t.Fatalf("404 не должен нести полей тикета: %v", body)
+	}
+
+	// 2. Порядок гейтов: привязка проверяется ДО rate-limiter'а (5 rps per
+	// player_id). Лимитер ключуется по player_id ЖЕРТВЫ, поэтому проверка после
+	// него и жгла бы чужой бюджет, и протекала бы: у несуществующего uuid бюджета
+	// нет вовсе, так что 429 вместо 404 = «тикет существует».
+	for i := range 8 {
+		if code, body := boundGame.do("GET", "/v1/matchmaking/tickets/"+arenaTicket, nil); code != 404 {
+			t.Fatalf("чужое чтение #%d: want 404, got %d %v (429 = гейт стоит после лимитера)", i+1, code, body)
+		}
+	}
+
+	// 3. Чужая ОТМЕНА: 404 и тикет реально не тронут — владелец видит его живым.
+	if code, body := boundGame.do("DELETE", "/v1/matchmaking/tickets/"+arenaTicket, nil); code != 404 {
+		t.Fatalf("чужая отмена: want 404, got %d %v", code, body)
+	}
+	code, body = boundArena.do("GET", "/v1/matchmaking/tickets/"+arenaTicket, nil)
+	if code != 200 || body["status"] != "queued" {
+		t.Fatalf("чужая отмена не должна была пройти: %d %v", code, body)
+	}
+
+	// 4. Свой тикет привязанным ключом — как раньше: читается и отменяется.
+	code, body = boundGame.do("GET", "/v1/matchmaking/tickets/"+gameTicket, nil)
+	if code != 200 || body["player_id"] != "game-player" {
+		t.Fatalf("свой тикет на чтении: %d %v", code, body)
+	}
+	code, body = boundGame.do("DELETE", "/v1/matchmaking/tickets/"+gameTicket, nil)
+	if code != 200 || body["status"] != "cancelled" {
+		t.Fatalf("свой тикет на отмене: %d %v", code, body)
+	}
+
+	// 5. Глобальный ключ (NULL/NULL — привязка опциональна by design,
+	// environments v1 §5) работает с ЛЮБЫМ проектом: интеграция игрового бэкенда,
+	// который ключ не привязывал, не сломана.
+	code, body = global.do("GET", "/v1/matchmaking/tickets/"+arenaTicket, nil)
+	if code != 200 || body["player_id"] != "arena-player" {
+		t.Fatalf("глобальный ключ на чужом проекте: want 200, got %d %v", code, body)
+	}
+	code, body = global.do("DELETE", "/v1/matchmaking/tickets/"+arenaTicket, nil)
+	if code != 200 || body["status"] != "cancelled" {
+		t.Fatalf("глобальный ключ отменяет тикет любого проекта: %d %v", code, body)
+	}
+}
+
 // /v1/allocate resolves env (explicit → sole-with-ready → 409) and enforces the
 // key binding on the resolved env.
 func TestAllocateEnvResolution(t *testing.T) {

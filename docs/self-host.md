@@ -410,8 +410,12 @@ a ticket for **any** `player_id`, and — given a `ticket_id` — read someone e
 ticket (once matched, that includes `host`, `port`, `match_id` and the
 `join_token`) and cancel it; a ticket filed under a foreign `player_id` also
 evicts that player's own ticket while it is still queued. Binding the key to one
-`(project, env)` does not contain this: the binding is enforced when a ticket is
-created, not when one is read or cancelled. **Give the key
+`(project, env)` contains this **across** projects and environments: the binding
+is enforced on all three ticket endpoints, so a ticket of another pair answers
+`404` — the same body an unknown `ticket_id` gets, since a `403` would confirm
+that someone else's ticket exists. It contains nothing **inside** that pair —
+there is no ownership check at all — and a global (unbound) key still reaches
+every project, because the binding is optional by design. **Give the key
 to your game backend, not to the game client**: the backend authenticates the
 player its own way, keeps the key, and files the ticket with a `player_id` it has
 already verified. A key baked into the client is a public secret, and `player_id`
