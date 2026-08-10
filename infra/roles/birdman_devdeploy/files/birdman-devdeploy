@@ -37,6 +37,10 @@ AGENT_TIMEOUT="${BIRDMAN_DEVDEPLOY_AGENT_TIMEOUT:-90}"
 POLL="${BIRDMAN_DEVDEPLOY_POLL_INTERVAL:-2}"
 TEXTFILE_DIR="${BIRDMAN_DEVDEPLOY_TEXTFILE_DIR:-/var/lib/node_exporter/textfile_collector}"
 SKIP_AGENTS="${BIRDMAN_DEVDEPLOY_SKIP_AGENTS:-}"
+# Окружение, чьи агенты обновляются. Прод сюда не попадает никогда: цели
+# перечисляются явно и фильтруются по этому имени.
+DEV_ENV="${BIRDMAN_DEVDEPLOY_ENV:-dev}"
+ADMIN_KEY=""
 
 REJECTED="$STATE_DIR/rejected"
 DEPLOYED="$STATE_DIR/deployed.json"
@@ -221,8 +225,137 @@ EOF
   return 4
 }
 
-# --- шаг агентов (реализуется отдельной задачей плана) -----------------------
-upgrade_agents() { return 0; }
+# --- шаг агентов -------------------------------------------------------------
+#
+# Три решения, каждое закрывает конкретную мину:
+#
+# 1. node_id ВСЕГДА явный. Форма POST /v1/agent-upgrade без node_id бьёт по
+#    ВСЕМУ флоту и по коду не сужается ни по проекту, ни по окружению
+#    (httpapi/ops.go: «апгрейд агента — инфраструктурная операция»).
+#    Автоматический дев-пайплайн, способный разослать бинарь на все ноды
+#    платформы, включая будущие прод-овые, недопустим — поэтому цели
+#    перечисляем сами и фильтруем по env.
+# 2. Канарейка — локальный агент master-бокса. У агента нет авто-отката:
+#    упавший бинарь = офлайн-нода до ручного вмешательства. Первым идёт тот
+#    агент, до которого мы дотягиваемся тривиально; лёг — удалённых не трогаем.
+# 3. По одной, с гейтом по AgentVersion из re-Hello — тот же критерий, что у
+#    watchdog'а мастера, а не «отправили и забыли».
+#
+# Безопасно это без единой строчки нового кода в агенте: команда идемпотентна
+# (version == running → no-op), битая закачка не трогает бинарь, а контейнеры
+# дедиков переживают рестарт агента — живые матчи не рвутся.
+
+nodes_json() {
+  curl -fsS --max-time 15 -H "Authorization: Bearer $ADMIN_KEY" \
+    "$MASTER_API/v1/nodes?env=$DEV_ENV" 2>/dev/null
+}
+
+# node_agent_version <node_id> — версия агента ноды по данным мастера.
+node_agent_version() {
+  nodes_json | python3 -c '
+import json, sys
+want = sys.argv[1]
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for n in d.get("nodes", []):
+    if n.get("id") == want:
+        print(n.get("agent_version", ""))
+        break
+' "$1"
+}
+
+# agent_targets <target-version> <local-hostname> — «id<TAB>hostname» на строку.
+# Фильтр: только наш env, не dead, версия ещё не целевая. Локальная нода —
+# первой (канарейка).
+agent_targets() {
+  nodes_json | python3 -c '
+import json, sys
+target, local, env = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+rows = [
+    n for n in d.get("nodes", [])
+    if n.get("env") == env
+    and n.get("state") != "dead"
+    and n.get("agent_version") != target
+]
+rows.sort(key=lambda n: 0 if n.get("hostname") == local else 1)
+for n in rows:
+    print(n.get("id", "") + "\t" + n.get("hostname", ""))
+' "$1" "$2" "$DEV_ENV"
+}
+
+wait_agent_version() {
+  local node_id="$1" target="$2"
+  local deadline=$(($(date +%s) + AGENT_TIMEOUT))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    [ "$(node_agent_version "$node_id")" = "$target" ] && return 0
+    sleep "$POLL"
+  done
+  return 1
+}
+
+upgrade_agents() {
+  local target="$AGENT_VERSION_TARGET"
+  [ -n "$target" ] || return 0
+  if rejected_has "agent:$target"; then
+    return 0
+  fi
+
+  local sha
+  sha="$(fetch birdman-agent.sha256 | tr -d ' \t\r\n')"
+  if [ "${#sha}" -ne 64 ]; then
+    log "sha256 агента не читается — шаг агентов пропущен"
+    return 1
+  fi
+
+  ADMIN_KEY="$(cat "$ADMIN_KEY_FILE" 2>/dev/null)"
+  if [ -z "$ADMIN_KEY" ]; then
+    log "admin-ключ не читается — шаг агентов пропущен"
+    return 1
+  fi
+
+  local local_host targets
+  local_host="${BIRDMAN_DEVDEPLOY_LOCAL_HOSTNAME:-$(hostname)}"
+  targets="$(agent_targets "$target" "$local_host")"
+  [ -n "$targets" ] || return 0
+
+  local url="$BASE_URL/birdman-agent"
+  local node_id hostname
+  while IFS="$(printf '\t')" read -r node_id hostname; do
+    [ -n "$node_id" ] || continue
+    log "апгрейд агента $hostname ($node_id) до $target"
+    if ! curl -fsS --max-time 15 -X POST \
+      -H "Authorization: Bearer $ADMIN_KEY" -H "Content-Type: application/json" \
+      -d "{\"node_id\":\"$node_id\",\"url\":\"$url\",\"sha256\":\"$sha\",\"version\":\"$target\"}" \
+      "$MASTER_API/v1/agent-upgrade" >/dev/null; then
+      log "мастер не принял команду апгрейда для $hostname"
+      rejected_add "agent:$target"
+      M_AGENT_FAIL=$((M_AGENT_FAIL + 1))
+      return 1
+    fi
+
+    if wait_agent_version "$node_id" "$target"; then
+      log "агент $hostname на $target"
+      M_AGENT_OK=$((M_AGENT_OK + 1))
+      continue
+    fi
+
+    # Канарейка легла — дальше по цепочке не идём: удалённой ноде тот же
+    # битый бинарь стоил бы офлайна до ручного вмешательства.
+    log "агент $hostname не перепредставился с $target — СТОП, остальные ноды не трогаю"
+    rejected_add "agent:$target"
+    M_AGENT_FAIL=$((M_AGENT_FAIL + 1))
+    return 1
+  done <<EOF
+$targets
+EOF
+  return 0
+}
 
 main() {
   if [ -e "$DISABLED" ]; then

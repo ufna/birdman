@@ -65,8 +65,21 @@ case "$url" in
     [ -f "$T/nodes.json" ] || exit 22
     cat "$T/nodes.json"; exit 0 ;;
   */v1/agent-upgrade)
+    # Моделируем агента: если для этой ноды не подложен файл $T/fail_<id>,
+    # она перепредставляется с новой версией (агент апгрейднулся). Иначе
+    # версия не меняется — деплоер обязан это увидеть по таймауту.
     echo "$body" >> "$T/upgrades.log"
-    [ -f "$T/upgrade_applies" ] && cp "$T/nodes_after.json" "$T/nodes.json"
+    python3 - "$body" "$T/nodes.json" "$T" <<'PY'
+import json, os, sys
+req = json.loads(sys.argv[1]); path, tdir = sys.argv[2], sys.argv[3]
+if os.path.exists(os.path.join(tdir, "fail_" + req["node_id"])):
+    sys.exit(0)
+d = json.load(open(path))
+for n in d["nodes"]:
+    if n["id"] == req["node_id"]:
+        n["agent_version"] = req["version"]
+json.dump(d, open(path, "w"))
+PY
     echo '{"upgrading":["x"]}'; exit 0 ;;
 esac
 name="${url##*/}"
@@ -147,6 +160,64 @@ touch "$T/health_bad"
 run
 grep -q 'birdman_devdeploy_rollbacks_total 1' "$T/textfile/birdman-devdeploy.prom" 2>/dev/null &&
   ok "откат посчитан" || no "нет счётчика откатов"
+
+# --- шаг агентов -------------------------------------------------------------
+
+# Флот: удалённая нода намеренно ПЕРВАЯ в массиве — чтобы проверить, что
+# деплоер действительно переставляет локальную вперёд, а не полагается на
+# порядок ответа. Плюс мёртвая нода и нода чужого окружения.
+fleet() {
+  cat >"$T/nodes.json" <<'JSON'
+{"nodes":[
+ {"id":"n-remote","hostname":"dogi-tc","env":"dev","state":"active","agent_version":"old"},
+ {"id":"n-local","hostname":"test-box","env":"dev","state":"active","agent_version":"old"},
+ {"id":"n-dead","hostname":"gone","env":"dev","state":"dead","agent_version":"old"},
+ {"id":"n-prod","hostname":"prodbox","env":"prod","state":"active","agent_version":"old"}
+]}
+JSON
+  unset BIRDMAN_DEVDEPLOY_SKIP_AGENTS
+  export BIRDMAN_DEVDEPLOY_LOCAL_HOSTNAME=test-box
+}
+
+setup "агенты: цели, адресность и порядок"
+fleet
+run
+n="$(wc -l <"$T/upgrades.log" 2>/dev/null | tr -d ' ')"
+[ "$n" = 2 ] && ok "апгрейд ушёл ровно двум нодам" || no "ушло $n команд вместо 2"
+grep -q 'n-dead' "$T/upgrades.log" 2>/dev/null && no "мёртвая нода получила команду" || ok "мёртвая нода пропущена"
+grep -q 'n-prod' "$T/upgrades.log" 2>/dev/null && no "нода чужого env получила команду" || ok "чужой env не тронут"
+head -1 "$T/upgrades.log" 2>/dev/null | grep -q 'n-local' && ok "канарейка первой" || no "первой пошла не локальная нода"
+tail -1 "$T/upgrades.log" 2>/dev/null | grep -q 'n-remote' && ok "удалённая после канарейки" || no "порядок нарушен"
+! grep -qv 'node_id' "$T/upgrades.log" 2>/dev/null && ok "node_id есть в КАЖДОЙ команде" || no "нашлась команда без node_id"
+grep -q 'dev-abc1234' "$T/upgrades.log" 2>/dev/null && ok "версия из MANIFEST" || no "версия не из MANIFEST"
+grep -q 'birdman_devdeploy_agent_upgrades_total{status="ok"} 2' "$T/textfile/birdman-devdeploy.prom" 2>/dev/null &&
+  ok "оба апгрейда посчитаны" || no "счётчик успешных апгрейдов неверен"
+
+setup "агенты: уже на целевой версии — команды нет"
+fleet
+python3 - "$T/nodes.json" <<'PY'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p))
+for n in d["nodes"]: n["agent_version"]="dev-abc1234"
+json.dump(d,open(p,"w"))
+PY
+run
+[ ! -f "$T/upgrades.log" ] && ok "ни одной лишней команды" || no "дёрнул апгрейд на актуальной версии"
+
+setup "агенты: канарейка легла — удалённую не трогаем"
+fleet
+touch "$T/fail_n-local"
+run
+grep -q 'n-local' "$T/upgrades.log" 2>/dev/null && ok "канарейке команда ушла" || no "канарейка не получила команду"
+grep -q 'n-remote' "$T/upgrades.log" 2>/dev/null && no "удалённая нода тронута после провала" || ok "удалённая нода НЕ тронута"
+grep -q '^agent:dev-abc1234$' "$T/state/rejected" 2>/dev/null && ok "версия агента в rejected" || no "rejected не содержит версию агента"
+[ "$(cat "$T/usr/birdman-master")" = MASTER-BINARY-V2 ] && ok "мастер НЕ откачен из-за агента" || no "провал агента откатил мастера"
+grep -q 'birdman_devdeploy_agent_upgrades_total{status="failed"} 1' "$T/textfile/birdman-devdeploy.prom" 2>/dev/null &&
+  ok "провал посчитан" || no "счётчик провалов неверен"
+
+rm -f "$T/upgrades.log" "$T/fail_n-local"
+run
+[ ! -f "$T/upgrades.log" ] && ok "отвергнутая версия агента не ретраится" || no "rejected-версия агента пошла в повтор"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
