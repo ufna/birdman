@@ -105,7 +105,10 @@ export function Events() {
       if (project !== null && evProject !== undefined && evProject !== project) return false;
       return true;
     });
-  }, [all, kind, node, period, selected]);
+    // project В ЗАВИСИМОСТЯХ ОБЯЗАТЕЛЕН: без него смена проекта не
+    // пересчитывает фильтр — лента остаётся от прежнего проекта до любого
+    // постороннего изменения (поймано ревью #948).
+  }, [all, kind, node, period, selected, project]);
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const clampedPage = Math.min(page, pageCount - 1);

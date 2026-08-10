@@ -3,13 +3,13 @@
 // limit/offset. Клик по строке (в обеих вкладках) открывает дровер деталей
 // матча (статы + логи).
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import * as Tabs from '@radix-ui/react-tabs';
 import type { ColumnDef } from '@tanstack/react-table';
 import { api } from '../lib/api';
 import type { Match, MatchState } from '../lib/api';
 import { useEnv, keepForEnv } from '../lib/env';
-import { useProjectList } from '../lib/project';
+import { useProject, useProjectList } from '../lib/project';
 import { useMatchDrawer, useServerDrawer } from '../lib/drawer';
 import { useNow } from '../lib/useNow';
 import { versionColor } from '../lib/stats';
@@ -177,6 +177,15 @@ function MatchHistory() {
   const [state, setState] = useState<MatchState | ''>('');
   const [region, setRegion] = useState('');
   const [page, setPage] = useState(0);
+
+  // Смена проекта сбрасывает страницу: у соседнего проекта матчей может быть
+  // меньше, и «страница 5» открылась бы пустой (поймано ревью #948). Фильтры
+  // state/region делают то же через resetPage — здесь проект приходит извне,
+  // поэтому эффектом.
+  const { selected: project } = useProject();
+  useEffect(() => {
+    setPage(0);
+  }, [project]);
 
   // Регионы для фильтра — из нод (авторитетный список).
   const nodes = useProjectList((project) => api.listNodes({ project }), []);

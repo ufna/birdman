@@ -80,10 +80,14 @@ export function Deploys({ navigate }: { navigate: (path: string) => void }) {
         <EnvSettingsCard env={selectedEnvObj} onSaved={reloadEnvs} />
       )}
       <DeployHowto ctx={howtoCtx} navigate={navigate} defaultExpanded={isEmpty && selected === null} />
+      {/* Имя проекта в заголовке карточки — ТОЛЬКО когда оно что-то различает.
+          После серверного сужения (W2) группа всегда одна, и её заголовок
+          дублировал бы селектор проекта в шапке (поймано ревью #948). */}
       {projects.map(({ project, versions: pv }) => (
         <ProjectDeploys
           key={project}
           project={project}
+          showProject={projects.length > 1}
           versions={pv}
           servers={servers.data ?? []}
           nodes={nodes.data ?? []}
@@ -104,6 +108,7 @@ export function Deploys({ navigate }: { navigate: (path: string) => void }) {
 
 function ProjectDeploys({
   project,
+  showProject,
   versions,
   servers,
   nodes,
@@ -118,6 +123,7 @@ function ProjectDeploys({
   reload,
 }: {
   project: string;
+  showProject: boolean;
   versions: VersionInfo[];
   servers: GameServer[];
   nodes: NodeInfo[];
@@ -213,7 +219,7 @@ function ProjectDeploys({
   return (
     <Card>
       <CardHeader
-        title={t('deploys.project', { project })}
+        title={showProject ? t('deploys.project', { project }) : t('nav.deploys')}
         aside={
           <div className="flex flex-wrap items-center gap-3">
             <label className="flex items-center gap-1.5 text-xs text-muted">

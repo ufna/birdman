@@ -18,6 +18,8 @@ import {
 } from '../lib/project';
 import { ProjectSelector } from '../components/Shell';
 import { Fleet } from '../screens/Fleet';
+import { Events } from '../screens/Events';
+import { DrawerProvider } from '../lib/drawer';
 
 const proj = (slug: string): ProjectInfo => ({
   id: `id-${slug}`,
@@ -306,6 +308,54 @@ describe('EnvProvider под ProjectProvider', () => {
     await waitFor(() => {
       expect(urls.some((u) => u === '/v1/nodes?project=arena')).toBe(true);
     });
+  });
+
+  // Регрессия по ревью #948: `project` использовался в useMemo фильтра ленты,
+  // но отсутствовал в его зависимостях — смена проекта не пересчитывала
+  // фильтр, и на экране оставались события ПРЕЖНЕГО проекта. Тест ловит
+  // именно это: сам список событий при переключении НЕ перезапрашивается
+  // (у /v1/events нет ?project=), значит пересчёт может дать только пересборка
+  // мемо — без неё видимый набор не изменится.
+  it('экран Событий пересчитывает ленту при смене проекта (deps useMemo)', async () => {
+    const events = [
+      { id: 1, ts: '2026-08-01T10:00:00Z', kind: 'version_registered', payload: { project: 'game', semver: '1.0.0' } },
+      { id: 2, ts: '2026-08-01T11:00:00Z', kind: 'version_registered', payload: { project: 'arena', semver: '9.9.9' } },
+    ];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        const u = String(url);
+        if (u.startsWith('/v1/projects')) return Promise.resolve(jsonRes({ projects: [game, arena] }));
+        if (u.startsWith('/v1/environments')) return Promise.resolve(jsonRes({ environments: [] }));
+        if (u.startsWith('/v1/nodes')) return Promise.resolve(jsonRes({ nodes: [] }));
+        if (u.startsWith('/v1/events')) return Promise.resolve(jsonRes({ events }));
+        return Promise.resolve(jsonRes({}));
+      }),
+    );
+    render(
+      <I18nProvider initialLang="en">
+        <ProjectProvider>
+          <DrawerProvider>
+            <div>
+              <ProjectSelector />
+              <Events />
+            </div>
+          </DrawerProvider>
+        </ProjectProvider>
+      </I18nProvider>,
+    );
+
+    // my-game: своё событие видно, чужое (arena) — нет.
+    await waitFor(() => {
+      expect(screen.getByText(/1\.0\.0/)).toBeTruthy();
+    });
+    expect(screen.queryByText(/9\.9\.9/)).toBeNull();
+
+    fireEvent.change(await screen.findByRole('combobox', { name: 'Project' }), { target: { value: 'arena' } });
+    await waitFor(() => {
+      expect(screen.getByText(/9\.9\.9/)).toBeTruthy();
+    });
+    expect(screen.queryByText(/1\.0\.0/)).toBeNull();
   });
 
   it('проекта нет → окружения не запрашиваются вовсе', async () => {
