@@ -33,13 +33,17 @@
   changed_when: false
   failed_when: false
 
-# command не поддерживает check-режим (движок его скипает) → в --check у
-# birdman_overlay_image_check нет .rc; гард `is not skipped` перед деref'ом (тот
-# же класс/идиома, что 236/248). В бою probe исполняется всегда (у него нет
-# when) → `is not skipped` тождественно истинно, и условие сводится к прежнему
-# `... is changed or rc != 0`. В --check probe скипнут → второй операнд ложен
-# коротким замыканием (деref .rc не берётся), решение о сборке деградирует до
-# «context is changed» — сам build под --check тоже скипается движком.
+# ВНИМАНИЕ (уточнено в #962 прямой пробой на core 2.21.1): конъюнкт
+# `is not skipped` здесь НЕ обязателен — вопреки исходному комментарию #257,
+# .rc под --check СУЩЕСТВУЕТ. command/shell check-режим поддерживают
+# (supports_check_mode=True) и скипаются САМИ, внутри модуля, возвращая
+# полноформатный результат rc=0, stdout='', stderr='', skipped=true
+# (ansible/modules/command.py). Класс «регистр = голый {skipped, msg}» — про
+# модули БЕЗ поддержки check-режима (uri в #236), не про этот таск.
+# Гард оставлен как есть (он безвреден и тождественен): под --check rc=0, так
+# что и без него условие сводится к «context is changed»; в бою probe
+# исполняется всегда (у него нет when) → `is not skipped` тождественно истинно.
+# Сам build под --check скипается движком в любом случае.
 - name: Build overlay image (локально на боксе, без внешнего registry)
   ansible.builtin.command:
     cmd: docker build -t {{ birdman_overlay_image }} {{ birdman_overlay_dir }}/build
@@ -57,12 +61,26 @@
     creates: "{{ birdman_overlay_conf_dir }}/wg.key"
   no_log: true
 
+# read-before-create (класс #258, которым overlay-роль не была покрыта): file
+# state=file (дефолт) энфорсит владельца/режим ключа, который создаёт shell
+# строкой выше. В --check на свежем боксе ключ не материализуется → модуль
+# честно падает «file (...) is absent, cannot continue», и до up.yml прогон
+# вообще не доходит. stat-проба + гард `not ansible_check_mode or exists`
+# пускают --check насквозь; в бою `not ansible_check_mode` тождественно истинно
+# (ключ создан выше либо уже был по creates:) → семантика неизменна.
+- name: Probe overlay private key (check-mode fresh-box guard)
+  ansible.builtin.stat:
+    path: "{{ birdman_overlay_conf_dir }}/wg.key"
+    get_checksum: false   # файл — приватный ключ: хеш в выводе -v ни к чему
+  register: birdman_overlay_key_stat
+
 - name: Enforce key ownership and mode
   ansible.builtin.file:
     path: "{{ birdman_overlay_conf_dir }}/wg.key"
     owner: root
     group: root
     mode: "0600"
+  when: not ansible_check_mode or birdman_overlay_key_stat.stat.exists
 
 - name: Derive public key
   ansible.builtin.command:
@@ -70,14 +88,35 @@
   register: birdman_overlay_pubkey_cmd
   changed_when: false
 
-# Как у Build выше: command «Derive public key» в --check скипается движком →
-# у birdman_overlay_pubkey_cmd нет .stdout, а set_fact рендерит шаблон безусловно
-# → раньше стоп на undefined. Гард `is not skipped` (идиома 236/248): в бою
-# command исполняется всегда (у него нет when) → гард тождественно истинен,
-# set_fact публикует pubkey как прежде; в --check command скипнут → set_fact
-# мягко скипается, деref .stdout не берётся (pubkey-факт в check-режиме не
-# публикуется — это ожидаемо, соседи его читают только в боевом прогоне).
+# Как у Build выше, комментарий #257 был неточен: .stdout под --check есть и
+# равен '' (command скипается сам, внутри модуля). Гард `is not skipped`
+# оставлен (в бою он тождественно истинен — у command нет when), но САМ ПО СЕБЕ
+# он ломал check-режим: факт не публиковался НИ У КОГО, и дальше по прогону
+# undefined-факт валил два сайта (tracker #962) — спок-ветку wg.conf.j2
+# («no attribute 'birdman_overlay_pubkey'») и -l-guard хаба, который считал
+# dropped'ом ноду без факта и давал ложную тревогу на полном прогоне.
+# Поэтому в check-режиме факт публикуется ЯВНОЙ заглушкой (парный set_fact
+# ниже): downstream видит defined-значение, ничего на диск не пишется, а
+# -l-guard остаётся живым — ноды ВНЕ прогона факта по-прежнему не получают,
+# значит настоящий вывод живого peer'а он ловит и под --check.
 - name: Publish pubkey as host fact (публичен; конфиги соседей читают его из hostvars)
   ansible.builtin.set_fact:
     birdman_overlay_pubkey: "{{ birdman_overlay_pubkey_cmd.stdout | trim }}"
   when: birdman_overlay_pubkey_cmd is not skipped
+
+# Заведомо невалидный base64-ключ: если такая строка когда-нибудь доедет до
+# боевого wg.conf, `wg setconf` откажется её съесть (громкий отказ вместо
+# тихо битого туннеля). В --check на диск ничего не пишется.
+- name: Publish placeholder pubkey in check mode (факт обязан быть defined)
+  ansible.builtin.set_fact:
+    birdman_overlay_pubkey: CHECK-MODE-PLACEHOLDER-NOT-A-REAL-PUBKEY
+  when: birdman_overlay_pubkey_cmd is skipped
+
+- name: Note that pubkey is a placeholder in check mode
+  ansible.builtin.debug:
+    msg: >-
+      check mode: вывод pubkey не исполнялся (command скипает себя под --check)
+      — в превью wg.conf вместо ключа стоит
+      CHECK-MODE-PLACEHOLDER-NOT-A-REAL-PUBKEY. Боевой прогон выводит настоящий
+      ключ из wg.key и рендерит конфиг как обычно.
+  when: birdman_overlay_pubkey_cmd is skipped

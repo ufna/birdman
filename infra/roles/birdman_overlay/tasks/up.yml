@@ -43,15 +43,22 @@
     mode: "0644"
   notify: Restart birdman-overlay
 
-# ПРОВЕРЕНО (tracker #265, ansible-core 2.16 и 2.21): гард `... is not skipped`
-# перед деref'ом регистра здесь НЕ нужен — в отличие от 236/248/257. Класс тех
-# задач — модули БЕЗ поддержки check-режима (uri, wait_for): их скипает движок,
-# у регистра остаётся голый {skipped, msg}, и любой деref под --check падает.
-# command/shell check-режим поддерживают и скипаются САМИ, уже внутри модуля,
-# возвращая полноформатный результат (rc=0, stdout='', stderr='', skipped=true)
-# — .stderr/.rc под --check есть. Сверх того, changed_when у скипнутого таска
-# движок не вычисляет вовсе (task_executor: `if not utr.skipped`). Оба регистра
-# (compose_up, ping) больше нигде в репо не разыменовываются.
+# ПРОВЕРЕНО (tracker #265, уточнено #962; ansible-core 2.16 и 2.21): гард
+# `... is not skipped` перед деref'ом регистра здесь НЕ нужен.
+# command/shell check-режим ПОДДЕРЖИВАЮТ (supports_check_mode=True) и скипаются
+# САМИ, уже внутри модуля, возвращая полноформатный результат (rc=0, stdout='',
+# stderr='', skipped=true) — .stderr/.rc под --check есть. Сверх того,
+# changed_when у скипнутого таска движок не вычисляет вовсе (task_executor:
+# `if not utr.skipped`). Оба регистра (compose_up, ping) больше нигде в репо не
+# разыменовываются.
+# Про «класс 236/248/257» в соседних комментариях — точная разбивка (#962):
+#   236 — да, тот класс: uri check-режим НЕ поддерживает, движок скипает таск,
+#         у регистра остаётся голый {skipped, msg}, любой деref падает;
+#   248 — shell, у регистра .stdout='' есть; гард там всё равно чинил РЕАЛЬНЫЙ
+#         дефект (пустой stdout ложно валил fail-гейт «ключ не найден»),
+#         но не тот, что описан в его комментарии;
+#   257 — command, .stdout='' есть; деref не падал, гард был не нужен и сам
+#         сломал check-режим (undefined pubkey-факт) — это и есть #962.
 - name: Start birdman-overlay (docker compose, идемпотентно)
   ansible.builtin.command:
     cmd: docker compose -f {{ birdman_overlay_dir }}/compose.yml up -d --wait
