@@ -517,7 +517,7 @@ export const en = {
   'alerts.col.expr': 'Expression',
   'alerts.col.for': 'For',
   'alerts.col.alert': 'Alert',
-  'alerts.col.where': 'Region · node',
+  'alerts.col.where': 'Project · region · node',
   'alerts.col.started': 'Started',
   'alerts.col.ended': 'Ended',
   'alerts.col.status': 'Status',
@@ -525,6 +525,19 @@ export const en = {
   'alerts.noHistory': 'No alerts have fired yet.',
   'alerts.limitAria': 'How many entries to fetch',
   'alerts.lastN': 'last {count}',
+
+  // Project scope of an alert (мультипроект, tracker #956). Narrowing by the
+  // selected project is NON-HIDING: an alert only leaves the screen when its
+  // project is explicitly a different one. A platform alert (no project label —
+  // master down, node down, disk, certs, backups) stays visible under EVERY
+  // project and says so, otherwise the operator reads "MasterDown" as a problem
+  // of the project currently selected. Same framing as stats.ccu.platformWide.
+  'alerts.scope.platform': 'platform',
+  'alerts.scope.platformHint': 'Platform-wide alert: it belongs to no project and stays visible whichever project is selected.',
+  'alerts.scope.note':
+    'Narrowed to the selected project. Platform alerts (master, nodes, disks, certificates, backups) stay visible under every project.',
+  'alerts.rules.platformNote':
+    'The rule catalogue is platform-wide and is NOT narrowed by the project selector: a rule has no project of its own — it lives inside the expression, which may fan out into one alert per project.',
 
   // — Alerts mute (admin sets/removes; panel suppression + audit) —
   'alerts.mute.section': 'Muted',

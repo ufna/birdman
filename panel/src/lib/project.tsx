@@ -19,6 +19,7 @@ import type { ReactNode } from 'react';
 import { api } from './api';
 import type { ApiEvent, ProjectInfo } from './api';
 import { useData } from './live';
+import { useAsync } from './useAsync';
 
 /** Ключ localStorage для выбранного проекта (слаг). */
 export const PROJECT_STORAGE_KEY = 'birdman.project';
@@ -131,6 +132,21 @@ export function useProject(): ProjectContextValue {
 }
 
 /**
+ * Слаг для сужения запроса. Различаем ДВА «проекта нет», и разница
+ * принципиальная:
+ *  • провайдера нет вовсе (изолированные юнит-тесты экранов) → проектного
+ *    измерения не существует, сужать нечем: фетчим БЕЗ фильтра ('' отсеивается
+ *    в qs(), параметр в запрос не попадает), ровно как до мультипроекта. Тот же
+ *    приём, что у FALLBACK_ENV.
+ *  • провайдер есть и говорит null (список грузится / проектов нет) → null:
+ *    вызывающий не запрашивает ничего, чужие данные не показываем даже мельком.
+ */
+export function useProjectSlug(): string | null {
+  const ctx = useContext(ProjectContext);
+  return ctx === null ? '' : ctx.selected;
+}
+
+/**
  * `useData` для проектных списков (мультипроект W2): отдаёт фетчеру выбранный
  * слаг и САМ добавляет проект в зависимости — смена проекта перезапрашивает
  * данные, и забыть об этом на очередном экране нельзя по построению. Пока
@@ -138,16 +154,28 @@ export function useProject(): ProjectContextValue {
  * фильтра: панель не показывает чужие данные, даже мельком.
  */
 export function useProjectList<T>(fetcher: (project: string) => Promise<T[]>, deps: unknown[]) {
-  const ctx = useContext(ProjectContext);
-  // Различаем ДВА «проекта нет», и разница принципиальная:
-  //  • провайдера нет вовсе (изолированные юнит-тесты экранов) → проектного
-  //    измерения не существует, сужать нечем: фетчим БЕЗ фильтра, ровно как
-  //    до мультипроекта. Пустая строка отсеивается в qs(), так что параметр
-  //    в запрос не попадает. Тот же приём, что у FALLBACK_ENV.
-  //  • провайдер есть и говорит null (список грузится / проектов нет) →
-  //    пустой список: чужие данные не показываем даже мельком.
-  const project = ctx === null ? '' : ctx.selected;
+  const project = useProjectSlug();
   return useData<T[]>(
+    () => (project === null ? Promise.resolve([]) : fetcher(project)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- deps задаёт экран, проект добавляем мы
+    [...deps, project],
+  );
+}
+
+/**
+ * То же сужение, но поверх `useAsync` вместо `useData` — для экранов, которые
+ * сознательно НЕ висят на SSE. Отличается только базовым хуком: слаг, две
+ * трактовки «проекта нет» и автодобавление проекта в deps — общие.
+ *
+ * Зачем отдельный хук, а не useProjectList: `useData` перечитывает данные на
+ * каждое событие флота (плюс поллинг 5–30с). Алерты на это подписывать нельзя —
+ * это прокси к vmalert, и «алерты не должны перечитываться на каждое событие
+ * флота» записано в шапке lib/useAsync.ts как решение. Взять useProjectList
+ * означало бы молча поменять частоту опроса апстрима ради переиспользования.
+ */
+export function useProjectAsync<T>(fetcher: (project: string) => Promise<T[]>, deps: unknown[]) {
+  const project = useProjectSlug();
+  return useAsync<T[]>(
     () => (project === null ? Promise.resolve([]) : fetcher(project)),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- deps задаёт экран, проект добавляем мы
     [...deps, project],

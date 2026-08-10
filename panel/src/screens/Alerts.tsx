@@ -5,6 +5,14 @@
 // Описания алертов приходят с бэка двуязычно: description (EN) + description_ru
 // (опционально) — выбираем по локали с фоллбэком на EN (alertDescription).
 // Обвязку UI переводим через каталог как обычно.
+//
+// Проектное измерение (мультипроект, трекер #956, шаг 2/3 эпика #950). Активные
+// и История сужаются СЕРВЕРНЫМ ?project= (useProjectAsync), Правила — нет: это
+// каталог конфигурации, у правила проекта нет вовсе. Сужение НЕ СКРЫВАЮЩЕЕ:
+// алерт уходит с экрана, только если его project явно чужой, а платформенный
+// (MasterDown/NodeDown/DiskHigh*/CertExpiry/Backup*) виден при любом выборе — и
+// подписан чипом, иначе оператор прочитает «мастер лёг» как беду текущего
+// проекта. Молча спрятать такой алерт — худший исход этого экрана.
 
 import { useMemo, useState } from 'react';
 import type { ColumnDef } from '@tanstack/react-table';
@@ -14,15 +22,18 @@ import type { ActiveAlert, AlertEvent, AlertMute, AlertRule } from '../lib/api';
 import {
   MUTE_PRESETS,
   alertDescription,
+  alertProjectOf,
   alertSoundEnabled,
   alertsUnavailable,
+  isPlatformAlert,
   muteErrorMessage,
   normalizeMuteRegion,
   presetExpiry,
   setAlertSoundEnabled,
 } from '../lib/alerts';
-import type { MutePreset } from '../lib/alerts';
+import type { AlertScoped, MutePreset } from '../lib/alerts';
 import { useAsync } from '../lib/useAsync';
+import { useProject, useProjectAsync } from '../lib/project';
 import { canAdmin, useSession } from '../lib/session';
 import { useT, useFormat } from '../lib/i18n';
 import type { BoundFormat, MessageKey } from '../lib/i18n';
@@ -37,12 +48,20 @@ const HISTORY_LIMITS = [20, 50, 100];
 export function Alerts() {
   const { t } = useT();
   const { session } = useSession();
+  const { selected } = useProject();
   const mayMute = session != null && canAdmin(session);
   const [limit, setLimit] = useState(50);
-  const active = useAsync(() => api.alertsActive(), []);
+  // Активные и история — через useProjectAsync: слаг уезжает в ?project=, а сам
+  // проект попадает в deps, так что его смена ПЕРЕСЧИТЫВАЕТ данные (грабли #948
+  // — там проект забыли в deps, и экран показывал прежний проект).
+  const active = useProjectAsync((project) => api.alertsActive({ project }), []);
+  const history = useProjectAsync((project) => api.alertHistory({ limit, project }), [limit]);
+  // Правила и заглушки — платформенные: каталог конфигурации и панельные mute
+  // (привязка mute к проекту — отдельный шаг эпика, #957).
   const rules = useAsync(() => api.alertRules(), []);
-  const history = useAsync(() => api.alertHistory(limit), [limit]);
   const mutes = useAsync(() => api.alertMutes(), []);
+  // Подписи про сужение показываем, только когда сужать есть по чему.
+  const narrowed = selected !== null;
 
   // После постановки/снятия mute перечитываем всё, чей вид зависит от заглушек:
   // список mutes + флаги muted на активных и в истории.
@@ -70,6 +89,7 @@ export function Alerts() {
         reload={active.reload}
         mayMute={mayMute}
         onMuted={refreshMuted}
+        narrowed={narrowed}
       />
       <RulesSection
         rules={rules.data}
@@ -78,6 +98,7 @@ export function Alerts() {
         reload={rules.reload}
         mayMute={mayMute}
         onMuted={refreshMuted}
+        narrowed={narrowed}
       />
       <HistorySection
         events={history.data}
@@ -139,6 +160,36 @@ function MutedChip() {
       {t('alerts.mute.badge')}
     </span>
   );
+}
+
+/**
+ * Честная подпись «платформенный» — на алертах, у которых нет проекта. Ставится
+ * ТОЛЬКО когда мастер сказал про область явно (alertScopeOf): мастер без
+ * additive-полей #955 не даёт повода подписывать ничего, и панель молчит,
+ * вместо того чтобы навесить подпись на все алерты подряд.
+ */
+function PlatformChip({ alert }: { alert: AlertScoped }) {
+  const { t } = useT();
+  if (!isPlatformAlert(alert)) return null;
+  return (
+    <span
+      title={t('alerts.scope.platformHint')}
+      className="rounded border border-line px-1.5 py-0.5 text-[10px] tracking-wide text-muted uppercase"
+    >
+      {t('alerts.scope.platform')}
+    </span>
+  );
+}
+
+/** Подпись про не скрывающее сужение — под шапкой сужаемой секции. */
+function ScopeNote() {
+  const { t } = useT();
+  return <p className="border-b border-line px-4 py-2 text-xs text-muted">{t('alerts.scope.note')}</p>;
+}
+
+/** «Где горит»: проект (если он есть) рядом с регионом и нодой. */
+function whereOf(a: AlertScoped & { region: string; node: string }): string {
+  return [alertProjectOf(a), a.region, a.node].filter((x) => x !== undefined && x !== '').join(' · ') || '—';
 }
 
 // --- Заглушённые (mutes) ---
@@ -366,6 +417,7 @@ function ActiveSection({
   reload,
   mayMute,
   onMuted,
+  narrowed,
 }: {
   active?: ActiveAlert[];
   error?: Error;
@@ -373,6 +425,7 @@ function ActiveSection({
   reload: () => void;
   mayMute: boolean;
   onMuted: () => void;
+  narrowed: boolean;
 }) {
   const { t, lang } = useT();
   const fmt = useFormat();
@@ -383,6 +436,7 @@ function ActiveSection({
         title={t('alerts.active')}
         aside={active !== undefined ? <span className="tabular font-mono text-xs text-muted">{active.length}</span> : undefined}
       />
+      {narrowed && <ScopeNote />}
       {loading ? (
         <LoadingRow />
       ) : soft !== null ? (
@@ -401,6 +455,7 @@ function ActiveSection({
                 <div className="flex flex-wrap items-center gap-2">
                   <StateBadge state={a.severity} tone={toneOfSeverity(a.severity)} domain="severity" />
                   <span className="font-mono text-sm font-medium">{a.name}</span>
+                  <PlatformChip alert={a} />
                   {a.muted === true && <MutedChip />}
                 </div>
                 {alertDescription(a, lang) !== '' && (
@@ -408,7 +463,7 @@ function ActiveSection({
                 )}
               </div>
               <div className="flex shrink-0 flex-col items-end gap-1.5 text-right">
-                <div className="font-mono text-xs text-muted">{[a.region, a.node].filter((x) => x !== '').join(' · ') || '—'}</div>
+                <div className="font-mono text-xs text-muted">{whereOf(a)}</div>
                 <div className="font-mono text-xs text-muted">{fmt.stamp(a.active_at)}</div>
                 {mayMute && a.muted !== true && <MuteButton alertname={a.name} region={a.region} onMuted={onMuted} />}
               </div>
@@ -429,6 +484,7 @@ function RulesSection({
   reload,
   mayMute,
   onMuted,
+  narrowed,
 }: {
   rules?: AlertRule[];
   error?: Error;
@@ -436,6 +492,7 @@ function RulesSection({
   reload: () => void;
   mayMute: boolean;
   onMuted: () => void;
+  narrowed: boolean;
 }) {
   const { t } = useT();
   const soft = useSoftNote(error);
@@ -491,6 +548,9 @@ function RulesSection({
         title={t('alerts.rules')}
         aside={rules !== undefined ? <span className="tabular font-mono text-xs text-muted">{rules.length}</span> : undefined}
       />
+      {/* Правила НЕ сужаются по проекту — говорим это вслух, иначе отсутствие
+          сужения на фоне сужённых секций прочтётся как забывчивость панели. */}
+      {narrowed && <p className="border-b border-line px-4 py-2 text-xs text-muted">{t('alerts.rules.platformNote')}</p>}
       {loading ? (
         <LoadingRow />
       ) : soft !== null ? (
@@ -538,6 +598,7 @@ function HistorySection({
           <div className={`min-w-48 max-w-[24rem] ${row.original.muted === true ? 'opacity-60' : ''}`}>
             <div className="flex items-center gap-2">
               <span className="font-mono text-sm font-medium">{row.original.name}</span>
+              <PlatformChip alert={row.original} />
               {row.original.muted === true && <MutedChip />}
             </div>
             {alertDescription(row.original, lang) !== '' && (
@@ -556,9 +617,7 @@ function HistorySection({
       {
         id: 'where',
         header: t('alerts.col.where'),
-        cell: ({ row }) => (
-          <span className="font-mono text-xs text-muted">{[row.original.region, row.original.node].filter((x) => x !== '').join(' · ') || '—'}</span>
-        ),
+        cell: ({ row }) => <span className="font-mono text-xs text-muted">{whereOf(row.original)}</span>,
       },
       {
         id: 'started',

@@ -7,7 +7,7 @@
 // (alertDescription). Обвязку UI переводим через каталог как обычно.
 
 import { ApiError } from './api';
-import type { ActiveAlert } from './api';
+import type { ActiveAlert, AlertScope } from './api';
 import type { I18nContextValue, Lang } from './i18n';
 
 export type AlertsUnavailable = 'unconfigured' | 'upstream';
@@ -36,6 +36,50 @@ export function alertDescription(a: { description: string; description_ru?: stri
     return a.description_ru;
   }
   return a.description;
+}
+
+// --- проектная область алерта (мультипроект, трекер #956) ---
+
+/** Общая часть активного алерта и записи истории, из которой видна область. */
+export interface AlertScoped {
+  project?: string;
+  scope?: AlertScope;
+}
+
+/**
+ * Область алерта: платформенный или проектный — ЛИБО undefined, если мастер о
+ * ней ничего не сказал.
+ *
+ * Три случая, и третий — несущий. Поля `project`/`scope` additive (#955): master,
+ * который ещё не перевыкачен, не отдаёт НИ ОДНОГО из них. Соблазн считать
+ * «нет project → платформенный» здесь ошибочен: на старом мастере такая подпись
+ * навесилась бы на ВСЕ алерты, включая проектные, и оператор читал бы честную с
+ * виду подпись, которая ничего не значит. Поэтому неизвестность остаётся
+ * неизвестностью, а панель в этом случае просто молчит.
+ *
+ * `scope` от мастера главнее вывода из `project`: это его собственное решение
+ * (docs/specs/master.md §6), панель его не пересчитывает. Вывод из непустого
+ * `project` — страховка для чужого прокси, который донёс лейбл, но не scope.
+ */
+export function alertScopeOf(a: AlertScoped): AlertScope | undefined {
+  if (a.scope === 'platform' || a.scope === 'project') return a.scope;
+  if (a.project !== undefined && a.project !== '') return 'project';
+  return undefined;
+}
+
+/**
+ * Платформенный ли алерт — то есть нужна ли ему честная подпись. Такой алерт
+ * виден при ЛЮБОМ выбранном проекте (сужение не скрывающее, см. keepForProject
+ * и master keepAlertForProject), и без подписи оператор решит, что упавший
+ * мастер или кончающийся диск относятся к текущему проекту.
+ */
+export function isPlatformAlert(a: AlertScoped): boolean {
+  return alertScopeOf(a) === 'platform';
+}
+
+/** Проект алерта для показа рядом с region/node; пусто/нет поля → undefined. */
+export function alertProjectOf(a: AlertScoped): string | undefined {
+  return a.project !== undefined && a.project !== '' ? a.project : undefined;
 }
 
 // --- mute вью-модель (чистые функции — точки тестирования) ---

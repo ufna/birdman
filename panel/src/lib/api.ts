@@ -260,8 +260,18 @@ export interface AlertRule {
   description_ru?: string;
 }
 
+/**
+ * Область алерта (мультипроект, трекер #955): `platform` — алерт не привязан к
+ * проекту (MasterDown, NodeDown, DiskHigh, CertExpiry, BackupStale/Failed),
+ * `project` — привязан. Master выводит область из НАЛИЧИЯ лейбла `project` у
+ * метрики, на которой построен expr.
+ */
+export type AlertScope = 'project' | 'platform';
+
 /** Активный (firing) алерт из vmalert. `muted` — подавлен ли mute'ом (панель).
- *  `description` — EN; `description_ru` — опциональный RU (фоллбэк на EN). */
+ *  `description` — EN; `description_ru` — опциональный RU (фоллбэк на EN).
+ *  `project`/`scope` — additive-поля #955: их НЕТ у мастера, который ещё не
+ *  перевыкачен, поэтому оба опциональны (см. alertScopeOf в lib/alerts.ts). */
 export interface ActiveAlert {
   name: string;
   severity: string;
@@ -273,10 +283,13 @@ export interface ActiveAlert {
   description: string;
   description_ru?: string;
   muted?: boolean;
+  project?: string;
+  scope?: AlertScope;
 }
 
 /** Срабатывание из истории (alerts.log). active — ещё ли горит (по endsAt).
- *  `description` — EN; `description_ru` — опциональный RU (фоллбэк на EN). */
+ *  `description` — EN; `description_ru` — опциональный RU (фоллбэк на EN).
+ *  `project`/`scope` — additive-поля #955, опциональны (см. ActiveAlert). */
 export interface AlertEvent {
   name: string;
   severity: string;
@@ -289,6 +302,8 @@ export interface AlertEvent {
   active: boolean;
   received_at?: string;
   muted?: boolean;
+  project?: string;
+  scope?: AlertScope;
 }
 
 /**
@@ -591,11 +606,23 @@ export const api = {
 
   // --- П2: алерты (скоуп readonly; master проксирует vmalert) ---
 
+  /** Каталог правил. Сознательно БЕЗ ?project=: у правила проекта нет — он живёт
+   *  внутри текста expr, и фильтр по несуществующему лейблу вернул бы пустой
+   *  каталог для любого проекта (master: handleAlertRules). */
   alertRules: () => request<{ rules: AlertRule[] }>('GET', '/v1/alerts/rules').then((r) => r.rules),
-  alertsActive: () =>
-    request<{ alerts: ActiveAlert[] }>('GET', '/v1/alerts/active').then((r) => r.alerts),
-  alertHistory: (limit: number) =>
-    request<{ alerts: AlertEvent[] }>('GET', `/v1/alerts/history${qs({ limit })}`).then((r) => r.alerts),
+  /** Активные. `project` — НЕ скрывающее сужение (#955): алерт уходит, только
+   *  если его project ЯВНО чужой; платформенный виден при любом выборе. */
+  alertsActive: (opts: { project?: string } = {}) =>
+    request<{ alerts: ActiveAlert[] }>('GET', `/v1/alerts/active${qs({ project: opts.project })}`).then(
+      (r) => r.alerts,
+    ),
+  /** История. `project` — то же не скрывающее сужение; master применяет его ДО
+   *  отсечения по limit, иначе записи проекта съедали бы соседи. */
+  alertHistory: (opts: { limit: number; project?: string }) =>
+    request<{ alerts: AlertEvent[] }>(
+      'GET',
+      `/v1/alerts/history${qs({ limit: opts.limit, project: opts.project })}`,
+    ).then((r) => r.alerts),
 
   // Заглушки алертов (readonly читает; создание/снятие — admin). all=1 включает истёкшие.
   alertMutes: (all = false) =>

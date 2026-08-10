@@ -46,14 +46,14 @@ export default tseslint.config(
       // `additionalHooks` — существенное расширение покрытия. Данные панель
       // тянет не голым `useEffect`, а своими хуками вида `(fetcher, deps)`:
       // useData/useLiveAsync (lib/live.tsx), useAsync (lib/useAsync.ts),
-      // useProjectList (lib/project.tsx). Их массив deps — такой же ручной
+      // useProjectList/useProjectAsync (lib/project.tsx). Их массив deps — такой же ручной
       // список, как у useMemo, и до сих пор он был слепой зоной ЛЮБОГО
       // линтера: забыть в нём проект или фильтр можно было безнаказанно на
       // каждом из ~40 call-site'ов по экранам. Замер на момент заведения:
       // новых находок ноль (экраны честны) — цена нулевая, защита реальная.
       'react-hooks/exhaustive-deps': [
         'error',
-        { additionalHooks: '^(useData|useLiveAsync|useAsync|useProjectList)$' },
+        { additionalHooks: '^(useData|useLiveAsync|useAsync|useProjectList|useProjectAsync)$' },
       ],
 
       // ── React Fast Refresh (DX) ───────────────────────────────────────
