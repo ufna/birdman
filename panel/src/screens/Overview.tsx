@@ -4,8 +4,8 @@
 import { useMemo } from 'react';
 import { api } from '../lib/api';
 import type { GameServer, Match, NodeInfo, VersionInfo } from '../lib/api';
-import { useData } from '../lib/live';
 import { useEnv, keepForEnv } from '../lib/env';
+import { useProjectList } from '../lib/project';
 import { useNow } from '../lib/useNow';
 import { useT, useFormat } from '../lib/i18n';
 import { Card, CardHeader, ErrorNote, LiveValue, LoadingRow, StatCard } from '../components/ui';
@@ -16,11 +16,13 @@ const HOUR_MS = 3_600_000;
 const LIVE_SERVER_STATES = new Set(['creating', 'ready', 'allocated', 'draining']);
 
 export function Overview() {
-  const nodes = useData(() => api.listNodes(), []);
-  const servers = useData(() => api.listServers(), []);
-  const versions = useData(() => api.listVersions(), []);
+  // Все списки сужены по ВЫБРАННОМУ проекту на сервере (мультипроект W2):
+  // useProjectList сам подставляет слаг и перезапрашивает при его смене.
+  const nodes = useProjectList((project) => api.listNodes({ project }), []);
+  const servers = useProjectList((project) => api.listServers({ project }), []);
+  const versions = useProjectList((project) => api.listVersions({ project }), []);
   // Матчи за час для спарклайна + live-счётчик; лимита 1000 хватает v0.
-  const matches = useData(() => api.listMatches({ limit: 1000 }), []);
+  const matches = useProjectList((project) => api.listMatches({ project, limit: 1000 }), []);
   const now = useNow();
   const { selected } = useEnv();
 

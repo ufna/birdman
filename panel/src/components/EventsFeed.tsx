@@ -6,6 +6,7 @@ import { api } from '../lib/api';
 import type { ApiEvent } from '../lib/api';
 import { useLive } from '../lib/live';
 import { useEnv, eventEnvOf, keepForEnv } from '../lib/env';
+import { useProject, keepForProject } from '../lib/project';
 import { shortId, summarizePayload } from '../lib/format';
 import { useT, useFormat } from '../lib/i18n';
 import type { I18nContextValue } from '../lib/i18n';
@@ -17,6 +18,7 @@ const FEED_CAP = 60;
 export function EventsFeed() {
   const { subscribe } = useLive();
   const { selected } = useEnv();
+  const { selected: project } = useProject();
   const { t } = useT();
   const fmt = useFormat();
   const [events, setEvents] = useState<ApiEvent[] | null>(null);
@@ -53,7 +55,9 @@ export function EventsFeed() {
   if (events === null) return <LoadingRow />;
   // env-фильтр (environments v1 §8, M13) — то же правило, что экран Events:
   // события БЕЗ env видны только в «All»; version_promoted несёт env в to_env.
-  const visible = keepForEnv(events, selected, eventEnvOf);
+  // Проектный фильтр поверх него — НЕ скрывающий: у проекта нет режима «Все»,
+  // поэтому уходят только события ЧУЖОГО проекта (мультипроект W2).
+  const visible = keepForProject(keepForEnv(events, selected, eventEnvOf), project);
   if (visible.length === 0) {
     return <EmptyState>{events.length > 0 ? t('events.emptyFilter') : t('events.none')}</EmptyState>;
   }

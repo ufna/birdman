@@ -287,7 +287,7 @@ POST /v1/rollback: шаг 3 в обратную сторону (образы у�
 | `DELETE /v1/matchmaking/tickets/{id}` | matchmaking | отмена |
 | `GET /v1/qos?env=&project=` | public | пинг-эндпоинты нод env `[{region, host, udp_port}]`; без env — единственный env с активными нодами, иначе `400 env_required` (environments v1 §3) |
 | `POST /v1/allocate` | allocate | граница флота (см. §3); `env?` резолвится (явное → привязка ключа → единственный env с ready → `409`) |
-| `GET /v1/nodes` · `/v1/servers` · `/v1/matches` · `/v1/versions` | readonly | списки с фильтрами; `/v1/nodes` (v1) отдаёт аддитивные cert-поля `cert_serial`, `cert_not_after`, `enrolled_at` (nullable) |
+| `GET /v1/nodes` · `/v1/servers` · `/v1/matches` · `/v1/versions` | readonly | списки с фильтрами; все четыре принимают `?project=` (мультипроект W2 — панель сужает по выбранному проекту на сервере), `/v1/nodes` и `/v1/versions` дополнительно `?env=`; пустой фильтр = всё, как раньше. `/v1/nodes` (v1) отдаёт аддитивные cert-поля `cert_serial`, `cert_not_after`, `enrolled_at` (nullable). События (`/v1/events`) проектом НЕ сужаются: в таблице нет `project_id`, панель убирает лишь события явно чужого проекта |
 | `GET /v1/ca` | readonly | публичный PEM-бандл активных внутренних CA (`text/plain`) — для ansible (кладёт `master-ca.pem` на ноды) и отладки; приватный ключ CA неоткуда прочитать by construction (mTLS v1, `protocol.md` §Auth) |
 | `GET /v1/events/stream` (SSE) | readonly | live-лента для панели |
 | `PUT /v1/fleets/{region}` | admin | buffer, max_servers, reap_ttl; **`env` в теле обязателен** (environments v1 §2; валидация active_version×env — БД-FK + 400) |

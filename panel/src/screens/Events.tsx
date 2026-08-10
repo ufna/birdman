@@ -8,8 +8,9 @@ import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { api } from '../lib/api';
 import type { ApiEvent, NodeInfo } from '../lib/api';
-import { useData, useLive } from '../lib/live';
+import { useLive } from '../lib/live';
 import { useEnv, eventEnvOf } from '../lib/env';
+import { useProject, useProjectList, eventProjectOf } from '../lib/project';
 import { useServerDrawer } from '../lib/drawer';
 import { shortId, summarizePayload } from '../lib/format';
 import { useT, useFormat } from '../lib/i18n';
@@ -35,9 +36,10 @@ function kindLabel(kind: string, i18n: Pick<I18nContextValue, 't' | 'has'>): str
 export function Events() {
   const { subscribe } = useLive();
   const { selected } = useEnv();
+  const { selected: project } = useProject();
   const i18n = useT();
   const { t, tp } = i18n;
-  const nodes = useData(() => api.listNodes(), []);
+  const nodes = useProjectList((project) => api.listNodes({ project }), []);
 
   const [limit, setLimit] = useState(500);
   const [reloadKey, setReloadKey] = useState(0);
@@ -96,6 +98,11 @@ export function Events() {
       // env-фильтр (environments v1 §7, M13): при выбранном env показываем только
       // события этого env; события БЕЗ env (старые/безадресные) — только в «All».
       if (selected !== null && eventEnvOf(e) !== selected) return false;
+      // проектный фильтр (мультипроект W2) — НЕ скрывающий: убирает только
+      // события ЧУЖОГО проекта, неатрибутированные остаются (у events нет
+      // project_id, а режима «Все проекты» не существует — см. keepForProject).
+      const evProject = eventProjectOf(e);
+      if (project !== null && evProject !== undefined && evProject !== project) return false;
       return true;
     });
   }, [all, kind, node, period, selected]);

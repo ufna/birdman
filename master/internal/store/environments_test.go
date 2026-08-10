@@ -41,7 +41,7 @@ func TestEnvironmentsSeededOnProjectCreate(t *testing.T) {
 		t.Fatalf("prod seed wrong: %+v", prod)
 	}
 	// The seeded node itself entered as dev (never prod implicitly).
-	nodes, _ := st.ListNodes(ctx)
+	nodes, _ := st.ListNodes(ctx, store.NodeFilter{})
 	if len(nodes) != 1 || nodes[0].Env != "dev" {
 		t.Fatalf("new node must enter as dev: %+v", nodes)
 	}
@@ -433,7 +433,7 @@ func TestEnvironmentsDeleteCascade(t *testing.T) {
 		t.Fatal("wrong rows deleted")
 	}
 	// Provenance промоута обнулён (self-FK), сама prod-версия жива.
-	vs, err := st.ListVersions(ctx)
+	vs, err := st.ListVersions(ctx, store.VersionFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}

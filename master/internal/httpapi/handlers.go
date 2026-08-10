@@ -53,8 +53,13 @@ func (s *Server) handleCreateNode(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleListNodes is GET /v1/nodes?project=&env= (readonly). Оба фильтра
+// необязательны; пустые = весь флот (поведение до мультипроекта W2).
 func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
-	nodes, err := s.st.ListNodes(r.Context())
+	nodes, err := s.st.ListNodes(r.Context(), store.NodeFilter{
+		Project: r.URL.Query().Get("project"),
+		Env:     r.URL.Query().Get("env"),
+	})
 	if err != nil {
 		storeError(w, err)
 		return
@@ -146,8 +151,13 @@ func (s *Server) handleCreateVersion(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, resp)
 }
 
+// handleListVersions is GET /v1/versions?project=&env= (readonly). Оба фильтра
+// необязательны; пустые = все версии (поведение до мультипроекта W2).
 func (s *Server) handleListVersions(w http.ResponseWriter, r *http.Request) {
-	versions, err := s.st.ListVersions(r.Context())
+	versions, err := s.st.ListVersions(r.Context(), store.VersionFilter{
+		Project: r.URL.Query().Get("project"),
+		Env:     r.URL.Query().Get("env"),
+	})
 	if err != nil {
 		storeError(w, err)
 		return

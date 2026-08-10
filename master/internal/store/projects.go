@@ -18,10 +18,12 @@ type Project struct {
 
 // ListProjects returns every project, oldest first — what the panel's project
 // selector is built from (мультипроект W1). Sorted by (created_at, slug): the
-// timestamp alone is not a total order, because ensureProject can create
-// several projects inside one transaction and they then share it — the slug
-// tiebreak keeps the selector's first entry (its default choice) stable across
-// reloads.
+// timestamp alone is not a total order, and the panel's DEFAULT choice is
+// literally "the first row", so a tie would make that default flip between
+// reloads. Ties are reachable without any single transaction creating two
+// projects (no path does): `now()` is per-transaction, and two projects
+// registered concurrently — or restored from a dump — can land on the same
+// microsecond. The slug tiebreak makes the order total either way.
 func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 	rows, err := s.Pool.Query(ctx, `
 		select id::text, slug, match_size, created_at

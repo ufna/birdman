@@ -8,8 +8,8 @@ import * as Tabs from '@radix-ui/react-tabs';
 import type { ColumnDef } from '@tanstack/react-table';
 import { api } from '../lib/api';
 import type { Match, MatchState } from '../lib/api';
-import { useData } from '../lib/live';
 import { useEnv, keepForEnv } from '../lib/env';
+import { useProjectList } from '../lib/project';
 import { useMatchDrawer, useServerDrawer } from '../lib/drawer';
 import { useNow } from '../lib/useNow';
 import { versionColor } from '../lib/stats';
@@ -32,7 +32,7 @@ type T = I18nContextValue['t'];
  */
 function useMatchEnvFilter(): (matches: Match[]) => Match[] {
   const { selected } = useEnv();
-  const versions = useData(() => api.listVersions(), []);
+  const versions = useProjectList((project) => api.listVersions({ project }), []);
   const envOf = useMemo(() => new Map((versions.data ?? []).map((v) => [v.id, v.env])), [versions.data]);
   return useCallback(
     (matches: Match[]) => keepForEnv(matches, selected, (m) => envOf.get(m.version_id)),
@@ -69,11 +69,11 @@ function LiveMatches() {
   const { t } = useT();
   const { open: openMatch } = useMatchDrawer();
   const filterByEnv = useMatchEnvFilter();
-  const live = useData(
-    () =>
+  const live = useProjectList(
+    (project) =>
       Promise.all([
-        api.listMatches({ state: 'running', limit: 500 }),
-        api.listMatches({ state: 'pending', limit: 500 }),
+        api.listMatches({ project, state: 'running', limit: 500 }),
+        api.listMatches({ project, state: 'pending', limit: 500 }),
       ]).then(([running, pending]) =>
         [...running, ...pending].sort(
           (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
@@ -179,16 +179,17 @@ function MatchHistory() {
   const [page, setPage] = useState(0);
 
   // Регионы для фильтра — из нод (авторитетный список).
-  const nodes = useData(() => api.listNodes(), []);
+  const nodes = useProjectList((project) => api.listNodes({ project }), []);
   const regions = useMemo(
     () => [...new Set((nodes.data ?? []).map((n) => n.region))].sort((a, b) => a.localeCompare(b)),
     [nodes.data],
   );
 
   // limit+1 — чтобы знать, есть ли следующая страница.
-  const rows = useData(
-    () =>
+  const rows = useProjectList(
+    (project) =>
       api.listMatches({
+        project,
         state: state === '' ? undefined : state,
         region: region === '' ? undefined : region,
         limit: PAGE_SIZE + 1,

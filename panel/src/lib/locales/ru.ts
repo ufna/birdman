@@ -260,6 +260,9 @@ export const ru: Record<MessageKey, string> = {
   'fleet.nodesCount.many': '{count} тачек',
   'fleet.nodesCount.other': '{count} тачки',
   'fleet.emptyPre': 'Тачек пока нет. Зарегистрируйте первую:',
+  // Вариант с проектом (мультипроект W2): после сужения голое «тачек нет»
+  // читалось бы как «платформа мертва». Без выбранного проекта — вариант выше.
+  'fleet.emptyInProject': 'В проекте {project} пока нет тачек. Зарегистрируйте первую:',
   'fleet.node.noServers': 'На тачке нет дедиков.',
   'fleet.toggleNode': 'Показать или скрыть дедики тачки {host}',
   'fleet.drain.playing.one': '{count} доигрывает',
@@ -321,6 +324,7 @@ export const ru: Record<MessageKey, string> = {
 
   // — экран «Деплои» —
   'deploys.emptyPre': 'Версий пока нет. Зарегистрируйте билд:',
+  'deploys.emptyInProject': 'В проекте {project} пока нет версий. Зарегистрируйте билд:',
   'deploys.project': 'Проект {project}',
   'deploys.versionsCount.one': '{count} версия',
   'deploys.versionsCount.few': '{count} версии',

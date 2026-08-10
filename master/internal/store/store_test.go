@@ -35,7 +35,7 @@ func TestNodeTokenAuth(t *testing.T) {
 		t.Fatalf("unknown node: want ErrBadToken, got %v", err)
 	}
 
-	nodes, err := st.ListNodes(ctx)
+	nodes, err := st.ListNodes(ctx, store.NodeFilter{})
 	if err != nil || len(nodes) != 1 {
 		t.Fatalf("list nodes: %v, %d", err, len(nodes))
 	}

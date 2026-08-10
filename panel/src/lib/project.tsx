@@ -15,7 +15,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { api } from './api';
-import type { ProjectInfo } from './api';
+import type { ApiEvent, ProjectInfo } from './api';
+import { useData } from './live';
 
 /** Ключ localStorage для выбранного проекта (слаг). */
 export const PROJECT_STORAGE_KEY = 'birdman.project';
@@ -125,4 +126,56 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
 
 export function useProject(): ProjectContextValue {
   return useContext(ProjectContext) ?? FALLBACK_PROJECT;
+}
+
+/**
+ * `useData` для проектных списков (мультипроект W2): отдаёт фетчеру выбранный
+ * слаг и САМ добавляет проект в зависимости — смена проекта перезапрашивает
+ * данные, и забыть об этом на очередном экране нельзя по построению. Пока
+ * проекта нет (грузится / их вообще нет) — пустой список, а не запрос без
+ * фильтра: панель не показывает чужие данные, даже мельком.
+ */
+export function useProjectList<T>(fetcher: (project: string) => Promise<T[]>, deps: unknown[]) {
+  const ctx = useContext(ProjectContext);
+  // Различаем ДВА «проекта нет», и разница принципиальная:
+  //  • провайдера нет вовсе (изолированные юнит-тесты экранов) → проектного
+  //    измерения не существует, сужать нечем: фетчим БЕЗ фильтра, ровно как
+  //    до мультипроекта. Пустая строка отсеивается в qs(), так что параметр
+  //    в запрос не попадает. Тот же приём, что у FALLBACK_ENV.
+  //  • провайдер есть и говорит null (список грузится / проектов нет) →
+  //    пустой список: чужие данные не показываем даже мельком.
+  const project = ctx === null ? '' : ctx.selected;
+  return useData<T[]>(
+    () => (project === null ? Promise.resolve([]) : fetcher(project)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- deps задаёт экран, проект добавляем мы
+    [...deps, project],
+  );
+}
+
+/**
+ * Проект события ленты — для клиентского сужения (у таблицы `events` нет
+ * project_id, а из payload проект несут только часть видов: version/deploy/
+ * fleet/environment; у node/server/match-событий его нет вовсе).
+ */
+export function eventProjectOf(e: ApiEvent): string | undefined {
+  const v = e.payload.project;
+  return typeof v === 'string' ? v : undefined;
+}
+
+/**
+ * Фильтр ленты по проекту — НЕ скрывающий: событие уходит, только если оно
+ * ЯВНО принадлежит другому проекту. Событие без атрибуции остаётся видимым.
+ *
+ * Так, а не «оставить только совпадающие», потому что у проекта нет режима
+ * «Все» (в отличие от env): строгий фильтр спрятал бы неатрибутированные
+ * события НАВСЕГДА и ни из какого режима их было бы не достать — потеря
+ * данных ради косметики. Настоящее решение — project_id в самой таблице
+ * событий; до него честнее показать лишнее, чем утаить нужное.
+ */
+export function keepForProject(events: ApiEvent[], project: string | null): ApiEvent[] {
+  if (project === null) return events;
+  return events.filter((e) => {
+    const p = eventProjectOf(e);
+    return p === undefined || p === project;
+  });
 }

@@ -498,10 +498,12 @@ export const api = {
   deleteSession: () => request<void>('DELETE', '/v1/session'),
 
   // Read-only списки П0.
-  listNodes: () => request<{ nodes: NodeInfo[] }>('GET', '/v1/nodes').then((r) => r.nodes),
+  listNodes: (f: { project?: string; env?: string } = {}) =>
+    request<{ nodes: NodeInfo[] }>('GET', `/v1/nodes${qs(f)}`).then((r) => r.nodes),
   listServers: (f: { state?: string; region?: string; project?: string } = {}) =>
     request<{ servers: GameServer[] }>('GET', `/v1/servers${qs(f)}`).then((r) => r.servers),
-  listVersions: () => request<{ versions: VersionInfo[] }>('GET', '/v1/versions').then((r) => r.versions),
+  listVersions: (f: { project?: string; env?: string } = {}) =>
+    request<{ versions: VersionInfo[] }>('GET', `/v1/versions${qs(f)}`).then((r) => r.versions),
   listMatches: (f: MatchFilter = {}) =>
     request<{ matches: Match[] }>('GET', `/v1/matches${qs(f)}`).then((r) => r.matches),
   getMatch: (id: string) =>
@@ -548,9 +550,11 @@ export const api = {
 
   // --- Окружения (environments v1 §2): список — readonly, CRUD — admin ---
 
-  /** Список окружений проекта (readonly). project обязателен: панель всегда
-   *  знает выбранный проект (мультипроект W1), sole-резолва больше не ждём. */
-  listEnvironments: (project?: string) =>
+  /** Список окружений проекта (readonly). project ОБЯЗАТЕЛЕН: панель всегда
+   *  знает выбранный проект (мультипроект W1), и опциональность параметра
+   *  оставляла бы открытым путь к sole-резолву на стороне master — тому
+   *  самому, который при нескольких проектах отвечал 400. */
+  listEnvironments: (project: string) =>
     request<{ environments: Environment[] }>('GET', `/v1/environments${qs({ project })}`).then((r) => r.environments),
   /** Создать окружение (admin). 201; production&&auto_deploy или all/global → 400; дубль → 409. */
   createEnvironment: (body: EnvironmentInput) =>

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -103,12 +104,37 @@ func (s *Store) CreateVersion(ctx context.Context, p CreateVersionParams) (Versi
 	return v, nil
 }
 
-// ListVersions returns all registered versions.
-func (s *Store) ListVersions(ctx context.Context) ([]Version, error) {
-	rows, err := s.Pool.Query(ctx, `
+// VersionFilter narrows ListVersions; a zero value means "everything" (пустое
+// поле — отсутствие условия, как в ServerFilter/NodeFilter).
+type VersionFilter struct {
+	Project string // слаг проекта (мультипроект W2)
+	Env     string // окружение версии (environments v1)
+}
+
+// ListVersions returns registered versions, newest first, optionally narrowed
+// by VersionFilter.
+func (s *Store) ListVersions(ctx context.Context, f VersionFilter) ([]Version, error) {
+	q := `
 		select v.id::text, v.project_id::text, p.slug, v.semver, v.image_ref, v.env, v.state, v.created_at, v.deprecated_at, v.promoted_from::text
-		from versions v join projects p on p.id = v.project_id
-		order by v.created_at desc`)
+		from versions v join projects p on p.id = v.project_id`
+	var conds []string
+	var args []any
+	add := func(cond string, val any) {
+		args = append(args, val)
+		conds = append(conds, fmt.Sprintf(cond, len(args)))
+	}
+	if f.Project != "" {
+		add("p.slug = $%d", f.Project)
+	}
+	if f.Env != "" {
+		add("v.env = $%d", f.Env)
+	}
+	if len(conds) > 0 {
+		q += " where " + strings.Join(conds, " and ")
+	}
+	q += " order by v.created_at desc"
+
+	rows, err := s.Pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}

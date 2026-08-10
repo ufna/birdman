@@ -7,8 +7,17 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import type { Environment, ProjectInfo } from '../lib/api';
 import { I18nProvider } from '../lib/i18n';
 import { EnvProvider, useEnv } from '../lib/env';
-import { PROJECT_STORAGE_KEY, ProjectProvider, resolveProject, storedProject, useProject } from '../lib/project';
+import {
+  PROJECT_STORAGE_KEY,
+  ProjectProvider,
+  eventProjectOf,
+  keepForProject,
+  resolveProject,
+  storedProject,
+  useProject,
+} from '../lib/project';
 import { ProjectSelector } from '../components/Shell';
+import { Fleet } from '../screens/Fleet';
 
 const proj = (slug: string): ProjectInfo => ({
   id: `id-${slug}`,
@@ -62,6 +71,35 @@ describe('project — storedProject', () => {
     expect(storedProject()).toBeNull();
     localStorage.setItem(PROJECT_STORAGE_KEY, 'arena');
     expect(storedProject()).toBe('arena');
+  });
+});
+
+describe('project — eventProjectOf / keepForProject (лента событий)', () => {
+  const ev = (id: number, payload: Record<string, unknown>) => ({
+    id,
+    ts: '2026-08-01T00:00:00Z',
+    kind: 'version_registered',
+    payload,
+  });
+
+  it('проект события берётся из payload.project; иначе undefined', () => {
+    expect(eventProjectOf(ev(1, { project: 'game' }))).toBe('game');
+    expect(eventProjectOf(ev(2, {}))).toBeUndefined();
+    // Не строка — тоже «не знаем», а не приведение к строке.
+    expect(eventProjectOf(ev(3, { project: 42 }))).toBeUndefined();
+  });
+
+  it('фильтр НЕ скрывающий: уходят только события ЧУЖОГО проекта', () => {
+    const events = [ev(1, { project: 'game' }), ev(2, { project: 'arena' }), ev(3, {})];
+    const kept = keepForProject(events, 'game');
+    // Событие без атрибуции ОСТАЁТСЯ: у проекта нет режима «Все», и строгий
+    // фильтр спрятал бы его навсегда — это была бы потеря данных.
+    expect(kept.map((e) => e.id)).toEqual([1, 3]);
+  });
+
+  it('проект не выбран → лента не режется', () => {
+    const events = [ev(1, { project: 'game' }), ev(2, { project: 'arena' })];
+    expect(keepForProject(events, null)).toHaveLength(2);
   });
 });
 
@@ -230,6 +268,44 @@ describe('EnvProvider под ProjectProvider', () => {
       expect(screen.getByTestId('envs').textContent).toBe('arena/dev');
     });
     expect(urls).toContain('/v1/environments?project=arena');
+  });
+
+  it('экран Флот запрашивает ноды с ?project= и перезапрашивает при смене', async () => {
+    const urls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        const u = String(url);
+        urls.push(u);
+        if (u.startsWith('/v1/projects')) return Promise.resolve(jsonRes({ projects: [game, arena] }));
+        if (u.startsWith('/v1/environments')) return Promise.resolve(jsonRes({ environments: [] }));
+        if (u.startsWith('/v1/nodes')) return Promise.resolve(jsonRes({ nodes: [] }));
+        if (u.startsWith('/v1/servers')) return Promise.resolve(jsonRes({ servers: [] }));
+        if (u.startsWith('/v1/versions')) return Promise.resolve(jsonRes({ versions: [] }));
+        return Promise.resolve(jsonRes({ events: [] }));
+      }),
+    );
+    render(
+      <I18nProvider initialLang="en">
+        <ProjectProvider>
+          <div>
+            <ProjectSelector />
+            <Fleet />
+          </div>
+        </ProjectProvider>
+      </I18nProvider>,
+    );
+
+    await waitFor(() => {
+      expect(urls.some((u) => u === '/v1/nodes?project=game')).toBe(true);
+    });
+    // Сужение серверное: голого /v1/nodes (все проекты сразу) быть не должно.
+    expect(urls.some((u) => u === '/v1/nodes')).toBe(false);
+
+    fireEvent.change(await screen.findByRole('combobox', { name: 'Project' }), { target: { value: 'arena' } });
+    await waitFor(() => {
+      expect(urls.some((u) => u === '/v1/nodes?project=arena')).toBe(true);
+    });
   });
 
   it('проекта нет → окружения не запрашиваются вовсе', async () => {

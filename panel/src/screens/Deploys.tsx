@@ -12,8 +12,9 @@ import type { ColumnDef } from '@tanstack/react-table';
 import * as Dialog from '@radix-ui/react-dialog';
 import { api, ApiError } from '../lib/api';
 import type { ApiEvent, Environment, GameServer, NodeInfo, VersionInfo } from '../lib/api';
-import { useData, useLive } from '../lib/live';
+import { useLive } from '../lib/live';
 import { useEnv, keepForEnv } from '../lib/env';
+import { useProject, useProjectList } from '../lib/project';
 import { canAdmin, canDeploy, useSession } from '../lib/session';
 import { shortId } from '../lib/format';
 import { useT, useFormat } from '../lib/i18n';
@@ -31,14 +32,15 @@ const HEARTBEAT_FRESH_MS = 30_000;
 
 export function Deploys({ navigate }: { navigate: (path: string) => void }) {
   const { t } = useT();
-  const versions = useData(() => api.listVersions(), []);
-  const servers = useData(() => api.listServers(), []);
-  const nodes = useData(() => api.listNodes(), []);
+  const versions = useProjectList((project) => api.listVersions({ project }), []);
+  const servers = useProjectList((project) => api.listServers({ project }), []);
+  const nodes = useProjectList((project) => api.listNodes({ project }), []);
   const progress = useDeployProgress();
   const { session } = useSession();
   const mayDeploy = session != null && canDeploy(session);
   const mayAdmin = session != null && canAdmin(session);
   const { selected, environments, reload: reloadEnvs } = useEnv();
+  const { selected: project } = useProject();
   // «Скрывать disabled» по умолчанию (environments v1 §8, M11): при dev-потоке
   // список версий пухнет снятыми ретеншном строками — прячем их за тогглом.
   const [hideDisabled, setHideDisabled] = useState(true);
@@ -73,7 +75,7 @@ export function Deploys({ navigate }: { navigate: (path: string) => void }) {
 
   return (
     <div className="flex flex-col gap-4">
-      {isEmpty && <p className="text-sm text-muted">{selected !== null ? t('deploys.emptyEnv') : t('deploys.emptyPre')}</p>}
+      {isEmpty && <p className="text-sm text-muted">{selected !== null ? t('deploys.emptyEnv') : project !== null ? t('deploys.emptyInProject', { project }) : t('deploys.emptyPre')}</p>}
       {mayAdmin && selectedEnvObj !== undefined && (
         <EnvSettingsCard env={selectedEnvObj} onSaved={reloadEnvs} />
       )}

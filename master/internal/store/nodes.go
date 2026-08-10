@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/crypto/bcrypt"
@@ -366,14 +367,39 @@ func (s *Store) EnvNodeIDs(ctx context.Context, projectID, env string) ([]string
 	return out, rows.Err()
 }
 
-// ListNodes returns all nodes with project slugs.
-func (s *Store) ListNodes(ctx context.Context) ([]Node, error) {
-	rows, err := s.Pool.Query(ctx, `
+// NodeFilter narrows ListNodes; a zero value means "everything" (пустое поле —
+// отсутствие условия, как в ServerFilter).
+type NodeFilter struct {
+	Project string // слаг проекта (мультипроект W2)
+	Env     string // окружение ноды (environments v1)
+}
+
+// ListNodes returns nodes with project slugs, oldest first, optionally
+// narrowed by NodeFilter.
+func (s *Store) ListNodes(ctx context.Context, f NodeFilter) ([]Node, error) {
+	q := `
 		select n.id::text, n.project_id::text, p.slug, n.region, n.env, n.hostname, host(n.public_ip),
 		       n.capacity_slots, n.agent_version, n.state, n.last_heartbeat_at, n.labels, n.created_at,
 		       n.cert_serial, n.cert_not_after, n.enrolled_at
-		from nodes n join projects p on p.id = n.project_id
-		order by n.created_at`)
+		from nodes n join projects p on p.id = n.project_id`
+	var conds []string
+	var args []any
+	add := func(cond string, v any) {
+		args = append(args, v)
+		conds = append(conds, fmt.Sprintf(cond, len(args)))
+	}
+	if f.Project != "" {
+		add("p.slug = $%d", f.Project)
+	}
+	if f.Env != "" {
+		add("n.env = $%d", f.Env)
+	}
+	if len(conds) > 0 {
+		q += " where " + strings.Join(conds, " and ")
+	}
+	q += " order by n.created_at"
+
+	rows, err := s.Pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}

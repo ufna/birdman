@@ -195,7 +195,10 @@ func (s *Server) handleAgentUpgrade(w http.ResponseWriter, r *http.Request) {
 		}
 		targets = []store.Node{node}
 	} else {
-		nodes, err := s.st.ListNodes(r.Context())
+		// Апгрейд агента — инфраструктурная операция, а не проектная: цель
+		// «все ноды» остаётся всем флотом (пустой фильтр), сужать её по
+		// проекту было бы новым поведением, которого никто не просил.
+		nodes, err := s.st.ListNodes(r.Context(), store.NodeFilter{})
 		if err != nil {
 			storeError(w, err)
 			return

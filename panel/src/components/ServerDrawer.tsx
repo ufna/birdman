@@ -10,7 +10,8 @@ import * as Dialog from '@radix-ui/react-dialog';
 import * as Tabs from '@radix-ui/react-tabs';
 import { api } from '../lib/api';
 import type { ApiEvent, GameServer } from '../lib/api';
-import { useData, useLive } from '../lib/live';
+import { useLive } from '../lib/live';
+import { useProjectList } from '../lib/project';
 import { useNow } from '../lib/useNow';
 import { serverMetricQueries } from '../lib/metrics';
 import { shortId, summarizePayload } from '../lib/format';
@@ -52,8 +53,8 @@ function HiddenTitle() {
 
 function DrawerBody({ serverId }: { serverId: string }) {
   const { t } = useT();
-  const servers = useData(() => api.listServers(), []);
-  const versions = useData(() => api.listVersions(), []);
+  const servers = useProjectList((project) => api.listServers({ project }), []);
+  const versions = useProjectList((project) => api.listVersions({ project }), []);
   const now = useNow();
 
   const server = useMemo(

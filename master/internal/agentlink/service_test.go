@@ -193,7 +193,7 @@ func TestSessionHeartbeatCommandsAndReplay(t *testing.T) {
 		return err == nil && sv.State == "ready" && sv.Port == 22001
 	})
 	eventually(t, "node heartbeat recorded", func() bool {
-		nodes, err := st.ListNodes(context.Background())
+		nodes, err := st.ListNodes(context.Background(), store.NodeFilter{})
 		return err == nil && len(nodes) == 1 && nodes[0].LastHeartbeatAt != nil
 	})
 
@@ -291,7 +291,7 @@ func TestSessionReplacedByNewConnection(t *testing.T) {
 	}
 	// Wait until the first session is attached (its Hello is processed).
 	eventually(t, "first session attached", func() bool {
-		nodes, err := st.ListNodes(context.Background())
+		nodes, err := st.ListNodes(context.Background(), store.NodeFilter{})
 		return err == nil && nodes[0].AgentVersion == "0.1.0"
 	})
 

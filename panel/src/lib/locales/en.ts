@@ -276,6 +276,9 @@ export const en = {
   'fleet.nodesCount.many': '{count} nodes',
   'fleet.nodesCount.other': '{count} nodes',
   'fleet.emptyPre': 'No nodes yet. Register the first:',
+  // Вариант с проектом (мультипроект W2): после сужения голое «нет нод»
+  // читалось бы как «платформа мертва». Без выбранного проекта — вариант выше.
+  'fleet.emptyInProject': 'No nodes in project {project} yet. Register the first:',
   'fleet.node.noServers': 'No dedics on this node.',
   'fleet.toggleNode': 'Show or hide dedics on {host}',
   'fleet.drain.playing.one': '{count} still playing',
@@ -337,6 +340,7 @@ export const en = {
 
   // — Deploys screen —
   'deploys.emptyPre': 'No versions yet. Register a build:',
+  'deploys.emptyInProject': 'No versions in project {project} yet. Register a build:',
   'deploys.project': 'Project {project}',
   'deploys.versionsCount.one': '{count} version',
   'deploys.versionsCount.few': '{count} versions',

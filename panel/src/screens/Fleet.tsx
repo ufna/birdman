@@ -8,6 +8,7 @@ import { api, ApiError } from '../lib/api';
 import type { ApiEvent, Environment, GameServer, NodeInfo } from '../lib/api';
 import { useData } from '../lib/live';
 import { useEnv, keepForEnv } from '../lib/env';
+import { useProject, useProjectList } from '../lib/project';
 import { canAdmin, useSession } from '../lib/session';
 import { EnvTag } from '../components/EnvTag';
 import { useServerDrawer } from '../lib/drawer';
@@ -25,15 +26,19 @@ const LIVE_SERVER_STATES = new Set(['creating', 'ready', 'allocated', 'draining'
 
 export function Fleet() {
   const { t, tp } = useT();
-  const nodes = useData(() => api.listNodes(), []);
-  const servers = useData(() => api.listServers(), []);
-  const versions = useData(() => api.listVersions(), []);
+  const nodes = useProjectList((project) => api.listNodes({ project }), []);
+  const servers = useProjectList((project) => api.listServers({ project }), []);
+  const versions = useProjectList((project) => api.listVersions({ project }), []);
   // Причина карантина — из последнего события node_quarantine ноды
   // (server-side фильтра по node_id у /v1/events нет — фильтруем клиентом).
+  // Проектного сужения тут не нужно: лента используется как lookup
+  // node_id → причина карантина, а сами ноды уже сужены по проекту — событие
+  // чужой ноды просто никогда не будет запрошено.
   const events = useData(() => api.listEvents(500), []);
   const { session } = useSession();
   const mayAdmin = session != null && canAdmin(session);
   const { selected, environments } = useEnv();
+  const { selected: project } = useProject();
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const isProdEnv = (envName: string) => environments.find((e) => e.name === envName)?.production === true;
 
@@ -167,7 +172,8 @@ export function Fleet() {
           rowId={(n) => n.id}
           empty={
             <>
-              {t('fleet.emptyPre')} <span className="font-mono">POST /v1/nodes</span>
+              {project !== null ? t('fleet.emptyInProject', { project }) : t('fleet.emptyPre')}{' '}
+              <span className="font-mono">POST /v1/nodes</span>
             </>
           }
           expandedId={expandedId}
