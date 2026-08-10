@@ -43,3 +43,34 @@ jobs:
 
       - name: Build (vite)
         run: npm run build
+
+  # Аудит зависимостей — ОТДЕЛЬНЫМ джобом, чтобы красное читалось как «audit»,
+  # а не как «сборка сломалась»: падает он от чужого релиза в произвольный момент.
+  # Оба шага строят дерево из package-lock.json, `npm ci` не нужен → джоб идёт
+  # секунды и не удлиняет критический путь.
+  audit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: panel
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Блокирующая часть: только рантайм-зависимости. Их код едет в panel/dist
+      # и через go:embed внутрь бинаря master, то есть до оператора, — high здесь
+      # обязан ронять PR.
+      - name: Audit runtime deps (blocking)
+        run: npm audit --omit=dev --audit-level=high
+
+      # Информационная часть: dev/сборочные (vite, vitest, eslint, tsc). Их код
+      # не покидает CI и машину разработчика — собранная статика его не содержит,
+      # так что находка тут это гигиена цепочки сборки, а не дырка в продукте.
+      # Виден как warning, но НЕ блокирует несвязанный PR.
+      # Разбор поверхности зависимостей — docs/specs/panel.md §2.
+      - name: Audit build deps (informational)
+        continue-on-error: true
+        run: npm audit --audit-level=high
