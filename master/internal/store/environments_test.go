@@ -339,7 +339,7 @@ func TestEnvironmentsDeleteCascade(t *testing.T) {
 	if err := st.UpsertRollupDay(ctx, time.Now().UTC(), []store.RollupDim{
 		{Region: "eu", Semver: "1.0.0", Env: "dev", Matches: 1},
 		{Region: "eu", Semver: "1.0.0", Env: "prod", Matches: 1},
-	}, 3); err != nil {
+	}, 3, nil); err != nil {
 		t.Fatalf("rollup: %v", err)
 	}
 

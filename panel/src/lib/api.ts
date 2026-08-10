@@ -535,13 +535,16 @@ export const api = {
 
   // --- П2: статистика / cost (скоуп readonly) ---
 
-  /** Агрегаты обзора за N дней (matches/players/CCU/версии/fill-rate). `env`
-   *  (environments v1 §7, I5) сужает историю через ?env=; CCU остаётся
-   *  глобальным платформенным пиком (панель подписывает его «platform-wide»). */
-  statsOverview: (days: number, env?: string) =>
-    request<StatsOverview>('GET', `/v1/stats/overview${qs({ days, env })}`),
-  /** Слото-часы per регион/версия + утилизация за N дней. `env` — как в overview. */
-  statsCost: (days: number, env?: string) => request<StatsCost>('GET', `/v1/stats/cost${qs({ days, env })}`),
+  /** Агрегаты обзора за N дней (matches/players/CCU/версии/fill-rate).
+   *  `env` (environments v1 §7, I5) сужает историю, но НЕ пик CCU — он
+   *  остаётся пиком всего среза. `project` (мультипроект W3) сужает ВСЁ,
+   *  включая пик: проекты — непересекающиеся тенанты. Опции объектом, а не
+   *  двумя строками подряд: перепутать их местами было бы слишком легко. */
+  statsOverview: (days: number, f: { project?: string; env?: string } = {}) =>
+    request<StatsOverview>('GET', `/v1/stats/overview${qs({ days, ...f })}`),
+  /** Слото-часы per регион/версия + утилизация за N дней. Фильтры — как в overview. */
+  statsCost: (days: number, f: { project?: string; env?: string } = {}) =>
+    request<StatsCost>('GET', `/v1/stats/cost${qs({ days, ...f })}`),
 
   // --- Проекты (мультипроект W1) ---
 

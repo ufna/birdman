@@ -314,7 +314,7 @@ func TestStatsOverviewRollupBacked(t *testing.T) {
 		if err := st.UpsertRollupDay(ctx, phantomDay, []store.RollupDim{
 			{Day: phantomDay, Region: "zzz-phantom", Semver: "0.0.0-phantom",
 				Matches: 999, PlayersPeakSum: 500, DurSumSeconds: 12345, DurCount: 3, SlotSeconds: 54321},
-		}, 777); err != nil {
+		}, 777, nil); err != nil {
 			t.Fatalf("seed phantom rollup day: %v", err)
 		}
 
@@ -464,7 +464,7 @@ func TestStatsOverviewRollupBacked(t *testing.T) {
 		}
 
 		// Sanity: the rollup tables really are untouched in this sub-case.
-		dims, err := st.RollupDims(ctx, today.AddDate(0, 0, -6), today, "")
+		dims, err := st.RollupDims(ctx, today.AddDate(0, 0, -6), today, store.RollupFilter{})
 		if err != nil {
 			t.Fatalf("rollup dims: %v", err)
 		}
@@ -486,7 +486,7 @@ func TestStatsCostRollupBacked(t *testing.T) {
 
 		if err := st.UpsertRollupDay(ctx, phantomDay, []store.RollupDim{
 			{Day: phantomDay, Region: "zzz-phantom-cost", Semver: "0.0.0-phantom", SlotSeconds: 36000}, // 10h exactly
-		}, 0); err != nil {
+		}, 0, nil); err != nil {
 			t.Fatalf("seed phantom rollup day: %v", err)
 		}
 
@@ -760,7 +760,7 @@ func TestStatsEnvRollupBacked(t *testing.T) {
 		t.Fatalf("backfill: %v", err)
 	}
 	// Sanity: the rollup table really is env-split for the day.
-	if dims, err := st.RollupDims(ctx, day, day, "prod"); err != nil || len(dims) != 1 || dims[0].Env != "prod" {
+	if dims, err := st.RollupDims(ctx, day, day, store.RollupFilter{Env: "prod"}); err != nil || len(dims) != 1 || dims[0].Env != "prod" {
 		t.Fatalf("rollup prod slice = %+v (err %v), want sole prod dim", dims, err)
 	}
 
@@ -820,5 +820,115 @@ func TestStatsEnvCost(t *testing.T) {
 
 	if code := getStatus(t, ts.URL, "/v1/stats/cost?env=zzz-nope", roSecret); code != 400 {
 		t.Fatalf("nonexistent env cost: want 400, got %d", code)
+	}
+}
+
+// --- проектное сужение статистики (мультипроект W3) ---
+
+// ?project= сужает Stats по проекту, включая ПИК CCU — в отличие от ?env=,
+// который пик оставляет платформенным (решение I5). Причина различия:
+// окружения делят одну ёмкость флота, а проекты — непересекающиеся тенанты,
+// и «пик CCU» под выбранным проектом обязан быть пиком этого проекта.
+func TestStatsProjectScoping(t *testing.T) {
+	ts, st, f, roSecret := newStatsAPI(t)
+	ctx := t.Context()
+	now := time.Now().UTC()
+
+	// Второй проект со своим флотом и своей версией.
+	arenaNode, _, err := st.CreateNode(ctx, store.CreateNodeParams{
+		Project: "arena", Region: "eu", Hostname: "arena-1",
+		PublicIP: "203.0.113.88", CapacitySlots: 20,
+	})
+	if err != nil {
+		t.Fatalf("arena node: %v", err)
+	}
+	arenaVer, err := st.CreateVersion(ctx, store.CreateVersionParams{
+		Project: "arena", Semver: "9.9.9", ImageRef: "ghcr.io/example/arena:9.9.9", Env: "dev",
+	})
+	if err != nil {
+		t.Fatalf("arena version: %v", err)
+	}
+	gameSrv := f.InsertServer(t, f.NodeID, f.VersionID, "reaped", 23001, 0)
+	arenaSrv := f.InsertServer(t, arenaNode.ID, arenaVer.ID, "reaped", 23002, 0)
+
+	// Пересекаются во времени: платформенный пик 15 больше любого проектного.
+	insertEnvMatch(t, st, gameSrv, "eu", "dev", 10,
+		now.Add(-30*time.Minute), now.Add(-29*time.Minute), endAt(now.Add(-2*time.Minute)))
+	insertEnvMatch(t, st, arenaSrv, "eu", "dev", 5,
+		now.Add(-20*time.Minute), now.Add(-19*time.Minute), endAt(now.Add(-1*time.Minute)))
+
+	var game stats.OverviewResponse
+	httpGetJSON(t, ts.URL, "/v1/stats/overview?days=7&project=game", roSecret, &game)
+	assertSoleVersion(t, game, "1.0.0", 1)
+	if game.PeakCCU != 10 {
+		t.Fatalf("game peak_ccu = %d, want 10 (пик ПРОЕКТА, не платформенный 15)", game.PeakCCU)
+	}
+	if game.TimeToMatch.Samples != 1 {
+		t.Fatalf("game ttm samples = %d, want 1 (только матч game)", game.TimeToMatch.Samples)
+	}
+
+	var arena stats.OverviewResponse
+	httpGetJSON(t, ts.URL, "/v1/stats/overview?days=7&project=arena", roSecret, &arena)
+	assertSoleVersion(t, arena, "9.9.9", 1)
+	if arena.PeakCCU != 5 {
+		t.Fatalf("arena peak_ccu = %d, want 5", arena.PeakCCU)
+	}
+
+	// Без фильтра — вся платформа, как раньше.
+	var all stats.OverviewResponse
+	httpGetJSON(t, ts.URL, "/v1/stats/overview?days=7", roSecret, &all)
+	if len(all.VersionDistribution) != 2 {
+		t.Fatalf("без фильтра ждём обе версии: %+v", all.VersionDistribution)
+	}
+	if all.PeakCCU != 15 {
+		t.Fatalf("платформенный peak_ccu = %d, want 15", all.PeakCCU)
+	}
+
+	// Cost сужается тем же параметром.
+	var costGame stats.CostResponse
+	httpGetJSON(t, ts.URL, "/v1/stats/cost?days=7&project=game", roSecret, &costGame)
+	for _, key := range costGame.SlotHoursPerDayByVersion.Keys {
+		if key == "9.9.9" {
+			t.Fatalf("в cost проекта game не должно быть версии arena: %+v", costGame.SlotHoursPerDayByVersion.Keys)
+		}
+	}
+
+	// Опечатка в имени проекта — понятный 400, а не молча пустой ряд.
+	if code := getStatus(t, ts.URL, "/v1/stats/overview?project=zzz-nope", roSecret); code != 400 {
+		t.Fatalf("несуществующий проект: want 400, got %d", code)
+	}
+}
+
+// Раньше ?env= валидировался против SoleProjectSlug, поэтому при ДВУХ проектах
+// любой ?env= отвечал 400 «several projects exist» — фильтр по окружению
+// переставал работать ровно тогда, когда проектов становилось больше одного.
+// Мультипроект W3 этот последний sole-project fallback снял.
+func TestStatsEnvFilterSurvivesSeveralProjects(t *testing.T) {
+	ts, st, _, roSecret := newStatsAPI(t)
+	ctx := t.Context()
+	if _, err := st.SetProjectMatchSize(ctx, "arena", 4); err != nil { // второй проект
+		t.Fatalf("second project: %v", err)
+	}
+
+	// Пара (project, env) — валидируется в переданном проекте.
+	if code := getStatus(t, ts.URL, "/v1/stats/overview?env=dev&project=game", roSecret); code != 200 {
+		t.Fatalf("dev в game: want 200, got %d", code)
+	}
+	// Без проекта достаточно, чтобы окружение с таким именем существовало
+	// хоть где-то: пары нет по условию, но защита от опечатки остаётся.
+	if code := getStatus(t, ts.URL, "/v1/stats/overview?env=dev", roSecret); code != 200 {
+		t.Fatalf("dev без проекта при двух проектах: want 200, got %d", code)
+	}
+	if code := getStatus(t, ts.URL, "/v1/stats/overview?env=zzz-nope", roSecret); code != 400 {
+		t.Fatalf("опечатка в env без проекта: want 400, got %d", code)
+	}
+	// Окружение есть, но НЕ в этом проекте → 400 с парой в тексте.
+	if _, err := st.CreateEnvironment(ctx, store.CreateEnvironmentParams{
+		Project: "arena", Name: "staging",
+	}); err != nil {
+		t.Fatalf("arena/staging: %v", err)
+	}
+	if code := getStatus(t, ts.URL, "/v1/stats/overview?env=staging&project=game", roSecret); code != 400 {
+		t.Fatalf("чужое окружение в проекте: want 400, got %d", code)
 	}
 }

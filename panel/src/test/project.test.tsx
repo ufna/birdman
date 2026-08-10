@@ -19,6 +19,7 @@ import {
 import { ProjectSelector } from '../components/Shell';
 import { Fleet } from '../screens/Fleet';
 import { Events } from '../screens/Events';
+import { Stats } from '../screens/Stats';
 import { DrawerProvider } from '../lib/drawer';
 
 const proj = (slug: string): ProjectInfo => ({
@@ -356,6 +357,56 @@ describe('EnvProvider под ProjectProvider', () => {
       expect(screen.getByText(/9\.9\.9/)).toBeTruthy();
     });
     expect(screen.queryByText(/1\.0\.0/)).toBeNull();
+  });
+
+  // Статистика — единственный экран, который НЕЛЬЗЯ сузить в браузере:
+  // иммутабельная часть окна приходит уже агрегированной из роллапов
+  // (мультипроект W3 дал им колонку project). Значит проверять надо именно
+  // параметр запроса, а не отфильтрованный результат.
+  it('экран Статистики запрашивает агрегаты с ?project= и переспрашивает при смене', async () => {
+    const urls: string[] = [];
+    const emptyOverview = {
+      days: 7,
+      timezone: 'UTC',
+      generated_at: '2026-08-01T00:00:00Z',
+      matches_per_day: { unit: 'matches/day', keys: [], points: [] },
+      players_per_day: { unit: 'players/day', keys: [], points: [] },
+      peak_ccu_per_day: { unit: 'players', points: [] },
+      peak_ccu: 0,
+      avg_match_duration_seconds: null,
+      avg_match_duration_per_day: { unit: 'seconds', points: [] },
+      version_distribution: [],
+      time_to_match: { p50_seconds: null, p95_seconds: null, samples: 0, source: 'matches', note: '' },
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        const u = String(url);
+        urls.push(u);
+        if (u.startsWith('/v1/projects')) return Promise.resolve(jsonRes({ projects: [game, arena] }));
+        if (u.startsWith('/v1/environments')) return Promise.resolve(jsonRes({ environments: [] }));
+        if (u.startsWith('/v1/stats/overview')) return Promise.resolve(jsonRes(emptyOverview));
+        return Promise.resolve(jsonRes({}));
+      }),
+    );
+    render(
+      <I18nProvider initialLang="en">
+        <ProjectProvider>
+          <div>
+            <ProjectSelector />
+            <Stats />
+          </div>
+        </ProjectProvider>
+      </I18nProvider>,
+    );
+
+    await waitFor(() => {
+      expect(urls.some((u) => u.startsWith('/v1/stats/overview') && u.includes('project=game'))).toBe(true);
+    });
+    fireEvent.change(await screen.findByRole('combobox', { name: 'Project' }), { target: { value: 'arena' } });
+    await waitFor(() => {
+      expect(urls.some((u) => u.startsWith('/v1/stats/overview') && u.includes('project=arena'))).toBe(true);
+    });
   });
 
   it('проекта нет → окружения не запрашиваются вовсе', async () => {

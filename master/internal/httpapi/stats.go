@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -53,18 +54,18 @@ func (s *Server) handleStatsOverview(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	env, ok := s.statsEnv(w, r)
+	project, env, ok := s.statsScope(w, r)
 	if !ok {
 		return
 	}
 	now := time.Now().UTC()
 	axis := stats.DayAxisUTC(now, days)
-	dims, peak, err := s.statsDims(r.Context(), axis, now, env)
+	dims, peak, err := s.statsDims(r.Context(), axis, now, project, env)
 	if err != nil {
 		storeError(w, err)
 		return
 	}
-	ttm, err := s.st.StatMatchesTTM(r.Context(), axis[0], env)
+	ttm, err := s.st.StatMatchesTTM(r.Context(), axis[0], project, env)
 	if err != nil {
 		storeError(w, err)
 		return
@@ -77,13 +78,13 @@ func (s *Server) handleStatsCost(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	env, ok := s.statsEnv(w, r)
+	project, env, ok := s.statsScope(w, r)
 	if !ok {
 		return
 	}
 	now := time.Now().UTC()
 	axis := stats.DayAxisUTC(now, days)
-	dims, _, err := s.statsDims(r.Context(), axis, now, env)
+	dims, _, err := s.statsDims(r.Context(), axis, now, project, env)
 	if err != nil {
 		storeError(w, err)
 		return
@@ -114,30 +115,60 @@ func statsDays(w http.ResponseWriter, r *http.Request) (int, bool) {
 	return n, true
 }
 
-// statsEnv parses the optional ?env= filter (environments v1, I5). Empty →
-// ("", true) = all environments (the v0 behaviour). A named env is validated
-// against the sole project's environments (the single-project convention used
-// across the stats/qos/environments handlers): an unknown env is a 400, so a
-// typo never silently returns an empty slice. Writes its own error response
-// and returns false when the request must not proceed.
-func (s *Server) statsEnv(w http.ResponseWriter, r *http.Request) (string, bool) {
-	env := r.URL.Query().Get("env")
-	if env == "" {
-		return "", true
+// statsScope parses the optional ?project= and ?env= filters. Both empty =
+// вся платформа (поведение v0). Оба валидируются, чтобы опечатка давала
+// понятный 400, а не молча пустой ряд. Пишет свой ответ об ошибке и
+// возвращает false, когда запрос продолжать нельзя.
+//
+// Проектный фильтр (мультипроект W3) СНЯЛ последний sole-project fallback в
+// статистике: раньше env проверялся против SoleProjectSlug, и при нескольких
+// проектах любой ?env= отвечал 400 «several projects exist» — то есть фильтр
+// по окружению переставал работать ровно тогда, когда проектов становилось
+// больше одного. Теперь:
+//   - project задан → env проверяется в ЭТОМ проекте (пара (project, env) —
+//     то же, чем живут deploy/versions/promote);
+//   - project пуст, env задан → достаточно, чтобы окружение с таким именем
+//     существовало хоть у одного проекта: без выбранного проекта пары нет, но
+//     защита от опечатки остаётся.
+func (s *Server) statsScope(w http.ResponseWriter, r *http.Request) (project, env string, ok bool) {
+	project = r.URL.Query().Get("project")
+	env = r.URL.Query().Get("env")
+
+	if project != "" {
+		if _, err := s.st.GetProject(r.Context(), project); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				// Опечатка в query — плохой ВВОД (400), а не «ресурса нет» (404):
+				// сам ресурс тут — статистика, и она существует.
+				writeError(w, http.StatusBadRequest, "bad_request", "no such project "+project)
+				return "", "", false
+			}
+			storeError(w, err)
+			return "", "", false
+		}
 	}
-	project, err := s.st.SoleProjectSlug(r.Context())
+	if env == "" {
+		return project, "", true
+	}
+	if project != "" {
+		if _, err := s.st.GetEnvironment(r.Context(), project, env); err != nil {
+			// ErrBadEnv → 400 «no such environment <project>/<env>» — тот же текст и тот
+			// же код, что и на deploy/versions/promote (v3: единый sentinel в storeError);
+			// реальный сбой стора → 500, а не «плохой ввод».
+			storeError(w, err)
+			return "", "", false
+		}
+		return project, env, true
+	}
+	exists, err := s.st.EnvironmentNameExists(r.Context(), env)
 	if err != nil {
 		storeError(w, err)
-		return "", false
+		return "", "", false
 	}
-	if _, err := s.st.GetEnvironment(r.Context(), project, env); err != nil {
-		// ErrBadEnv → 400 «no such environment <project>/<env>» — тот же текст и тот
-		// же код, что и на deploy/versions/promote (v3: единый sentinel в storeError);
-		// реальный сбой стора → 500, а не «плохой ввод».
-		storeError(w, err)
-		return "", false
+	if !exists {
+		writeError(w, http.StatusBadRequest, "bad_request", "no such environment "+env)
+		return "", "", false
 	}
-	return env, true
+	return "", env, true
 }
 
 // --- rollup-backed read-path (shared by overview/cost) ---
@@ -165,7 +196,7 @@ func (s *Server) statsEnv(w http.ResponseWriter, r *http.Request) (string, bool)
 // double-count a day already served from the immutable range. This mirrors
 // statsrollup/job.go's recomputeDay, which drops the same kind of stray dim
 // for the same reason.
-func (s *Server) statsDims(ctx context.Context, axis []time.Time, now time.Time, env string) ([]stats.DailyDim, map[string]int, error) {
+func (s *Server) statsDims(ctx context.Context, axis []time.Time, now time.Time, project, env string) ([]stats.DailyDim, map[string]int, error) {
 	axis0 := axis[0]
 	today := utctime.StartOfDay(now)
 	liveStart := today.AddDate(0, 0, -1)        // 00:00 UTC yesterday
@@ -174,16 +205,18 @@ func (s *Server) statsDims(ctx context.Context, axis []time.Time, now time.Time,
 	var dims []stats.DailyDim
 	peak := map[string]int{}
 	if !axis0.After(immutableEnd) {
-		// Dims are env-scoped (env-column filter, empty = all); peak CCU is read
-		// from the global match_ccu_daily rollup and so is platform-wide by
-		// construction (I5) regardless of env.
-		immutableDims, err := s.st.RollupDims(ctx, axis0, immutableEnd, env)
+		// Dims сужаются колонками env и project (пусто = всё). Пик CCU читается
+		// из своего проектного среза match_ccu_daily: project="" — платформенный
+		// (все проекты), непустой — пик ЭТОГО проекта. По env пик по-прежнему НЕ
+		// делится (решение I5): окружения делят одну ёмкость флота, а проекты —
+		// непересекающиеся тенанты, поэтому измерение добавлено только второму.
+		immutableDims, err := s.st.RollupDims(ctx, axis0, immutableEnd, store.RollupFilter{Env: env, Project: project})
 		if err != nil {
 			return nil, nil, err
 		}
 		dims = immutableDims
 
-		immutablePeak, err := s.st.RollupPeakCCU(ctx, axis0, immutableEnd)
+		immutablePeak, err := s.st.RollupPeakCCU(ctx, axis0, immutableEnd, project)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -195,20 +228,36 @@ func (s *Server) statsDims(ctx context.Context, axis []time.Time, now time.Time,
 	if err != nil {
 		return nil, nil, err
 	}
-	// livePeak is computed over ALL environments' matches so peak CCU stays
-	// platform-wide (I5 — the panel labels it "platform-wide" in env mode),
-	// matching the global match_ccu_daily rollup above; the dims are then
-	// re-derived from the env's matches only when a filter is set, keeping
-	// matches/players/duration/slot env-scoped.
-	liveDims, livePeak := stats.AggregateDaily(matches, liveAxis, now)
+	// Живой хвост считается так же, как иммутабельная часть, иначе два конца
+	// одного ряда разъехались бы: проект сужает ВСЁ, включая пик (проекты —
+	// непересекающиеся тенанты), а env — только dims, оставляя пик
+	// платформенным (I5, панель так его и подписывает).
+	scoped := matches
+	if project != "" {
+		scoped = filterMatchesByProject(matches, project)
+	}
+	liveDims, livePeak := stats.AggregateDaily(scoped, liveAxis, now)
 	if env != "" {
-		liveDims, _ = stats.AggregateDaily(filterMatchesByEnv(matches, env), liveAxis, now)
+		liveDims, _ = stats.AggregateDaily(filterMatchesByEnv(scoped, env), liveAxis, now)
 	}
 	dims = append(dims, filterDimsFrom(liveDims, liveAxis[0])...)
 	for dk, v := range livePeak { // live always wins for its own days
 		peak[dk] = v
 	}
 	return dims, peak, nil
+}
+
+// filterMatchesByProject keeps only the matches of one project — the live-tail
+// counterpart of RollupDims' project-column filter (мультипроект W3). Only
+// called with a non-empty project.
+func filterMatchesByProject(matches []store.StatMatch, project string) []store.StatMatch {
+	out := make([]store.StatMatch, 0, len(matches))
+	for _, m := range matches {
+		if m.Project == project {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // filterMatchesByEnv keeps only the matches whose execution env (matches.env,

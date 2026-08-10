@@ -87,6 +87,18 @@ func (s *Store) ListEnvironments(ctx context.Context, projectSlug string) ([]Env
 	return out, rows.Err()
 }
 
+// EnvironmentNameExists reports whether ANY project has an environment with
+// this name — the typo guard for `?env=` без выбранного проекта (мультипроект
+// W3, httpapi.statsScope). Пары (project, env) тут нет по условию, поэтому
+// проверяется только имя: этого хватает, чтобы опечатка дала понятный 400, а
+// не молча пустой ряд, и не требует sole-project допущения.
+func (s *Store) EnvironmentNameExists(ctx context.Context, name string) (bool, error) {
+	var exists bool
+	err := s.Pool.QueryRow(ctx,
+		`select exists(select 1 from environments where name = $1)`, name).Scan(&exists)
+	return exists, err
+}
+
 // GetEnvironment returns one environment (ErrBadEnv when missing). Every caller
 // is an existence check of an env NAMED BY A REQUEST — the matchmaker ticket, the
 // ?env= stats filter, the rollback body, the auto-deploy resolve — so a missing

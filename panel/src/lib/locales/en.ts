@@ -817,8 +817,11 @@ export const en = {
   'access.environments.toast.deletedCascade':
     'Environment {name} deleted: versions {versions}, fleets {fleets}, matches {matches}, servers {servers}, keys revoked {keys}',
 
-  // Stats: CCU is platform-wide (global), noted when an env filter is active.
+  // Stats: peak CCU is never narrowed by the env filter, and the note says so.
+  // WHICH whole it covers depends on the project scope (мультипроект W3): a
+  // selected project makes it that project's peak, otherwise the platform's.
   'stats.ccu.platformWide': 'platform-wide (not filtered by env)',
+  'stats.ccu.projectWide': 'across the whole project (not filtered by env)',
 } as const;
 
 export type MessageKey = keyof typeof en;

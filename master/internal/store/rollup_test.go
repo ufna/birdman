@@ -73,7 +73,7 @@ func TestRollupStore(t *testing.T) {
 		t.Fatalf("day1 overlap: want 1 match, got %d: %+v", len(m1), m1)
 	}
 	dims1, peak1 := stats.AggregateDaily(m1, []time.Time{day1}, now)
-	if err := st.UpsertRollupDay(ctx, day1, dims1, peak1[dk(day1)]); err != nil {
+	if err := st.UpsertRollupDay(ctx, day1, dims1, peak1[dk(day1)], nil); err != nil {
 		t.Fatalf("upsert day1: %v", err)
 	}
 
@@ -86,12 +86,12 @@ func TestRollupStore(t *testing.T) {
 		t.Fatalf("day2 overlap: want 1 match, got %d: %+v", len(m2), m2)
 	}
 	dims2, peak2 := stats.AggregateDaily(m2, []time.Time{day2}, now)
-	if err := st.UpsertRollupDay(ctx, day2, dims2, peak2[dk(day2)]); err != nil {
+	if err := st.UpsertRollupDay(ctx, day2, dims2, peak2[dk(day2)], nil); err != nil {
 		t.Fatalf("upsert day2: %v", err)
 	}
 
 	// RollupDims returns exactly what was written.
-	got, err := st.RollupDims(ctx, day1, day2, "")
+	got, err := st.RollupDims(ctx, day1, day2, store.RollupFilter{Env: ""})
 	if err != nil {
 		t.Fatalf("rollup dims: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestRollupStore(t *testing.T) {
 		t.Fatalf("missing expected regions: %+v", got)
 	}
 
-	peaks, err := st.RollupPeakCCU(ctx, day1, day2)
+	peaks, err := st.RollupPeakCCU(ctx, day1, day2, "")
 	if err != nil {
 		t.Fatalf("rollup peak ccu: %v", err)
 	}
@@ -133,10 +133,10 @@ func TestRollupStore(t *testing.T) {
 	}
 
 	// Re-upsert day1 with the same data must not duplicate rows (delete+insert).
-	if err := st.UpsertRollupDay(ctx, day1, dims1, peak1[dk(day1)]); err != nil {
+	if err := st.UpsertRollupDay(ctx, day1, dims1, peak1[dk(day1)], nil); err != nil {
 		t.Fatalf("re-upsert day1: %v", err)
 	}
-	got2, err := st.RollupDims(ctx, day1, day2, "")
+	got2, err := st.RollupDims(ctx, day1, day2, store.RollupFilter{Env: ""})
 	if err != nil {
 		t.Fatalf("rollup dims after re-upsert: %v", err)
 	}
@@ -149,17 +149,17 @@ func TestRollupStore(t *testing.T) {
 	// rolled up at all via the map's ok-return (plain indexing can't tell
 	// "absent" from "present with the legitimate value 0" apart).
 	day0 := day1.AddDate(0, 0, -1)
-	if err := st.UpsertRollupDay(ctx, day0, nil, 0); err != nil {
+	if err := st.UpsertRollupDay(ctx, day0, nil, 0, nil); err != nil {
 		t.Fatalf("upsert empty day: %v", err)
 	}
-	peaks0, err := st.RollupPeakCCU(ctx, day0, day0)
+	peaks0, err := st.RollupPeakCCU(ctx, day0, day0, "")
 	if err != nil {
 		t.Fatalf("rollup peak ccu (empty day): %v", err)
 	}
 	if v, ok := peaks0[dk(day0)]; !ok || v != 0 {
 		t.Fatalf("empty day should be marked processed with peak 0: ok=%v peak=%v", ok, v)
 	}
-	dims0, err := st.RollupDims(ctx, day0, day0, "")
+	dims0, err := st.RollupDims(ctx, day0, day0, store.RollupFilter{Env: ""})
 	if err != nil {
 		t.Fatalf("dims empty day: %v", err)
 	}
@@ -202,12 +202,12 @@ func TestRollupStoreEnv(t *testing.T) {
 		{Day: day, Region: "eu", Semver: "1.0.0", Env: "dev", Matches: 3, PlayersPeakSum: 30, SlotSeconds: 900},
 		{Day: day, Region: "eu", Semver: "1.0.0", Env: "prod", Matches: 1, PlayersPeakSum: 5, SlotSeconds: 600},
 	}
-	if err := st.UpsertRollupDay(ctx, day, dims, 42); err != nil {
+	if err := st.UpsertRollupDay(ctx, day, dims, 42, nil); err != nil {
 		t.Fatalf("upsert env day: %v", err)
 	}
 
 	// No env filter → both rows, each carrying its env.
-	all, err := st.RollupDims(ctx, day, day, "")
+	all, err := st.RollupDims(ctx, day, day, store.RollupFilter{Env: ""})
 	if err != nil {
 		t.Fatalf("rollup dims (all): %v", err)
 	}
@@ -223,14 +223,14 @@ func TestRollupStoreEnv(t *testing.T) {
 	}
 
 	// env filter isolates a single environment's slice.
-	prod, err := st.RollupDims(ctx, day, day, "prod")
+	prod, err := st.RollupDims(ctx, day, day, store.RollupFilter{Env: "prod"})
 	if err != nil {
 		t.Fatalf("rollup dims (prod): %v", err)
 	}
 	if len(prod) != 1 || prod[0].Env != "prod" || prod[0].Matches != 1 {
 		t.Fatalf("prod slice = %+v, want sole prod dim (matches 1)", prod)
 	}
-	dev, err := st.RollupDims(ctx, day, day, "dev")
+	dev, err := st.RollupDims(ctx, day, day, store.RollupFilter{Env: "dev"})
 	if err != nil {
 		t.Fatalf("rollup dims (dev): %v", err)
 	}
@@ -239,7 +239,7 @@ func TestRollupStoreEnv(t *testing.T) {
 	}
 
 	// match_ccu_daily stays a single global row per day (no env split).
-	peaks, err := st.RollupPeakCCU(ctx, day, day)
+	peaks, err := st.RollupPeakCCU(ctx, day, day, "")
 	if err != nil {
 		t.Fatalf("rollup peak ccu: %v", err)
 	}
@@ -263,7 +263,7 @@ func TestRollupReupsertPrunesStaleEnv(t *testing.T) {
 	if err := st.UpsertRollupDay(ctx, day, []store.RollupDim{
 		{Day: day, Region: "eu", Semver: "1.0.0", Env: "dev", Matches: 3, PlayersPeakSum: 30, SlotSeconds: 900},
 		{Day: day, Region: "eu", Semver: "1.0.0", Env: "prod", Matches: 1, PlayersPeakSum: 5, SlotSeconds: 600},
-	}, 42); err != nil {
+	}, 42, nil); err != nil {
 		t.Fatalf("first upsert: %v", err)
 	}
 
@@ -271,11 +271,11 @@ func TestRollupReupsertPrunesStaleEnv(t *testing.T) {
 	// be pruned, not linger.
 	if err := st.UpsertRollupDay(ctx, day, []store.RollupDim{
 		{Day: day, Region: "eu", Semver: "1.0.0", Env: "dev", Matches: 4, PlayersPeakSum: 40, SlotSeconds: 1200},
-	}, 40); err != nil {
+	}, 40, nil); err != nil {
 		t.Fatalf("re-upsert: %v", err)
 	}
 
-	all, err := st.RollupDims(ctx, day, day, "")
+	all, err := st.RollupDims(ctx, day, day, store.RollupFilter{Env: ""})
 	if err != nil {
 		t.Fatalf("rollup dims: %v", err)
 	}
@@ -283,7 +283,7 @@ func TestRollupReupsertPrunesStaleEnv(t *testing.T) {
 		t.Fatalf("re-upsert must leave only the fresh dev row, got %+v", all)
 	}
 	// The stale prod slice is gone.
-	prod, err := st.RollupDims(ctx, day, day, "prod")
+	prod, err := st.RollupDims(ctx, day, day, store.RollupFilter{Env: "prod"})
 	if err != nil {
 		t.Fatalf("rollup dims (prod): %v", err)
 	}

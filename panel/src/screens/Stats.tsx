@@ -16,7 +16,9 @@ import { api } from '../lib/api';
 import type { StatsOverview, TimeToMatch } from '../lib/api';
 import { useLiveAsync } from '../lib/live';
 import { useEnv } from '../lib/env';
+import { useProject } from '../lib/project';
 import { useT, useFormat } from '../lib/i18n';
+import type { MessageKey } from '../lib/i18n';
 import { toSimpleColumns, toStackModel, versionShareModel } from '../lib/stats';
 import {
   matchesRunningQuery,
@@ -60,6 +62,7 @@ export function Stats() {
   const range = rangeByKey(rangeKey);
   const days = effectiveDays(range);
   const { selected } = useEnv();
+  const { selected: project } = useProject();
   // env сужает историю через ?env= (environments v1 §7, I5). CCU остаётся
   // глобальным платформенным пиком — StatsBody подписывает его «platform-wide».
   //
@@ -68,14 +71,19 @@ export function Stats() {
   // иначе при переключении чипа мгновение показываются данные ПРЕЖНЕГО
   // окружения как готовые (follow-up p3).
   const ov = useLiveAsync(
-    () => api.statsOverview(days, selected ?? undefined).then((data) => ({ env: selected, data })),
-    [days, selected],
+    () =>
+      api
+        .statsOverview(days, { project: project ?? undefined, env: selected ?? undefined })
+        .then((data) => ({ env: selected, project, data })),
+    [days, selected, project],
   );
   // Данные годны, только если они за ЗАПРОШЕННЫЙ период и ЗАПРОШЕННЫЙ env;
   // иначе (первая загрузка, смена периода/режима/окружения) — скелетон под
   // финальную раскладку.
   const readyOv =
-    ov.data !== undefined && ov.data.env === selected && ov.data.data.days === days ? ov.data.data : undefined;
+    ov.data !== undefined && ov.data.env === selected && ov.data.project === project && ov.data.data.days === days
+      ? ov.data.data
+      : undefined;
 
   // Полноэкранная ошибка — ТОЛЬКО в product-режиме: там /v1/stats/overview и
   // есть страница. В live-режиме VM-панели (MetricChart/UtilizationChart) и
@@ -98,7 +106,7 @@ export function Stats() {
       {range.mode === 'live' ? (
         <LiveBody range={range} days={days} ov={{ ready: readyOv, error: ov.error }} />
       ) : readyOv !== undefined ? (
-        <StatsBody ov={readyOv} envActive={selected !== null} />
+        <StatsBody ov={readyOv} envActive={selected !== null} projectScoped={project !== null} />
       ) : (
         <StatsSkeleton />
       )}
@@ -212,7 +220,23 @@ function StatsSkeleton() {
   );
 }
 
-function StatsBody({ ov, envActive }: { ov: StatsOverview; envActive: boolean }) {
+/** Подпись пика CCU при активном env-фильтре: «весь» — это проект, если он
+ *  выбран (мультипроект W3 дал пику проектное измерение), иначе платформа.
+ *  Вынесено функцией, потому что используется в двух местах и разъехаться им
+ *  нельзя: карточка и заголовок графика описывают ОДНО число. */
+function ccuScopeKey(projectScoped: boolean): MessageKey {
+  return projectScoped ? 'stats.ccu.projectWide' : 'stats.ccu.platformWide';
+}
+
+function StatsBody({
+  ov,
+  envActive,
+  projectScoped,
+}: {
+  ov: StatsOverview;
+  envActive: boolean;
+  projectScoped: boolean;
+}) {
   const { t } = useT();
   const fmt = useFormat();
   const int = (v: number) => String(Math.round(v));
@@ -235,7 +259,7 @@ function StatsBody({ ov, envActive }: { ov: StatsOverview; envActive: boolean })
         <StatCard
           label={t('stats.card.peakCcu')}
           value={ov.peak_ccu}
-          detail={envActive ? t('stats.ccu.platformWide') : t('stats.card.peakCcuDetail')}
+          detail={envActive ? t(ccuScopeKey(projectScoped)) : t('stats.card.peakCcuDetail')}
         />
         <StatCard label={t('stats.card.avgDuration')} value={dur(ov.avg_match_duration_seconds)} detail={t('stats.card.avgDurationDetail')} />
         <StatCard
@@ -276,7 +300,7 @@ function StatsBody({ ov, envActive }: { ov: StatsOverview; envActive: boolean })
           />
         </Card>
         <Card className="p-4">
-          <ChartHeading title={t('stats.peakCcuPerDay')} note={envActive ? t('stats.ccu.platformWide') : t('stats.peakCcuNote')} />
+          <ChartHeading title={t('stats.peakCcuPerDay')} note={envActive ? t(ccuScopeKey(projectScoped)) : t('stats.peakCcuNote')} />
           <BarChart
             columns={ccu.columns}
             max={ccu.max}

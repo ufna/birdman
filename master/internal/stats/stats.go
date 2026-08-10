@@ -197,30 +197,38 @@ type DailyDim = store.RollupDim
 // match to now). Dims are keyed by day×region×semver×env (environments v1,
 // I5): a match contributes to its own env's dim only, so the rollup persists
 // one match_stats_daily row per environment and the read path can slice by
-// env. peakByDay reuses the exact sweep-line peakCCUPerDay uses — over ALL
-// matches, no env split — so occupancy stays a platform-wide metric
-// (match_ccu_daily is global, I5) that the two paths can never disagree on.
+// env. Ключ dim'а несёт ещё и ПРОЕКТ (мультипроект W3), так что роллап
+// хранит по строке на (region, semver, env, project) и читающая сторона
+// сужает по проекту так же, как по env.
+//
+// peakByDay reuses the exact sweep-line peakCCUPerDay uses — over ALL
+// matches, no env split — so occupancy stays comparable between the two
+// paths; проектный срез пика считает AggregateDailyPeakByProject тем же
+// сканом по подмножеству матчей (пик НЕ аддитивен, вывести один срез из
+// другого нельзя).
 //
 // A match's start day need not itself be in axis (e.g. a tail-recompute of a
 // single day D may see a match that started the day before but still
 // overlaps D) — matches/players/duration are still attributed to that match's
 // real start day in that case, per the rule above.
 func AggregateDaily(matches []store.StatMatch, axis []time.Time, now time.Time) (dims []DailyDim, peakByDay map[string]int) {
-	type key struct{ day, region, semver, env string }
+	type key struct{ day, region, semver, env, project string }
 	idx := map[key]int{}
-	dimIndex := func(day time.Time, region, semver, env string) int {
-		k := key{utctime.DayKey(day), region, semver, env}
+	dimIndex := func(day time.Time, region, semver, env, project string) int {
+		k := key{utctime.DayKey(day), region, semver, env, project}
 		if i, ok := idx[k]; ok {
 			return i
 		}
 		i := len(dims)
 		idx[k] = i
-		dims = append(dims, DailyDim{Day: utctime.StartOfDay(day), Region: region, Semver: semver, Env: env})
+		dims = append(dims, DailyDim{
+			Day: utctime.StartOfDay(day), Region: region, Semver: semver, Env: env, Project: project,
+		})
 		return i
 	}
 
 	for _, m := range matches {
-		si := dimIndex(m.StartedAt, m.Region, m.Semver, m.Env)
+		si := dimIndex(m.StartedAt, m.Region, m.Semver, m.Env, m.Project)
 		dims[si].Matches++
 		dims[si].PlayersPeakSum += int64(m.PlayersPeak)
 		if m.EndedAt != nil {
@@ -234,11 +242,32 @@ func AggregateDaily(matches []store.StatMatch, axis []time.Time, now time.Time) 
 			if secs <= 0 {
 				continue
 			}
-			di := dimIndex(day, m.Region, m.Semver, m.Env)
+			di := dimIndex(day, m.Region, m.Semver, m.Env, m.Project)
 			dims[di].SlotSeconds += secs
 		}
 	}
 	return dims, peakCCUByDay(matches, axis, now)
+}
+
+// AggregateDailyPeakByProject returns project slug -> (day key -> peak CCU),
+// the per-project slices of the same sweep-line AggregateDaily uses for its
+// platform-wide peak (мультипроект W3).
+//
+// Считается отдельным проходом по подмножеству матчей КАЖДОГО проекта, а не
+// делением платформенного пика: пик — не аддитивная величина, сумма проектных
+// пиков строго больше реального одновременного пика платформы, когда пики
+// проектов пришлись на разные моменты суток. Поэтому оба среза хранятся, и ни
+// один не выводится из другого (store.UpsertRollupDay пишет их рядом).
+func AggregateDailyPeakByProject(matches []store.StatMatch, axis []time.Time, now time.Time) map[string]map[string]int {
+	byProject := map[string][]store.StatMatch{}
+	for _, m := range matches {
+		byProject[m.Project] = append(byProject[m.Project], m)
+	}
+	out := make(map[string]map[string]int, len(byProject))
+	for project, ms := range byProject {
+		out[project] = peakCCUByDay(ms, axis, now)
+	}
+	return out
 }
 
 // BuildOverviewFromDaily builds the same OverviewResponse as BuildOverview,

@@ -25,6 +25,7 @@ type StatMatch struct {
 	Region      string
 	Semver      string
 	Env         string
+	Project     string // слаг проекта матча (мультипроект W3); пусто в узких чтениях
 	PlayersPeak int
 	CreatedAt   time.Time  // match row created = allocation time (time-to-match input)
 	StartedAt   time.Time  // match_start report (never nil here)
@@ -37,9 +38,10 @@ type StatMatch struct {
 // can slice by environment; the query itself is unfiltered (all env).
 func (s *Store) StatMatches(ctx context.Context, since time.Time) ([]StatMatch, error) {
 	rows, err := s.Pool.Query(ctx, `
-		select m.region, v.semver, m.env, m.players_peak, m.created_at, m.started_at, m.ended_at
+		select m.region, v.semver, m.env, p.slug, m.players_peak, m.created_at, m.started_at, m.ended_at
 		from matches m
 		join versions v on v.id = m.version_id
+		join projects p on p.id = m.project_id
 		where m.started_at is not null and m.started_at >= $1
 		order by m.started_at`, since)
 	if err != nil {
@@ -49,7 +51,7 @@ func (s *Store) StatMatches(ctx context.Context, since time.Time) ([]StatMatch, 
 	var out []StatMatch
 	for rows.Next() {
 		var sm StatMatch
-		if err := rows.Scan(&sm.Region, &sm.Semver, &sm.Env, &sm.PlayersPeak,
+		if err := rows.Scan(&sm.Region, &sm.Semver, &sm.Env, &sm.Project, &sm.PlayersPeak,
 			&sm.CreatedAt, &sm.StartedAt, &sm.EndedAt); err != nil {
 			return nil, err
 		}
@@ -67,14 +69,18 @@ func (s *Store) StatMatches(ctx context.Context, since time.Time) ([]StatMatch, 
 // percentiles are non-additive and so ttm is always recomputed fresh over
 // the whole window rather than served from the match_stats_daily rollup. A
 // non-empty env scopes the fill-rate percentiles to that environment (I5);
-// empty env = all environments (the v0 behaviour).
-func (s *Store) StatMatchesTTM(ctx context.Context, since time.Time, env string) ([]StatMatch, error) {
+// empty env = all environments (the v0 behaviour). project сужает так же
+// (мультипроект W3); пустой = все проекты. Проект джойнится, а не берётся из
+// денормализованной колонки: у matches её нет, есть project_id.
+func (s *Store) StatMatchesTTM(ctx context.Context, since time.Time, project, env string) ([]StatMatch, error) {
 	rows, err := s.Pool.Query(ctx, `
-		select created_at, started_at
-		from matches
-		where started_at is not null and started_at >= $1
-		  and ($2 = '' or env = $2)
-		order by started_at`, since, env)
+		select m.created_at, m.started_at
+		from matches m
+		join projects p on p.id = m.project_id
+		where m.started_at is not null and m.started_at >= $1
+		  and ($2 = '' or m.env = $2)
+		  and ($3 = '' or p.slug = $3)
+		order by m.started_at`, since, env, project)
 	if err != nil {
 		return nil, err
 	}

@@ -117,14 +117,14 @@ func TestRollupJob(t *testing.T) {
 	// Backfill stopped needing a which-days-are-missing scan (Fix 1: it now
 	// recomputes every day unconditionally, see TestRollupJobBackfillSelfHeals below).
 	backfillFrom, backfillTo := today.AddDate(0, 0, -29), today.AddDate(0, 0, -2)
-	peaksBackfill, err := st.RollupPeakCCU(ctx, backfillFrom, backfillTo)
+	peaksBackfill, err := st.RollupPeakCCU(ctx, backfillFrom, backfillTo, "")
 	if err != nil {
 		t.Fatalf("peak ccu (backfill range): %v", err)
 	}
 	if len(peaksBackfill) != 28 {
 		t.Fatalf("backfill: want 28 rolled-up days in [today-29,today-2], got %d: %+v", len(peaksBackfill), peaksBackfill)
 	}
-	peaksTail, err := st.RollupPeakCCU(ctx, yesterday, today)
+	peaksTail, err := st.RollupPeakCCU(ctx, yesterday, today, "")
 	if err != nil {
 		t.Fatalf("peak ccu (tail range): %v", err)
 	}
@@ -135,7 +135,7 @@ func TestRollupJob(t *testing.T) {
 	// fiveDaysAgo is the long-running match's true start day: Backfill
 	// attributes its matches/players there in full (deterministic — the
 	// match's clamp-to-now end is always past fiveDaysAgo+1day by 5 days).
-	fdDims, err := st.RollupDims(ctx, fiveDaysAgo, fiveDaysAgo, "")
+	fdDims, err := st.RollupDims(ctx, fiveDaysAgo, fiveDaysAgo, store.RollupFilter{Env: ""})
 	if err != nil {
 		t.Fatalf("dims fiveDaysAgo: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestRollupJob(t *testing.T) {
 	if fdDim.Matches != 1 || fdDim.PlayersPeakSum != 6 || fdDim.DurCount != 0 || fdDim.SlotSeconds != 12*3600 {
 		t.Fatalf("fiveDaysAgo running-match dim: %+v", fdDim)
 	}
-	fdPeaks, err := st.RollupPeakCCU(ctx, fiveDaysAgo, fiveDaysAgo)
+	fdPeaks, err := st.RollupPeakCCU(ctx, fiveDaysAgo, fiveDaysAgo, "")
 	if err != nil {
 		t.Fatalf("peaks fiveDaysAgo: %v", err)
 	}
@@ -161,11 +161,11 @@ func TestRollupJob(t *testing.T) {
 	}
 	afterTick := time.Now().UTC()
 
-	yestDims, err := st.RollupDims(ctx, yesterday, yesterday, "")
+	yestDims, err := st.RollupDims(ctx, yesterday, yesterday, store.RollupFilter{Env: ""})
 	if err != nil {
 		t.Fatalf("dims yesterday: %v", err)
 	}
-	todayDims, err := st.RollupDims(ctx, today, today, "")
+	todayDims, err := st.RollupDims(ctx, today, today, store.RollupFilter{Env: ""})
 	if err != nil {
 		t.Fatalf("dims today: %v", err)
 	}
@@ -229,14 +229,14 @@ func TestRollupJob(t *testing.T) {
 	// (=14) -> peak 14. Today's peak depends on how far "now" has gotten
 	// into the day (whether running-match's clamp-to-now reaches
 	// today-match's 2h mark), so only bound it loosely.
-	peaksYest, err := st.RollupPeakCCU(ctx, yesterday, yesterday)
+	peaksYest, err := st.RollupPeakCCU(ctx, yesterday, yesterday, "")
 	if err != nil {
 		t.Fatalf("peaks yesterday: %v", err)
 	}
 	if peaksYest[utctime.DayKey(yesterday)] != 14 {
 		t.Fatalf("yesterday peak ccu = %v, want 14", peaksYest[utctime.DayKey(yesterday)])
 	}
-	peaksToday, err := st.RollupPeakCCU(ctx, today, today)
+	peaksToday, err := st.RollupPeakCCU(ctx, today, today, "")
 	if err != nil {
 		t.Fatalf("peaks today: %v", err)
 	}
@@ -249,11 +249,11 @@ func TestRollupJob(t *testing.T) {
 	if err := job.tick(ctx); err != nil {
 		t.Fatalf("second tick: %v", err)
 	}
-	yestDims2, err := st.RollupDims(ctx, yesterday, yesterday, "")
+	yestDims2, err := st.RollupDims(ctx, yesterday, yesterday, store.RollupFilter{Env: ""})
 	if err != nil {
 		t.Fatalf("dims yesterday (2nd tick): %v", err)
 	}
-	todayDims2, err := st.RollupDims(ctx, today, today, "")
+	todayDims2, err := st.RollupDims(ctx, today, today, store.RollupFilter{Env: ""})
 	if err != nil {
 		t.Fatalf("dims today (2nd tick): %v", err)
 	}
@@ -332,7 +332,7 @@ func TestRollupJobBackfillSelfHeals(t *testing.T) {
 	// match on D was still running and got dropped by the day-filter). This
 	// also marks D "present" in match_ccu_daily, which is what the old
 	// RolledUpDays-gated skip kept it from ever fixing.
-	if err := st.UpsertRollupDay(ctx, d, nil, 0); err != nil {
+	if err := st.UpsertRollupDay(ctx, d, nil, 0, nil); err != nil {
 		t.Fatalf("seed stale partial rollup for d: %v", err)
 	}
 
@@ -355,11 +355,11 @@ func TestRollupJobBackfillSelfHeals(t *testing.T) {
 		t.Fatalf("reference computation produced no eu dim on d: %+v", wantDims)
 	}
 
-	gotDims, err := st.RollupDims(ctx, d, d, "")
+	gotDims, err := st.RollupDims(ctx, d, d, store.RollupFilter{Env: ""})
 	if err != nil {
 		t.Fatalf("rollup dims: %v", err)
 	}
-	gotPeaks, err := st.RollupPeakCCU(ctx, d, d)
+	gotPeaks, err := st.RollupPeakCCU(ctx, d, d, "")
 	if err != nil {
 		t.Fatalf("rollup peak ccu: %v", err)
 	}
@@ -414,7 +414,7 @@ func TestRollupJobEnvGrouping(t *testing.T) {
 
 	// Two rollup rows for the day — one per env — with matches attributed to
 	// their own env, not folded together.
-	all, err := st.RollupDims(ctx, day, day, "")
+	all, err := st.RollupDims(ctx, day, day, store.RollupFilter{Env: ""})
 	if err != nil {
 		t.Fatalf("rollup dims (all): %v", err)
 	}
@@ -428,7 +428,7 @@ func TestRollupJobEnvGrouping(t *testing.T) {
 	}
 
 	// The env filter isolates one environment's slice.
-	prod, err := st.RollupDims(ctx, day, day, "prod")
+	prod, err := st.RollupDims(ctx, day, day, store.RollupFilter{Env: "prod"})
 	if err != nil {
 		t.Fatalf("rollup dims (prod): %v", err)
 	}
@@ -437,7 +437,7 @@ func TestRollupJobEnvGrouping(t *testing.T) {
 	}
 
 	// match_ccu_daily: one global, platform-wide peak for the day (15), not split.
-	peaks, err := st.RollupPeakCCU(ctx, day, day)
+	peaks, err := st.RollupPeakCCU(ctx, day, day, "")
 	if err != nil {
 		t.Fatalf("rollup peak ccu: %v", err)
 	}
@@ -472,4 +472,92 @@ func reflectEqualDims(a, b []store.RollupDim) bool {
 		}
 	}
 	return true
+}
+
+// Роллап разделяет матчи РАЗНЫХ ПРОЕКТОВ по своим строкам (мультипроект W3),
+// а пик CCU получает проектные срезы РЯДОМ с платформенным. Симметрично
+// TestBackfillSplitsRollupByEnv выше, но по второму измерению — и с той
+// разницей, что по проекту делится ещё и пик: окружения делят одну ёмкость
+// флота, а проекты — непересекающиеся тенанты.
+func TestBackfillSplitsRollupByProject(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10) // проект "game"
+	ctx := context.Background()
+	gameSrv := f.InsertServer(t, f.NodeID, f.VersionID, "reaped", 20101, 0)
+
+	// Второй проект со своей нодой, версией и дедиком.
+	arenaNode, _, err := st.CreateNode(ctx, store.CreateNodeParams{
+		Project: "arena", Region: "eu", Hostname: "arena-1",
+		PublicIP: "203.0.113.77", CapacitySlots: 10,
+	})
+	if err != nil {
+		t.Fatalf("arena node: %v", err)
+	}
+	arenaVer, err := st.CreateVersion(ctx, store.CreateVersionParams{
+		Project: "arena", Semver: "9.9.9", ImageRef: "ghcr.io/example/arena:9.9.9", Env: "dev",
+	})
+	if err != nil {
+		t.Fatalf("arena version: %v", err)
+	}
+	arenaSrv := f.InsertServer(t, arenaNode.ID, arenaVer.ID, "reaped", 20102, 0)
+
+	now := time.Now().UTC()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	day := today.AddDate(0, 0, -10) // внутри иммутабельного окна Backfill
+
+	// Пересекаются во времени, поэтому платформенный пик (12) больше любого
+	// проектного (7 у game, 5 у arena) — на этом и видно, что пик не аддитивен
+	// и что проектные срезы считаются отдельно, а не делением платформенного.
+	insertJobMatchEnv(t, st, gameSrv, "eu", "dev", 7, day.Add(10*time.Hour), tPtr(day.Add(10*time.Hour+30*time.Minute)))
+	insertJobMatchEnv(t, st, arenaSrv, "eu", "dev", 5, day.Add(10*time.Hour+10*time.Minute), tPtr(day.Add(10*time.Hour+40*time.Minute)))
+
+	if err := New(st, time.Minute, testLog()).Backfill(ctx); err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+
+	all, err := st.RollupDims(ctx, day, day, store.RollupFilter{})
+	if err != nil {
+		t.Fatalf("rollup dims (all): %v", err)
+	}
+	byProject := map[string]store.RollupDim{}
+	for _, d := range all {
+		byProject[d.Project] = d
+	}
+	if len(byProject) != 2 || byProject["game"].Matches != 1 || byProject["game"].PlayersPeakSum != 7 ||
+		byProject["arena"].Matches != 1 || byProject["arena"].PlayersPeakSum != 5 {
+		t.Fatalf("проектная группировка сломана: %+v", all)
+	}
+	// Ни одна строка не осталась неатрибутированной: джоба знает проект каждого
+	// матча, '' бывает только у исторических строк из бэкфилла миграции.
+	if _, ok := byProject[""]; ok {
+		t.Fatalf("джоба не должна писать неатрибутированные строки: %+v", all)
+	}
+
+	arenaDims, err := st.RollupDims(ctx, day, day, store.RollupFilter{Project: "arena"})
+	if err != nil {
+		t.Fatalf("rollup dims (arena): %v", err)
+	}
+	if len(arenaDims) != 1 || arenaDims[0].Project != "arena" {
+		t.Fatalf("фильтр по проекту = %+v, want единственный dim arena", arenaDims)
+	}
+
+	dk := utctime.DayKey(day)
+	platform, err := st.RollupPeakCCU(ctx, day, day, "")
+	if err != nil {
+		t.Fatalf("peak platform: %v", err)
+	}
+	if platform[dk] != 12 {
+		t.Fatalf("платформенный пик = %v, want 12", platform)
+	}
+	gamePeak, err := st.RollupPeakCCU(ctx, day, day, "game")
+	if err != nil {
+		t.Fatalf("peak game: %v", err)
+	}
+	arenaPeak, err := st.RollupPeakCCU(ctx, day, day, "arena")
+	if err != nil {
+		t.Fatalf("peak arena: %v", err)
+	}
+	if gamePeak[dk] != 7 || arenaPeak[dk] != 5 {
+		t.Fatalf("проектные пики = game %v / arena %v, want 7 и 5", gamePeak, arenaPeak)
+	}
 }

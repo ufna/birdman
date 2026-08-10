@@ -161,6 +161,9 @@ func (j *Job) recomputeDay(ctx context.Context, d, now time.Time) error {
 		return err
 	}
 	dims, peakByDay := stats.AggregateDaily(matches, []time.Time{dStart}, now)
+	// Проектные срезы пика (мультипроект W3) — тем же сканом по подмножеству
+	// матчей каждого проекта: пик не аддитивен, из платформенного не выводится.
+	peakByProject := stats.AggregateDailyPeakByProject(matches, []time.Time{dStart}, now)
 
 	var filtered []stats.DailyDim
 	for _, dim := range dims {
@@ -168,5 +171,12 @@ func (j *Job) recomputeDay(ctx context.Context, d, now time.Time) error {
 			filtered = append(filtered, dim)
 		}
 	}
-	return j.st.UpsertRollupDay(ctx, dStart, filtered, peakByDay[utctime.DayKey(dStart)])
+	dayKey := utctime.DayKey(dStart)
+	dayPeakByProject := make(map[string]int, len(peakByProject))
+	for project, byDay := range peakByProject {
+		if peak, ok := byDay[dayKey]; ok {
+			dayPeakByProject[project] = peak
+		}
+	}
+	return j.st.UpsertRollupDay(ctx, dStart, filtered, peakByDay[dayKey], dayPeakByProject)
 }

@@ -8,6 +8,7 @@ import { api } from '../lib/api';
 import type { StatsCost } from '../lib/api';
 import { useAsync } from '../lib/useAsync';
 import { useEnv } from '../lib/env';
+import { useProject } from '../lib/project';
 import { useT } from '../lib/i18n';
 import { toStackModel, utilizationModel, versionColor } from '../lib/stats';
 import {
@@ -42,17 +43,23 @@ function fmtHours(v: number): string {
 export function Cost() {
   const [days, setDays] = useState(7);
   const { selected } = useEnv();
+  const { selected: project } = useProject();
   // Ответ /v1/stats/cost НЕ несёт env — помечаем данные окружением, за которое
   // их запросили (как и Stats, follow-up p3): «готовность» = ТОТ период и ТОТ
   // env, иначе при смене чипа мгновение показывались бы цифры прежнего env.
   const cost = useAsync(
-    () => api.statsCost(days, selected ?? undefined).then((data) => ({ env: selected, data })),
-    [days, selected],
+    () =>
+      api
+        .statsCost(days, { project: project ?? undefined, env: selected ?? undefined })
+        .then((data) => ({ env: selected, project, data })),
+    [days, selected, project],
   );
   // Данные показываем, только если они за ЗАПРОШЕННЫЙ период и env; иначе
   // (первая загрузка, смена периода/окружения) — скелетон: раскладка держится.
   const ready =
-    cost.data !== undefined && cost.data.env === selected && cost.data.data.days === days ? cost.data.data : undefined;
+    cost.data !== undefined && cost.data.env === selected && cost.data.project === project && cost.data.data.days === days
+      ? cost.data.data
+      : undefined;
 
   if (cost.error !== undefined && cost.data === undefined) {
     return (
