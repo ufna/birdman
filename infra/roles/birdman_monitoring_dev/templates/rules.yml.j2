@@ -48,31 +48,37 @@ groups:
       # production (деривация — join environments по (project_id, s.env), НЕ
       # через nodes — I6). prod → critical, не-prod → warning: пустой буфер
       # боевого окружения будит, dev/стейджинг только предупреждает.
+      # Агрегация — по (region, project): birdman_servers уже несёт project, и
+      # sum by(region) его СТИРАЛ — пустой ready-буфер проекта А маскировался
+      # серверами проекта Б в том же регионе, т.е. алерт молчал там, где должен
+      # был гореть. Лейбл project доезжает до алерта и делает его проектным для
+      # панели (?project= на /v1/alerts/*, master.md §6).
       # ВНИМАНИЕ (для ОБОИХ срезов): если master перестаёт экспортировать
-      # ready-серию этого среза в регионе (0 серий вместо явного 0), sum by(region)
+      # ready-серию этого среза (0 серий вместо явного 0), sum by(region, project)
       # не вернёт 0 — страхует парный BufferEmptyAllocFail ниже (по
-      # allocation_failures, у которого среза production НЕТ).
+      # allocation_failures, у которого среза production НЕТ). Сужение группировки
+      # эту дыру не расширяет: у пары ready==0 она была и до проекта.
       - alert: BufferEmptyReadyProd
-        expr: sum by (region) (birdman_servers{state="ready", production="true"}) == 0
+        expr: sum by (region, project) (birdman_servers{state="ready", production="true"}) == 0
         for: {{ birdman_ready_empty_for }}
         labels:
           severity: critical
         annotations:
-          summary: {% raw %}'BufferEmpty(prod): регион {{ $labels.region }} без ready-серверов'{% endraw %}
+          summary: {% raw %}'BufferEmpty(prod): проект {{ $labels.project }}, регион {{ $labels.region }} без ready-серверов'{% endraw %}
 
-          description: 'sum(birdman_servers{state="ready", production="true"}) == 0 for longer than the threshold (ops.md §1 BufferEmpty).'
-          description_ru: 'sum(birdman_servers{state="ready", production="true"}) == 0 дольше порога (ops.md §1 BufferEmpty).'
+          description: 'sum(birdman_servers{state="ready", production="true"}) == 0 for a (region, project) pair for longer than the threshold (ops.md §1 BufferEmpty).'
+          description_ru: 'sum(birdman_servers{state="ready", production="true"}) == 0 по паре (регион, проект) дольше порога (ops.md §1 BufferEmpty).'
 
       - alert: BufferEmptyReadyNonProd
-        expr: sum by (region) (birdman_servers{state="ready", production="false"}) == 0
+        expr: sum by (region, project) (birdman_servers{state="ready", production="false"}) == 0
         for: {{ birdman_ready_empty_for }}
         labels:
           severity: warning
         annotations:
-          summary: {% raw %}'BufferEmpty(non-prod): регион {{ $labels.region }} без ready-серверов'{% endraw %}
+          summary: {% raw %}'BufferEmpty(non-prod): проект {{ $labels.project }}, регион {{ $labels.region }} без ready-серверов'{% endraw %}
 
-          description: 'sum(birdman_servers{state="ready", production="false"}) == 0 for longer than the threshold (ops.md §1 BufferEmpty).'
-          description_ru: 'sum(birdman_servers{state="ready", production="false"}) == 0 дольше порога (ops.md §1 BufferEmpty).'
+          description: 'sum(birdman_servers{state="ready", production="false"}) == 0 for a (region, project) pair for longer than the threshold (ops.md §1 BufferEmpty).'
+          description_ru: 'sum(birdman_servers{state="ready", production="false"}) == 0 по паре (регион, проект) дольше порога (ops.md §1 BufferEmpty).'
 
       # BufferEmpty (2/2): аллокации падают из-за отсутствия ёмкости. Метрика
       # birdman_allocation_failures_total НЕ несёт лейбла production (пары по
@@ -80,13 +86,19 @@ groups:
       # ОДНО правило critical — заодно absent-страховка для обоих production-срезов
       # ready==0. Новый reason=env_required (409-ambiguous allocate) сюда не
       # попадает: expr фильтрует reason="no_capacity".
+      # expr НЕ трогаем: метрика теперь несёт лейбл project (master, metrics.go),
+      # и он доезжает до алерта сам — правило стало проектным без правки запроса.
+      # summary поэтому называет проект: без этого на два разных проекта в
+      # Discord/лог прилетали бы два неотличимых сообщения. project="" (запрос не
+      # разобран) = лейбла нет → алерт остаётся платформенным и виден при любом
+      # выбранном проекте.
       - alert: BufferEmptyAllocFail
         expr: increase(birdman_allocation_failures_total{reason="no_capacity"}[1m]) > 0
         for: 0s
         labels:
           severity: critical
         annotations:
-          summary: {% raw %}'BufferEmpty: no_capacity аллокаций за 1м: {{ $value }}'{% endraw %}
+          summary: {% raw %}'BufferEmpty: проект {{ $labels.project }}, no_capacity аллокаций за 1м: {{ $value }}'{% endraw %}
 
           description: 'No free slots available for allocation (ops.md §1 BufferEmpty).'
           description_ru: 'Нет свободных слотов под аллокацию (ops.md §1 BufferEmpty).'
@@ -158,14 +170,15 @@ groups:
           description: 'Node containerd filesystem (images) is above the critical threshold — GC/prune/add disk (ops.md §6 runbook 4).'
           description_ru: 'containerd-ФС (образы) ноды выше critical-порога — GC/прюнинг/докупить диск (ops.md §6 runbook 4).'
 
-      # AllocationFailures: любые провалы аллокации (по reason).
+      # AllocationFailures: любые провалы аллокации (по reason и project — лейбл
+      # project метрика несёт с master'а, expr его не трогает; см. BufferEmptyAllocFail).
       - alert: AllocationFailures
         expr: increase(birdman_allocation_failures_total[5m]) > 0
         for: 0s
         labels:
           severity: warning
         annotations:
-          summary: {% raw %}'AllocationFailures: reason={{ $labels.reason }} за 5м: {{ $value }}'{% endraw %}
+          summary: {% raw %}'AllocationFailures: проект {{ $labels.project }}, reason={{ $labels.reason }} за 5м: {{ $value }}'{% endraw %}
 
           description: 'Allocation failures are increasing (ops.md §1 AllocationFailures).'
           description_ru: 'Растут ошибки аллокации (ops.md §1 AllocationFailures).'

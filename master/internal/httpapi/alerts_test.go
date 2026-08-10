@@ -24,9 +24,20 @@ const (
 		{"state":"firing","name":"NodeDown","labels":{"alertname":"NodeDown","severity":"critical","node":"n1","region":"eu"},"annotations":{"description":"node is unreachable","description_ru":"нода недоступна"},"activeAt":"2026-07-08T09:00:00Z","value":"42"},
 		{"state":"pending","name":"DiskHigh","labels":{"alertname":"DiskHigh","severity":"warning"},"activeAt":"2026-07-08T10:00:00Z"}
 	]}}`
+	// Project scoping (tracker #955): one alert of alpha, one of beta, one
+	// platform alert with no project label at all.
+	vmAlertsProjectJSON = `{"status":"success","data":{"alerts":[
+		{"state":"firing","name":"BufferEmptyReadyProd","labels":{"alertname":"BufferEmptyReadyProd","severity":"critical","region":"eu","project":"alpha"},"annotations":{"description":"no ready servers"},"activeAt":"2026-07-08T09:00:00Z","value":"0"},
+		{"state":"firing","name":"AllocationFailures","labels":{"alertname":"AllocationFailures","severity":"warning","region":"eu","project":"beta"},"annotations":{"description":"alloc failures"},"activeAt":"2026-07-08T09:10:00Z","value":"3"},
+		{"state":"firing","name":"NodeDown","labels":{"alertname":"NodeDown","severity":"critical","node":"n1","region":"eu"},"annotations":{"description":"node is unreachable"},"activeAt":"2026-07-08T09:20:00Z","value":"42"}
+	]}}`
 )
 
 func fakeVmalert(t *testing.T) *httptest.Server {
+	return fakeVmalertWith(t, vmAlertsJSON)
+}
+
+func fakeVmalertWith(t *testing.T, alertsJSON string) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -34,7 +45,7 @@ func fakeVmalert(t *testing.T) *httptest.Server {
 		case "/api/v1/rules":
 			_, _ = w.Write([]byte(vmRulesJSON))
 		case "/api/v1/alerts":
-			_, _ = w.Write([]byte(vmAlertsJSON))
+			_, _ = w.Write([]byte(alertsJSON))
 		default:
 			http.NotFound(w, r)
 		}
@@ -100,6 +111,10 @@ func TestAlertsEndpoints(t *testing.T) {
 	if a0 := active[0].(map[string]any); a0["description"] != "node is unreachable" || a0["description_ru"] != "нода недоступна" {
 		t.Fatalf("active bilingual description: %v", a0)
 	}
+	// A rule built on a metric without a `project` label is platform-scoped.
+	if a0 := active[0].(map[string]any); a0["project"] != "" || a0["scope"] != "platform" {
+		t.Fatalf("NodeDown must be platform-scoped: %v", a0)
+	}
 
 	// history: both deliveries, newest first, active flags per endsAt.
 	code, body = ro.do("GET", "/v1/alerts/history?limit=50", nil)
@@ -127,6 +142,101 @@ func TestAlertsEndpoints(t *testing.T) {
 	// bad limit.
 	if code, _ := ro.do("GET", "/v1/alerts/history?limit=0", nil); code != 400 {
 		t.Fatalf("history bad limit: want 400, got %d", code)
+	}
+}
+
+// TestAlertsProjectScope covers ?project= on /v1/alerts/{active,history}
+// (tracker #955). The load-bearing assertion is the SECOND one: the filter is
+// non-hiding, so a platform alert (no `project` label) must survive a project
+// selection — silently swallowing NodeDown/MasterDown would be worse than
+// showing a neighbour's alert, and a project has no "All" mode to get it back.
+func TestAlertsProjectScope(t *testing.T) {
+	st := testdb.New(t)
+	log := opsLog()
+	m := metrics.New(st, log)
+	mm := matchmaker.New(st, m, matchmaker.Config{}, log)
+	dep := deploy.New(deploy.Options{Store: st, Sender: &testdb.CommandRecorder{}, Log: log})
+	ctx := t.Context()
+	_, roSecret, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "ro", Scopes: []string{httpapi.ScopeReadonly}})
+
+	vm := fakeVmalertWith(t, vmAlertsProjectJSON)
+
+	// History mirrors the active set: alpha, beta and one unlabelled platform alert.
+	logPath := filepath.Join(t.TempDir(), "alerts.log")
+	logBody := `{"received_at":"2026-07-08T09:00:00Z","alerts":[{"status":"firing","labels":{"alertname":"BufferEmptyReadyProd","severity":"critical","region":"eu","project":"alpha"},"annotations":{"description":"no ready servers"},"startsAt":"2026-07-08T08:59:00Z","endsAt":""}]}
+{"received_at":"2026-07-08T09:10:00Z","alerts":[{"status":"firing","labels":{"alertname":"AllocationFailures","severity":"warning","region":"eu","project":"beta"},"annotations":{"description":"alloc failures"},"startsAt":"2026-07-08T09:09:00Z","endsAt":""}]}
+{"received_at":"2026-07-08T09:20:00Z","alerts":[{"status":"firing","labels":{"alertname":"NodeDown","severity":"critical","node":"n1","region":"eu"},"annotations":{"description":"node is unreachable"},"startsAt":"2026-07-08T09:19:00Z","endsAt":""}]}
+`
+	if err := os.WriteFile(logPath, []byte(logBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", "", log).
+		WithAlertsSources(vm.URL, logPath))
+	t.Cleanup(ts.Close)
+	ro := &client{t: t, base: ts.URL, key: roSecret}
+
+	// names collects name→alert for one endpoint call, failing the test on a
+	// non-200 or a malformed body.
+	names := func(path string) map[string]map[string]any {
+		t.Helper()
+		code, body := ro.do("GET", path, nil)
+		if code != 200 {
+			t.Fatalf("%s: %d %v", path, code, body)
+		}
+		out := map[string]map[string]any{}
+		for _, raw := range body["alerts"].([]any) {
+			a := raw.(map[string]any)
+			out[a["name"].(string)] = a
+		}
+		return out
+	}
+
+	for _, path := range []string{"/v1/alerts/active", "/v1/alerts/history"} {
+		// 1. No ?project= → behaviour as before: everything is returned.
+		all := names(path)
+		if len(all) != 3 {
+			t.Fatalf("%s without filter: want 3 alerts, got %d (%v)", path, len(all), all)
+		}
+		// scope is derived from the presence of the label — no scope: label in rules.
+		if all["BufferEmptyReadyProd"]["scope"] != "project" || all["BufferEmptyReadyProd"]["project"] != "alpha" {
+			t.Fatalf("%s: project alert scope/project: %v", path, all["BufferEmptyReadyProd"])
+		}
+		if all["NodeDown"]["scope"] != "platform" || all["NodeDown"]["project"] != "" {
+			t.Fatalf("%s: platform alert scope/project: %v", path, all["NodeDown"])
+		}
+
+		// 2. ?project=alpha → narrowed, but NOT hiding.
+		got := names(path + "?project=alpha")
+		if _, ok := got["BufferEmptyReadyProd"]; !ok {
+			t.Fatalf("%s?project=alpha: own alert missing (%v)", path, got)
+		}
+		if _, ok := got["NodeDown"]; !ok {
+			t.Fatalf("%s?project=alpha: PLATFORM alert must stay visible (%v)", path, got)
+		}
+		if _, ok := got["AllocationFailures"]; ok {
+			t.Fatalf("%s?project=alpha: beta's alert must be gone (%v)", path, got)
+		}
+		if len(got) != 2 {
+			t.Fatalf("%s?project=alpha: want alpha+platform, got %v", path, got)
+		}
+
+		// 3. A project with no alerts of its own still sees the platform ones.
+		none := names(path + "?project=gamma")
+		if len(none) != 1 {
+			t.Fatalf("%s?project=gamma: want just the platform alert, got %v", path, none)
+		}
+		if _, ok := none["NodeDown"]; !ok {
+			t.Fatalf("%s?project=gamma: platform alert missing (%v)", path, none)
+		}
+	}
+
+	// /v1/alerts/rules is the configuration catalogue, not alert instances —
+	// ?project= must NOT shrink it (the project lives in the expr, not in labels).
+	_, unfiltered := ro.do("GET", "/v1/alerts/rules", nil)
+	_, filtered := ro.do("GET", "/v1/alerts/rules?project=alpha", nil)
+	if len(filtered["rules"].([]any)) != len(unfiltered["rules"].([]any)) {
+		t.Fatalf("rules must ignore ?project=: %v vs %v", filtered["rules"], unfiltered["rules"])
 	}
 }
 

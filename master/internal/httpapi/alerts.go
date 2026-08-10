@@ -28,6 +28,10 @@ import (
 // `description` when `description_ru` is absent (self-host operators need not
 // write bilingual rules).
 //
+// Project scoping (tracker #955): /v1/alerts/{active,history} report `project`
+// (from the alert's label) and a derived `scope` ("project"|"platform"), and
+// accept ?project= — a NON-hiding filter, see keepAlertForProject below.
+//
 // Mutes (POST/GET/DELETE /v1/alerts/mutes) are master state (table alert_mutes,
 // store/alerts.go) — the source of truth. A mute is reflected as muted:true on
 // matching alerts in /v1/alerts/{active,history} so the panel can dim/hide them
@@ -71,6 +75,15 @@ type alertRule struct {
 	DescriptionRu string `json:"description_ru,omitempty"` // optional RU; panel falls back to Description
 }
 
+// handleAlertRules is GET /v1/alerts/rules (readonly).
+//
+// Deliberately NOT filtered by ?project= (unlike /active and /history): this is
+// the CONFIGURATION CATALOGUE, not a list of alert instances. A rule has no
+// project — its expr may fan out into one series per project (BufferEmptyReady*
+// aggregates by (region, project)), so the project lives inside the query text,
+// not in the static labels vmalert reports here. Filtering by a label that
+// structurally cannot be there would return an empty catalogue for every
+// project.
 func (s *Server) handleAlertRules(w http.ResponseWriter, r *http.Request) {
 	if s.vmalertURL == "" {
 		writeError(w, http.StatusServiceUnavailable, "alerts_unconfigured",
@@ -122,6 +135,8 @@ type activeAlert struct {
 	Severity      string    `json:"severity"`
 	Region        string    `json:"region"`
 	Node          string    `json:"node"`
+	Project       string    `json:"project"` // from the alert's `project` label; "" = platform-wide
+	Scope         string    `json:"scope"`   // "project" | "platform" — derived from Project
 	State         string    `json:"state"`
 	ActiveAt      time.Time `json:"active_at"`
 	Value         string    `json:"value"`
@@ -141,9 +156,13 @@ func (s *Server) handleAlertsActive(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "upstream", err.Error())
 		return
 	}
+	project := r.URL.Query().Get("project")
 	out := make([]activeAlert, 0)
 	for _, a := range va.Data.Alerts {
 		if a.State != "firing" { // active = currently firing
+			continue
+		}
+		if !keepAlertForProject(a.Labels["project"], project) {
 			continue
 		}
 		name := a.Name
@@ -155,6 +174,8 @@ func (s *Server) handleAlertsActive(w http.ResponseWriter, r *http.Request) {
 			Severity:      a.Labels["severity"],
 			Region:        a.Labels["region"],
 			Node:          alertNode(a.Labels),
+			Project:       a.Labels["project"],
+			Scope:         alertScope(a.Labels["project"]),
 			State:         a.State,
 			ActiveAt:      a.ActiveAt,
 			Value:         a.Value,
@@ -221,6 +242,55 @@ func alertNode(labels map[string]string) string {
 	return ""
 }
 
+// --- project scoping (tracker #955) ---
+//
+// An alert is project-scoped iff the metric its expr is built on CARRIES a
+// `project` label — nothing else is configured, and no `scope:` label is
+// introduced into the rules. That way the self-host operator's OWN rules are
+// classified correctly without learning any markup discipline: aggregate over
+// a project-labelled series and the alert is a project alert; build it on node
+// disk or cert expiry and it is a platform alert. Same trick as the optional
+// `description_ru` annotation — the rule file stays the single source of truth
+// instead of a catalogue baked into master/panel.
+//
+// scope is derived rather than passed through so the panel never has to repeat
+// the "empty label means platform" rule (docs/specs/master.md §6).
+
+const (
+	alertScopeProject  = "project"
+	alertScopePlatform = "platform"
+)
+
+func alertScope(project string) string {
+	if project == "" {
+		return alertScopePlatform
+	}
+	return alertScopeProject
+}
+
+// keepAlertForProject is the ?project= filter, and it is deliberately NOT
+// hiding: an alert drops out only when it EXPLICITLY belongs to another
+// project. An alert with no `project` label (MasterDown, NodeDown, DiskHigh,
+// CertExpiry, BackupFailed — platform by nature, I6) stays visible under every
+// selection.
+//
+// Strict "keep only what matches" was rejected: a project has no "All" mode in
+// the panel (unlike env), so a strict filter would hide every platform alert
+// FOREVER, with no view to get it back — silently swallowing "the master is
+// down" is a worse outcome than showing a neighbour's alert. Precedents:
+// keepForProject for the event feed (panel/src/lib/project.tsx) and the
+// platform slice of peak CCU (store/rollup.go, decision I5/W3).
+//
+// The requested project is NOT validated against the DB — same as the other
+// screens the panel narrows in W2 (?project= on /v1/{nodes,servers,versions,
+// matches}), and unlike /v1/stats/* which 400s on a typo because it had a
+// legacy env fallback to kill. Alerts are an ops screen: an unknown project
+// degrades to "platform alerts only", never to an error page, and the panel
+// only ever sends a slug from its own DB-backed selector.
+func keepAlertForProject(alertProject, want string) bool {
+	return want == "" || alertProject == "" || alertProject == want
+}
+
 // --- alert history (log sink) ---
 
 // alertEvent is one normalized firing/resolution from the alert log.
@@ -229,6 +299,8 @@ type alertEvent struct {
 	Severity      string `json:"severity"`
 	Region        string `json:"region"`
 	Node          string `json:"node"`
+	Project       string `json:"project"` // from the alert's `project` label; "" = platform-wide
+	Scope         string `json:"scope"`   // "project" | "platform" — derived from Project
 	StartsAt      string `json:"startsAt"`
 	EndsAt        string `json:"endsAt"`
 	Description   string `json:"description"`              // EN, canonical
@@ -276,7 +348,7 @@ func (s *Server) handleAlertHistory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	events := parseAlertsLog(data, time.Now(), limit)
+	events := parseAlertsLog(data, time.Now(), limit, r.URL.Query().Get("project"))
 	mutes, err := s.st.ListAlertMutes(r.Context(), false)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
@@ -292,8 +364,13 @@ func (s *Server) handleAlertHistory(w http.ResponseWriter, r *http.Request) {
 // newest-first list capped at limit. It is defensive: unparseable lines are
 // skipped, and both the {received_at, alerts:[…]} batch shape and a bare
 // single-alert object are accepted. Never returns nil (→ [] in JSON).
-func parseAlertsLog(data []byte, now time.Time, limit int) []alertEvent {
+//
+// project is the (non-hiding) ?project= filter — applied while reading, i.e.
+// BEFORE the limit cap, so ?limit=100&project=X really returns up to 100
+// alerts of X instead of whatever survives after neighbours ate the budget.
+func parseAlertsLog(data []byte, now time.Time, limit int, project string) []alertEvent {
 	out := []alertEvent{}
+	keep := func(a amAlert) bool { return keepAlertForProject(a.Labels["project"], project) }
 	sc := bufio.NewScanner(bytes.NewReader(data))
 	// Alert lines can be long (many labels/annotations) — lift the token cap.
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
@@ -305,13 +382,16 @@ func parseAlertsLog(data []byte, now time.Time, limit int) []alertEvent {
 		var wl webhookLine
 		if err := json.Unmarshal(line, &wl); err == nil && len(wl.Alerts) > 0 {
 			for _, a := range wl.Alerts {
+				if !keep(a) {
+					continue
+				}
 				out = append(out, normalizeAlert(a, wl.ReceivedAt, now))
 			}
 			continue
 		}
 		// Fallback: a bare single-alert object per line.
 		var a amAlert
-		if err := json.Unmarshal(line, &a); err == nil && len(a.Labels) > 0 {
+		if err := json.Unmarshal(line, &a); err == nil && len(a.Labels) > 0 && keep(a) {
 			out = append(out, normalizeAlert(a, wl.ReceivedAt, now))
 		}
 	}
@@ -334,6 +414,8 @@ func normalizeAlert(a amAlert, receivedAt string, now time.Time) alertEvent {
 		Severity:      a.Labels["severity"],
 		Region:        a.Labels["region"],
 		Node:          alertNode(a.Labels),
+		Project:       a.Labels["project"],
+		Scope:         alertScope(a.Labels["project"]),
 		StartsAt:      a.StartsAt,
 		EndsAt:        a.EndsAt,
 		Description:   annotation(a.Annotations),

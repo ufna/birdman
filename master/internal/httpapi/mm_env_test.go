@@ -195,9 +195,12 @@ func TestAllocateEnvResolution(t *testing.T) {
 	// (environments v1 §7) — dashboards separate «operator must name env» from a
 	// malformed request's bad_request. CounterVec only prints series it has
 	// touched, so the presence of this line means the env_required inc happened.
+	// The project label (tracker #955) rides along on the same series — this is
+	// also the proof that the allocation's project reaches the metric, and hence
+	// the BufferEmptyAllocFail/AllocationFailures alerts, without an expr change.
 	if scrape := metricsText(t, ts.URL); !strings.Contains(scrape,
-		`birdman_allocation_failures_total{reason="env_required"} `) {
-		t.Fatal("409-ambiguous allocate must increment AllocationFailures{reason=env_required}")
+		`birdman_allocation_failures_total{project="game",reason="env_required"} `) {
+		t.Fatal("409-ambiguous allocate must increment AllocationFailures{reason=env_required,project=game}")
 	}
 
 	// bound(dev) key on env=prod → 403.

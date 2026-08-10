@@ -164,7 +164,7 @@ func (mm *Matchmaker) matchBucket(ctx context.Context, project, env string, size
 		if errors.Is(err, store.ErrNoCapacity) {
 			// Tickets stay queued; the warm pool catches up via reconcile and
 			// the next tick retries. Feeds the BufferEmpty alert (ops.md §1).
-			mm.m.AllocFailures.WithLabelValues("no_capacity").Inc()
+			mm.m.AllocFailures.WithLabelValues("no_capacity", project).Inc()
 			exhausted[region] = true
 			continue
 		}

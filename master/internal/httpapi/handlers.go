@@ -261,22 +261,26 @@ func (s *Server) handleAllocate(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	var req allocateRequest
 	if !decodeJSON(w, r, &req) {
-		s.m.AllocFailures.WithLabelValues("bad_request").Inc()
+		// The body never parsed — the project is genuinely unknown here, so the
+		// label is empty rather than guessed (an empty label reads as absent, i.e.
+		// the resulting alert stays platform-scoped and is never hidden by a
+		// project filter). Every later site knows req.Project.
+		s.m.AllocFailures.WithLabelValues("bad_request", "").Inc()
 		return
 	}
 	if req.Project == "" || req.Region == "" {
-		s.m.AllocFailures.WithLabelValues("bad_request").Inc()
+		s.m.AllocFailures.WithLabelValues("bad_request", req.Project).Inc()
 		writeError(w, http.StatusBadRequest, "bad_request", "project and region are required")
 		return
 	}
 	if _, err := uuid.Parse(req.MatchID); err != nil {
-		s.m.AllocFailures.WithLabelValues("bad_request").Inc()
+		s.m.AllocFailures.WithLabelValues("bad_request", req.Project).Inc()
 		writeError(w, http.StatusBadRequest, "bad_request", "match_id must be a uuid")
 		return
 	}
 	if req.VersionID != nil {
 		if _, err := uuid.Parse(*req.VersionID); err != nil {
-			s.m.AllocFailures.WithLabelValues("bad_request").Inc()
+			s.m.AllocFailures.WithLabelValues("bad_request", req.Project).Inc()
 			writeError(w, http.StatusBadRequest, "bad_request", "version_id must be a uuid")
 			return
 		}
@@ -308,7 +312,7 @@ func (s *Server) handleAllocate(w http.ResponseWriter, r *http.Request) {
 			s.writeAllocNoCapacity(w, r, req)
 			return
 		case err != nil:
-			s.m.AllocFailures.WithLabelValues("internal").Inc()
+			s.m.AllocFailures.WithLabelValues("internal", req.Project).Inc()
 			storeError(w, err)
 			return
 		}
@@ -328,11 +332,11 @@ func (s *Server) handleAllocate(w http.ResponseWriter, r *http.Request) {
 			// reason label so AllocationFailures dashboards separate «operator
 			// must name env» from malformed requests (environments v1 §7). The
 			// BufferEmpty rule filters {reason="no_capacity"}, so it is untouched.
-			s.m.AllocFailures.WithLabelValues("env_required").Inc()
+			s.m.AllocFailures.WithLabelValues("env_required", req.Project).Inc()
 			writeError(w, http.StatusConflict, "env_required", err.Error())
 			return
 		case err != nil:
-			s.m.AllocFailures.WithLabelValues("internal").Inc()
+			s.m.AllocFailures.WithLabelValues("internal", req.Project).Inc()
 			storeError(w, err)
 			return
 		}
@@ -352,11 +356,11 @@ func (s *Server) handleAllocate(w http.ResponseWriter, r *http.Request) {
 		s.writeAllocNoCapacity(w, r, req)
 		return
 	case errors.Is(err, store.ErrNotFound):
-		s.m.AllocFailures.WithLabelValues("bad_request").Inc()
+		s.m.AllocFailures.WithLabelValues("bad_request", req.Project).Inc()
 		storeError(w, err)
 		return
 	case err != nil:
-		s.m.AllocFailures.WithLabelValues("internal").Inc()
+		s.m.AllocFailures.WithLabelValues("internal", req.Project).Inc()
 		storeError(w, err)
 		return
 	}
@@ -369,7 +373,7 @@ func (s *Server) handleAllocate(w http.ResponseWriter, r *http.Request) {
 // event). Both the empty-pool env fallback (env-less allocate, zero ready) and
 // the claim path that finds no server land here — one place, one contract.
 func (s *Server) writeAllocNoCapacity(w http.ResponseWriter, r *http.Request, req allocateRequest) {
-	s.m.AllocFailures.WithLabelValues("no_capacity").Inc()
+	s.m.AllocFailures.WithLabelValues("no_capacity", req.Project).Inc()
 	payload := map[string]any{
 		"project": req.Project, "region": req.Region, "reason": "no_capacity",
 	}

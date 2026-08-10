@@ -94,10 +94,17 @@ func New(st *store.Store, log *slog.Logger) *Metrics {
 			Help:    "Duration of POST /v1/allocate (SLO p95 < 1s warm).",
 			Buckets: prometheus.DefBuckets,
 		}),
+		// project is the allocation's project — an allocation is ALWAYS about one
+		// (allocateRequest.Project is required), so the label makes BufferEmptyAllocFail
+		// and AllocationFailures project-scoped without touching their expr, and it
+		// costs one series per project. It is empty ONLY where the request has not
+		// been parsed yet (the earliest decodeJSON failure): an empty label is the
+		// same as an absent one in Prometheus, so such an alert stays PLATFORM-scoped
+		// and remains visible under any ?project= (httpapi/alerts.go).
 		AllocFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "birdman_allocation_failures_total",
-			Help: "Failed allocations by reason (no_capacity, bad_request, env_required, internal).",
-		}, []string{"reason"}),
+			Help: "Failed allocations by reason (no_capacity, bad_request, env_required, internal) and project.",
+		}, []string{"reason", "project"}),
 		MMQueueDepth: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "birdman_mm_queue_depth",
 			Help: "Queued matchmaking tickets per best (lowest-rtt) region and env (environments v1 §7).",

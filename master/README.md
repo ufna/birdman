@@ -72,7 +72,7 @@
   - rate-limit матчмейкинга: 5 rps per player_id → `429 rate_limited`;
 - **/metrics** (Prometheus): `birdman_servers{project,env,production,state,region,version}`,
   `birdman_allocation_duration_seconds`,
-  `birdman_allocation_failures_total{reason}`,
+  `birdman_allocation_failures_total{reason,project}`,
   `birdman_node_heartbeat_age_seconds`, `birdman_mm_queue_depth{region,env}`,
   `birdman_mm_time_to_match_seconds`, `birdman_mm_tickets_total{result}`;
 - **SSE** `GET /v1/events/stream` (readonly+): новые строки `events` как
