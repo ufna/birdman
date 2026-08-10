@@ -96,6 +96,9 @@ func New(st *store.Store, m *metrics.Metrics, mm *matchmaker.Matchmaker, dep *de
 	// Promote a version into another environment (environments v1 §4, deploy.go).
 	s.mux.HandleFunc("POST /v1/promote", s.requireScope(ScopeDeploy, s.handlePromote))
 	s.mux.HandleFunc("PUT /v1/fleets/{region}", s.requireScope(ScopeAdmin, s.handleUpsertFleet))
+	// Список проектов — readonly (селектор проекта в панели, мультипроект W1);
+	// правка match_size остаётся admin.
+	s.mux.HandleFunc("GET /v1/projects", s.requireScope(ScopeReadonly, s.handleListProjects))
 	s.mux.HandleFunc("PUT /v1/projects/{slug}", s.requireScope(ScopeAdmin, s.handleUpsertProject))
 	// Environments CRUD (environments v1 §2, environments.go). List/usage are
 	// readonly; create/patch/delete are admin. DELETE сносит окружение вместе с

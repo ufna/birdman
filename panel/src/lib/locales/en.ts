@@ -687,8 +687,18 @@ export const en = {
   'backups.history.result.error': 'error',
   'event.backup_failed': 'Backup failed',
 
+  // --- Projects (мультипроект W1) ---
+  // Top-level switcher: every screen shows the SELECTED project; there is no
+  // "all projects" mode.
+  'project.switch': 'Project',
+  'project.none': 'No projects yet',
+  'project.none.hint':
+    'A project is created implicitly by the first node or version you register — there is nothing to create by hand.',
+  'project.unavailable': 'Projects unavailable',
+  'project.unavailable.hint': "Couldn't load the project list. Click to retry.",
+
   // --- Environments (environments v1 §8) ---
-  // Global env switcher (Shell chips).
+  // Global env switcher (Shell chips) — the environments OF THE SELECTED PROJECT.
   'env.switch': 'Environment',
   'env.all': 'All',
   'env.productionTitle': 'production environment',
@@ -697,8 +707,6 @@ export const en = {
   'env.unavailable': 'Environments unavailable',
   'env.unavailable.hint':
     "Couldn't load the environment list — the env filter is off and every screen shows all data. Click to retry.",
-  'env.unavailable.multiProject':
-    'The panel works with a single project (v1) and master has more than one, so the environment list is unavailable. The env filter is off — every screen shows all data.',
 
   // Fleet: move a node to another environment (PATCH /v1/nodes/{id}).
   'fleet.moveEnv': 'Move to env…',

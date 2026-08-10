@@ -4,14 +4,18 @@
 // умолчанию. Фильтрует Overview/Fleet/Deploys/Matches/Stats/Cost (+Events
 // клиентски) — экраны читают selected через useEnv() и сужают данные сами.
 //
-// Панель живёт sole-project допущением (как везде в v0): проект берём из самих
-// окружений (все одного проекта) — он нужен админке Environments для create/
-// patch/delete. Баннер «выберите проект» при >1 проекте — вне скоупа v1.
+// Окружения живут ВНУТРИ проекта, поэтому этот провайдер вложен в
+// ProjectProvider (мультипроект W1) и запрашивает список ВСЕГДА с ?project=
+// выбранного проекта, перезапрашивая его при смене. Прежнее sole-project
+// допущение снято: `project` больше не выводится из самих окружений, а
+// приходит из ProjectContext — иначе админка Environments и привязка ключей
+// в Access не знали бы, к какому проекту относится их правка.
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import { api, ApiError } from './api';
+import { api } from './api';
 import type { ApiEvent, Environment } from './api';
+import { useProject } from './project';
 
 /** Ключ localStorage для выбранного окружения (имя env; отсутствует = «All»). */
 export const ENV_STORAGE_KEY = 'birdman.env';
@@ -22,7 +26,7 @@ export type EnvSelection = string | null;
 interface EnvContextValue {
   /** Окружения проекта (non-production сначала); пусто, пока грузится/недоступно. */
   environments: Environment[];
-  /** Слаг единственного проекта (sole-project) — из окружений; null, если неизвестен. */
+  /** Слаг ВЫБРАННОГО проекта (из ProjectContext); null, пока проекта нет. */
   project: string | null;
   /**
    * ЭФФЕКТИВНЫЙ выбор: имя окружения или null («All»). Пока окружений нет
@@ -36,24 +40,6 @@ interface EnvContextValue {
   /** Ошибка GET /v1/environments: чипы заменяются предупреждением (Shell). */
   error?: Error;
   reload: () => void;
-}
-
-/** Почему список окружений не приехал (подпись деградации в Shell). */
-export type EnvErrorKind = 'multiProject' | 'unavailable';
-
-/**
- * Классификация отказа GET /v1/environments (follow-up p2). Панель живёт
- * sole-project допущением: без ?project= master резолвит единственный проект, а
- * при нескольких отвечает 400 bad_request с «several projects exist …» внутри
- * detail (SoleProjectSlug → ErrConflict). Это не «мастер лежит», а «панель не
- * умеет мультипроект» — и текст пользователю нужен другой.
- */
-export function envErrorKind(error: unknown): EnvErrorKind {
-  const multi =
-    error instanceof ApiError &&
-    (error.status === 400 || error.status === 409) &&
-    /several projects/i.test(error.detail ?? '');
-  return multi ? 'multiProject' : 'unavailable';
 }
 
 // Экспортируется для юнит-тестов (инъекция управляемого контекста, как
@@ -122,27 +108,38 @@ export function eventEnvOf(e: ApiEvent): string | undefined {
 }
 
 export function EnvProvider({ children }: { children: ReactNode }) {
+  const { selected: project, loading: projectLoading } = useProject();
   const [environments, setEnvironments] = useState<Environment[]>([]);
   // ЖЕЛАЕМЫЙ (персистентный) выбор пользователя. Эффективный `selected` ниже —
   // производный: без списка окружений он всегда «All».
   const [desired, setDesired] = useState<EnvSelection>(() => storedEnv());
-  const [loading, setLoading] = useState(true);
+  const [envLoading, setEnvLoading] = useState(true);
   const [error, setError] = useState<Error | undefined>(undefined);
   const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
+    // Проекта нет (грузится / их вообще нет) — спрашивать окружения не у кого.
+    // Это НЕ ошибка: чипов просто нет, а «загружаемся» скажет projectLoading.
+    if (project === null) {
+      setEnvironments([]);
+      setError(undefined);
+      setEnvLoading(false);
+      return;
+    }
     let cancelled = false;
-    setLoading(true);
+    setEnvLoading(true);
     api
-      .listEnvironments()
+      .listEnvironments(project)
       .then((envs) => {
         if (cancelled) return;
         const ordered = orderedEnvs(envs);
         setEnvironments(ordered);
-        // Стёртый/несуществующий сохранённый env — откат на «All».
+        // Стёртый/несуществующий сохранённый env — откат на «All». Сюда же
+        // попадает смена проекта: у нового проекта свои окружения, и env,
+        // которого в нём нет, молча не должен резать экраны.
         setDesired((cur) => resolveSelection(cur, ordered));
         setError(undefined);
-        setLoading(false);
+        setEnvLoading(false);
       })
       .catch((e: unknown) => {
         if (cancelled) return;
@@ -150,12 +147,12 @@ export function EnvProvider({ children }: { children: ReactNode }) {
         // деградирует в «All» (см. derived `selected`) — данные не режем молча.
         setEnvironments([]);
         setError(e instanceof Error ? e : new Error(String(e)));
-        setLoading(false);
+        setEnvLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [reloadKey]);
+  }, [reloadKey, project]);
 
   const setSelected = useCallback((env: EnvSelection) => {
     try {
@@ -171,8 +168,6 @@ export function EnvProvider({ children }: { children: ReactNode }) {
     setReloadKey((k) => k + 1);
   }, []);
 
-  const project = environments[0]?.project ?? null;
-
   // Нет списка (грузится / недоступен / пуст) → «All». Есть — сохранённый выбор,
   // если такое окружение ещё существует. Персист (localStorage) при деградации
   // НЕ трогаем: список вернётся — вернётся и выбор.
@@ -180,6 +175,10 @@ export function EnvProvider({ children }: { children: ReactNode }) {
     () => (environments.length === 0 ? null : resolveSelection(desired, environments)),
     [environments, desired],
   );
+  // «Грузимся» — это и загрузка проектов тоже: пока их нет, окружения не
+  // запрашиваются вовсе, и без этого слагаемого панель отрапортовала бы
+  // готовность, ничего ещё не показав.
+  const loading = projectLoading || envLoading;
 
   const value = useMemo(
     () => ({ environments, project, selected, setSelected, loading, error, reload }),

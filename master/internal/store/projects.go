@@ -16,6 +16,31 @@ type Project struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// ListProjects returns every project, oldest first — what the panel's project
+// selector is built from (мультипроект W1). Sorted by (created_at, slug): the
+// timestamp alone is not a total order, because ensureProject can create
+// several projects inside one transaction and they then share it — the slug
+// tiebreak keeps the selector's first entry (its default choice) stable across
+// reloads.
+func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
+	rows, err := s.Pool.Query(ctx, `
+		select id::text, slug, match_size, created_at
+		from projects order by created_at, slug`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Project
+	for rows.Next() {
+		var p Project
+		if err := rows.Scan(&p.ID, &p.Slug, &p.MatchSize, &p.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 // GetProject returns a project by slug (ErrNotFound when missing).
 func (s *Store) GetProject(ctx context.Context, slug string) (Project, error) {
 	var p Project

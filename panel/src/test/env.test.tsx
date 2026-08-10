@@ -5,14 +5,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ReactElement, ReactNode } from 'react';
-import { ApiError } from '../lib/api';
 import type { ApiEvent, Environment, NodeInfo, SessionInfo } from '../lib/api';
 import { I18nProvider } from '../lib/i18n';
 import { SessionContext } from '../lib/session';
+import { ProjectContext } from '../lib/project';
+import type { ProjectContextValue } from '../lib/project';
 import {
   EnvContext,
   EnvProvider,
-  envErrorKind,
   envMatches,
   eventEnvOf,
   keepForEnv,
@@ -134,19 +134,6 @@ describe('EnvChips', () => {
 
 // --- деградация: список окружений недоступен (follow-up p2) ---
 
-describe('env — envErrorKind', () => {
-  it('400/409 «several projects» (панель sole-project) → multiProject', () => {
-    const multi = new ApiError(400, 'bad_request', 'project is required: several projects exist, ticket must name one: conflict');
-    expect(envErrorKind(multi)).toBe('multiProject');
-    expect(envErrorKind(new ApiError(409, 'conflict', 'several projects exist'))).toBe('multiProject');
-  });
-  it('прочие отказы (и не-API ошибки) → unavailable', () => {
-    expect(envErrorKind(new ApiError(500, 'internal', 'boom'))).toBe('unavailable');
-    expect(envErrorKind(new ApiError(400, 'bad_request', 'project is required: no projects: not found'))).toBe('unavailable');
-    expect(envErrorKind(new Error('offline'))).toBe('unavailable');
-  });
-});
-
 /** Пробник эффективного выбора из useEnv (внутри EnvProvider) + сами чипы. */
 function EnvProbe() {
   const { selected, environments } = useEnv();
@@ -162,17 +149,25 @@ function EnvProbe() {
 const jsonRes = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 
-const MULTI_PROJECT_400 = {
-  error: 'bad_request',
-  detail: 'project is required: several projects exist, ticket must name one: conflict',
+/** Проект инжектим фиксированным: тесты ниже про ОКРУЖЕНИЯ, а не про выбор
+ *  проекта (он — предмет project.test.tsx). EnvProvider без выбранного проекта
+ *  окружения не запрашивает вовсе (мультипроект W1). */
+const PROJECT_GAME: ProjectContextValue = {
+  projects: [{ id: 'p1', slug: 'game', match_size: 2, created_at: '2026-07-01T00:00:00Z' }],
+  selected: 'game',
+  setSelected: () => {},
+  loading: false,
+  reload: () => {},
 };
 
 function renderProvider() {
   return render(
     <I18nProvider initialLang="en">
-      <EnvProvider>
-        <EnvProbe />
-      </EnvProvider>
+      <ProjectContext.Provider value={PROJECT_GAME}>
+        <EnvProvider>
+          <EnvProbe />
+        </EnvProvider>
+      </ProjectContext.Provider>
     </I18nProvider>,
   );
 }
@@ -196,13 +191,6 @@ describe('EnvProvider — деградация при недоступном GET
     const chip = await screen.findByRole('button', { name: /Environments unavailable/ });
     expect(chip.getAttribute('title')).toMatch(/env filter is off/i);
     expect(screen.queryByRole('button', { name: 'All' })).toBeNull(); // обычных чипов нет
-  });
-
-  it('>1 проекта в master (400) → в тултипе текст про мультипроект', async () => {
-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(jsonRes(MULTI_PROJECT_400, 400))));
-    renderProvider();
-    const chip = await screen.findByRole('button', { name: /Environments unavailable/ });
-    expect(chip.getAttribute('title')).toMatch(/single project/i);
   });
 
   it('повтор по клику: список приехал → чипы вернулись и сохранённый выбор восстановлен', async () => {

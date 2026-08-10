@@ -291,6 +291,7 @@ POST /v1/rollback: шаг 3 в обратную сторону (образы у�
 | `GET /v1/ca` | readonly | публичный PEM-бандл активных внутренних CA (`text/plain`) — для ansible (кладёт `master-ca.pem` на ноды) и отладки; приватный ключ CA неоткуда прочитать by construction (mTLS v1, `protocol.md` §Auth) |
 | `GET /v1/events/stream` (SSE) | readonly | live-лента для панели |
 | `PUT /v1/fleets/{region}` | admin | buffer, max_servers, reap_ttl; **`env` в теле обязателен** (environments v1 §2; валидация active_version×env — БД-FK + 400) |
+| `GET /v1/projects` | readonly | список проектов `[{id, slug, match_size, created_at}]`, старейший первым — источник селектора проекта в панели (мультипроект W1). Readonly по замыслу: панель обязана показывать, в каком проекте работает, и readonly-сессии тоже |
 | `PUT /v1/projects/{slug}` | admin | match_size проекта (уточнено в v0) |
 | `POST /v1/versions` | deploy | регистрация билда из CI; **`env` обязателен** (заменил `channel`); привязанный ключ — только свой env |
 | `POST /v1/deploy` · `/v1/rollback` | deploy | см. §5; rollback скоупится env версии — `env` обязателен при >1 env с окном deprecated, иначе sole-fallback |

@@ -174,6 +174,19 @@ type upsertProjectRequest struct {
 	MatchSize int32 `json:"match_size"`
 }
 
+// handleListProjects is GET /v1/projects (readonly) — the panel's project
+// selector reads it (мультипроект W1). Readonly on purpose, unlike the admin
+// PUT below: a readonly session must still be able to see WHICH project it is
+// looking at, and the payload carries nothing secret (slug, match_size).
+func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
+	projects, err := s.st.ListProjects(r.Context())
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"projects": emptyNotNull(projects)})
+}
+
 func (s *Server) handleUpsertProject(w http.ResponseWriter, r *http.Request) {
 	var req upsertProjectRequest
 	if !decodeJSON(w, r, &req) {

@@ -58,6 +58,16 @@ export interface VersionInfo {
   promoted_from?: string;
 }
 
+/** Проект (мультипроект W1): верхнее измерение платформы — всё (ноды, версии,
+ *  флоты, окружения, матчи) принадлежит ровно одному проекту. GET /v1/projects
+ *  (readonly) отдаёт их старейшим первым; правка match_size — admin (PUT). */
+export interface ProjectInfo {
+  id: string;
+  slug: string;
+  match_size: number;
+  created_at: string;
+}
+
 /** Окружение проекта (environments v1 §2): измерение платформы. Ведёт поведение
  *  флаг `production` (bool), не имя: production=true запрещает auto_deploy
  *  (guardrail в БД+API) и снимает лимит ретеншна. GET /v1/environments (readonly);
@@ -531,9 +541,15 @@ export const api = {
   /** Слото-часы per регион/версия + утилизация за N дней. `env` — как в overview. */
   statsCost: (days: number, env?: string) => request<StatsCost>('GET', `/v1/stats/cost${qs({ days, env })}`),
 
+  // --- Проекты (мультипроект W1) ---
+
+  /** Список проектов (readonly), старейший первым — источник селектора проекта. */
+  listProjects: () => request<{ projects: ProjectInfo[] }>('GET', '/v1/projects').then((r) => r.projects),
+
   // --- Окружения (environments v1 §2): список — readonly, CRUD — admin ---
 
-  /** Список окружений проекта (readonly). project опускаем — резолвится sole. */
+  /** Список окружений проекта (readonly). project обязателен: панель всегда
+   *  знает выбранный проект (мультипроект W1), sole-резолва больше не ждём. */
   listEnvironments: (project?: string) =>
     request<{ environments: Environment[] }>('GET', `/v1/environments${qs({ project })}`).then((r) => r.environments),
   /** Создать окружение (admin). 201; production&&auto_deploy или all/global → 400; дубль → 409. */

@@ -3,6 +3,7 @@ import { I18nProvider, useT } from './lib/i18n';
 import { SessionProvider, canAdmin, canRead, useSession } from './lib/session';
 import { LiveProvider } from './lib/live';
 import { EnvProvider } from './lib/env';
+import { ProjectProvider } from './lib/project';
 import { DrawerProvider } from './lib/drawer';
 import { ToastProvider } from './components/Toast';
 import { usePath } from './lib/usePath';
@@ -67,11 +68,15 @@ function Root() {
   return (
     <LiveProvider>
       <ToastProvider>
-        <EnvProvider>
-          <DrawerProvider>
-            <Routed />
-          </DrawerProvider>
-        </EnvProvider>
+        {/* Проект снаружи окружения: окружения принадлежат проекту, и
+            EnvProvider читает выбранный проект из ProjectContext. */}
+        <ProjectProvider>
+          <EnvProvider>
+            <DrawerProvider>
+              <Routed />
+            </DrawerProvider>
+          </EnvProvider>
+        </ProjectProvider>
       </ToastProvider>
     </LiveProvider>
   );

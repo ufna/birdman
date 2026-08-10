@@ -8,7 +8,8 @@ import type { ReactNode } from 'react';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import * as Dialog from '@radix-ui/react-dialog';
 import { useLive } from '../lib/live';
-import { envErrorKind, useEnv } from '../lib/env';
+import { useEnv } from '../lib/env';
+import { useProject } from '../lib/project';
 import { canAdmin, useSession } from '../lib/session';
 import type { SessionInfo } from '../lib/api';
 import { useTheme } from '../lib/theme';
@@ -130,6 +131,96 @@ function NavGlyph({ icon }: { icon: NavIcon }) {
 }
 
 /**
+ * Селектор проекта (мультипроект W1) — верхнее измерение панели: всё, что
+ * показывают экраны, живёт внутри ВЫБРАННОГО проекта, режима «все проекты» нет.
+ *
+ * Три формы вместо одной, потому что у них разный смысл: несколько проектов —
+ * нативный `<select>` (доступен с клавиатуры, не разъезжается на десятке
+ * проектов и не тянет зависимость); ровно один — статическая подпись (какой
+ * проект открыт, видно всегда, но выбирать не из чего); ни одного — чип с
+ * подсказкой, что проект заведётся сам при регистрации первой ноды/версии
+ * (ensureProject), а не «пусто» без объяснений.
+ */
+export function ProjectSelector() {
+  const { projects, selected, setSelected, loading, error, reload } = useProject();
+  const { t } = useT();
+  if (error !== undefined) return <ProjectUnavailableChip retry={reload} />;
+  // Пока список едет, не мигаем «проектов нет» — это разные состояния.
+  if (loading && projects.length === 0) return null;
+  return (
+    <div role="group" aria-label={t('project.switch')} className="flex flex-wrap items-center gap-1.5">
+      <span aria-hidden className="text-xs font-medium tracking-wide text-muted uppercase">
+        {t('project.switch')}
+      </span>
+      {projects.length === 0 ? (
+        <span title={t('project.none.hint')} className="rounded-lg border border-line px-2.5 py-1 text-xs text-muted">
+          {t('project.none')}
+        </span>
+      ) : projects.length === 1 ? (
+        <span className="rounded-lg border border-line px-2.5 py-1 font-mono text-xs font-medium text-ink">
+          {projects[0].slug}
+        </span>
+      ) : (
+        // appearance-none + своя шеврон-иконка: нативная отрисовка селекта
+        // выбивается из плоского стиля панели, но сам <select> остаётся
+        // нативным — клавиатура и скринридеры работают даром.
+        <span className="relative inline-flex items-center">
+          <select
+            aria-label={t('project.switch')}
+            value={selected ?? ''}
+            onChange={(e) => {
+              setSelected(e.target.value);
+            }}
+            className="appearance-none rounded-lg border border-line bg-card py-1 pr-7 pl-2.5 font-mono text-xs font-medium text-ink transition-colors hover:border-accent focus:border-accent focus:outline-none"
+          >
+            {projects.map((p) => (
+              <option key={p.slug} value={p.slug}>
+                {p.slug}
+              </option>
+            ))}
+          </select>
+          <svg
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden
+            className="pointer-events-none absolute right-2 size-3 text-muted"
+          >
+            <path d="M4 6.5 8 10.5l4-4" />
+          </svg>
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** Список проектов не приехал: селектора нет — говорим об этом и даём повтор. */
+function ProjectUnavailableChip({ retry }: { retry: () => void }) {
+  const { t } = useT();
+  const hint = t('project.unavailable.hint');
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <span aria-hidden className="text-xs font-medium tracking-wide text-muted uppercase">
+        {t('project.switch')}
+      </span>
+      <button
+        type="button"
+        onClick={retry}
+        title={hint}
+        aria-label={`${t('project.unavailable')} — ${hint}`}
+        className="inline-flex items-center gap-1.5 rounded-lg border border-warn/40 bg-warn-bg/40 px-2.5 py-1 text-xs font-medium text-warn transition-opacity hover:opacity-80"
+      >
+        <span aria-hidden className="size-1.5 rounded-full bg-warn" />
+        {t('project.unavailable')}
+      </button>
+    </div>
+  );
+}
+
+/**
  * Глобальный переключатель окружения (environments v1 §8): чипы из
  * GET /v1/environments (non-production сначала, потом production, потом «All»),
  * выбор персистится (useEnv). Скрыт, пока окружений нет/не загрузились —
@@ -142,7 +233,7 @@ function NavGlyph({ icon }: { icon: NavIcon }) {
 export function EnvChips() {
   const { environments, selected, setSelected, error, reload } = useEnv();
   const { t } = useT();
-  if (error !== undefined) return <EnvUnavailableChip error={error} retry={reload} />;
+  if (error !== undefined) return <EnvUnavailableChip retry={reload} />;
   if (environments.length === 0) return null;
   const chipCls = (active: boolean) =>
     `inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition-colors ${
@@ -188,12 +279,13 @@ export function EnvChips() {
 /**
  * Деградация списка окружений (follow-up p2): чипов нет, фильтр отключён —
  * говорим об этом одним чипом с тултипом (title) и даём повторить запрос
- * кликом. Отдельный текст, когда причина — мультипроект в master (панель v1
- * sole-project: GET /v1/environments без ?project= отвечает 400).
+ * кликом. Причина теперь ровно одна — список не приехал: прежняя ветка
+ * «мультипроект» (400 several projects exist) недостижима, панель спрашивает
+ * окружения только с явным ?project= выбранного проекта (мультипроект W1).
  */
-function EnvUnavailableChip({ error, retry }: { error: Error; retry: () => void }) {
+function EnvUnavailableChip({ retry }: { retry: () => void }) {
   const { t } = useT();
-  const hint = envErrorKind(error) === 'multiProject' ? t('env.unavailable.multiProject') : t('env.unavailable.hint');
+  const hint = t('env.unavailable.hint');
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       <span aria-hidden className="text-xs font-medium tracking-wide text-muted uppercase">
@@ -452,7 +544,12 @@ export function Shell({ path, navigate, children }: { path: string; navigate: (p
             </div>
           </header>
           <main id="main-content" tabIndex={-1} className="mx-auto flex w-full max-w-[1400px] flex-1 flex-col gap-4 px-4 py-5 focus:outline-none md:px-6">
-            <EnvChips />
+            {/* Проект — верхнее измерение, окружение — вложенное в него: в
+                одной строке и именно в этом порядке. */}
+            <div className="flex flex-wrap items-center gap-x-5 gap-y-2 empty:hidden">
+              <ProjectSelector />
+              <EnvChips />
+            </div>
             {children}
           </main>
         </div>
