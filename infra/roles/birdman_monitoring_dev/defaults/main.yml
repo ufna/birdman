@@ -100,3 +100,7 @@ birdman_pg_db: birdman
 birdman_pg_user: postgres
 birdman_backups_dir: /var/lib/birdman/backups
 birdman_backup_stale_for: 15m          # BackupStale: for-порог vmalert
+
+# --- pull-деплоер дев-стенда (spec 2026-08-10) ---
+birdman_devdeploy_failed_for: 5m       # DevDeployFailed: for-порог vmalert
+birdman_devdeploy_stale_after_h: 6     # DevDeployStale: часов без успешного тика

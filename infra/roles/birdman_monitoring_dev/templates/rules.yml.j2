@@ -319,6 +319,33 @@ groups:
           description: 'A backup run failed within the last hour — see Admin → Backups (history with the error text) and the backup_failed event. Keeps firing until an hour has passed since the error — by design (a rotation-immune gauge instead of increase over the non-monotonic runs_total).'
           description_ru: 'Смотри Админку → Бекапы (история с текстом ошибки) и событие backup_failed. Горит до истечения часа после ошибки — осознанно (rotation-immune гейдж вместо increase по немонотонному runs_total).'
 
+      # Дев-стенд v2 (spec 2026-08-10): pull-деплоер. Failed — была битая
+      # сборка и откат; Stale — тики идут, но успеха нет (типично: каждый тик
+      # падает на скачивании). Разведены намеренно: «релиз недоступен» не
+      # трогает ни один из таймстемпов, поэтому поднимает только Stale, а
+      # ложную тревогу о битой сборке — нет.
+      - alert: DevDeployFailed
+        expr: birdman_devdeploy_last_failure_timestamp > birdman_devdeploy_last_success_timestamp
+        for: {{ birdman_devdeploy_failed_for }}
+        labels:
+          severity: warning
+        annotations:
+          summary: {% raw %}'DevDeployFailed: авто-выкат дев-стенда упал и откатился'{% endraw %}
+
+          description: 'The dev-stand pull deployer rejected a build: either the sha256 did not match or the master failed its /healthz gate and was rolled back to the previous binary. The bad artifact is recorded in /var/lib/birdman-master/rejected and will not be retried — the next develop build supersedes it. See `journalctl -u birdman-devdeploy`.'
+          description_ru: 'Деплоер отверг сборку: не сошлась sha256 либо мастер не прошёл /healthz и откачен на предыдущий бинарь. Артефакт записан в /var/lib/birdman-master/rejected и повторяться не будет — его вытеснит следующая сборка из develop. Смотри `journalctl -u birdman-devdeploy`.'
+
+      - alert: DevDeployStale
+        expr: birdman_devdeploy_last_success_timestamp > 0 and (time() - birdman_devdeploy_last_success_timestamp) > {{ birdman_devdeploy_stale_after_h }} * 3600
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: {% raw %}'DevDeployStale: успешного тика авто-выката не было дольше порога'{% endraw %}
+
+          description: 'The deployer timer is alive but no tick has succeeded for hours — typically the release is unreachable (network, deleted tag, renamed asset). A quiet no-op also counts as success, so weekends without commits do NOT trigger this.'
+          description_ru: 'Таймер жив, но успешных тиков нет часами — обычно недоступен релиз (сеть, снесённый тег, переименованный ассет). Тихий no-op тоже считается успехом, поэтому выходные без коммитов это правило НЕ поднимают.'
+
 # ---------------------------------------------------------------------------
 # MasterDown — НАМЕРЕННО не реализовано здесь. Его НЕЛЬЗЯ определить с самого
 # master/этого стека (стек живёт на той же тачке — при падении master'а/бокса

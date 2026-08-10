@@ -22,6 +22,10 @@ birdman_devdeploy_service: birdman-master
 birdman_devdeploy_state_dir: /var/lib/birdman-master
 birdman_devdeploy_master_api: "http://127.0.0.1:8100"
 birdman_devdeploy_admin_key_file: /etc/birdman/master-admin.key
-# Каталог textfile-коллектора node_exporter бокса. Пустая строка → метрики не
-# пишутся (скрипт это переживает), останутся только записи в журнале.
+# Каталог textfile-коллектора node_exporter бокса. ⚠️ Сам node_exporter —
+# ЧУЖОЙ (роль мониторинга скрейпит его read-only и не управляет им), а каталог
+# — стандартный drop-in, в котором уже лежат .prom-файлы других проектов
+# владельца. Мы кладём туда РОВНО ОДИН свой файл birdman-devdeploy.prom и
+# больше ничего не трогаем; снос роли = удаление этого файла.
+# Пустая строка → метрики не пишутся (скрипт это переживает), остаётся журнал.
 birdman_devdeploy_textfile_dir: /var/lib/node_exporter/textfile_collector
