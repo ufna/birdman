@@ -31,22 +31,61 @@ alter table match_ccu_daily add primary key (day, project);
 -- явным маркером «не атрибутировано», а не молчаливым дефолтом на первый
 -- проект, который врал бы в отчётности.
 --
+-- День считается в UTC ЯВНО (`at time zone 'utc'` даёт timestamp без зоны), а
+-- не голым date(m.started_at): started_at — timestamptz, и date() привёл бы
+-- его к таймзоне СЕССИИ, тогда как роллап-строки живут в UTC-днях
+-- (utctime.StartOfDay по всему коду статистики). На сервере с
+-- TimeZone = Europe/Moscow голый date() промахивался бы мимо строки ЛИБО
+-- попадал в соседнюю — и та получала бы чужой проект. Штатный деплой — docker
+-- postgres:16 с UTC, но self-host на чужом инстансе с локальной TZ рядовой,
+-- поэтому зона фиксируется в запросе, а не предполагается у сервера.
+--
+-- Проект считается «касающимся» дня, если матч этот день ПЕРЕКРЫВАЕТ, а не
+-- только в нём начался. Так устроена сама роллап-строка (docs/specs/master.md
+-- §6, stats.AggregateDaily): matches/players_peak/duration идут в день СТАРТА,
+-- а slot_seconds размазываются по всем перекрытым дням. Значит строка дня D+1
+-- может целиком состоять из кросс-полуночного «смира» матча, стартовавшего в
+-- D: по дню старта её владелец не виден вовсе, и при коллизии semver она
+-- молча досталась бы ЧУЖОМУ проекту (у которого в D+1 свои матчи есть).
+-- Перекрытие закрывает обе стороны: чистый смир достаётся своему проекту, а
+-- смешанная строка (смир одного проекта + матчи другого) честно остаётся с ''.
+--
 -- Самолечение: statsrollup.Backfill при каждом старте master безусловно
 -- пересчитывает из сырых матчей окно [today-29, today-2] (matches никогда не
 -- удаляются), поэтому последние 30 дней приедут корректными проектными
 -- строками при первом же рестарте. Неатрибутированными останутся только дни
 -- СТАРШЕ окна и только при реальной коллизии semver между проектами.
-with attribution as (
-    select date(m.started_at) as day,
+with spans as (
+    select p.slug,
            m.region,
            v.semver,
            m.env,
-           min(p.slug) as slug,
-           count(distinct p.slug) as projects
+           (m.started_at at time zone 'utc')::date as first_day,
+           -- Полуинтервал [start, end), как в stats.overlapSeconds: матч,
+           -- закончившийся ровно в полночь, в следующий день slot_seconds не
+           -- вносит и касающимся его считать нельзя — отсюда вычет
+           -- микросекунды (разрешение timestamptz). Незавершённый матч
+           -- ограничивается «сейчас» — так же, как stats.matchEnd. greatest
+           -- страхует от ended_at < started_at: спан не бывает пустым.
+           (greatest(m.started_at,
+                     coalesce(m.ended_at, now()) - interval '1 microsecond')
+            at time zone 'utc')::date as last_day
     from matches m
     join versions v on v.id = m.version_id
     join projects p on p.id = m.project_id
     where m.started_at is not null
+),
+attribution as (
+    select g::date as day,
+           s.region,
+           s.semver,
+           s.env,
+           min(s.slug) as slug,
+           count(distinct s.slug) as projects
+    from spans s
+    cross join lateral generate_series(s.first_day::timestamp,
+                                       s.last_day::timestamp,
+                                       interval '1 day') as g
     group by 1, 2, 3, 4
 )
 update match_stats_daily d
