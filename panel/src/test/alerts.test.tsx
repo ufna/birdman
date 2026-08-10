@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { ApiError } from '../lib/api';
 import type { ProjectInfo } from '../lib/api';
 import { alertDescription, alertProjectOf, alertScopeOf, alertsUnavailable, isPlatformAlert } from '../lib/alerts';
@@ -8,6 +8,7 @@ import { I18nProvider } from '../lib/i18n';
 import { ProjectProvider } from '../lib/project';
 import { ProjectSelector } from '../components/Shell';
 import { Alerts } from '../screens/Alerts';
+import { useCriticalAlerts } from '../lib/useCriticalAlerts';
 
 describe('toneOfSeverity', () => {
   it('critical → dead, warning → warn, прочее → neutral', () => {
@@ -60,6 +61,7 @@ const rule = {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.useRealTimers();
   localStorage.clear();
 });
 
@@ -399,5 +401,157 @@ describe('Alerts — сужение по проекту (не скрывающе
     });
     expect(screen.getByText('платформенный')).toBeTruthy();
     expect(screen.queryByText('platform')).toBeNull();
+  });
+});
+
+// --- бейдж critical: дельта-состояние принадлежит СРЕЗУ, а не хуку (#964) ---
+
+const POLL_MS = 30_000;
+
+/** Фейковый clock ДО render: поллинг хука должен встать на него, а не на реальный. */
+const useFakeClock = () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'setInterval', 'clearTimeout', 'clearInterval'] });
+};
+
+/**
+ * Зонд бейджа: число и alarmKey. Проверять достаточно второй — пульс CSS
+ * (key=alarmKey) и звук висят на ОДНОМ и том же инкременте внутри хука, так
+ * что «alarmKey вырос» и есть «оператору сказали: случилось сейчас».
+ */
+function CriticalProbe() {
+  const { count, alarmKey } = useCriticalAlerts();
+  return <span data-testid="critical">{`${count}/${alarmKey}`}</span>;
+}
+
+function renderBadgeUnderProject() {
+  render(
+    <I18nProvider initialLang="en">
+      <ProjectProvider>
+        <div>
+          <ProjectSelector />
+          <CriticalProbe />
+        </div>
+      </ProjectProvider>
+    </I18nProvider>,
+  );
+}
+
+/** Вся наблюдаемая семантика бейджа одной строкой: `число/alarmKey`. */
+const badge = () => screen.getByTestId('critical').textContent;
+
+const switchProject = (slug: string) => {
+  fireEvent.change(screen.getByRole('combobox', { name: 'Project' }), { target: { value: slug } });
+};
+
+/**
+ * Осаждение под фейковыми таймерами: RTL-ные findBy/waitFor завязаны на
+ * реальный clock и под vi.useFakeTimers просто зависают, поэтому крутим
+ * таймеры и микротаски руками (idiom backups.test.tsx).
+ */
+async function settle(ms = 0) {
+  await act(async () => {
+    if (ms > 0) await vi.advanceTimersByTimeAsync(ms);
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+  });
+}
+
+describe('Бейдж critical — «новый critical» считается внутри проекта', () => {
+  // Несущий тест карточки. Пульс и звук существуют ровно затем, чтобы значить
+  // «загорелось СЕЙЧАС»; если они срабатывают на каждое переключение проекта,
+  // оператор научится их игнорировать — и пропустит настоящий сигнал.
+  it('смена проекта на срез с бОльшим числом critical НЕ выдаётся за новый critical', async () => {
+    useFakeClock();
+    stubAlertsApi(
+      {
+        active: [
+          activeOf('BufferEmptyReadyProd', 'game'),
+          activeOf('AllocationFailures', 'arena'),
+          activeOf('CrashLoop', 'arena'),
+          activeOf('TickDegraded', 'arena'),
+        ],
+        history: [],
+      },
+      [],
+    );
+    renderBadgeUnderProject();
+    await settle();
+    expect(badge()).toBe('1/0'); // game: один critical, первое чтение не пульсирует
+
+    switchProject('arena');
+    await settle();
+    expect(badge()).toBe('3/0'); // три critical соседа — другой срез, а не «загорелось»
+
+    switchProject('game');
+    await settle();
+    expect(badge()).toBe('1/0'); // и обратно: меньше — тоже не событие
+  });
+
+  it('новый critical В ПРЕДЕЛАХ проекта — даёт признак нового (пульс/звук)', async () => {
+    useFakeClock();
+    const active: unknown[] = [activeOf('BufferEmptyReadyProd', 'game')];
+    stubAlertsApi({ active, history: [] }, []);
+    renderBadgeUnderProject();
+    await settle();
+    expect(badge()).toBe('1/0');
+
+    active.push(activeOf('CrashLoop', 'game')); // в ТОМ ЖЕ проекте загорелось ещё одно
+    await settle(POLL_MS);
+    expect(badge()).toBe('2/1');
+  });
+
+  // Обратная сторона той же поломки: смена проекта запросы не отменяет, и
+  // ответ ПРОШЛОГО проекта может прийти после ответа нового. Если он запишет
+  // своё число в дельта-состояние, следующий настоящий critical нового проекта
+  // окажется «не больше прошлого» и будет съеден молча — худший исход из двух.
+  it('ответ прошлого проекта, пришедший после смены, не травит ни число, ни дельту', async () => {
+    useFakeClock();
+    const held: { project: string; send: (alerts: unknown[]) => void }[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        const u = String(url);
+        if (u.startsWith('/v1/projects')) return Promise.resolve(jsonRes({ projects: [game, arena] }));
+        if (u.startsWith('/v1/alerts/active')) {
+          const project = new URL(u, 'http://x').searchParams.get('project') ?? '';
+          return new Promise<Response>((resolve) => {
+            held.push({
+              project,
+              send: (alerts) => {
+                resolve(jsonRes({ alerts }));
+              },
+            });
+          });
+        }
+        return Promise.resolve(jsonRes({ alerts: [] }));
+      }),
+    );
+    renderBadgeUnderProject();
+    await settle();
+    expect(held.map((h) => h.project)).toEqual(['game']); // запрос по game висит
+
+    switchProject('arena');
+    await settle();
+    expect(held.map((h) => h.project)).toEqual(['game', 'arena']);
+
+    // Новый проект отвечает первым…
+    held[1].send([activeOf('AllocationFailures', 'arena')]);
+    await settle();
+    expect(badge()).toBe('1/0');
+
+    // …и только потом приезжает ответ прошлого проекта с тремя critical.
+    held[0].send([
+      activeOf('BufferEmptyReadyProd', 'game'),
+      activeOf('CrashLoop', 'game'),
+      activeOf('TickDegraded', 'game'),
+    ]);
+    await settle();
+    expect(badge()).toBe('1/0'); // чужой ответ не показывается и не запоминается
+
+    // Настоящий новый critical в ТЕКУЩЕМ проекте после этого обязан пульсировать.
+    await settle(POLL_MS);
+    const fresh = held.find((h) => h.project === 'arena' && h !== held[1]);
+    fresh?.send([activeOf('AllocationFailures', 'arena'), activeOf('CrashLoop', 'arena')]);
+    await settle();
+    expect(badge()).toBe('2/1');
   });
 });
