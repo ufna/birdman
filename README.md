@@ -62,6 +62,13 @@ birdman has three moving parts and one firm rule about traffic.
 
 **Control plane and game traffic are separate paths.** The agent dials *out* to the master over mTLS gRPC, so nodes expose no inbound admin port and the master is the only managed public address; Postgres is the single source of truth. **Players connect straight to the dedicated server's `host:port`** — game traffic never passes through the master, so restarting the master never interrupts a live match.
 
+**birdman authenticates infrastructure, not players.** Operators and services
+present scoped API keys and nodes present mTLS certificates, but `player_id` in a
+matchmaking ticket is an opaque string the master trusts and never persists — so a
+`matchmaking` key belongs to your game backend, which authenticates the player
+and files tickets on their behalf, not to the game client. Details: the
+[self-host guide](docs/self-host.md), "The `matchmaking` key and `player_id`".
+
 Full component specs: [docs/specs/architecture.md](docs/specs/architecture.md) *(in Russian)*.
 
 ## Status

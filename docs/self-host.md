@@ -398,6 +398,32 @@ Secrets and where they live:
 Everything else (overlay addresses `10.77.0.0/24`, the WG port `51827`, the game
 `20000–20050`/`19999`) — not secrets: RFC1918 or public by design.
 
+### The `matchmaking` key and `player_id`
+
+birdman authenticates operators, services and nodes — **never the end player**,
+and by design it never will. `player_id` in a matchmaking ticket is an opaque
+string the caller supplies and the master trusts; it is never persisted (no table
+has a `player_id` column — players reach the database only as a count).
+
+A `matchmaking`-scoped key therefore reaches further than it looks: it may create
+a ticket for **any** `player_id`, and — given a `ticket_id` — read someone else's
+ticket (once matched, that includes `host`, `port`, `match_id` and the
+`join_token`) and cancel it; a ticket filed under a foreign `player_id` also
+evicts that player's own ticket while it is still queued. Binding the key to one
+`(project, env)` does not contain this: the binding is enforced when a ticket is
+created, not when one is read or cancelled. **Give the key
+to your game backend, not to the game client**: the backend authenticates the
+player its own way, keeps the key, and files the ticket with a `player_id` it has
+already verified. A key baked into the client is a public secret, and `player_id`
+then guarantees nothing — the 5 rps per-`player_id` limit is abuse damping, not a
+security boundary. `join_token` does not close the gap either: it authorizes
+joining one dedicated server, it does not authenticate a player, and today
+nothing verifies it (the dedicated-server side is still a TODO).
+
+The full model — including what the backend owns (reconnect, player leave,
+player-level state) — is in `docs/specs/architecture.md`, section
+«Модель доверия (trust boundaries)» *(in Russian)*.
+
 ---
 
 **Next:** the full REST API — `master/README.md`; node/ansible internals and the
