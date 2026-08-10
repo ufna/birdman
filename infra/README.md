@@ -147,3 +147,40 @@ ansible-playbook playbooks/add-node.yml  # идемпотентно; хаб + в
 - Все секреты живут только на тачке в файлах 0600: `pg.pass`, `master-admin.key`, `node.token`, `ghcr.token` (+ dsn внутри `master.yaml`). В репо, фактах и логах ansible их нет — таски с ними `no_log`.
 - GHCR-токен — только env при запуске (`lookup('env', 'BIRDMAN_GHCR_TOKEN')`). Перед коммитами: `grep -rn "ghp[_]\|bmk[_]\|bnt[_]" --exclude-dir=.git .` → ничего, кроме фейковых фикстур в тестах.
 - Прод-секреты — ansible-vault (ops.md §4), появятся с прод-ролями.
+
+## Авто-выкат дев-стенда (`birdman_devdeploy`)
+
+Роль ставит на master-бокс pull-деплоер: `birdman-devdeploy.timer` раз в 60с
+забирает rolling-prerelease `dev` (его собирает `.github/workflows/dev-build.yml`
+из ветки `develop`), сверяет sha256, ставит мастера, ждёт `/healthz` и при
+провале возвращает `birdman-master.prev`. Затем — агенты окружения `dev`:
+адресно по `node_id`, канарейкой (сначала агент самого master-бокса), по одной.
+
+Выкат идёт **pull**, а не push из CI: в публичном репозитории нет ни одного
+секрета с доступом к инфраструктуре, наружу ничего не открывается.
+
+```bash
+# посмотреть, что выкачено сейчас
+ssh master-box 'sudo cat /var/lib/birdman-master/deployed.json'
+# журнал тиков
+ssh master-box 'sudo journalctl -u birdman-devdeploy -n 50'
+# выключить (переживает прогон ansible)
+ssh master-box 'sudo touch /etc/birdman/devdeploy.disabled'
+# или только на текущую сессию
+ssh master-box 'sudo systemctl stop birdman-devdeploy.timer'
+```
+
+⚠️ Пока деплоер включён, **бинарём мастера владеет он**: роль
+`birdman_master_dev` ставит бинарь только при bootstrap (когда его ещё нет).
+Ручная замена бинаря живёт до следующего тика — сначала выключи деплоер.
+
+⚠️ **Правило expand/contract** (`docs/specs/ops.md` §2): миграции в цикле
+`develop` только добавляют. Авто-откат возвращает бинарь, но не откатывает
+миграции — удаление или переименование в том же цикле сделает откат
+невозможным.
+
+Тесты деплоера (заглушки curl/systemctl, без боксов и без сети):
+
+```bash
+./infra/roles/birdman_devdeploy/tests/run.sh
+```
