@@ -154,6 +154,33 @@ var (
 		"birdman_servers",
 		"Server counts by project, env, production, state, region and version (semver).",
 		[]string{"project", "env", "production", "state", "region", "version"}, nil)
+	// birdman_server_info{server_id, project, env} = 1 — the reference series
+	// that gives an OWNER to the per-server metrics the AGENT emits (tracker
+	// #958). birdman_server_tick_ms / birdman_server_players / the per-container
+	// cpu+mem pair carry only server_id, because the agent does not know which
+	// project a dedik belongs to at all — StartServer never told it. So a rule
+	// over them (TickDegraded) could not be project-scoped, and the alert screen
+	// showed project A's operator the tick degradation of project B.
+	//
+	// This series closes that without touching the agent, the protocol or the
+	// fleet: the master already owns server_id → project in Postgres, and a rule
+	// joins on server_id (`group_left(project)`) to inherit the label. The
+	// alternative — a label minted by the agent — needs a proto/agent change,
+	// a fleet-wide agent upgrade AND a full dedik churn (Manager.Restore rebuilds
+	// state from container labels, which carry no project), i.e. it delivers only
+	// after a rollout; this delivers on the next scrape for the whole fleet.
+	//
+	// Value is always 1 — it is a join key, nothing reads it as a measurement,
+	// so multiplying a rule's left side by it preserves that side's $value.
+	// project = projects.slug and env = servers.env, exactly the derivation
+	// birdman_servers uses, so both series say "project" about the same thing.
+	// Cardinality: one series per LIVE dedik (terminal states are excluded, see
+	// the query) — the same order as the four per-server series the agent
+	// already exports, and it shrinks back as servers are reaped.
+	serverInfoDesc = prometheus.NewDesc(
+		"birdman_server_info",
+		"Reference series (always 1) mapping a live server_id to its project and env, for joining agent-emitted per-server metrics (tick/players/cpu/mem) to their owner.",
+		[]string{"server_id", "project", "env"}, nil)
 	heartbeatAgeDesc = prometheus.NewDesc(
 		"birdman_node_heartbeat_age_seconds",
 		"Seconds since the last agent heartbeat, per node.",
@@ -344,6 +371,7 @@ type dbCollector struct {
 
 func (c *dbCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- serversDesc
+	ch <- serverInfoDesc
 	ch <- heartbeatAgeDesc
 	ch <- versionsDesc
 	ch <- eventsTotalDesc
@@ -563,6 +591,8 @@ func (c *dbCollector) Collect(ch chan<- prometheus.Metric) {
 		c.collectReadyZeros(ctx, ch, readySeen)
 	}
 
+	c.collectServerInfo(ctx, ch)
+
 	rows, err = c.st.Pool.Query(ctx, `
 		select hostname, region, greatest(extract(epoch from (now() - last_heartbeat_at)), 0)
 		from nodes where last_heartbeat_at is not null`)
@@ -663,6 +693,51 @@ func (c *dbCollector) collectReadyZeros(ctx context.Context, ch chan<- prometheu
 	}
 	if err := rows.Err(); err != nil {
 		c.log.Error("metrics: ready-buffer fleets rows failed", "err", err)
+	}
+}
+
+// collectServerInfo emits birdman_server_info{server_id, project, env} = 1 for
+// every LIVE dedik (tracker #958) — the join key that lets a rule over an
+// agent-emitted per-server metric inherit the owning project.
+//
+// Only non-terminal states are reported: 'failed' and 'reaped' mean the
+// container is gone, so no agent series exists to join against, and including
+// them would let the series grow without bound over the lifetime of the
+// database. Live rows, by contrast, are bounded by the fleet size.
+//
+// A failed or partial read emits NOTHING for the affected rows — the #960
+// discipline: an invented answer is worse than a missing one. Here the missing
+// answer is SAFE by construction, because the consuming rule is written as a
+// non-hiding join (rules.yml.j2, TickDegraded): the branch that does not match
+// this series still fires, just without the project label, i.e. as a platform
+// alert visible under any ?project= filter. Degradation widens the alert, it
+// never drops it.
+func (c *dbCollector) collectServerInfo(ctx context.Context, ch chan<- prometheus.Metric) {
+	// project/env derived exactly like birdman_servers: projects.slug and the
+	// SERVER's env (I6 — never the node's), so both series mean the same thing
+	// by "project" and a dashboard may join them.
+	rows, err := c.st.Pool.Query(ctx, `
+		select s.id::text, p.slug, s.env
+		from servers s
+		join projects p on p.id = s.project_id
+		where s.state not in ('failed', 'reaped')`)
+	if err != nil {
+		c.log.Error("metrics: server info query failed", "err", err)
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var serverID, project, env string
+		if err := rows.Scan(&serverID, &project, &env); err != nil {
+			c.log.Error("metrics: server info scan failed", "err", err)
+			return
+		}
+		// servers.id is the primary key, so the labelset is unique by
+		// construction — Gather cannot trip over a duplicate here.
+		ch <- prometheus.MustNewConstMetric(serverInfoDesc, prometheus.GaugeValue, 1, serverID, project, env)
+	}
+	if err := rows.Err(); err != nil {
+		c.log.Error("metrics: server info rows failed", "err", err)
 	}
 }
 

@@ -147,6 +147,136 @@ tests:
               description: 'A bad release is likely — roll back (ops.md §6 runbook 3).'
               description_ru: 'Вероятен плохой релиз — rollback (ops.md §6 runbook 3).'
 
+  # --- TickDegraded: the project label arrives by JOIN, and the join hides
+  # nothing (tracker #958) ---
+
+  # The agent emits birdman_server_tick_ms{server_id} and nothing else — it does
+  # not know which project a dedik belongs to. The master's reference series
+  # birdman_server_info supplies the owner, and group_left copies it onto the
+  # alert: this is the whole point of the card.
+  - interval: 1m
+    name: 'TickDegraded inherits project from birdman_server_info'
+    input_series:
+      - series: 'birdman_server_tick_ms{server_id="srv-a",node="node-1",region="eu"}'
+        values: '80+0x10'
+      - series: 'birdman_server_info{server_id="srv-a",project="arena",env="prod"}'
+        values: '1+0x10'
+    alert_rule_test:
+      # for: 5m — silent before the threshold.
+      - eval_time: 4m
+        alertname: TickDegraded
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: TickDegraded
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              server_id: srv-a
+              node: node-1
+              region: eu
+              project: arena
+            exp_annotations:
+              summary: 'TickDegraded: проект arena, server srv-a tick=80ms'
+              description: 'game-health: server tick has been degraded for longer than the threshold (ops.md §1 TickDegraded). The project label is joined from birdman_server_info; without a match the alert stays platform-scoped.'
+              description_ru: 'game-health: тик деградировал дольше порога (ops.md §1 TickDegraded). Лейбл project доклеивается join''ом с birdman_server_info; без совпадения алерт остаётся платформенным.'
+
+  # THE NON-HIDING GUARANTEE. The info series is missing (master down, DB
+  # hiccup, a dedik unknown to the database) — a plain `group_left` join would
+  # SILENTLY DROP the sample and the degradation would vanish from the screen.
+  # The second branch keeps it firing, just without the project label, i.e. as a
+  # platform alert visible under every ?project= filter. Deleting that branch
+  # turns this case red.
+  - interval: 1m
+    name: 'no birdman_server_info — TickDegraded still fires, platform-scoped'
+    input_series:
+      - series: 'birdman_server_tick_ms{server_id="srv-a",node="node-1",region="eu"}'
+        values: '80+0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: TickDegraded
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              server_id: srv-a
+              node: node-1
+              region: eu
+            exp_annotations:
+              summary: 'TickDegraded: server srv-a tick=80ms'
+              description: 'game-health: server tick has been degraded for longer than the threshold (ops.md §1 TickDegraded). The project label is joined from birdman_server_info; without a match the alert stays platform-scoped.'
+              description_ru: 'game-health: тик деградировал дольше порога (ops.md §1 TickDegraded). Лейбл project доклеивается join''ом с birdman_server_info; без совпадения алерт остаётся платформенным.'
+
+  # Scoping actually SEPARATES the projects: the degraded dedik of project "a"
+  # must not be reported as project "b", and the healthy dedik of "b" must not
+  # alert at all. This is what the alert screen's ?project= narrowing buys.
+  - interval: 1m
+    name: 'two projects — each degraded dedik carries its own project'
+    input_series:
+      - series: 'birdman_server_tick_ms{server_id="srv-a",node="node-1",region="eu"}'
+        values: '80+0x10'
+      - series: 'birdman_server_tick_ms{server_id="srv-b",node="node-2",region="eu"}'
+        values: '16+0x10'
+      - series: 'birdman_server_info{server_id="srv-a",project="a",env="prod"}'
+        values: '1+0x10'
+      - series: 'birdman_server_info{server_id="srv-b",project="b",env="prod"}'
+        values: '1+0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: TickDegraded
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              server_id: srv-a
+              node: node-1
+              region: eu
+              project: a
+            exp_annotations:
+              summary: 'TickDegraded: проект a, server srv-a tick=80ms'
+              description: 'game-health: server tick has been degraded for longer than the threshold (ops.md §1 TickDegraded). The project label is joined from birdman_server_info; without a match the alert stays platform-scoped.'
+              description_ru: 'game-health: тик деградировал дольше порога (ops.md §1 TickDegraded). Лейбл project доклеивается join''ом с birdman_server_info; без совпадения алерт остаётся платформенным.'
+
+  # Two info series for ONE server_id (two masters, or one master scraped by two
+  # jobs) is a many-to-one duplicate: without `max by (server_id, project)` the
+  # whole expression errors out with "multiple matches for labels" and the rule
+  # dies — the worst kind of silent failure. The aggregation collapses them, so
+  # exactly one alert comes out.
+  - interval: 1m
+    name: 'duplicate birdman_server_info — one alert, not a broken rule'
+    input_series:
+      - series: 'birdman_server_tick_ms{server_id="srv-a",node="node-1",region="eu"}'
+        values: '80+0x10'
+      - series: 'birdman_server_info{server_id="srv-a",project="arena",env="prod",instance="master-1"}'
+        values: '1+0x10'
+      - series: 'birdman_server_info{server_id="srv-a",project="arena",env="prod",instance="master-2"}'
+        values: '1+0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: TickDegraded
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              server_id: srv-a
+              node: node-1
+              region: eu
+              project: arena
+            exp_annotations:
+              summary: 'TickDegraded: проект arena, server srv-a tick=80ms'
+              description: 'game-health: server tick has been degraded for longer than the threshold (ops.md §1 TickDegraded). The project label is joined from birdman_server_info; without a match the alert stays platform-scoped.'
+              description_ru: 'game-health: тик деградировал дольше порога (ops.md §1 TickDegraded). Лейбл project доклеивается join''ом с birdman_server_info; без совпадения алерт остаётся платформенным.'
+
+  # A healthy tick with a matching info series must stay silent — the join must
+  # not turn `> threshold` into "anything that has an owner".
+  - interval: 1m
+    name: 'tick below the threshold — silence despite a matching info series'
+    input_series:
+      - series: 'birdman_server_tick_ms{server_id="srv-a",node="node-1",region="eu"}'
+        values: '16+0x10'
+      - series: 'birdman_server_info{server_id="srv-a",project="arena",env="prod"}'
+        values: '1+0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: TickDegraded
+        exp_alerts: []
+
   - interval: 1m
     name: 'zero baseline — the first agent_upgrade_failed fires'
     input_series:

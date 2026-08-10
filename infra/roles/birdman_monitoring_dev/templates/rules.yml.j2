@@ -205,16 +205,53 @@ groups:
       # TickDegraded: тик игрового сервера выше порога игры дольше 5м.
       # (ops.md §1 говорит про p95 tick_ms; в v0 agent отдаёт gauge
       #  birdman_server_tick_ms{server_id} — правило на него, порог — var.)
+      #
+      # ПРОЕКТНЫЙ ЧЕРЕЗ JOIN (tracker #958). Деградировавший тик — проблема
+      # конкретной игры, но спроецировать проект было нечем: метрику эмитит
+      # АГЕНТ, а агент проекта дедика не знает вовсе (StartServer ему проект не
+      # везёт). Лейбл, отчеканенный агентом, потребовал бы правки агента +
+      # апгрейда всего флота + полной перекрутки живых дедиков (Restore
+      # поднимает состояние из label'ов контейнера, проекта там нет) — то есть
+      # выката. Вместо этого master эмитит справочную серию
+      # birdman_server_info{server_id, project, env} = 1 из БД
+      # (master/internal/metrics/metrics.go, collectServerInfo), а правило
+      # доклеивает лейбл join'ом — работает на всём существующем флоте со
+      # следующего скрейпа, без единого выката.
+      #
+      # ДВЕ ВЕТКИ, потому что join обязан быть НЕ СКРЫВАЮЩИМ:
+      #   1) сматчилось → алерт несёт project и становится проектным по идиоме
+      #      #955 (область выводится из НАЛИЧИЯ лейбла, никакого scope: в
+      #      правиле — чужие правила self-host-операторов работают как работали);
+      #   2) не сматчилось (master лежит, БД моргнула, дедика нет в БД) →
+      #      алерт всё равно ГОРИТ, просто без лейбла, т.е. платформенным, и
+      #      виден при любом ?project= (не-скрывающий фильтр master.md §6).
+      #      Деградация РАСШИРЯЕТ алерт, а не роняет его. Ровно этот случай
+      #      закреплён кейсом в tests/rules_test.yml — молчаливо не сматчиться
+      #      join уже не может.
+      # $value не портится: info == 1, умножение оставляет tick как есть.
+      # `unless on (server_id)` делает ветки непересекающимися → один дедик
+      # никогда не даёт двух алертов.
+      # `max by (server_id, project)` — страховка от many-to-one: два master'а
+      # (или два скрейп-джоба одного) дали бы ДВЕ info-серии на один server_id,
+      # и весь запрос свалился бы в ошибку «multiple matches» — правило умерло
+      # бы целиком, худший вид «молча не работает». Агрегация схлопывает их в
+      # одну, join остаётся однозначным.
       - alert: TickDegraded
-        expr: birdman_server_tick_ms > {{ birdman_tick_degraded_ms }}
+        expr: >-
+          (birdman_server_tick_ms > {{ birdman_tick_degraded_ms }})
+          * on (server_id) group_left (project)
+          max by (server_id, project) (birdman_server_info)
+          or
+          (birdman_server_tick_ms > {{ birdman_tick_degraded_ms }})
+          unless on (server_id) birdman_server_info
         for: {{ birdman_tick_degraded_for }}
         labels:
           severity: warning
         annotations:
-          summary: {% raw %}'TickDegraded: server {{ $labels.server_id }} tick={{ $value }}ms'{% endraw %}
+          summary: {% raw %}'TickDegraded: {{ if $labels.project }}проект {{ $labels.project }}, {{ end }}server {{ $labels.server_id }} tick={{ $value }}ms'{% endraw %}
 
-          description: 'game-health: server tick has been degraded for longer than the threshold (ops.md §1 TickDegraded).'
-          description_ru: 'game-health: тик деградировал дольше порога (ops.md §1 TickDegraded).'
+          description: 'game-health: server tick has been degraded for longer than the threshold (ops.md §1 TickDegraded). The project label is joined from birdman_server_info; without a match the alert stays platform-scoped.'
+          description_ru: 'game-health: тик деградировал дольше порога (ops.md §1 TickDegraded). Лейбл project доклеивается join''ом с birdman_server_info; без совпадения алерт остаётся платформенным.'
 
       # AgentUpgradeFailed: self-upgrade агента не завершился Hello с новой
       # версией в окне (master пишет событие agent_upgrade_failed, итерация 4).
