@@ -1,0 +1,257 @@
+#!/usr/bin/env bash
+# birdman-devdeploy — pull-деплоер дев-стенда.
+#
+# Раз в тик: сходить за rolling-prerelease `dev`, сверить sha256 с тем, что
+# установлено, поставить, перезапустить мастера и убедиться по /healthz, что он
+# поднялся. Не поднялся — вернуть предыдущий бинарь и запомнить sha как
+# отвергнутый, чтобы не катать битую сборку по кругу (та же семантика, что у
+# auto_deploy версий: упавшая версия не ретраится, её вытеснит следующий билд).
+#
+# Почему pull, а не push из CI: репозиторий публичный, и push означал бы ключ к
+# инфраструктуре в его настройках. Здесь бокс ходит наружу сам, только по HTTPS,
+# и ничего не открывает.
+#
+# Спека: birdman-internal/docs/superpowers/specs/2026-08-10-devnode-tc-and-dev-autodeploy-design.md
+#
+# set -e намеренно НЕ включён: отказы разбираются явно, тихий no-op — норма.
+set -uo pipefail
+
+CONF="${BIRDMAN_DEVDEPLOY_CONF:-/etc/birdman/devdeploy.conf}"
+# Конфиг присваивает через `: "${VAR:=…}"`, поэтому переменные окружения
+# (тесты, ручной прогон) всегда сильнее файла.
+# shellcheck source=/dev/null
+[ -r "$CONF" ] && . "$CONF"
+
+REPO="${BIRDMAN_DEVDEPLOY_REPO:-ufna/birdman}"
+TAG="${BIRDMAN_DEVDEPLOY_TAG:-dev}"
+BASE_URL="${BIRDMAN_DEVDEPLOY_BASE_URL:-https://github.com/$REPO/releases/download/$TAG}"
+BIN="${BIRDMAN_DEVDEPLOY_BIN:-/usr/local/bin/birdman-master}"
+SERVICE="${BIRDMAN_DEVDEPLOY_SERVICE:-birdman-master}"
+STATE_DIR="${BIRDMAN_DEVDEPLOY_STATE_DIR:-/var/lib/birdman-master}"
+LOCK="${BIRDMAN_DEVDEPLOY_LOCK:-/run/birdman/devdeploy.lock}"
+DISABLED="${BIRDMAN_DEVDEPLOY_DISABLED:-/etc/birdman/devdeploy.disabled}"
+MASTER_API="${BIRDMAN_DEVDEPLOY_MASTER_API:-http://127.0.0.1:8100}"
+ADMIN_KEY_FILE="${BIRDMAN_DEVDEPLOY_ADMIN_KEY_FILE:-/etc/birdman/master-admin.key}"
+HEALTH_TIMEOUT="${BIRDMAN_DEVDEPLOY_HEALTH_TIMEOUT:-60}"
+AGENT_TIMEOUT="${BIRDMAN_DEVDEPLOY_AGENT_TIMEOUT:-90}"
+POLL="${BIRDMAN_DEVDEPLOY_POLL_INTERVAL:-2}"
+TEXTFILE_DIR="${BIRDMAN_DEVDEPLOY_TEXTFILE_DIR:-/var/lib/node_exporter/textfile_collector}"
+SKIP_AGENTS="${BIRDMAN_DEVDEPLOY_SKIP_AGENTS:-}"
+
+REJECTED="$STATE_DIR/rejected"
+DEPLOYED="$STATE_DIR/deployed.json"
+METRICS="$STATE_DIR/metrics.env"
+PROM="$TEXTFILE_DIR/birdman-devdeploy.prom"
+
+log() { printf '%s birdman-devdeploy: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+
+# sha256 переносимо: Linux — sha256sum, macOS (прогон тестов) — shasum.
+if command -v sha256sum >/dev/null 2>&1; then
+  sha_of() { sha256sum "$1" 2>/dev/null | awk '{print $1}'; }
+else
+  sha_of() { shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'; }
+fi
+
+# fetch <относительное-имя> [выходной-файл] — тело в stdout либо в файл.
+fetch() {
+  local name="$1" out="${2:-}"
+  if [ -n "$out" ]; then
+    curl -fsS --max-time 120 -o "$out" "$BASE_URL/$name"
+  else
+    curl -fsS --max-time 30 "$BASE_URL/$name"
+  fi
+}
+
+# --- метрики (textfile-коллектор node_exporter) ------------------------------
+M_SUCCESS=0
+M_FAILURE=0
+M_ROLLBACKS=0
+M_AGENT_OK=0
+M_AGENT_FAIL=0
+
+load_metrics() {
+  # shellcheck source=/dev/null
+  [ -r "$METRICS" ] && . "$METRICS"
+  return 0
+}
+
+save_metrics() {
+  mkdir -p "$STATE_DIR"
+  cat >"$METRICS.tmp" <<EOF
+M_SUCCESS=$M_SUCCESS
+M_FAILURE=$M_FAILURE
+M_ROLLBACKS=$M_ROLLBACKS
+M_AGENT_OK=$M_AGENT_OK
+M_AGENT_FAIL=$M_AGENT_FAIL
+EOF
+  mv "$METRICS.tmp" "$METRICS"
+
+  # Пишем атомарно: node_exporter читает каталог в любой момент, а
+  # наполовину записанный файл он отверг бы целиком.
+  [ -d "$TEXTFILE_DIR" ] || return 0
+  cat >"$PROM.tmp" <<EOF
+# HELP birdman_devdeploy_last_success_timestamp Unixtime последнего успешного тика авто-выката.
+# TYPE birdman_devdeploy_last_success_timestamp gauge
+birdman_devdeploy_last_success_timestamp $M_SUCCESS
+# HELP birdman_devdeploy_last_failure_timestamp Unixtime последнего отказа авто-выката.
+# TYPE birdman_devdeploy_last_failure_timestamp gauge
+birdman_devdeploy_last_failure_timestamp $M_FAILURE
+# HELP birdman_devdeploy_rollbacks_total Сколько раз мастер откатывался на предыдущий бинарь.
+# TYPE birdman_devdeploy_rollbacks_total counter
+birdman_devdeploy_rollbacks_total $M_ROLLBACKS
+# HELP birdman_devdeploy_agent_upgrades_total Апгрейды агентов dev-окружения по исходу.
+# TYPE birdman_devdeploy_agent_upgrades_total counter
+birdman_devdeploy_agent_upgrades_total{status="ok"} $M_AGENT_OK
+birdman_devdeploy_agent_upgrades_total{status="failed"} $M_AGENT_FAIL
+EOF
+  mv "$PROM.tmp" "$PROM"
+}
+
+# --- список отвергнутых артефактов -------------------------------------------
+# Строки с префиксом: `master:<sha256>` и `agent:<version>`. Раздельно, чтобы
+# провал агента не блокировал выкат мастера и наоборот.
+rejected_has() { [ -f "$REJECTED" ] && grep -qxF "$1" "$REJECTED"; }
+rejected_add() {
+  mkdir -p "$STATE_DIR"
+  rejected_has "$1" || printf '%s\n' "$1" >>"$REJECTED"
+}
+
+# --- лок ---------------------------------------------------------------------
+# mkdir атомарен и есть везде (flock — util-linux, на macOS его нет, а тесты
+# гоняются и там). Стухший лок старше 30 минут забираем: тик — oneshot, столько
+# он не живёт даже с самым долгим health-gate.
+acquire_lock() {
+  mkdir -p "$(dirname "$LOCK")" 2>/dev/null
+  if mkdir "$LOCK" 2>/dev/null; then
+    trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+    return 0
+  fi
+  if [ -d "$LOCK" ] && [ -z "$(find "$LOCK" -maxdepth 0 -mmin -30 2>/dev/null)" ]; then
+    log "забираю стухший лок $LOCK"
+    rmdir "$LOCK" 2>/dev/null
+    if mkdir "$LOCK" 2>/dev/null; then
+      trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+      return 0
+    fi
+  fi
+  return 1
+}
+
+# --- health-gate -------------------------------------------------------------
+# /healthz пингует БД, поэтому 200 status:ok означает «процесс поднялся,
+# миграции прошли, БД жива» — ровно тот гейт, который нужен.
+health_wait() {
+  local deadline=$(($(date +%s) + HEALTH_TIMEOUT))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    if curl -fsS --max-time 5 "$MASTER_API/healthz" 2>/dev/null | grep -q '"status":"ok"'; then
+      return 0
+    fi
+    sleep "$POLL"
+  done
+  return 1
+}
+
+# --- шаг мастера -------------------------------------------------------------
+# Коды: 0 выкачено · 1 нечего делать · 2 релиз недоступен · 3 sha не сошлась
+#       4 откат после провала health-gate
+deploy_master() {
+  local want have tmp got
+  want="$(fetch birdman-master.sha256 | tr -d ' \t\r\n')"
+  if [ "${#want}" -ne 64 ]; then
+    log "релиз $TAG недоступен или sha256 не читается — пропускаю тик"
+    return 2
+  fi
+
+  have="$(sha_of "$BIN")"
+  if [ "$want" = "$have" ]; then
+    return 1
+  fi
+  if rejected_has "master:$want"; then
+    log "сборка мастера $want уже отвергнута — не ретраю"
+    return 1
+  fi
+
+  tmp="$(mktemp)"
+  if ! fetch birdman-master "$tmp"; then
+    log "не смог скачать бинарь мастера"
+    rm -f "$tmp"
+    return 2
+  fi
+  got="$(sha_of "$tmp")"
+  if [ "$got" != "$want" ]; then
+    log "sha256 не сошлась: жду $want, получил $got — бинарь не тронут"
+    rm -f "$tmp"
+    return 3
+  fi
+
+  local commit agent_version
+  commit="$(fetch MANIFEST | awk -F= '/^commit=/{print $2}')"
+  agent_version="$(fetch MANIFEST | awk -F= '/^agent_version=/{print $2}')"
+
+  log "ставлю мастера $want (commit ${commit:-?})"
+  [ -f "$BIN" ] && cp -p "$BIN" "$BIN.prev"
+  install -m 0755 "$tmp" "$BIN"
+  rm -f "$tmp"
+  systemctl restart "$SERVICE"
+
+  if health_wait; then
+    mkdir -p "$STATE_DIR"
+    cat >"$DEPLOYED" <<EOF
+{"master_sha256":"$want","commit":"$commit","agent_version":"$agent_version","at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+EOF
+    log "мастер поднялся, /healthz ok"
+    AGENT_VERSION_TARGET="$agent_version"
+    return 0
+  fi
+
+  log "health-gate не прошёл — откатываюсь на .prev"
+  if [ -f "$BIN.prev" ]; then
+    install -m 0755 "$BIN.prev" "$BIN"
+    systemctl restart "$SERVICE"
+    health_wait || log "ВНИМАНИЕ: после отката мастер тоже не поднялся"
+  else
+    log "ВНИМАНИЕ: .prev нет, откатывать нечем"
+  fi
+  rejected_add "master:$want"
+  return 4
+}
+
+# --- шаг агентов (реализуется отдельной задачей плана) -----------------------
+upgrade_agents() { return 0; }
+
+main() {
+  if [ -e "$DISABLED" ]; then
+    exit 0
+  fi
+  if ! acquire_lock; then
+    log "предыдущий тик ещё идёт — выхожу"
+    exit 0
+  fi
+  mkdir -p "$STATE_DIR"
+  load_metrics
+
+  AGENT_VERSION_TARGET=""
+  deploy_master
+  local rc=$?
+  case "$rc" in
+    0 | 1) M_SUCCESS="$(date +%s)" ;;
+    3) M_FAILURE="$(date +%s)" ;;
+    4)
+      M_FAILURE="$(date +%s)"
+      M_ROLLBACKS=$((M_ROLLBACKS + 1))
+      ;;
+    # 2 — релиз недоступен: не успех и не отказ выката. Тишину поймает
+    # DevDeployStale, поднимать DevDeployFailed тут было бы ложной тревогой.
+  esac
+
+  if [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ]; then
+    if [ -z "$SKIP_AGENTS" ]; then
+      upgrade_agents
+    fi
+  fi
+
+  save_metrics
+  exit 0
+}
+
+main "$@"
