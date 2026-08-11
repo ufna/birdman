@@ -79,7 +79,10 @@
   `birdman_mm_time_to_match_seconds`, `birdman_mm_tickets_total{result}`;
 - **SSE** `GET /v1/events/stream` (readonly+): новые строки `events` как
   `id:`/`event: <kind>`/`data: <json>` (курсор по id, poll ~1с), keepalive
-  каждые 15с, реконнект без потерь через `?after_id=` / `Last-Event-ID`;
+  каждые 15с, реконнект через `?after_id=` / `Last-Event-ID` — без потерь при
+  обрыве СОЕДИНЕНИЯ (про гонку коммитов см. spec §6 и tracker #1013). Лента
+  сужается привязкой ключа так же, как `GET /v1/events`: `?project=` с чужим
+  слагом → 403, без параметра привязанный ключ видит свой проект (tracker #999);
 - **матчи для панели**: `GET /v1/matches` (фильтры `state|region|project`,
   `limit/offset`, свежие первыми; в ответе semver, host:port и живые
   `server_players`) и `GET /v1/matches/{id}`;
