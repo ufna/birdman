@@ -31,16 +31,22 @@ import (
 const mmRateLimit = 5
 
 type Server struct {
-	st            *store.Store
-	m             *metrics.Metrics
-	mm            *matchmaker.Matchmaker
-	dep           *deploy.Manager
-	sender        CommandSender        // agent command dispatch (agentlink.Hub)
-	logs          *agentlink.LogRouter // TailLogs chunk router
-	vmURL         string               // VictoriaMetrics base URL for the metrics proxy
-	vlURL         string               // VictoriaLogs base URL for the logs query proxy
-	vmalertURL    string               // vmalert base URL for the alerts endpoints
-	alertsLogPath string               // alert sink log for GET /v1/alerts/history
+	st     *store.Store
+	m      *metrics.Metrics
+	mm     *matchmaker.Matchmaker
+	dep    *deploy.Manager
+	sender CommandSender        // agent command dispatch (agentlink.Hub)
+	logs   *agentlink.LogRouter // TailLogs chunk router
+	vmURL  string               // VictoriaMetrics base URL for the metrics proxy
+	vlURL  string               // VictoriaLogs base URL for the logs query proxy
+	// Канарейки апстримов (narrow_probe.go, tracker #1007): сужение запроса
+	// привязанного ключа исполняет апстрим, а незнакомый query-параметр HTTP
+	// молча игнорирует, — поэтому перед КАЖДЫМ сужаемым запросом master
+	// сверяется с пробой, что ручка на том конце вообще разбирается.
+	logsProbe     *narrowProbe
+	metricsProbe  *narrowProbe
+	vmalertURL    string // vmalert base URL for the alerts endpoints
+	alertsLogPath string // alert sink log for GET /v1/alerts/history
 	mmLimit       *rateLimiter
 	auth          *authenticator
 	log           *slog.Logger
@@ -69,6 +75,7 @@ func New(st *store.Store, m *metrics.Metrics, mm *matchmaker.Matchmaker, dep *de
 		st: st, m: m, mm: mm, dep: dep, sender: sender, logs: logs, vmURL: vmURL, vlURL: vlURL,
 		mmLimit: newRateLimiter(mmRateLimit, mmRateLimit),
 		auth:    newAuthenticator(st), log: log, mux: http.NewServeMux(),
+		logsProbe: newLogsNarrowProbe(), metricsProbe: newMetricsNarrowProbe(),
 	}
 
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz) // no auth by design

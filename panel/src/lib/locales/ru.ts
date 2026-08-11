@@ -211,6 +211,10 @@ export const ru: Record<MessageKey, string> = {
   'metric.error': 'Метрики недоступны (ошибка {code}).',
   'metric.err.expired': 'Сессия истекла — войдите заново, чтобы видеть метрики.',
   'metric.err.offline': 'Не удалось связаться с master — проверьте соединение.',
+  // tracker #1007: апстрим не разбирает ручку сужения, поэтому master отказывает,
+  // а не отдаёт привязанному к проекту ключу весь флот.
+  'metric.err.narrowing':
+    'Метрики скрыты: этот master не может сузить запрос до вашего проекта — настроенная VictoriaMetrics не понимает query-параметр extra_label. Чинить оператору: victoriametrics_url (доки self-host, §4).',
   'metric.noData': 'Нет данных за выбранный период.',
   'metric.players': 'Игроки',
   'metric.tick': 'Tick, мс',

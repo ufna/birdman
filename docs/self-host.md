@@ -382,9 +382,11 @@ Empty → the metrics/logs tabs answer `503` (`metrics_unconfigured` /
 `logs_unconfigured`), everything else works. That is NOT the whole failure
 model: with a URL set but the upstream down you get `502 upstream`, a bad
 `limit` gets `400`, and a bound key gets `200` with a narrowed — sometimes
-empty — result. Plus `403`, but only from the key's scope or from a pair that
-cannot be narrowed — binding by itself does NOT close these handles. Details
-right below, in this same section.
+empty — result. A bound key against an upstream that cannot enforce the
+narrowing gets `503 logs_narrowing_unsupported` / `metrics_narrowing_unsupported`
+instead of everyone else's data (tracker #1007). Plus `403`, but only from the
+key's scope or from a pair that cannot be narrowed — binding by itself does NOT
+close these handles. Details right below, in this same section.
 
 **Who sees what (tracker #994).** A global (unbound) key uses both raw proxies —
 `GET /v1/logs/query` and `GET /v1/metrics/query`·`/query_range` — exactly as
@@ -438,14 +440,74 @@ Consequences worth knowing up front:
   the upstream fail-open of the next bullet looks like. So compare not "is it
   non-empty" but whether the bound output is strictly CONTAINED in the global
   one.
-- **Upstream versions are not cosmetic.** The narrowing relies on the stock
-  `extra_stream_filters` (VictoriaLogs) and `extra_label` (VictoriaMetrics)
-  query args. An upstream that does NOT know such an arg silently ignores it
-  and answers `200` with the whole fleet — i.e. a bound key reads other
-  projects again, with no error to show for it. The minimum this was verified
-  on, and what our ansible roles pin: **VictoriaLogs v1.51.0, VictoriaMetrics
-  v1.102.1**. `victorialogs_url` must point at VictoriaLogs; a Loki-compatible
-  stand-in will not understand the arg and will not hold the boundary.
+- **Upstream versions are not cosmetic — and master now checks that the
+  upstream actually PARSES the narrowing arg (tracker #1007).** The narrowing relies on the stock `extra_stream_filters`
+  (VictoriaLogs) and `extra_label` (VictoriaMetrics) query args, and the
+  narrowing itself is executed by the upstream, not by master. An upstream that
+  does NOT know such an arg does not answer with an error — HTTP ignores an
+  unknown query arg silently, so it would answer `200` with the whole fleet.
+  Master therefore probes the upstream before letting a bound key's query
+  through: a canary request with a deliberately MALFORMED value of the arg must
+  be rejected (`4xx`), and a control request without the arg must succeed
+  (`2xx`). Both hold → the arg is parsed, and master lets the narrowed query
+  through. They do not → **master refuses instead of answering with everyone's
+  data**:
+
+  - `503` + `logs_narrowing_unsupported` / `metrics_narrowing_unsupported` —
+    the upstream swallowed a value it cannot possibly parse, i.e. it is not
+    parsing the arg at all. The message names the arg, the config option and
+    the minimum version. Fix the upstream, not the key.
+  - `502` + `upstream` — the probe could not reach a verdict (upstream down,
+    `5xx`, a gateway in front that rejects everything, **or an upstream that
+    answers but takes longer than the probe's 5-second budget** — the real query
+    path would have given it 15s, so a very slow-but-healthy upstream can serve
+    a global key while refusing a bound one). Refusing here too is deliberate:
+    "could not verify" is not "verified".
+
+  Neither message carries the upstream's own response body — only its status
+  code and our explanation. The probe request is master's own and is NOT
+  narrowed by the key's pair, so echoing what it got back to a bound key would
+  turn the refusal itself into the channel we are closing. The body goes to the
+  master log, where you actually want it.
+
+  The probe travels the same URL and the same paths as the real query, so it
+  tests your whole chain — an old version, a Loki-compatible stand-in in
+  `victorialogs_url`, or a reverse proxy that strips query args all fail it
+  identically. It runs once at master start (you get the ERROR in the log at
+  boot, not when the first bound key trips over it — but a failing probe never
+  blocks master from starting) and is then cached for 5 minutes, so a healthy
+  deployment pays at most 2 requests to VictoriaLogs and 4 to VictoriaMetrics
+  per 5 minutes, and nothing at all while no bound key is asking. There is no
+  background refresh, so once every 5 minutes ONE user request pays for the
+  whole probe synchronously and may take a few seconds longer than usual.
+  A verdict older than 5 minutes is never used — read that literally: if you
+  swap the upstream under a running master for one that does not parse the arg,
+  then until the verdict expires (up to 5 minutes) master keeps narrowing into
+  the void and that upstream answers with the whole fleet. This is NOT
+  monitoring — the probe is lazy, it re-runs on the first bound request AFTER
+  the verdict expires, not on a timer.
+  Selective interference is its blind spot too: a middlebox that strips the arg
+  only for some requests (by query text, by header) passes the probe — it proves
+  the route, not the intentions of whoever sits on it. **A global (unbound)
+  key is not probed and not refused** — narrowing does not apply to it, so it
+  stays your diagnostic tool on a broken deployment.
+
+  The minimum this was verified on, and what our ansible roles pin:
+  **VictoriaLogs v1.51.0, VictoriaMetrics v1.102.1**. `victorialogs_url` must
+  point at VictoriaLogs; a Loki-compatible stand-in will not understand the arg
+  — and will now be refused rather than silently trusted. Note what the probe
+  does and does not look at: it never reads the upstream's VERSION, only whether
+  the arg is parsed on the paths we narrow. A newer or older build that parses
+  it passes; the versions above are simply what this was verified on.
+
+  **What the probe does NOT prove.** It proves the arg is PARSED, not that it is
+  ENFORCED. An upstream that parses and validates the arg and then ignores its
+  meaning would pass. There is no store-independent probe for enforcement: on an
+  empty index "the filter returned nothing foreign" is indistinguishable from
+  "the filter was ignored", and an access boundary must not depend on whether
+  there happens to be data right now. If you run something other than
+  VictoriaLogs/VictoriaMetrics, verify enforcement yourself with the
+  global-vs-bound comparison described two bullets above.
 - **Rolling the agent back.** An agent older than #994 cannot find logs in
   subdirectories: it will not rotate, finalize, retain or live-tail files that
   are already labelled. If you roll the agent back, move or remove

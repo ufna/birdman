@@ -5,7 +5,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ufna/birdman/master/internal/store"
 )
@@ -133,3 +136,75 @@ func TestNarrowedQueriesDropClientFilterKnobs(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// TestNarrowProbeVerdictExpires (tracker #1007): вердикт живёт не дольше своего
+// TTL, и по истечении проба идёт в апстрим ЗАНОВО. Без этой проверки мутация
+// «TTL = 100 часов» остаётся зелёной на всей батарее, а обещание «апстрим,
+// подменённый под работающим master'ом, обслуживается по старому вердикту не
+// дольше TTL» — ничем не подкреплённым.
+//
+// Тест внутренний и БЕЗ sleep: протухание имитируется сдвигом p.exp назад.
+// Спать на настоящем TTL значило бы менять честность теста на его флакость.
+func TestNarrowProbeVerdictExpires(t *testing.T) {
+	// Потолок на сам TTL, а не только на его применение: пока вердикт не протух,
+	// подменённый апстрим обслуживается по СТАРОМУ вердикту, то есть дыра #990
+	// открыта заново и молча. Окно измеряется минутами; часами — уже не гарантия.
+	if narrowProbeOKTTL > 15*time.Minute {
+		t.Fatalf("окно жизни устаревшего вердикта = %s: столько времени подмена апстрима заново открывает дыру #990 молча", narrowProbeOKTTL)
+	}
+	if narrowProbeFailTTL > narrowProbeOKTTL {
+		t.Fatalf("отказной TTL (%s) длиннее успешного (%s) — починенный апстрим ждал бы дольше сломанного",
+			narrowProbeFailTTL, narrowProbeOKTTL)
+	}
+
+	var parses atomic.Bool
+	parses.Store(true)
+	var hits atomic.Int64
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		// Пока parses=true — ведёт себя как настоящий VL: кривое значение
+		// знакомой ручки отвергает. Потом «апстрим подменили»: то же значение
+		// проглатывается молча.
+		if parses.Load() && r.URL.Query().Get("extra_stream_filters") == "{project=}" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer up.Close()
+
+	p := newLogsNarrowProbe()
+	if v, _ := p.check(up.URL, nil); v != narrowHonoured {
+		t.Fatalf("вердикт = %v, want narrowHonoured", v)
+	}
+	if got := time.Until(p.exp); got > narrowProbeOKTTL || got < narrowProbeOKTTL-time.Minute {
+		t.Fatalf("срок годности вердикта = %s, want ≈%s (okTTL не применён)", got, narrowProbeOKTTL)
+	}
+	afterFirst := hits.Load()
+	if afterFirst != 2 {
+		t.Fatalf("запросов пробы = %d, want 2 (канарейка + контроль)", afterFirst)
+	}
+
+	// Внутри TTL апстрим не трогается вовсе — иначе «кешируется» было бы словом.
+	parses.Store(false)
+	if v, _ := p.check(up.URL, nil); v != narrowHonoured || hits.Load() != afterFirst {
+		t.Fatalf("внутри TTL: вердикт = %v, запросов = %d (want narrowHonoured, %d)", v, hits.Load(), afterFirst)
+	}
+
+	// Вердикт протух — апстрим опрашивается заново, и подмена замечена.
+	p.exp = time.Now().Add(-time.Second)
+	v, detail := p.check(up.URL, nil)
+	if v != narrowIgnored {
+		t.Fatalf("после протухания: вердикт = %v, want narrowIgnored — подмена апстрима не замечена", v)
+	}
+	if hits.Load() <= afterFirst {
+		t.Fatalf("после протухания проба в апстрим не ходила (запросов %d)", hits.Load())
+	}
+	if !strings.Contains(detail, "extra_stream_filters") {
+		t.Fatalf("причина отказа не называет ручку: %q", detail)
+	}
+	// Отказной вердикт живёт КОРОЧЕ, чтобы починенный апстрим не ждал 5 минут.
+	if got := time.Until(p.exp); got > narrowProbeFailTTL {
+		t.Fatalf("срок годности отказа = %s, want ≤%s", got, narrowProbeFailTTL)
+	}
+}

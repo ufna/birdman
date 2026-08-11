@@ -339,6 +339,14 @@ func (s *Server) proxyVictoria(w http.ResponseWriter, r *http.Request, path stri
 			"victoriametrics_url is not set on this master")
 		return
 	}
+	// Сужение исполняет АПСТРИМ, а не master (#994), а незнакомый query-параметр
+	// HTTP молча игнорирует — поэтому перед сужаемым запросом master обязан
+	// ЗНАТЬ, что ручка на том конце разбирается (tracker #1007). Не знает —
+	// отказ, а не «отдать весь флот»; проба кеширована, в здоровом случае это
+	// ноль лишних запросов на боевом пути (narrow_probe.go).
+	if narrow && !s.requireNarrowableUpstream(w, s.metricsProbe, s.vmURL) {
+		return
+	}
 	target := strings.TrimRight(s.vmURL, "/") + path
 	rawQuery := r.URL.RawQuery
 	if narrow {
@@ -401,6 +409,12 @@ func (s *Server) handleLogsQuery(w http.ResponseWriter, r *http.Request) {
 		limit = min(n, 10000)
 	}
 	q.Set("limit", strconv.Itoa(limit))
+	// См. proxyVictoria: сужение исполняет апстрим, поэтому оно не имеет права
+	// «не сработать» молча (tracker #1007). Проба стоит ПОСЛЕ валидации limit —
+	// кривой limit остаётся 400 и апстрима не касается вовсе.
+	if narrow && !s.requireNarrowableUpstream(w, s.logsProbe, s.vlURL) {
+		return
+	}
 	if narrow {
 		q = narrowedLogsQuery(q, project, env)
 	}

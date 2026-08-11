@@ -235,6 +235,10 @@ export const en = {
   'metric.error': 'Metrics unavailable (error {code}).',
   'metric.err.expired': 'The session has expired — sign in again to see metrics.',
   'metric.err.offline': "Couldn't reach master — check the connection.",
+  // tracker #1007: the upstream does not parse the narrowing query arg, so master
+  // refuses instead of answering a project-bound key with the whole fleet.
+  'metric.err.narrowing':
+    'Metrics are hidden: this master cannot narrow the query to your project — the configured VictoriaMetrics does not understand the extra_label query arg. The operator has to fix victoriametrics_url (self-host docs, §4).',
   'metric.noData': 'No data for the selected period.',
   'metric.players': 'Players',
   'metric.tick': 'Tick, ms',

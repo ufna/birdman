@@ -433,16 +433,28 @@ func TestQueryProxiesNarrowToBoundScope(t *testing.T) {
 	// ИМЕННО эти байты, иначе 200 ничего не доказывает.
 	const logLine = `{"_time":"2026-08-11T10:00:00Z","_msg":"secret dedik output","server_id":"s1"}`
 	const vmBody = `{"status":"success","data":{"resultType":"vector","result":[]}}`
+	//
+	// Апстримы обёрнуты narrowAwareUpstream (tracker #1007): master пускает
+	// сужаемый запрос только в апстрим, у которого ПРОВЕРИЛ ручку сужения, а
+	// проверяется она кривым значением. Голый фейк, отвечающий 200 на что
+	// угодно, неотличим от апстрима, который ручки не знает, — и здесь получил
+	// бы законный 503. Сама эта ветка проверяется в TestNarrowingProbeGatesBoundKey.
+	//
+	// Побочный эффект, о котором надо знать, читая счётчики ниже: КОНТРОЛЬНЫЙ
+	// запрос пробы (тот, что без ручки) проходит обёртку насквозь, поэтому один
+	// раз инкрементит vlCalls/vmCalls и перезаписывает gotVL/gotVM. Порядок
+	// спасает — проба идёт ДО боевого запроса, так что к моменту проверок в
+	// gotVL/gotVM лежит именно боевой запрос.
 	var vlCalls, vmCalls int
 	var gotVL, gotVM url.Values
-	vl := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	vl := httptest.NewServer(narrowAwareUpstream("extra_stream_filters", func(w http.ResponseWriter, r *http.Request) {
 		vlCalls++
 		gotVL = r.URL.Query()
 		w.Header().Set("Content-Type", "application/stream+json")
 		_, _ = w.Write([]byte(logLine + "\n"))
 	}))
 	t.Cleanup(vl.Close)
-	vm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	vm := httptest.NewServer(narrowAwareUpstream("extra_label", func(w http.ResponseWriter, r *http.Request) {
 		vmCalls++
 		gotVM = r.URL.Query()
 		w.Header().Set("Content-Type", "application/json")

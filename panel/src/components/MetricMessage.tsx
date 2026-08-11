@@ -37,6 +37,12 @@ import type { MetricErrorCode, MetricStatus } from '../lib/useMetrics';
 // проверка ниже была бы верной лишь в рантайме, а компилятор её не видел бы.
 const CODE_MESSAGE: Record<string, MessageKey | undefined> = {
   unauthorized: 'metric.err.expired',
+  // tracker #1007. Без своей строки этот код показался бы общим «Метрики
+  // недоступны (ошибка metrics_narrowing_unsupported)», а богатый текст master'а
+  // до UI не довозят СТРУКТУРНО (политика #996: проза апстрима в панель не идёт).
+  // Между тем чинить тут не ключ и не панель, а конфиг апстрима, и сказать это
+  // должен экран — единственный потребитель этой проксии.
+  metrics_narrowing_unsupported: 'metric.err.narrowing',
 };
 
 export function MetricMessage({

@@ -312,6 +312,11 @@ func run() error {
 	// alertmanager silences, re-issues lost/expired ones, repairs endsAt drift
 	// and sweeps orphans. A disabled (empty alertmanager_url) mirror returns at once.
 	go silenceMirror.Run(loopCtx)
+	// Прогрев канареек VL/VM (tracker #1007): сломанный апстрим виден в логе при
+	// загрузке, а не в момент, когда об него споткнётся первый привязанный ключ.
+	// Именно ГОРУТИНА и именно после Serve: проба ходит по сети, а старт master'а
+	// не имеет права зависеть от того, поднялась ли уже наблюдаемость.
+	go apiHandler.WarmNarrowProbes(loopCtx)
 
 	errCh := make(chan error, 2)
 	go func() {

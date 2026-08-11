@@ -20,6 +20,7 @@ import (
 	"github.com/ufna/birdman/master/internal/testdb"
 
 	"net/http/httptest"
+	"net/http/httputil"
 )
 
 // Интеграционные проверки сужения (tracker #994) против ЖИВЫХ VictoriaLogs и
@@ -196,6 +197,120 @@ func TestLiveUpstreamMetricsNarrowing(t *testing.T) {
 	if strings.Contains(string(body), `"`+liveProjectForeign+`"`) {
 		t.Fatalf("УТЕЧКА (query_range): чужой проект в выдаче:\n%s", body)
 	}
+}
+
+// TestLiveUpstreamNarrowingProbe (tracker #1007) — карточка ровно про поведение
+// АПСТРИМА, поэтому фейковым апстримом она не доказывается. Здесь три случая на
+// ЖИВЫХ VictoriaLogs/VictoriaMetrics:
+//
+//  1. апстрим ручку понимает — привязанный ключ обслужен (иначе гейт был бы
+//     доказан «всегда отказом»);
+//  2. апстрим ручку НЕ понимает — эмулируется настоящим VL/VM за прокси,
+//     СРЕЗАЮЩИМ ручку из query: для master'а это неотличимо от версии без ручки
+//     и от Loki-совместимой замены — параметр не доезжает до движка и пропадает
+//     молча. Тут же измеряется, что случилось бы БЕЗ гейта: тот же прокси,
+//     тот же запрос, но ГЛОБАЛЬНЫМ ключом — и апстрим отдаёт весь флот;
+//  3. апстрим отвечает ошибкой — вердикта нет, значит тоже отказ.
+func TestLiveUpstreamNarrowingProbe(t *testing.T) {
+	vlURL, vmURL := liveUpstreams(t)
+	tag := fmt.Sprintf("probe-%d", time.Now().UnixNano())
+	seedVictoriaLogs(t, vlURL, tag)
+	seedVictoriaMetrics(t, vmURL)
+
+	foreign := "foreign " + tag
+	logsPath := "/v1/logs/query?query=" + url.QueryEscape("* | sort by (_time) desc") + "&limit=100"
+	metricsPath := "/v1/metrics/query?query=" + url.QueryEscape(`{__name__=~"birdman_live_.*"}`)
+
+	t.Run("живой апстрим ручку разбирает — привязанный ключ обслужен", func(t *testing.T) {
+		ts, boundSecret, _ := liveServer(t, vmURL, vlURL)
+		bound := &client{t: t, base: ts.URL, key: boundSecret}
+		code, body := bound.doRaw("GET", logsPath)
+		if code != 200 {
+			t.Fatalf("логи: %d (%s), want 200 — гейт закрыл ГОДНЫЙ апстрим", code, body)
+		}
+		if !strings.Contains(string(body), "mine "+tag) {
+			t.Fatalf("логи: привязанный ключ не получил своих строк: %s", body)
+		}
+		if code, body := bound.doRaw("GET", metricsPath); code != 200 {
+			t.Fatalf("метрики: %d (%s), want 200", code, body)
+		}
+	})
+
+	t.Run("прокси срезает ручку — fail-closed, а не 200 со всем флотом", func(t *testing.T) {
+		blindVL := stripKnobProxy(t, vlURL, "extra_stream_filters")
+		blindVM := stripKnobProxy(t, vmURL, "extra_label")
+		ts, boundSecret, globalSecret := liveServer(t, blindVM, blindVL)
+		bound := &client{t: t, base: ts.URL, key: boundSecret}
+		global := &client{t: t, base: ts.URL, key: globalSecret}
+
+		// СНАЧАЛА — цена вопроса, замеренная, а не предположенная: через ровно
+		// тот же слепой прокси глобальный ключ (его master не сужает) получает
+		// 200 и ЧУЖИЕ строки. Значит апстрим на том конце жив, запрос исполняет,
+		// а ручку теряет — то есть привязанный ключ без гейта получил бы ровно
+		// это же тело. Без этой половины «привязанному отказано» не доказывало
+		// бы ничего: так же выглядел бы и мёртвый прокси.
+		code, body := global.doRaw("GET", logsPath)
+		if code != 200 || !strings.Contains(string(body), foreign) {
+			t.Fatalf("контроль: слепой прокси не отдал весь флот глобальному ключу (%d) — проверка выродилась:\n%s", code, body)
+		}
+
+		for _, p := range []struct{ name, path, wantErr string }{
+			{"логи", logsPath, "logs_narrowing_unsupported"},
+			{"метрики", metricsPath, "metrics_narrowing_unsupported"},
+		} {
+			code, body := bound.doRaw("GET", p.path)
+			if code != 503 {
+				t.Fatalf("%s: %d (%s), want 503 — сужение молча не сработало", p.name, code, body)
+			}
+			if strings.Contains(string(body), foreign) {
+				t.Fatalf("%s: УТЕЧКА — чужие данные в теле отказа:\n%s", p.name, body)
+			}
+			if got := errCodeOf(t, body); got != p.wantErr {
+				t.Fatalf("%s: код = %q, want %q", p.name, got, p.wantErr)
+			}
+			if !strings.Contains(string(body), "extra_") {
+				t.Fatalf("%s: отказ не называет оператору ручку, которую чинить: %s", p.name, body)
+			}
+		}
+	})
+
+	t.Run("апстрим отвечает ошибкой — вердикта нет, значит отказ", func(t *testing.T) {
+		sick := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, "upstream is restarting")
+		}))
+		t.Cleanup(sick.Close)
+		ts, boundSecret, _ := liveServer(t, sick.URL, sick.URL)
+		bound := &client{t: t, base: ts.URL, key: boundSecret}
+		for _, p := range []string{logsPath, metricsPath} {
+			if code, body := bound.doRaw("GET", p); code != 502 {
+				t.Fatalf("%s на больном апстриме: %d (%s), want 502", p, code, body)
+			}
+		}
+	})
+}
+
+// stripKnobProxy — «апстрим не той версии» без второй версии апстрима: живой
+// VL/VM за обратным прокси, который вырезает ручку сужения из query. Для
+// master'а это неотличимо от апстрима, который ручку не знает: параметр не
+// доезжает до движка, ошибки нет, ответ 200.
+func stripKnobProxy(t *testing.T, backend, knob string) string {
+	t.Helper()
+	u, err := url.Parse(backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rp := httputil.NewSingleHostReverseProxy(u)
+	director := rp.Director
+	rp.Director = func(r *http.Request) {
+		director(r)
+		q := r.URL.Query()
+		q.Del(knob)
+		r.URL.RawQuery = q.Encode()
+	}
+	ts := httptest.NewServer(rp)
+	t.Cleanup(ts.Close)
+	return ts.URL
 }
 
 // firstStreamID вытаскивает _stream_id из первой ndjson-строки ответа VL.
