@@ -167,9 +167,18 @@ jobs:
             echo "PACKAGES_TOKEN не задан — безымянные версии пакета остаются (это не ошибка)"
             exit 0
           fi
-          gh api --paginate "/user/packages/container/birdman-dev/versions" \
-            --jq '.[] | select((.metadata.container.tags | length) == 0) | .id' \
-            | while read -r id; do
-                gh api --method DELETE "/user/packages/container/birdman-dev/versions/$id" >/dev/null \
-                  && echo "· удалена безымянная версия $id" || true
-              done
+          # Косметика не имеет права красить сборку: артефакт уже опубликован,
+          # и протухший или недостаточный токен здесь — повод для строчки в
+          # логе, а не для красного билда. Отсюда `|| true` на самом запросе
+          # (pipefail иначе провалил бы шаг вместе с джобой).
+          ids="$(gh api --paginate "/user/packages/container/birdman-dev/versions" \
+            --jq '.[] | select((.metadata.container.tags | length) == 0) | .id' 2>/dev/null || true)"
+          if [ -z "$ids" ]; then
+            echo "безымянных версий нет (или токен не даёт их прочитать) — пропускаю"
+            exit 0
+          fi
+          for id in $ids; do
+            gh api --method DELETE "/user/packages/container/birdman-dev/versions/$id" >/dev/null 2>&1 \
+              && echo "· удалена безымянная версия $id" \
+              || echo "· не смог удалить версию $id (нужен PAT со scope delete:packages)"
+          done
