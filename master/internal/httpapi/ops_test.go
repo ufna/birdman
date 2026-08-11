@@ -127,6 +127,70 @@ func TestAgentUpgradeAPI(t *testing.T) {
 	}
 }
 
+// TestAgentUpgradeEventRedactsURL: the agent fetches its binary itself over a
+// plain GET, so the URL handed to it may be a *presigned* registry link whose
+// query string is a bearer-equivalent credential (OCI transport, dev-stand v2).
+// The command must carry it verbatim, but the event must not: `events` rows live
+// forever and are readable by any readonly key through the panel.
+func TestAgentUpgradeEventRedactsURL(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 4)
+	log := opsLog()
+	m := metrics.New(st, log)
+	mm := matchmaker.New(st, m, matchmaker.Config{}, log)
+	dep := deploy.New(deploy.Options{Store: st, Sender: &testdb.CommandRecorder{}, Log: log})
+	rec := &testdb.CommandRecorder{}
+	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, rec, nil, "", "", log))
+	t.Cleanup(ts.Close)
+	ctx := t.Context()
+
+	_, adminKey, _ := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{Name: "admin", Scopes: []string{httpapi.ScopeAdmin}})
+	admin := &client{t: t, base: ts.URL, key: adminKey}
+
+	sha := "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	signed := "https://pkg-containers.example.com/ghcr1/blobs/sha256:" + sha +
+		"?se=2026-08-11T09%3A00%3A00Z&sig=SUPERSECRETSIGNATURE&sp=r"
+
+	if code, _ := admin.do("POST", "/v1/agent-upgrade", map[string]any{
+		"url": signed, "sha256": sha, "version": "9.9.9", "node_id": f.NodeID}); code != 202 {
+		t.Fatalf("upgrade: want 202")
+	}
+
+	// The agent still gets the working, signed URL — redaction must not break it.
+	if !hasCmd(rec.Take(), func(m *agentlinkv1.MasterMsg) bool {
+		u := m.GetUpgrade()
+		return u != nil && u.GetUrl() == signed
+	}) {
+		t.Fatal("agent must receive the URL verbatim, signature included")
+	}
+
+	events, err := st.ListEvents(ctx, 10)
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	var payloadURL string
+	var found bool
+	for _, e := range events {
+		if e.Kind != store.EventAgentUpgrade {
+			continue
+		}
+		found = true
+		if v, ok := e.Payload["url"].(string); ok {
+			payloadURL = v
+		}
+	}
+	if !found {
+		t.Fatal("no agent_upgrade event")
+	}
+	if strings.Contains(payloadURL, "SUPERSECRETSIGNATURE") || strings.Contains(payloadURL, "?") {
+		t.Fatalf("event leaked the signed URL: %q", payloadURL)
+	}
+	// Redacted, not dropped: the operator must still see where it pulled from.
+	if !strings.Contains(payloadURL, "pkg-containers.example.com") {
+		t.Fatalf("event lost the useful part of the URL: %q", payloadURL)
+	}
+}
+
 // TestMetricsQueryProxy covers the read-only VictoriaMetrics proxy.
 func TestMetricsQueryProxy(t *testing.T) {
 	st := testdb.New(t)

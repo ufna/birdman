@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -164,6 +165,31 @@ type agentUpgradeRequest struct {
 	NodeID  string `json:"node_id"` // optional: one node; empty → the whole fleet
 }
 
+// redactURLCredentials strips the query string and any userinfo from a URL
+// before it is persisted or logged, keeping scheme+host+path — enough to see
+// WHERE a binary came from, nothing that grants access to it.
+//
+// The agent fetches its own binary over a plain GET and speaks no auth
+// (agent/internal/upgrade), so the URL we hand it may be a *presigned* registry
+// link whose query string is a bearer-equivalent credential — that is exactly
+// what the OCI transport of the dev stand produces. The command must carry it
+// verbatim; the `events` row must not: those rows live forever and any
+// readonly key reads them through the panel, which is served on a public
+// domain. Unparseable input is cut at the first '?' rather than passed through.
+func redactURLCredentials(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		if i := strings.IndexByte(raw, '?'); i >= 0 {
+			return raw[:i]
+		}
+		return raw
+	}
+	u.RawQuery = ""
+	u.Fragment = ""
+	u.User = nil
+	return u.String()
+}
+
 func (s *Server) handleAgentUpgrade(w http.ResponseWriter, r *http.Request) {
 	var req agentUpgradeRequest
 	if !decodeJSON(w, r, &req) {
@@ -215,7 +241,7 @@ func (s *Server) handleAgentUpgrade(w http.ResponseWriter, r *http.Request) {
 			Upgrade: &agentlinkv1.UpgradeAgent{Url: req.URL, Sha256: req.SHA256, Version: req.Version}}})
 		nid := node.ID
 		if err := s.st.InsertEvent(r.Context(), store.EventAgentUpgrade, store.EventRef{NodeID: &nid},
-			map[string]any{"version": req.Version, "url": req.URL}); err != nil {
+			map[string]any{"version": req.Version, "url": redactURLCredentials(req.URL)}); err != nil {
 			s.log.Error("agent-upgrade: event write failed", "node_id", node.ID, "err", err)
 		}
 		s.watchAgentUpgrade(node.ID, req.Version)
