@@ -53,7 +53,7 @@ func (s *Server) handleStatsOverview(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	project, env, ok := s.statsScope(w, r)
+	project, env, ok := s.scopeFilter(w, r)
 	if !ok {
 		return
 	}
@@ -77,7 +77,7 @@ func (s *Server) handleStatsCost(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	project, env, ok := s.statsScope(w, r)
+	project, env, ok := s.scopeFilter(w, r)
 	if !ok {
 		return
 	}
@@ -112,56 +112,6 @@ func statsDays(w http.ResponseWriter, r *http.Request) (int, bool) {
 		return 0, false
 	}
 	return n, true
-}
-
-// statsScope parses the optional ?project= and ?env= filters. Both empty =
-// вся платформа (поведение v0). Оба валидируются, чтобы опечатка давала
-// понятный 400, а не молча пустой ряд. Пишет свой ответ об ошибке и
-// возвращает false, когда запрос продолжать нельзя.
-//
-// Проектная половина — общий `projectFilter` (server.go): с tracker #961 это
-// ОДИН вход для всех чтений, сужаемых по проекту, а не частная валидация
-// статистики. Env-половина остаётся здесь: пары (project, env) больше нигде нет.
-//
-// Проектный фильтр (мультипроект W3) СНЯЛ последний sole-project fallback в
-// статистике: раньше env проверялся против SoleProjectSlug, и при нескольких
-// проектах любой ?env= отвечал 400 «several projects exist» — то есть фильтр
-// по окружению переставал работать ровно тогда, когда проектов становилось
-// больше одного. Теперь:
-//   - project задан → env проверяется в ЭТОМ проекте (пара (project, env) —
-//     то же, чем живут deploy/versions/promote);
-//   - project пуст, env задан → достаточно, чтобы окружение с таким именем
-//     существовало хоть у одного проекта: без выбранного проекта пары нет, но
-//     защита от опечатки остаётся.
-func (s *Server) statsScope(w http.ResponseWriter, r *http.Request) (project, env string, ok bool) {
-	project, ok = s.projectFilter(w, r)
-	if !ok {
-		return "", "", false
-	}
-	env = r.URL.Query().Get("env")
-	if env == "" {
-		return project, "", true
-	}
-	if project != "" {
-		if _, err := s.st.GetEnvironment(r.Context(), project, env); err != nil {
-			// ErrBadEnv → 400 «no such environment <project>/<env>» — тот же текст и тот
-			// же код, что и на deploy/versions/promote (v3: единый sentinel в storeError);
-			// реальный сбой стора → 500, а не «плохой ввод».
-			storeError(w, err)
-			return "", "", false
-		}
-		return project, env, true
-	}
-	exists, err := s.st.EnvironmentNameExists(r.Context(), env)
-	if err != nil {
-		storeError(w, err)
-		return "", "", false
-	}
-	if !exists {
-		writeError(w, http.StatusBadRequest, "bad_request", "no such environment "+env)
-		return "", "", false
-	}
-	return "", env, true
 }
 
 // --- rollup-backed read-path (shared by overview/cost) ---

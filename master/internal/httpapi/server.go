@@ -317,6 +317,52 @@ func (s *Server) projectFilter(w http.ResponseWriter, r *http.Request) (string, 
 	return project, true
 }
 
+// scopeFilter validates BOTH scope query parameters — ?project= и ?env= — и
+// возвращает их для передачи в фильтры стора.
+//
+// Раньше эта проверка жила только в статистике (statsScope), а листинги нод и
+// версий брали ?env= сырым: опечатка молча давала пустой список — ровно то
+// расхождение, ради которого сводили ?project= (#961). Правило теперь одно на
+// все аутентифицированные чтения, и следующий, кто добавит ?env=, не выбирает
+// поведение наугад.
+//
+//   - project задан → env проверяется В ЭТОМ проекте (пара (project, env) — то
+//     же, чем живут deploy/versions/promote);
+//   - project пуст, env задан → достаточно, чтобы окружение с таким именем
+//     существовало хоть у одного проекта: пары без проекта нет, но защита от
+//     опечатки остаётся.
+func (s *Server) scopeFilter(w http.ResponseWriter, r *http.Request) (project, env string, ok bool) {
+	project, ok = s.projectFilter(w, r)
+	if !ok {
+		return "", "", false
+	}
+	env = r.URL.Query().Get("env")
+	if env == "" {
+		return project, "", true
+	}
+	if project != "" {
+		if _, err := s.st.GetEnvironment(r.Context(), project, env); err != nil {
+			// ErrBadEnv → 400 «no such environment <project>/<env>» — тот же текст и тот
+			// же код, что и на deploy/versions/promote (v3: единый sentinel в storeError);
+			// реальный сбой стора → 500, а не «плохой ввод».
+			storeError(w, err)
+			return "", "", false
+		}
+		return project, env, true
+	}
+	exists, err := s.st.EnvironmentNameExists(r.Context(), env)
+	if err != nil {
+		storeError(w, err)
+		return "", "", false
+	}
+	if !exists {
+		writeError(w, http.StatusBadRequest, "bad_request", "no such environment "+env)
+		return "", "", false
+	}
+	return "", env, true
+}
+
+
 // storeError maps store sentinel errors to HTTP responses. ErrBadEnv (окружение,
 // названное запросом, не существует) — это плохой ВВОД, а не отсутствующий ресурс:
 // единый 400 {"error":"bad_request","detail":"no such environment <project>/<env>"}

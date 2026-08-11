@@ -19,8 +19,12 @@ import (
 // ended_at; a failing server aborts its match). players_peak is the maximum
 // heartbeat players count observed while the match was open.
 type Match struct {
-	ID            string     `json:"id"`
-	Project       string     `json:"project"`
+	ID      string `json:"id"`
+	Project string `json:"project"`
+	// Env — окружение матча (environments v1). Колонка была в схеме с самого
+	// начала, но в API не выходила; привязка ключа (project, env) без неё
+	// непроверяема, а именно этого требует #974.
+	Env           string     `json:"env"`
 	Region        string     `json:"region"`
 	State         string     `json:"state"`
 	VersionID     string     `json:"version_id"`
@@ -44,7 +48,7 @@ type MatchFilter struct {
 }
 
 const matchSelect = `
-	select m.id::text, p.slug, m.region, m.state, m.version_id::text, v.semver,
+	select m.id::text, p.slug, m.env, m.region, m.state, m.version_id::text, v.semver,
 	       m.server_id::text, host(n.public_ip), s.port, s.players,
 	       m.players_peak, m.started_at, m.ended_at, m.created_at
 	from matches m
@@ -54,7 +58,7 @@ const matchSelect = `
 	join nodes    n on n.id = s.node_id`
 
 func scanMatch(row pgx.Row, m *Match) error {
-	return row.Scan(&m.ID, &m.Project, &m.Region, &m.State, &m.VersionID, &m.Semver,
+	return row.Scan(&m.ID, &m.Project, &m.Env, &m.Region, &m.State, &m.VersionID, &m.Semver,
 		&m.ServerID, &m.Host, &m.Port, &m.ServerPlayers,
 		&m.PlayersPeak, &m.StartedAt, &m.EndedAt, &m.CreatedAt)
 }

@@ -62,6 +62,16 @@ func (s *Server) handleGetMatch(w http.ResponseWriter, r *http.Request) {
 		storeError(w, err)
 		return
 	}
+	// Привязка ключа энфорсится и на чтении (#974). Исторически она стояла только
+	// на deploy/matchmaking/allocate, и привязанный readonly-ключ читал матч
+	// ЛЮБОГО проекта, зная uuid. Схема разрешает привязать ключ любого скоупа, и
+	// оператор, выдавший ключ проекта А, разумно ждёт, что проект Б тот не видит;
+	// листинг с #961 уже валидирует ?project=, так что молчаливое исключение
+	// осталось ровно на одной ручке. Глобальный/admin-ключ (в том числе сессия
+	// панели) проходит как раньше.
+	if !s.requireBinding(w, r, m.Project, m.Env) {
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"match": m})
 }
 

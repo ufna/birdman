@@ -58,13 +58,13 @@ func (s *Server) handleCreateNode(w http.ResponseWriter, r *http.Request) {
 // валидируется по БД — опечатка даёт 400, а не молча суженный флот
 // (projectFilter, tracker #961).
 func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
-	project, ok := s.projectFilter(w, r)
+	project, env, ok := s.scopeFilter(w, r)
 	if !ok {
 		return
 	}
 	nodes, err := s.st.ListNodes(r.Context(), store.NodeFilter{
 		Project: project,
-		Env:     r.URL.Query().Get("env"),
+		Env:     env,
 	})
 	if err != nil {
 		storeError(w, err)
@@ -167,13 +167,13 @@ func (s *Server) handleCreateVersion(w http.ResponseWriter, r *http.Request) {
 // необязательны; пустые = все версии (поведение до мультипроекта W2). `project`
 // валидируется по БД (projectFilter, tracker #961).
 func (s *Server) handleListVersions(w http.ResponseWriter, r *http.Request) {
-	project, ok := s.projectFilter(w, r)
+	project, env, ok := s.scopeFilter(w, r)
 	if !ok {
 		return
 	}
 	versions, err := s.st.ListVersions(r.Context(), store.VersionFilter{
 		Project: project,
-		Env:     r.URL.Query().Get("env"),
+		Env:     env,
 	})
 	if err != nil {
 		storeError(w, err)
