@@ -129,9 +129,28 @@ func expectRec(t *testing.T, ch chan rec, kind string) rec {
 	}
 }
 
+// sockDir даёт КОРОТКИЙ каталог под unix-сокет вместо t.TempDir().
+//
+// У sockaddr_un.sun_path жёсткий лимит длины (~104 байта на macOS, 108 на
+// Linux), а дефолтный macOS TMPDIR — это длинный /var/folders/xx/…/T/, на
+// котором бюджет исчерпывается ещё до имени файла: bind падает с невнятным
+// «invalid argument». В CI (Linux) этого не видно, поэтому само оно не
+// всплывёт — зато разработчик на маке получает два красных теста при первом же
+// `go test ./...`, не связанных с его правкой. Это ловушка доверия: к красноте
+// привыкают и пропускают настоящую регрессию.
+func sockDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "bm-uds-")
+	if err != nil {
+		t.Fatalf("временный каталог для сокета: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 func listen(t *testing.T, ev Events) (*Server, string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "agent.sock")
+	path := filepath.Join(sockDir(t), "agent.sock")
 	// logf=nil: серверные горутины могут логировать после конца теста
 	s, err := Listen(path, ev, nil)
 	if err != nil {

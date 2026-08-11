@@ -85,6 +85,14 @@ func Listen(path string, ev Events, logf func(string, ...any)) (*Server, error) 
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("remove stale socket %s: %w", path, err)
 	}
+	// Длина пути unix-сокета ограничена sockaddr_un.sun_path (~104 байта на
+	// macOS, 108 на Linux), а ядро сообщает о превышении невнятным
+	// «invalid argument». Объясняем причину сами: иначе на длинном пути (тот же
+	// дефолтный macOS TMPDIR вида /var/folders/…/T/) человек ищет ошибку в
+	// правах, занятом сокете и чём угодно, кроме длины.
+	if len(path) >= 104 {
+		return nil, fmt.Errorf("socket path %s is %d bytes: длиннее лимита sun_path (~104), выберите каталог короче", path, len(path))
+	}
 	ln, err := net.Listen("unix", path)
 	if err != nil {
 		return nil, fmt.Errorf("listen %s: %w", path, err)
