@@ -88,14 +88,22 @@ interface DataState<T> {
 export function useData<T>(fetcher: () => Promise<T>, deps: unknown[]): DataState<T> & { reload: () => void } {
   const { status, subscribe } = useLive();
   const [state, setState] = useState<DataState<T>>({ loading: true });
+  // Поколение запроса: guard от ответа ПРОШЛОГО среза. Прежний guard был
+  // локальным флагом в замыкании load(), а взводил его дизпоузер — и он
+  // использовался ровно в одном месте, в useEffect. SSE-рефетч, страховочный
+  // поллинг и кнопка «Повторить» звали load() и дизпоузер ВЫБРАСЫВАЛИ, поэтому
+  // их запросы не помечались устаревшими никогда: пользователь менял проект, а
+  // ответ прошлого доезжал и записывался в состояние нового. Счётчик в ref
+  // общий для всех вызовов, поэтому любой новый load() обесценивает предыдущие.
+  const gen = useRef(0);
   const load = useCallback(() => {
-    let stale = false;
+    const mine = ++gen.current;
     fetcher()
       .then((data) => {
-        if (!stale) setState({ data, loading: false, updatedAt: Date.now() });
+        if (mine === gen.current) setState({ data, loading: false, updatedAt: Date.now() });
       })
       .catch((error: unknown) => {
-        if (!stale)
+        if (mine === gen.current)
           setState((s) => ({
             ...s,
             error: error instanceof Error ? error : new Error(String(error)),
@@ -103,7 +111,7 @@ export function useData<T>(fetcher: () => Promise<T>, deps: unknown[]): DataStat
           }));
       });
     return () => {
-      stale = true;
+      gen.current++;
     };
     // deps задаёт вызывающий экран (фильтры и т.п.)
     // eslint-disable-next-line react-hooks/exhaustive-deps -- ДВЕ находки, обе по устройству хука. (1) deps не литерал: их прокидывает вызывающий экран — в этом весь смысл `useData(fetcher, deps)`; сами call-site'ы линтер проверяет через additionalHooks в eslint.config.js. (2) `fetcher` не может быть в deps: свежая стрелка каждый рендер — зависимость от неё зациклила бы перезапрос.
@@ -159,15 +167,23 @@ export function useLiveAsync<T>(
   const { subscribe } = useLive();
   const [state, setState] = useState<DataState<T>>({ loading: true });
 
+  // Поколение запроса: guard от ответа ПРОШЛОГО среза. Прежний guard был
+  // локальным флагом в замыкании load(), а взводил его дизпоузер — и он
+  // использовался ровно в одном месте, в useEffect. SSE-рефетч, страховочный
+  // поллинг и кнопка «Повторить» звали load() и дизпоузер ВЫБРАСЫВАЛИ, поэтому
+  // их запросы не помечались устаревшими никогда: пользователь менял проект, а
+  // ответ прошлого доезжал и записывался в состояние нового. Счётчик в ref
+  // общий для всех вызовов, поэтому любой новый load() обесценивает предыдущие.
+  const gen = useRef(0);
   const load = useCallback(() => {
-    let stale = false;
+    const mine = ++gen.current;
     setState((s) => ({ ...s, loading: true }));
     fetcher()
       .then((data) => {
-        if (!stale) setState({ data, loading: false, updatedAt: Date.now() });
+        if (mine === gen.current) setState({ data, loading: false, updatedAt: Date.now() });
       })
       .catch((error: unknown) => {
-        if (!stale)
+        if (mine === gen.current)
           setState((s) => ({
             data: s.data,
             loading: false,
@@ -175,7 +191,7 @@ export function useLiveAsync<T>(
           }));
       });
     return () => {
-      stale = true;
+      gen.current++;
     };
     // deps задаёт вызывающий экран (период и т.п.)
     // eslint-disable-next-line react-hooks/exhaustive-deps -- см. useData выше: deps прокидывает вызывающий экран (call-site'ы проверяются через additionalHooks), а `fetcher` — свежая стрелка каждый рендер.
