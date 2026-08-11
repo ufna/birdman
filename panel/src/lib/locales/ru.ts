@@ -710,6 +710,7 @@ export const ru: Record<MessageKey, string> = {
   // --- Окружения (environments v1 §8) ---
   // Глобальный переключатель env (чипы в Shell) — окружения ВЫБРАННОГО проекта.
   'env.switch': 'Окружение',
+  'scope.current': 'Текущий проект и окружение',
   'env.all': 'Все',
   'env.productionTitle': 'production-окружение',
 

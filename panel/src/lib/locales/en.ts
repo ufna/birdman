@@ -726,6 +726,7 @@ export const en = {
   // --- Environments (environments v1 §8) ---
   // Global env switcher (Shell chips) — the environments OF THE SELECTED PROJECT.
   'env.switch': 'Environment',
+  'scope.current': 'Current project and environment',
   'env.all': 'All',
   'env.productionTitle': 'production environment',
 

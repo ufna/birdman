@@ -143,14 +143,18 @@ function NavGlyph({ icon }: { icon: NavIcon }) {
  * подсказкой, что проект заведётся сам при регистрации первой ноды/версии
  * (ensureProject), а не «пусто» без объяснений.
  */
-export function ProjectSelector() {
+export function ProjectSelector({ stacked = false }: { stacked?: boolean } = {}) {
   const { projects, selected, setSelected, loading, error, reload } = useProject();
   const { t } = useT();
   if (error !== undefined) return <ProjectUnavailableChip retry={reload} />;
   // Пока список едет, не мигаем «проектов нет» — это разные состояния.
   if (loading && projects.length === 0) return null;
   return (
-    <div role="group" aria-label={t('project.switch')} className="flex flex-wrap items-center gap-1.5">
+    <div
+      role="group"
+      aria-label={t('project.switch')}
+      className={stacked ? 'flex flex-col items-stretch gap-1.5' : 'flex flex-wrap items-center gap-1.5'}
+    >
       <span aria-hidden className="text-xs font-medium tracking-wide text-muted uppercase">
         {t('project.switch')}
       </span>
@@ -166,14 +170,14 @@ export function ProjectSelector() {
         // appearance-none + своя шеврон-иконка: нативная отрисовка селекта
         // выбивается из плоского стиля панели, но сам <select> остаётся
         // нативным — клавиатура и скринридеры работают даром.
-        <span className="relative inline-flex items-center">
+        <span className={`relative inline-flex items-center ${stacked ? 'w-full' : ''}`}>
           <select
             aria-label={t('project.switch')}
             value={selected ?? ''}
             onChange={(e) => {
               setSelected(e.target.value);
             }}
-            className="appearance-none rounded-lg border border-line bg-card py-1 pr-7 pl-2.5 font-mono text-xs font-medium text-ink transition-colors hover:border-accent focus:border-accent focus:outline-none"
+            className={`appearance-none rounded-lg border border-line bg-card py-1 pr-7 pl-2.5 font-mono text-xs font-medium text-ink transition-colors hover:border-accent focus:border-accent focus:outline-none ${stacked ? 'w-full' : ''}`}
           >
             {projects.map((p) => (
               <option key={p.slug} value={p.slug}>
@@ -232,7 +236,7 @@ function ProjectUnavailableChip({ retry }: { retry: () => void }) {
  * (follow-up p2): фильтр в этот момент принудительно «All» (env.tsx), и молчать
  * об этом нельзя — иначе непонятно, почему переключателя нет.
  */
-export function EnvChips() {
+export function EnvChips({ stacked = false }: { stacked?: boolean } = {}) {
   const { environments, selected, setSelected, error, reload } = useEnv();
   const { t } = useT();
   if (error !== undefined) return <EnvUnavailableChip retry={reload} />;
@@ -242,11 +246,18 @@ export function EnvChips() {
       active ? 'border-accent bg-mark text-accent-ink' : 'border-line text-muted hover:text-ink'
     }`;
   return (
-    <div role="group" aria-label={t('env.switch')} className="flex flex-wrap items-center gap-1.5">
+    <div
+      role="group"
+      aria-label={t('env.switch')}
+      className={stacked ? 'flex flex-col items-start gap-1.5' : 'flex flex-wrap items-center gap-1.5'}
+    >
       <span aria-hidden className="text-xs font-medium tracking-wide text-muted uppercase">
         {t('env.switch')}
       </span>
-      {environments.map((e) => {
+      {/* Чипы всегда в своей строке-обёртке: в сайдбаре они переносятся под
+          подписью, в ряду — стоят рядом с ней. Одна структура на оба режима. */}
+      <div className="flex flex-wrap items-center gap-1.5">
+        {environments.map((e) => {
         const active = selected === e.name;
         return (
           <button
@@ -259,22 +270,71 @@ export function EnvChips() {
             }}
             className={chipCls(active)}
           >
-            {e.production && <span aria-hidden className="size-1.5 rounded-full bg-warn" />}
-            <span className="font-mono">{e.name}</span>
-          </button>
-        );
-      })}
-      <button
-        type="button"
-        aria-pressed={selected === null}
-        onClick={() => {
-          setSelected(null);
-        }}
-        className={chipCls(selected === null)}
-      >
-        {t('env.all')}
-      </button>
+              {e.production && <span aria-hidden className="size-1.5 rounded-full bg-warn" />}
+              <span className="font-mono">{e.name}</span>
+            </button>
+          );
+        })}
+        <button
+          type="button"
+          aria-pressed={selected === null}
+          onClick={() => {
+            setSelected(null);
+          }}
+          className={chipCls(selected === null)}
+        >
+          {t('env.all')}
+        </button>
+      </div>
     </div>
+  );
+}
+
+/**
+ * Скоуп панели — проект и окружение. Живёт в сайдбаре (и в мобильном меню), а
+ * не над контентом: это верхнее измерение ВСЕГО, что показывают экраны, и
+ * читаться должно сверху вниз — система → на что смотрю → раздел.
+ *
+ * Экраны без скоупа перечислены явно: Бекапы — единственный, кто не смотрит ни
+ * на проект, ни на окружение (настройки и история бекапов у мастера одни).
+ * Показывать там селектор, который ни на что не влияет, — врать пользователю.
+ * В Доступе скоуп НУЖЕН: к проекту и окружению привязываются API-ключи.
+ */
+const SCOPELESS_PATHS = new Set(['/backups']);
+
+export function pathUsesScope(path: string): boolean {
+  return !SCOPELESS_PATHS.has(path);
+}
+
+export function ScopePicker({ path }: { path: string }) {
+  if (!pathUsesScope(path)) return null;
+  return (
+    <div className="flex flex-col gap-3">
+      <ProjectSelector stacked />
+      <EnvChips stacked />
+    </div>
+  );
+}
+
+/**
+ * Текущий скоуп текстом в мобильной шапке. На узком экране сайдбара нет, а
+ * переключатель уезжает в выдвижное меню — без этой подписи пропал бы ответ на
+ * вопрос «в каком я проекте», который до переезда всегда был на экране.
+ * Не интерактивен намеренно: переключение — в меню, здесь только факт.
+ */
+export function ScopeIndicator({ path }: { path: string }) {
+  const { selected: project } = useProject();
+  const { selected: env } = useEnv();
+  const { t } = useT();
+  if (!pathUsesScope(path) || project === null) return null;
+  return (
+    <span className="truncate font-mono text-xs text-muted" title={t('scope.current')}>
+      {project}
+      <span aria-hidden className="px-1 text-line">
+        /
+      </span>
+      {env ?? t('env.all')}
+    </span>
   );
 }
 
@@ -512,6 +572,7 @@ function MobileNav({
               </button>
             </Dialog.Close>
           </div>
+          <ScopePicker path={path} />
           <NavLinks path={path} navigate={go} critical={critical} />
           <ShellFooter />
         </Dialog.Content>
@@ -532,6 +593,7 @@ export function Shell({ path, navigate, children }: { path: string; navigate: (p
         {/* Боковая колонка ≥md */}
         <aside className="sticky top-0 hidden h-screen w-56 shrink-0 flex-col gap-6 border-r border-line bg-card px-4 py-5 md:flex">
           <Brand />
+          <ScopePicker path={path} />
           <NavLinks path={path} navigate={navigate} critical={critical} />
           <ShellFooter />
         </aside>
@@ -540,18 +602,13 @@ export function Shell({ path, navigate, children }: { path: string; navigate: (p
           {/* Верхняя панель <md */}
           <header className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-line bg-card px-4 py-3 md:hidden">
             <Brand />
-            <div className="flex items-center gap-3">
+            <div className="flex min-w-0 items-center gap-3">
+              <ScopeIndicator path={path} />
               <LiveIndicator />
               <MobileNav path={path} navigate={navigate} critical={critical} />
             </div>
           </header>
           <main id="main-content" tabIndex={-1} className="mx-auto flex w-full max-w-[1400px] flex-1 flex-col gap-4 px-4 py-5 focus:outline-none md:px-6">
-            {/* Проект — верхнее измерение, окружение — вложенное в него: в
-                одной строке и именно в этом порядке. */}
-            <div className="flex flex-wrap items-center gap-x-5 gap-y-2 empty:hidden">
-              <ProjectSelector />
-              <EnvChips />
-            </div>
             {children}
           </main>
         </div>
