@@ -98,8 +98,20 @@
   через `agentlink.LogRouter`, в т.ч. для умерших), self-upgrade агента
   (`POST /v1/agent-upgrade`, watchdog → `agent_upgrade_succeeded/failed`),
   read-only прокси метрик к VictoriaMetrics (`GET /v1/metrics/query`·
-  `/query_range`); метрики `birdman_events_total{kind}` (вход CrashLoop-алерта),
+  `/query_range`) и истории логов к VictoriaLogs (`GET /v1/logs/query`, Логи
+  v1); метрики `birdman_events_total{kind,project}` (вход CrashLoop-алерта),
   `birdman_matches_running`, `birdman_players_online`.
+  **Модель доступа всех трёх проксий** (`master.md` §6, tracker #994), в том
+  порядке, в каком проверяет код — разрешение РАНЬШЕ состояния апстрима: гейт
+  скоупа (ключ без readonly/admin → 403 `scope readonly required`) → привязка,
+  непригодная к сужению → 403 fail-closed (**единственный** 403 из-за привязки:
+  сама по себе она эти ручки не закрывает) → пустой URL апстрима → 503
+  (`metrics_unconfigured`/`logs_unconfigured`) → апстрим не отвечает → 502
+  `upstream` → кривой `limit` у logs-проксии → 400 → иначе 200. Привязанному к
+  паре (project, env) ключу master при этом **сужает запрос этой парой**
+  (`extra_stream_filters` у VL, парные `extra_label` у VM): чужого он не
+  получает, а своё видит там, где пара есть в данных, иначе 200 и пусто.
+  Глобальный и admin-ключ ходят как раньше, verbatim.
 
 Отложено (TODO, спеки помечены): обмен node_token → клиентский mTLS-серт,
 проверка join_token на дедике (liba), деплой-хук из CI в master (master не

@@ -310,6 +310,39 @@ Leave both fields unset for a global key (the default; existing keys keep workin
 CI uses two: a dev-bound key on every push (auto-deploy) and a prod-bound key gated
 behind a GitHub environment approval for the promote.
 
+**Binding is a tenant boundary, not just a write gate.** It narrows READS too,
+but NOT everywhere at the same granularity, and the difference matters:
+
+- **by the (project, env) pair** — listings and aggregates (an explicit foreign
+  `?project=` → `403`, no parameter → narrowed to your own pair) and the raw
+  observability proxies;
+- **by PROJECT only** — the event feed and its live SSE stream, active alerts
+  and mutes. A key bound to `game/dev` sees `game/prod` events and alerts too:
+  there is no per-environment split on those surfaces.
+
+Both kinds of filter are **non-hiding**: a row with no project — a platform
+event, a `MasterDown`/`NodeDown` alert — stays visible to every bound key.
+Otherwise a tenant would never learn that the platform itself is down.
+
+What binding does not close at all: `GET /metrics` is unauthenticated and
+carries `{project, env, server_id}` (project slugs, environment names and the
+shape of the fleet, with no key at all), and `GET /v1/qos` is public by design
+and returns the addresses of active nodes. If you expose the panel through
+nginx (section 1), do not proxy `/metrics`.
+
+Two things are worth knowing BEFORE you hand bound keys out:
+
+- a client that used to read the whole platform with a bound key is broken
+  deliberately;
+- **observability has its own price, and it is not merely "you see less"** — a
+  bound key will not see some of its OWN logs at all. The details are in
+  section 4, "Who sees what"; read it before you issue an operator a bound key.
+
+`GET /v1/alerts/rules` is deliberately left open: it is a configuration catalog,
+not alert instances, and without it a tenant cannot explain its own alerts to
+itself. The price is that the `state` and `expr` of other tenants' rules are
+visible; do not hardcode a project slug into rule expressions.
+
 **Retention** (`retention_keep` on the env, dev default 20, prod 0 = unlimited):
 versions past the newest N are moved to `disabled` and their images are dropped from
 the env's nodes. Removal happens in two beats: a `RemoveImage` goes out immediately on
@@ -345,7 +378,13 @@ metrics:
   victorialogs_url: "http://127.0.0.1:9428"
 ```
 
-Empty → the metrics/logs tabs answer `503`, everything else works.
+Empty → the metrics/logs tabs answer `503` (`metrics_unconfigured` /
+`logs_unconfigured`), everything else works. That is NOT the whole failure
+model: with a URL set but the upstream down you get `502 upstream`, a bad
+`limit` gets `400`, and a bound key gets `200` with a narrowed — sometimes
+empty — result. Plus `403`, but only from the key's scope or from a pair that
+cannot be narrowed — binding by itself does NOT close these handles. Details
+right below, in this same section.
 
 **Who sees what (tracker #994).** A global (unbound) key uses both raw proxies —
 `GET /v1/logs/query` and `GET /v1/metrics/query`·`/query_range` — exactly as
@@ -365,14 +404,40 @@ Consequences worth knowing up front:
   the VictoriaLogs retention (14 days in the reference stack). This is a
   deliberate trade: treating an unlabelled line as "platform-wide" would have
   kept another project's game output readable for the whole retention window.
-- **The node turns the labelling on.** The agent writes into a path carrying
-  the pair only with `log_scope_dirs: true` in its config (`agent.yaml`); the
-  ansible role `birdman_agent_dev` sets the flag together with the new vector
-  config (`birdman_log_scope_dirs`, default `true`). The ordering is not
-  incidental: the agent binary upgrades itself, the shipper config does not,
-  and an agent that started writing into subdirectories ahead of its shipper
-  would stop shipping logs at all. While the flag is off, a bound key gets
-  `200` with an empty result.
+- **The node turns the labelling on, and it will NOT turn itself on.** The agent
+  writes into a path carrying the pair only with `log_scope_dirs: true` in its
+  config (`agent.yaml`), and **the agent binary's own default is `false`**. The
+  ordering is not incidental: the agent binary upgrades itself (`POST
+  /v1/agent-upgrade`), the shipper config does not, and an agent that started
+  writing into subdirectories ahead of its vector would stop shipping logs at
+  all (the old `servers/*.log` glob does not match the new path). So ONE and the
+  same ansible role `birdman_agent_dev` lays down both the flag and the new
+  vector config (variable `birdman_log_scope_dirs`, default `true` — that is the
+  ROLE's default, not the binary's), and a bare binary upgrade keeps the old,
+  safe layout.
+
+  **The trap: while the flag is off, a bound key gets `200` with an EMPTY
+  result** — not a `403`, not a `502`, not an error of any kind. On screen this
+  is indistinguishable from an honest "no logs in this window", and nothing will
+  signal it: neither master nor the panel knows about a flag left off on a node.
+  Upgrading master does not carry it either — roll your config management over
+  the GAME NODES (ours: `cd infra && ansible-playbook playbooks/add-node.yml`,
+  which puts the `birdman_agent_dev` role on the `birdman_nodes` group;
+  `dev-node.yml` is the master box and does not touch the nodes).
+
+  The check that answers directly is to look at the flag on the node itself:
+  `grep log_scope_dirs /etc/birdman/agent.yaml`. The indirect one, if you cannot
+  get onto the node: compare the output for ONE dedik whose project AND
+  ENVIRONMENT you know to be exactly your own pair — call `GET /v1/logs/query`
+  for that `server_id` with a GLOBAL key first, then with the bound one. Global
+  sees lines, bound does not → it is the labelling. "The bound key gets nothing"
+  on its own proves nothing: an honest "no logs in this window" looks the same,
+  and so does a correctly enforced boundary on a dedik from someone else's pair
+  (including another environment of your own project). The opposite outcome —
+  "both see the same thing" — is no reason to relax either: that is exactly what
+  the upstream fail-open of the next bullet looks like. So compare not "is it
+  non-empty" but whether the bound output is strictly CONTAINED in the global
+  one.
 - **Upstream versions are not cosmetic.** The narrowing relies on the stock
   `extra_stream_filters` (VictoriaLogs) and `extra_label` (VictoriaMetrics)
   query args. An upstream that does NOT know such an arg silently ignores it
