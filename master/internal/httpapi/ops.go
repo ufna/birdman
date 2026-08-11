@@ -112,15 +112,25 @@ func (s *Server) handleServerLogs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "server id must be a uuid")
 		return
 	}
-	if s.sender == nil || s.logs == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "logs proxy not wired")
-		return
-	}
-	nodeID, err := s.st.ServerNodeID(r.Context(), id)
+	// Порядок намеренный: сначала РАЗРЕШЕНИЕ, потом состояние сервиса. Гейт
+	// привязки (#988) закрывает ту же асимметрию, что #974 закрыл на чтении
+	// матча, но поверхность здесь тяжелее — не метаданные, а игровой вывод
+	// дедика. Ручка readonly и адресуется по uuid, поэтому привязанный ключ
+	// проекта А читал логи проекта Б, зная id сервера. Заодно неавторизованный
+	// вызов больше не узнаёт из ответа, подключена ли проксия логов.
+	target, err := s.st.ServerLogTarget(r.Context(), id)
 	if err != nil {
 		storeError(w, err)
 		return
 	}
+	if !s.requireBinding(w, r, target.Project, target.Env) {
+		return
+	}
+	if s.sender == nil || s.logs == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "logs proxy not wired")
+		return
+	}
+	nodeID := target.NodeID
 
 	follow := isTrue(r.URL.Query().Get("follow"))
 	tail := 0

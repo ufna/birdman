@@ -95,3 +95,47 @@ func TestGetMatchEnforcesBinding(t *testing.T) {
 		t.Fatalf("глобальный ключ: %d %v, want 200", code, body)
 	}
 }
+
+// TestServerLogsEnforcesBinding (#988): та же асимметрия, что закрыл #974, но на
+// ручке потяжелее — `GET /v1/servers/{id}/logs` отдаёт не метаданные, а игровой
+// вывод дедика. Ручка readonly и адресуется по uuid, поэтому привязанный ключ
+// проекта А читал логи проекта Б, зная id сервера. Глобальный ключ (и сессия
+// панели, которая admin) проходит как раньше.
+func TestServerLogsEnforcesBinding(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10)
+	ts, _, _ := deployServer(t, st)
+	ctx := t.Context()
+
+	serverID := f.InsertServerOn(t, f.NodeID, f.VersionID, "allocated")
+
+	if _, err := st.CreateProject(ctx, "neighbour", 2); err != nil {
+		t.Fatal(err)
+	}
+	nProject, nEnv := "neighbour", "dev"
+	_, boundSecret, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{
+		Name: "ro-neighbour", Scopes: []string{httpapi.ScopeReadonly}, Project: &nProject, Env: &nEnv,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound := &client{t: t, base: ts.URL, key: boundSecret}
+
+	if code, body := bound.do("GET", "/v1/servers/"+serverID+"/logs?tail=10", nil); code != 403 {
+		t.Fatalf("привязанный к чужому проекту ключ получил логи дедика: %d %v, want 403", code, body)
+	}
+
+	// Ключ, привязанный к СВОЕМУ проекту, гейт пройти обязан: 403 здесь означал
+	// бы, что мы сломали легитимный доступ, а не закрыли дыру.
+	ownProject, ownEnv := f.Project, f.Env
+	_, ownSecret, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{
+		Name: "ro-own", Scopes: []string{httpapi.ScopeReadonly}, Project: &ownProject, Env: &ownEnv,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	own := &client{t: t, base: ts.URL, key: ownSecret}
+	if code, body := own.do("GET", "/v1/servers/"+serverID+"/logs?tail=10", nil); code == 403 {
+		t.Fatalf("ключ своего проекта получил 403 — гейт бьёт по своим: %d %v", code, body)
+	}
+}

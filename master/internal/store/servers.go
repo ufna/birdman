@@ -69,12 +69,33 @@ func (s *Store) ListServers(ctx context.Context, f ServerFilter) ([]Server, erro
 // row stays (state reaped/failed) with the node_id, so logs of a finished
 // match remain reachable. ErrNotFound when the server id is unknown.
 func (s *Store) ServerNodeID(ctx context.Context, id string) (string, error) {
-	var nodeID string
-	err := s.Pool.QueryRow(ctx, `select node_id::text from servers where id = $1::uuid`, id).Scan(&nodeID)
+	t, err := s.ServerLogTarget(ctx, id)
+	return t.NodeID, err
+}
+
+// ServerLogTarget — всё, что нужно проксии логов про сервер: куда слать Tail и
+// к какому (project, env) относится вывод. Скоуп нужен не для маршрутизации, а
+// для энфорса привязки ключа (#988): ручка readonly и адресуется по uuid,
+// поэтому без него привязанный ключ проекта А читал бы логи дедика проекта Б.
+// Env берётся из КОЛОНКИ servers, а не join'ом к nodes — денормализация
+// намеренная (инвариант I6: перевод ноды в другое окружение не переписывает
+// историю уже запущенных серверов).
+type ServerLogTarget struct {
+	NodeID  string
+	Project string
+	Env     string
+}
+
+func (s *Store) ServerLogTarget(ctx context.Context, id string) (ServerLogTarget, error) {
+	var t ServerLogTarget
+	err := s.Pool.QueryRow(ctx, `
+		select s.node_id::text, p.slug, s.env
+		from servers s join projects p on p.id = s.project_id
+		where s.id = $1::uuid`, id).Scan(&t.NodeID, &t.Project, &t.Env)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", ErrNotFound
+		return ServerLogTarget{}, ErrNotFound
 	}
-	return nodeID, err
+	return t, err
 }
 
 func (s *Store) GetServer(ctx context.Context, id string) (Server, error) {

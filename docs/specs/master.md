@@ -309,7 +309,7 @@ POST /v1/rollback: шаг 3 в обратную сторону (образы у�
 | `PATCH /v1/nodes/{id} {env}` | admin | перевод ноды в env (любой стейт кроме `dead`, без живых servers; иначе 409; событие `node_env_changed`) |
 | `POST /v1/nodes/{id}/drain` · `/undrain` | admin | вывод тачки |
 | `POST /v1/nodes/{id}/revoke` | admin | вывод ноды из флота навсегда: `state=dead`, событие `node_revoked`. 409, если есть живые серверы (живую ноду выводит drain). Идемпотентно. Строка ноды остаётся — на неё ссылается история серверов |
-| `GET /v1/servers/{id}/logs?follow=&tail=` | readonly | проксирование tail с агента (уточнено в v0: readonly — панель показывает логи) |
+| `GET /v1/servers/{id}/logs?follow=&tail=` | readonly | проксирование tail с агента (уточнено в v0: readonly — панель показывает логи). **Привязка ключа энфорсится** (#988, как на `/v1/matches/{id}`): скоуп берётся из `(projects.slug, servers.env)` самого сервера, привязанный ключ чужого проекта → 403. Разрешение проверяется ДО состояния проксии, поэтому неавторизованный вызов не узнаёт, подключена ли она |
 | `POST /v1/agent-upgrade` | admin | self-upgrade агента(ов): `{url,sha256,version,node_id?}` (уточнено в v0) |
 | `GET /v1/metrics/query` · `/query_range` | readonly | read-only прокси к VictoriaMetrics для панели (уточнено в v0) |
 | `GET /v1/logs/query` | readonly | read-only прокси к VictoriaLogs для панели: история/поиск логов по флоту (Логи v1) |
