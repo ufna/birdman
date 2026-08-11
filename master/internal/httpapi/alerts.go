@@ -31,8 +31,13 @@ import (
 // Project scoping (tracker #955): /v1/alerts/{active,history} report `project`
 // (from the alert's label) and a derived `scope` ("project"|"platform"), and
 // accept ?project= — a NON-hiding filter, see keepAlertForProject below. The
-// slug itself is validated against the DB (validateProjectParam, tracker
-// #961): a typo is a 400, never a quietly narrowed screen.
+// slug itself is validated against the DB (validateProjectParam via tenantScope,
+// tracker #961): a typo is a 400, never a quietly narrowed screen.
+//
+// Key binding (tracker #995): on top of that filter these two reads enforce the
+// tenant boundary — for a BOUND key an alert is visible only when its `project`
+// equals the binding or is EMPTY (alertVisibility below). GET /v1/alerts/mutes
+// inherits the same rule; GET /v1/alerts/rules deliberately does not (see there).
 //
 // Mutes (POST/GET/DELETE /v1/alerts/mutes) are master state (table alert_mutes,
 // store/alerts.go) — the source of truth. A mute is reflected as muted:true on
@@ -86,6 +91,27 @@ type alertRule struct {
 // not in the static labels vmalert reports here. Filtering by a label that
 // structurally cannot be there would return an empty catalogue for every
 // project.
+//
+// Привязка ключа сюда тоже НЕ заводится (решение по #995, разобрано отдельно от
+// mute'ов). Причина та же структурная: сузить каталог не по чему, а «нечем
+// сузить» на границе арендатора значит выбирать между «отдать всем» и «закрыть
+// привязанному вовсе». Выбрано отдать: правила — платформенная КОНФИГУРАЦИЯ, тот
+// же класс, что платформенный алерт без лейбла, который привязанный ключ по
+// решению владельца видеть ОБЯЗАН; закрыв каталог, мы отняли бы у арендатора
+// ровно то, чем он объясняет себе свои же алерты (порог, `for`, текст описания),
+// а инстансов — то есть значений и адресов конкретных срабатываний — тут нет
+// вовсе.
+//
+// ЦЕНА названа честно, «ни одной чужой величины» тут было бы неправдой (найдено
+// вторым проходом): `state` правила — живой булев сигнал по ВСЕЙ платформе,
+// поэтому горящее `BufferEmptyReadyProd` сообщает арендатору «у кого-то на
+// платформе опустел прод-буфер», хотя своего инстанса в /active он не видит; и
+// чем уже область правила, тем точнее этот сигнал. Второй остаточный канал —
+// `expr`: текст пишет оператор self-host'а, и зашитый литерал `{project="game"}`
+// уедет привязанному ключу вместе с каталогом. Кодом ни то, ни другое не
+// лечится (разбирать чужой PromQL, чтобы угадать намерение автора, — худшее из
+// решений), лечится дисциплиной правил: агрегируй по `(project)`, не хардкодь
+// слаг. Оба записаны в docs/specs/master.md §6.
 func (s *Server) handleAlertRules(w http.ResponseWriter, r *http.Request) {
 	if s.vmalertURL == "" {
 		writeError(w, http.StatusServiceUnavailable, "alerts_unconfigured",
@@ -153,16 +179,13 @@ func (s *Server) handleAlertsActive(w http.ResponseWriter, r *http.Request) {
 			"vmalert_url is not set on this master")
 		return
 	}
-	// Валидация ?project= — ДО апстрима: опечатка не тратит запрос к vmalert и не
-	// превращается в 502, когда vmalert лежит. После 503 alerts_unconfigured выше:
-	// «на этом мастере алертов нет вовсе» — факт более фундаментальный, чем ввод.
-	//
-	// validateProjectParam, а НЕ tenantScope: арендаторская граница #993 сюда
-	// намеренно не заведена. У алертов свой не-скрывающий контракт (платформенный
-	// алерт виден под любым фильтром), поэтому «сузить до привязки» для них —
-	// другое правило («project алерта == привязка ИЛИ пусто») и другая карточка
-	// (#995). До неё привязанный ключ видит здесь алерты чужих проектов.
-	project, ok := s.validateProjectParam(w, r)
+	// Гейт привязки и валидация ?project= — ДО апстрима: опечатка не тратит
+	// запрос к vmalert и не превращается в 502, когда vmalert лежит; чужой слаг
+	// не тратит его тем более. После 503 alerts_unconfigured выше: «на этом
+	// мастере алертов нет вовсе» — факт более фундаментальный, чем ввод, и он
+	// одинаков для всех ключей (о существовании чужого проекта 503 не говорит
+	// ничего, поэтому порядок гейта относительно него ничего не открывает).
+	vis, ok := s.alertVisibility(w, r)
 	if !ok {
 		return
 	}
@@ -176,7 +199,7 @@ func (s *Server) handleAlertsActive(w http.ResponseWriter, r *http.Request) {
 		if a.State != "firing" { // active = currently firing
 			continue
 		}
-		if !keepAlertForProject(a.Labels["project"], project) {
+		if !vis.keep(a.Labels["project"]) {
 			continue
 		}
 		name := a.Name
@@ -296,13 +319,104 @@ func alertScope(project string) string {
 // platform slice of peak CCU (store/rollup.go, decision I5/W3).
 //
 // The requested slug IS validated against the DB before this filter ever runs
-// (validateProjectParam in server.go, tracker #961) — so `want` here is always
+// (validateProjectParam via tenantScope, tracker #961) — so `want` here is always
 // a real project. Non-hiding and validated are two different questions and both are
 // answered "yes": a typo can no longer masquerade as "platform alerts only",
 // which on THIS screen is indistinguishable from the desired state of "all
 // quiet", while a real project still keeps every platform alert in view.
+//
+// С #995 эта функция обслуживает ровно НЕПРИВЯЗАННЫЙ ключ (глобальный, admin,
+// сессия панели): у привязанного правило другое и скрывающее — keepForBinding
+// ниже. Ослабление здесь на границу арендатора больше не влияет — это и было
+// целью разделения.
 func keepAlertForProject(alertProject, want string) bool {
 	return want == "" || alertProject == "" || alertProject == want
+}
+
+// --- tenant boundary (tracker #995) ---
+
+// keepForBinding — СКРЫВАЮЩЕЕ правило привязки, решение владельца по #995:
+// привязанный ключ видит объект, только если тот принадлежит ЕГО проекту или не
+// принадлежит никакому. Вторая половина обязательна: платформенные MasterDown /
+// NodeDown лейбла `project` не несут, и спрятать их значило бы не сказать
+// арендатору, что лежит мастер, — гейт стал бы вреден. Правило одно на алерты
+// (alertVisibility) и на mute'ы (handleListAlertMutes), потому что mute — это
+// аннотация НАД алертом: разъехавшись, они показали бы арендатору mute на алерт,
+// которого он не видит, или скрыли бы причину `muted:true` на своём.
+//
+// ЦЕНА второй половины, названная вслух (найдено вторым проходом): платформенный
+// алерт несёт `node`/`instance` (см. alertNode), а это hostname КОНКРЕТНОЙ ноды,
+// которая может принадлежать соседнему тенанту — `NodeDown`, `DiskHigh*`,
+// `CertExpiry`, `AgentlinkPendingStuck` все без `project` и все с адресом узла.
+// То есть после #995 привязанный ключ по-прежнему узнаёт hostname'ы чужих нод —
+// не через листинги (#993 их закрыл), а через платформенные алерты. Спрятать
+// нельзя: правило владельца требует показывать платформенные алерты, а алерт без
+// адреса узла бесполезен. Записано в docs/specs/master.md §6.
+func keepForBinding(objProject, binding string) bool {
+	return objProject == "" || objProject == binding
+}
+
+// alertVisibility — правило видимости алерта для ОДНОГО запроса: какой из двух
+// фильтров применять и с каким проектом.
+//
+// bound=false — прежний не-скрывающий `?project=` (#955): алерт выпадает, только
+// если ЯВНО чужой запрошенному, пустой параметр не фильтрует вовсе.
+// bound=true — граница арендатора: `project` алерта == привязка ИЛИ пусто.
+//
+// Признак хранится ЯВНО, а не выводится из «project непуст»: для привязанного
+// ключа project и так всегда равен привязке, и правило «непустой want ⇒ фильтр
+// скрывающий» держалось бы лишь на том, что keepAlertForProject случайно
+// совпадает с нужным ответом при непустом want. Расклеится это ровно тогда,
+// когда кто-нибудь тронет не-скрывающий фильтр (а он ЗАТЕМ и заведён, чтобы его
+// смягчали), и граница молча превратится в фильтр. С явным флагом привязанный
+// путь падает ЗАКРЫТО даже в недостижимом случае пустой привязки: он тогда
+// покажет только платформенные алерты, а не всё подряд.
+type alertVisibility struct {
+	project string
+	bound   bool
+}
+
+func (v alertVisibility) keep(alertProject string) bool {
+	if v.bound {
+		return keepForBinding(alertProject, v.project)
+	}
+	return keepAlertForProject(alertProject, v.project)
+}
+
+// alertVisibility разбирает запрос в правило видимости: ОДИН вход для
+// /v1/alerts/active и /history.
+//
+// Гейт «явный чужой ?project= → 403» берётся у общего tenantScope (#993), а не
+// пишется здесь заново: у алертов своё правило ВИДИМОСТИ, но не свой ответ на
+// чужой слаг — иначе тело/код отказа разъехались бы с листингами, а
+// неотличимость живого чужого проекта от выдуманного пришлось бы доказывать
+// дважды. От tenantScope здесь нужна ровно первая половина: пара привязки как
+// значение фильтра и отказ до похода в БД. Вторую половину — сам фильтр — он
+// дать не может: у листингов сужение по проекту скрывающее ВСЕГДА, у алертов
+// только для привязанного ключа.
+//
+// readEnv=false, и это НЕ «у алерта нет измерения env» — оно есть: правила
+// мониторинга агрегируют по `(region, project, env)`
+// (infra/roles/birdman_monitoring_dev/templates/rules.yml.j2), и лейбл `env` у
+// части алертов приезжает. Причина в другом: ручка `?env=` не читает вовсе, и
+// гейтить параметр, не влияющий на выдачу, значило бы отвечать по-разному на
+// запросы с одинаковым результатом (#993).
+//
+// СЛЕДСТВИЕ, которое из этого вытекает и потому названо вслух: граница на
+// алертах проходит по ПРОЕКТУ, а не по паре (project, env) — так сформулировано
+// решение владельца по #995. Ключ, привязанный к `neighbour/dev`, видит алерты
+// `neighbour/prod`. Пар-точности листингов (#993, где чужой env своего проекта
+// даёт 403) здесь НЕТ; сделать её — отдельная развилка и отдельная карточка,
+// потому что «сузить до пары» спрячет и алерты без лейбла `env` либо потребует
+// второй половины правила («env алерта == привязка ИЛИ пусто»), а это уже
+// расширение принятого решения, а не его реализация (tracker #1015).
+func (s *Server) alertVisibility(w http.ResponseWriter, r *http.Request) (alertVisibility, bool) {
+	project, _, ok := s.tenantScope(w, r, false)
+	if !ok {
+		return alertVisibility{}, false
+	}
+	_, _, bound := keyBinding(r)
+	return alertVisibility{project: project, bound: bound}, true
 }
 
 // --- alert history (log sink) ---
@@ -340,11 +454,10 @@ type webhookLine struct {
 }
 
 func (s *Server) handleAlertHistory(w http.ResponseWriter, r *http.Request) {
-	// Валидация ?project= — до чтения лога: опечатка обязана давать 400 и на
-	// мастере, где лог-сина ещё нет (там ответ иначе неотличим от «всё спокойно»).
-	// validateProjectParam, а не tenantScope — причина та же, что в
-	// handleAlertsActive выше (#995).
-	project, ok := s.validateProjectParam(w, r)
+	// Гейт привязки и валидация ?project= — до чтения лога: опечатка обязана
+	// давать 400 и на мастере, где лог-сина ещё нет (там ответ иначе неотличим от
+	// «всё спокойно»), а чужой слаг — 403 независимо от того, есть ли лог вообще.
+	vis, ok := s.alertVisibility(w, r)
 	if !ok {
 		return
 	}
@@ -370,7 +483,7 @@ func (s *Server) handleAlertHistory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	events := parseAlertsLog(data, time.Now(), limit, project)
+	events := parseAlertsLog(data, time.Now(), limit, vis)
 	mutes, err := s.st.ListAlertMutes(r.Context(), false)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
@@ -387,12 +500,16 @@ func (s *Server) handleAlertHistory(w http.ResponseWriter, r *http.Request) {
 // skipped, and both the {received_at, alerts:[…]} batch shape and a bare
 // single-alert object are accepted. Never returns nil (→ [] in JSON).
 //
-// project is the (non-hiding) ?project= filter — applied while reading, i.e.
-// BEFORE the limit cap, so ?limit=100&project=X really returns up to 100
-// alerts of X instead of whatever survives after neighbours ate the budget.
-func parseAlertsLog(data []byte, now time.Time, limit int, project string) []alertEvent {
+// vis is the visibility rule for this request (the non-hiding ?project= filter,
+// or the tenant boundary of a bound key — alertVisibility). It is applied while
+// reading, i.e. BEFORE the limit cap, so ?limit=100&project=X really returns up
+// to 100 alerts of X instead of whatever survives after neighbours ate the
+// budget. For a bound key the order matters for the same reason AND for
+// correctness of the boundary's promise: a noisy neighbour must not be able to
+// push the tenant's own history out of the window.
+func parseAlertsLog(data []byte, now time.Time, limit int, vis alertVisibility) []alertEvent {
 	out := []alertEvent{}
-	keep := func(a amAlert) bool { return keepAlertForProject(a.Labels["project"], project) }
+	keep := func(a amAlert) bool { return vis.keep(a.Labels["project"]) }
 	sc := bufio.NewScanner(bytes.NewReader(data))
 	// Alert lines can be long (many labels/annotations) — lift the token cap.
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
@@ -485,6 +602,13 @@ func alertSortTime(a alertEvent) time.Time {
 // The project is part of the match (tracker #957) and is matched STRICTLY —
 // see store.AlertMute.Matches: a project-scoped mute never covers a platform
 // alert, unlike the deliberately non-hiding keepAlertForProject above.
+//
+// Сюда СОЗНАТЕЛЬНО передаётся ПОЛНЫЙ список mute'ов, не суженный привязкой
+// (#995), и утечки в этом нет именно из-за строгости выше: mute чужого проекта
+// не матчит ни один алерт, который привязанный ключ вообще видит (у видимого
+// project == привязка или пуст), поэтому на флаг `muted` он повлиять не может.
+// Сузь мы список здесь — результат был бы тот же, а вот пропажа mute'а БЕЗ
+// проекта (кроет всё) погасила бы флаг на своих же алертах.
 func anyMuteMatches(mutes []store.AlertMute, name, region, project string) bool {
 	for _, m := range mutes {
 		if m.Matches(name, region, project) {
@@ -598,11 +722,45 @@ func (s *Server) handleCreateAlertMute(w http.ResponseWriter, r *http.Request) {
 
 // handleListAlertMutes is GET /v1/alerts/mutes (readonly): active mutes
 // newest-first; ?all=1 also returns expired ones.
+//
+// Привязка (tracker #995). Эта ручка — «листинг БЕЗ фильтра»: `?project=` она не
+// принимает вовсе и до #995 отдавала привязанному ключу mute'ы чужих проектов
+// целиком, вместе с `note` (свободный текст оператора) и `created_by` (имя
+// чужого ключа). Под общее правило алертов она автоматически не подводится —
+// фильтра, который можно было бы «сделать скрывающим», тут нет, — но ответ по
+// существу тот же и по той же причине: mute ЕСТЬ аннотация над алертом
+// (`muted:true` в /active и /history), поэтому его видимость обязана совпадать с
+// видимостью алерта, который он гасит. Отсюда keepForBinding: свой проект ИЛИ
+// null (mute без проекта кроет всё, включая платформенные алерты арендатора, —
+// не покажи мы его, `muted:true` на своём алерте осталось бы без причины).
+//
+// `?project=` при этом НЕ заводится: новая поверхность API ради того же ответа
+// не нужна, а непривязанный ключ (глобальный, admin, сессия панели) получает
+// список как раньше — байт-в-байт, включая порядок и `?all=1`.
+//
+// Сужается ОТВЕТ, а не запрос к стору: это курируемый список из своей же БД, а
+// не сырая проксия (#990), состав полей задаём мы, и фильтрация в памяти тут не
+// «фильтрация ответа апстрима», а обычный отбор строк. ListAlertMutes читает
+// таблицу целиком в обоих случаях (её же читают /active и /history), так что
+// отдельный SQL-путь дал бы только вторую реализацию одного правила.
 func (s *Server) handleListAlertMutes(w http.ResponseWriter, r *http.Request) {
 	mutes, err := s.st.ListAlertMutes(r.Context(), r.URL.Query().Get("all") == "1")
 	if err != nil {
 		storeError(w, err)
 		return
+	}
+	if binding, _, bound := keyBinding(r); bound {
+		kept := make([]store.AlertMute, 0, len(mutes))
+		for _, m := range mutes {
+			muteProject := ""
+			if m.Project != nil {
+				muteProject = *m.Project
+			}
+			if keepForBinding(muteProject, binding) {
+				kept = append(kept, m)
+			}
+		}
+		mutes = kept
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"mutes": emptyNotNull(mutes)})
 }

@@ -1,9 +1,14 @@
 package httpapi
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ufna/birdman/master/internal/store"
 )
 
 // ts parses an RFC3339 UTC timestamp, panicking on a malformed literal — a
@@ -31,7 +36,7 @@ func TestParseAlertsLog(t *testing.T) {
 	}
 	data := []byte(strings.Join(lines, "\n") + "\n")
 
-	got := parseAlertsLog(data, now, 100, "")
+	got := parseAlertsLog(data, now, 100, alertVisibility{})
 	if len(got) != 3 {
 		t.Fatalf("want 3 alerts, got %d: %+v", len(got), got)
 	}
@@ -69,11 +74,11 @@ func TestParseAlertsLog(t *testing.T) {
 	}
 
 	// limit caps to the newest N; DiskHigh (newest) is always kept.
-	if lim := parseAlertsLog(data, now, 1, ""); len(lim) != 1 || lim[0].Name != "DiskHigh" {
+	if lim := parseAlertsLog(data, now, 1, alertVisibility{}); len(lim) != 1 || lim[0].Name != "DiskHigh" {
 		t.Fatalf("limit=1: %+v", lim)
 	}
 	// Empty input → [] (never nil).
-	if empty := parseAlertsLog(nil, now, 100, ""); empty == nil || len(empty) != 0 {
+	if empty := parseAlertsLog(nil, now, 100, alertVisibility{}); empty == nil || len(empty) != 0 {
 		t.Fatalf("empty input should give []: %+v", empty)
 	}
 	// No project labels anywhere in this log → every alert is platform-scoped,
@@ -83,7 +88,7 @@ func TestParseAlertsLog(t *testing.T) {
 			t.Fatalf("unlabelled alert must be platform-scoped: %+v", a)
 		}
 	}
-	if kept := parseAlertsLog(data, now, 100, "alpha"); len(kept) != 3 {
+	if kept := parseAlertsLog(data, now, 100, alertVisibility{project: "alpha"}); len(kept) != 3 {
 		t.Fatalf("platform alerts must survive ?project=alpha, got %d: %+v", len(kept), kept)
 	}
 }
@@ -113,7 +118,7 @@ func TestParseAlertsLogProjectFilterBeforeLimit(t *testing.T) {
 	}, "\n") + "\n")
 
 	// Filtering AFTER the cap would return 0 here (the newest 2 are both beta).
-	got := parseAlertsLog(data, now, 2, "alpha")
+	got := parseAlertsLog(data, now, 2, alertVisibility{project: "alpha"})
 	if len(got) != 2 {
 		t.Fatalf("want 2 alpha-visible alerts within limit=2, got %d: %+v", len(got), got)
 	}
@@ -123,7 +128,7 @@ func TestParseAlertsLogProjectFilterBeforeLimit(t *testing.T) {
 		}
 	}
 	// Unlimited: 2 alpha + 1 platform, никакой beta.
-	all := parseAlertsLog(data, now, 100, "alpha")
+	all := parseAlertsLog(data, now, 100, alertVisibility{project: "alpha"})
 	if len(all) != 3 {
 		t.Fatalf("want alpha(2)+platform(1)=3, got %d: %+v", len(all), all)
 	}
@@ -158,6 +163,104 @@ func TestKeepAlertForProject(t *testing.T) {
 		if got := keepAlertForProject(c.alert, c.want); got != c.keep {
 			t.Fatalf("keepAlertForProject(%q,%q) = %v, want %v", c.alert, c.want, got, c.keep)
 		}
+	}
+}
+
+// Правило привязки (tracker #995) — рядом с не-скрывающим, потому что разница
+// между ними и есть суть карточки: пустой `want` у одного значит «не фильтровать
+// вовсе», у другого — «только платформенные». Первая строка каждой таблицы — та
+// самая, из-за которой признак `bound` хранится ЯВНО, а не выводится из
+// непустоты проекта.
+func TestAlertVisibility(t *testing.T) {
+	cases := []struct {
+		name  string
+		vis   alertVisibility
+		alert string
+		keep  bool
+	}{
+		{"непривязанный без фильтра видит чужой", alertVisibility{}, "game", true},
+		{"привязанный с пустой привязкой не видит ничей", alertVisibility{bound: true}, "game", false},
+		{"привязанный видит платформенный", alertVisibility{project: "neighbour", bound: true}, "", true},
+		{"привязанный видит свой", alertVisibility{project: "neighbour", bound: true}, "neighbour", true},
+		{"привязанный не видит чужой", alertVisibility{project: "neighbour", bound: true}, "game", false},
+		{"непривязанный с фильтром видит платформенный", alertVisibility{project: "neighbour"}, "", true},
+		{"непривязанный с фильтром не видит чужой", alertVisibility{project: "neighbour"}, "game", false},
+	}
+	for _, c := range cases {
+		if got := c.vis.keep(c.alert); got != c.keep {
+			t.Fatalf("%s: keep(%q) при %+v = %v, want %v", c.name, c.alert, c.vis, got, c.keep)
+		}
+	}
+	// keepForBinding — то же правило, отдельно: его вторым вызывающим является
+	// листинг mute'ов, у которого своего теста-таблицы нет.
+	for _, c := range []struct {
+		obj, binding string
+		keep         bool
+	}{
+		{"", "neighbour", true},
+		{"neighbour", "neighbour", true},
+		{"game", "neighbour", false},
+		{"game", "", false},
+	} {
+		if got := keepForBinding(c.obj, c.binding); got != c.keep {
+			t.Fatalf("keepForBinding(%q,%q) = %v, want %v", c.obj, c.binding, got, c.keep)
+		}
+	}
+}
+
+// ПРОВОДКА признака привязки — отдельным тестом, потому что e2e её не видит:
+// при непустой привязке не-скрывающее правило и правило границы дают
+// одинаковый ответ на всех достижимых входах, поэтому мутация «bound: false» в
+// конструкторе оставалась ЗЕЛЁНОЙ на всём пакете (найдено вторым проходом).
+// Отсюда и этот тест: он смотрит на то, ЧТО построено, а не только на то, что
+// в итоге выдано, — иначе защита от будущего смягчения #955 не заперта ничем.
+//
+// БД тут не нужна и это часть проверки: для привязанного ключа tenantScope
+// обязан отвечать, не сходив в стор (правило #993 «гейт первым»), поэтому
+// пустой &Server{} — достаточный сервер, и падение с nil-паникой означало бы,
+// что гейт полез в БД.
+func TestAlertVisibilityWiring(t *testing.T) {
+	req := func(query string, key *store.APIKey) *http.Request {
+		r := httptest.NewRequest(http.MethodGet, "/v1/alerts/active"+query, nil)
+		if key != nil {
+			r = r.WithContext(context.WithValue(r.Context(), apiKeyCtxKey, *key))
+		}
+		return r
+	}
+	project, env := "neighbour", "dev"
+	bound := &store.APIKey{Project: &project, Env: &env}
+
+	s := &Server{}
+	// Привязанный ключ: правило построено СКРЫВАЮЩЕЕ и по его паре.
+	vis, ok := s.alertVisibility(httptest.NewRecorder(), req("", bound))
+	if !ok || !vis.bound || vis.project != "neighbour" {
+		t.Fatalf("привязанный ключ: vis=%+v ok=%v, want {neighbour true}", vis, ok)
+	}
+	// Свой слаг в параметре ничего не меняет.
+	if vis, ok := s.alertVisibility(httptest.NewRecorder(), req("?project=neighbour", bound)); !ok ||
+		!vis.bound || vis.project != "neighbour" {
+		t.Fatalf("привязанный ключ со своим ?project=: vis=%+v ok=%v", vis, ok)
+	}
+	// Чужой слаг: отказ пишется ЗДЕСЬ (ok=false), до апстрима и до БД.
+	w := httptest.NewRecorder()
+	if _, ok := s.alertVisibility(w, req("?project=game", bound)); ok {
+		t.Fatal("привязанный ключ с чужим ?project=: want отказ, got продолжение")
+	}
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("чужой ?project= привязанному ключу: want 403, got %d (%s)", w.Code, w.Body)
+	}
+	// `?env=` алерты не читают: параметр не влияет ни на выдачу, ни на отказ —
+	// поэтому чужой env даёт то же самое правило, а не 403 (иначе мы отвечали бы
+	// по-разному на запросы с одинаковым результатом, #993).
+	if vis, ok := s.alertVisibility(httptest.NewRecorder(), req("?env=prod", bound)); !ok ||
+		!vis.bound || vis.project != "neighbour" {
+		t.Fatalf("привязанный ключ с ?env=: vis=%+v ok=%v", vis, ok)
+	}
+	// Непривязанный ключ: правило НЕ скрывающее (bound=false), пустой параметр
+	// не сужает ничего.
+	if vis, ok := s.alertVisibility(httptest.NewRecorder(), req("", nil)); !ok ||
+		vis.bound || vis.project != "" {
+		t.Fatalf("непривязанный ключ: vis=%+v ok=%v, want {\"\" false}", vis, ok)
 	}
 }
 
