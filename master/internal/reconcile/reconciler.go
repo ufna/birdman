@@ -279,7 +279,14 @@ func (r *Reconciler) reconcileFleet(ctx context.Context, f store.FleetConfig) er
 				ImageRef: p.ImageRef,
 				// BIRDMAN_ENV — игровой сервер знает своё окружение (конфиги/
 				// аналитика). Заполнение существующего map-поля, ноль диффов proto.
-				Env:  map[string]string{"BIRDMAN_ENV": f.Env},
+				// BIRDMAN_PROJECT (tracker #994) — тем же каналом едет вторая
+				// половина пары: агент кладёт лог дедика в путь, несущий
+				// (project, env), чтобы стрим в VictoriaLogs был размечен
+				// владельцем. Пара берётся из ФЛОТА, под который дедик
+				// запускается, то есть чеканится в момент старта — инвариант I6:
+				// перевод НОДЫ в другое окружение (PATCH /v1/nodes/{id}) историю
+				// уже запущенных дедиков не переписывает.
+				Env:  map[string]string{"BIRDMAN_ENV": f.Env, "BIRDMAN_PROJECT": f.Project},
 				Port: 0, // agent picks from its pool
 			}},
 		})

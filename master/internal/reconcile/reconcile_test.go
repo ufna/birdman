@@ -117,6 +117,13 @@ func TestReconcileCreatesBuffer(t *testing.T) {
 		if got := start.GetEnv()["BIRDMAN_ENV"]; got != "dev" {
 			t.Fatalf("StartServer must carry BIRDMAN_ENV=dev, got %q", got)
 		}
+		// BIRDMAN_PROJECT — вторая половина пары (tracker #994). Без неё агент
+		// не знает владельца дедика, кладёт лог в плоский путь, стрим в
+		// VictoriaLogs остаётся без лейбла project/env — и привязанный ключ
+		// своих же логов не видит (сужение на master их отбрасывает).
+		if got := start.GetEnv()["BIRDMAN_PROJECT"]; got != f.Project {
+			t.Fatalf("StartServer must carry BIRDMAN_PROJECT=%s, got %q", f.Project, got)
+		}
 	}
 	if states := f.ServerStates(t); states["creating"] != 3 {
 		t.Fatalf("want 3 creating servers, got %+v", states)

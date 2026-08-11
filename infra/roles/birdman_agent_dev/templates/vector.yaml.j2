@@ -6,9 +6,21 @@ api:
 sources:
   dedik_logs:
     type: file
-    include: ["/var/log/birdman/servers/*.log"]
+    include:
+      # Размеченный путь (tracker #994): агент кладёт вывод дедика в
+      # {project}/{env}/{server_id}.log, и пара едет в стрим-лейблы. Пара
+      # приходит с ДЕДИКОМ (master → StartServer.env), а не с хостом: env ноды
+      # меняется через API без перерендера этого файла, и инвариант I6
+      # запрещает выводить окружение истории из текущей строки ноды.
+      - "/var/log/birdman/servers/*/*/*.log"
+      # Плоский путь — дедики, запущенные ДО разметки (и run-once). Их строки
+      # шиппятся по-прежнему (логи флота не теряем), но без project/env, а
+      # значит привязанному ключу master их не отдаёт — они доживают ретенцию.
+      - "/var/log/birdman/servers/*.log"
     # .log.1 не читаем: его содержимое уже прочитано live до ротации
-    exclude: ["/var/log/birdman/servers/*.log.1"]
+    exclude:
+      - "/var/log/birdman/servers/*/*/*.log.1"
+      - "/var/log/birdman/servers/*.log.1"
     read_from: beginning
     ignore_older_secs: 172800   # при первом старте не заливать древность
 transforms:
@@ -16,8 +28,21 @@ transforms:
     type: remap
     inputs: [dedik_logs]
     source: |
-      parsed, err = parse_regex(string!(.file), r'(?P<id>[^/]+)\.log$')
+      # Разбор ПОЛНОГО пути, а не хвоста: якорь ^ плюс корень целиком не дают
+      # плоскому /var/log/birdman/servers/{id}.log распасться на пару
+      # project=birdman, env=servers — оба слова валидные слаги, и такая пара
+      # отдала бы нелейблованную историю ключу, привязанному к ней.
+      parsed, err = parse_regex(string!(.file), r'^/var/log/birdman/servers/(?:(?P<project>[^/]+)/(?P<env>[^/]+)/)?(?P<id>[^/]+)\.log$')
       .server_id = if err == null { parsed.id } else { "unknown" }
+      project = if err == null { string(parsed.project) ?? "" } else { "" }
+      env = if err == null { string(parsed.env) ?? "" } else { "" }
+      # Вторая петля на том же гвозде: лейблом становится только пара, которую
+      # master вообще способен подставить в фильтр (алфавит слага проекта и
+      # имени окружения). Каталог со странным именем оставит строку БЕЗ пары —
+      # она просто не попадёт привязанному ключу, а не подменит чужую.
+      ok = match(project, r'^[a-z0-9][a-z0-9-]{0,31}$') && match(env, r'^[a-z0-9][a-z0-9-]{0,31}$')
+      .project = if ok { project } else { "" }
+      .env = if ok { env } else { "" }
       .node = "{{ inventory_hostname }}"
       .region = "{{ birdman_region }}"
 sinks:
@@ -32,6 +57,12 @@ sinks:
       server_id: "{{ server_id }}"
       node: "{{ node }}"
       region: "{{ region }}"
+      # Пара владельца строки. Это СТРИМ-поля, а не поля события: master сужает
+      # запрос привязанного ключа через extra_stream_filters, то есть граница
+      # доступа опирается на то, что проставил шиппер, а не на то, что дедик мог
+      # напечатать в свой stdout.
+      project: "{{ project }}"
+      env: "{{ env }}"
 {% endraw %}
     # Пин каденса флаша (= дефолту loki-sink, но явно): готовая строка уходит
     # в VL за ~1с, батч НЕ может держать хвост минутами. Наблюдавшиеся ~4м40с

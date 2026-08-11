@@ -3,16 +3,21 @@
   ansible.builtin.command: systemd-tmpfiles --create /etc/tmpfiles.d/birdman.conf
   changed_when: true
 
+# ВНИМАНИЕ (tracker #994): порядок определения = порядок исполнения при
+# flush_handlers. Шиппер обязан перечитать конфиг РАНЬШЕ, чем агент перейдёт на
+# размеченный путь логов, иначе между двумя рестартами существует окно, в
+# котором дедики пишут в {project}/{env}, а старый `include` vector'а туда не
+# смотрит. Не менять местами.
+- name: Restart birdman-vector
+  ansible.builtin.command:
+    cmd: docker restart birdman-vector
+  changed_when: true
+
 - name: Restart birdman-agent
   ansible.builtin.systemd_service:
     name: birdman-agent.service
     state: restarted
     daemon_reload: true
-
-- name: Restart birdman-vector
-  ansible.builtin.command:
-    cmd: docker restart birdman-vector
-  changed_when: true
 
 - name: Restart birdman-node-vmagent
   ansible.builtin.command:

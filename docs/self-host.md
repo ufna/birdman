@@ -347,6 +347,58 @@ metrics:
 
 Empty → the metrics/logs tabs answer `503`, everything else works.
 
+**Who sees what (tracker #994).** A global (unbound) key uses both raw proxies —
+`GET /v1/logs/query` and `GET /v1/metrics/query`·`/query_range` — exactly as
+before: the query is forwarded to the upstream verbatim. A key **bound to a
+(project, env) pair** gets `200`, but master NARROWS its query by that pair
+(`extra_stream_filters` for VictoriaLogs, `extra_label` for VictoriaMetrics), so
+it never receives another project's lines or series, whatever it asks for.
+Consequences worth knowing up front:
+
+- **Lines without the pair are not served to a bound key.** The pair reaches the
+  `project`/`env` stream labels from the log file PATH
+  (`{log_dir}/servers/{project}/{env}/{id}.log`, `docs/specs/agent.md` §5). So
+  the following are NOT labelled: everything written to VictoriaLogs before the
+  upgrade; logs of dediks that were already running at upgrade time (they keep
+  appending to the old flat path for the rest of their life); run-once logs.
+  A global key still sees those lines, a bound key does not — they age out with
+  the VictoriaLogs retention (14 days in the reference stack). This is a
+  deliberate trade: treating an unlabelled line as "platform-wide" would have
+  kept another project's game output readable for the whole retention window.
+- **The node turns the labelling on.** The agent writes into a path carrying
+  the pair only with `log_scope_dirs: true` in its config (`agent.yaml`); the
+  ansible role `birdman_agent_dev` sets the flag together with the new vector
+  config (`birdman_log_scope_dirs`, default `true`). The ordering is not
+  incidental: the agent binary upgrades itself, the shipper config does not,
+  and an agent that started writing into subdirectories ahead of its shipper
+  would stop shipping logs at all. While the flag is off, a bound key gets
+  `200` with an empty result.
+- **Upstream versions are not cosmetic.** The narrowing relies on the stock
+  `extra_stream_filters` (VictoriaLogs) and `extra_label` (VictoriaMetrics)
+  query args. An upstream that does NOT know such an arg silently ignores it
+  and answers `200` with the whole fleet — i.e. a bound key reads other
+  projects again, with no error to show for it. The minimum this was verified
+  on, and what our ansible roles pin: **VictoriaLogs v1.51.0, VictoriaMetrics
+  v1.102.1**. `victorialogs_url` must point at VictoriaLogs; a Loki-compatible
+  stand-in will not understand the arg and will not hold the boundary.
+- **Rolling the agent back.** An agent older than #994 cannot find logs in
+  subdirectories: it will not rotate, finalize, retain or live-tail files that
+  are already labelled. If you roll the agent back, move or remove
+  `{log_dir}/servers/*/*/` by hand.
+- **Custom shipper — put the pair in STREAM fields.** If you ship logs with
+  something other than our vector, `project` and `env` must be VictoriaLogs
+  stream fields. Wrong labelling creates no leak (the filter simply matches
+  nothing), but an operator with a bound key will be left without their own
+  logs. Never derive the pair from what the dedik prints to stdout: the access
+  boundary would then be controlled by the dedik itself.
+- **Metrics: only series carrying the pair are visible.** Those are
+  `birdman_servers`, `birdman_versions`, `birdman_server_info`. Per-server
+  series are emitted by the agent (`birdman_server_players`,
+  `birdman_container_*`) and carry no pair, while platform aggregates
+  (`birdman_players_online`, `birdman_matches_running`,
+  `birdman_node_capacity_slots`) are fleet-wide data by nature. For a bound
+  session those charts come back empty (`200` with an empty result, not `403`).
+
 Reference monitoring stack (VM + vmagent + vmalert + Grafana + Postgres backups)
 — the ansible role `infra/roles/birdman_monitoring_dev` (`infra/README.md`, the
 "Observability + ops" section). A node can push its agent's metrics to a central

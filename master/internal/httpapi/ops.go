@@ -327,11 +327,11 @@ func (s *Server) handleMetricsQueryRange(w http.ResponseWriter, r *http.Request)
 func (s *Server) proxyVictoria(w http.ResponseWriter, r *http.Request, path string) {
 	// Порядок как в #988: сначала РАЗРЕШЕНИЕ, потом состояние проксии — иначе
 	// 403 зависел бы от того, настроена ли VM, и отвечал бы на вопрос, который
-	// вызывающему знать не положено. Привязанному ключу сырой PromQL закрыт
-	// (#990): произвольный PromQL нельзя сузить, не переписав его (проектный
-	// лейбл есть у части серий — master-derived, metrics.go; у нодовых, от
-	// vmagent ноды, только node/region).
-	if !s.requireUnboundKey(w, r) {
+	// вызывающему знать не положено. narrowScope 403-ит только непригодную к
+	// сужению привязку (fail-closed, дверь #990); обычный привязанный ключ
+	// проходит и получает СУЖЕННЫЙ запрос.
+	project, env, narrow, ok := s.narrowScope(w, r)
+	if !ok {
 		return
 	}
 	if s.vmURL == "" {
@@ -340,8 +340,12 @@ func (s *Server) proxyVictoria(w http.ResponseWriter, r *http.Request, path stri
 		return
 	}
 	target := strings.TrimRight(s.vmURL, "/") + path
-	if r.URL.RawQuery != "" {
-		target += "?" + r.URL.RawQuery
+	rawQuery := r.URL.RawQuery
+	if narrow {
+		rawQuery = narrowedMetricsQuery(r.URL.Query(), project, env).Encode()
+	}
+	if rawQuery != "" {
+		target += "?" + rawQuery
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
@@ -371,12 +375,14 @@ func (s *Server) proxyVictoria(w http.ResponseWriter, r *http.Request, path stri
 // clamped on master (default 1000, max 10000) so the panel can't accidentally
 // pull unbounded result sets through the proxy.
 func (s *Server) handleLogsQuery(w http.ResponseWriter, r *http.Request) {
-	// Гейт #990 — ДО состояния проксии и ДО валидации limit (тот же порядок,
-	// что #988 завёл на live-tail): привязанный ключ проекта А доставал через
-	// эту ручку ровно те байты игрового вывода дедика проекта Б, которые #988
-	// закрыл на /v1/servers/{id}/logs — LogsQL едет в апстрим как есть, а
-	// проектного лейбла в стримах VL нет (server_id/node/region).
-	if !s.requireUnboundKey(w, r) {
+	// Разрешение — ДО состояния проксии и ДО валидации limit (порядок #988 на
+	// live-tail). #990 отвечал здесь глухим 403 привязанному ключу: LogsQL ехал
+	// в апстрим как есть, а проектного лейбла в стримах VL не было вовсе, так
+	// что ключ проекта А доставал байты игрового вывода дедика проекта Б.
+	// Теперь лейблы есть (project/env чеканит агент в пути файла лога), и
+	// привязанный ключ получает СВОИ строки — запрос сужается ниже.
+	project, env, narrow, ok := s.narrowScope(w, r)
+	if !ok {
 		return
 	}
 	if s.vlURL == "" {
@@ -395,6 +401,9 @@ func (s *Server) handleLogsQuery(w http.ResponseWriter, r *http.Request) {
 		limit = min(n, 10000)
 	}
 	q.Set("limit", strconv.Itoa(limit))
+	if narrow {
+		q = narrowedLogsQuery(q, project, env)
+	}
 	target := strings.TrimRight(s.vlURL, "/") + "/select/logsql/query?" + q.Encode()
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
@@ -414,6 +423,68 @@ func (s *Server) handleLogsQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
+}
+
+// --- серверное сужение сырых проксий по привязке ключа (tracker #994) ---
+//
+// ОБЩИЙ ПРИНЦИП обеих функций ниже: для привязанного ключа query-строка к
+// апстриму СОБИРАЕТСЯ ЗАНОВО из белого списка параметров, а не правится в
+// пришедшей, — клиентские `extra_filters`/`extra_stream_filters`/`extra_label`
+// до апстрима не доезжают вообще.
+//
+// НЕСУЩЕЕ здесь, однако, не вырезание, а ВЫБОР РУЧЕК: и несколько
+// `extra_stream_filters` у VL, и несколько `extra_label` у VM складываются по И
+// (проверено живьём), поэтому протёкший клиентский параметр может только сузить
+// сильнее, но не расширить. Вырезание — второй слой: детерминизм плюс защита от
+// параметра, который завтра появится у апстрима и окажется НЕ И-шным. Именно
+// таков `extra_filters[]` у VictoriaMetrics: несколько его значений
+// складываются по ИЛИ (проверено живьём на v1.102.1 — свой `{project="beta"}`
+// рядом с чужим `{project="alpha"}` вернул серии обоих), поэтому взять ЕГО в
+// качестве нашей ручки было бы дырой; в паре же с нашим И-шным `extra_label`
+// клиентский `extra_filters[]` безвреден и просто пересекается с ним.
+//
+// Сам запрос НЕ разбирается: парсер чужой грамматики на границе доступа — это
+// своя пачка дыр (экранирование, пайпы, подзапросы), а энфорсмент фильтра
+// выполняет апстрим (цена решения записана в docs/specs/master.md §6: тест
+// master'а доказывает только то, ЧТО ушло в апстрим, остальное —
+// интеграционный тест с живыми VL/VM).
+
+// logsPassthroughParams — параметры /select/logsql/query, которые master
+// пробрасывает привязанному ключу. limit ставится отдельно (он уже зажат).
+var logsPassthroughParams = []string{"query", "start", "end"}
+
+// metricsPassthroughParams — параметры /api/v1/query{,_range}, которые master
+// пробрасывает привязанному ключу.
+var metricsPassthroughParams = []string{"query", "time", "start", "end", "step", "timeout"}
+
+// narrowedLogsQuery собирает запрос к VictoriaLogs, сужённый парой привязки.
+// Пара проверена scopeLabelRe, поэтому в неё не попадёт ни кавычка, ни скобка;
+// strconv.Quote — вторая петля на том же гвозде.
+func narrowedLogsQuery(in url.Values, project, env string) url.Values {
+	out := url.Values{}
+	for _, k := range logsPassthroughParams {
+		if v := in.Get(k); v != "" {
+			out.Set(k, v)
+		}
+	}
+	out.Set("limit", in.Get("limit"))
+	out.Set("extra_stream_filters", "{project="+strconv.Quote(project)+",env="+strconv.Quote(env)+"}")
+	return out
+}
+
+// narrowedMetricsQuery собирает запрос к VictoriaMetrics, сужённый парой
+// привязки. extra_label (а не extra_filters[]) выбран сознательно: несколько
+// extra_label складываются по И.
+func narrowedMetricsQuery(in url.Values, project, env string) url.Values {
+	out := url.Values{}
+	for _, k := range metricsPassthroughParams {
+		if v := in.Get(k); v != "" {
+			out.Set(k, v)
+		}
+	}
+	out.Add("extra_label", "project="+project)
+	out.Add("extra_label", "env="+env)
+	return out
 }
 
 func isTrue(v string) bool {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -144,6 +145,25 @@ type server struct {
 	matchID       string
 	stopRequested bool
 	doneAt        time.Time
+	// logPath — файл, в который шим пишет вывод этого дедика. С #994 он
+	// зависит от пары (project, env), поэтому запоминается: у liba-кадров
+	// частота строк игрового лога, и резолвить каталог globом на каждый кадр
+	// было бы платой на горячем пути.
+	logPath string
+}
+
+// logFilePath — путь лога дедика, разрешаемый один раз. Для запущенного этим
+// агентом сервера он проставлен при старте; для восстановленного после
+// рестарта агента (пары в label'ах контейнера нет) резолвится по файловой
+// системе — файл уже создан шимом в момент старта контейнера, так что глоб его
+// находит и вывод не раздваивается по двум путям.
+func (s *server) logFilePath(root string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.logPath == "" {
+		s.logPath = filepath.Join(logrot.ServerDir(root, s.id), s.id+".log")
+	}
+	return s.logPath
 }
 
 // NewManager creates the manager. ctx bounds all runtime operations — it
@@ -890,7 +910,7 @@ func (m *Manager) listenSocket(srv *server) (*uds.Server, error) {
 		OnMatchEnd: func(matchID, result string) {
 			m.sink.ServerEvent(srv.id, "match_end", matchID+" "+result)
 		},
-		OnLog: func(level, msg string) { m.appendLibaLog(srv.id, level, msg) },
+		OnLog: func(level, msg string) { m.appendLibaLog(srv, level, msg) },
 		OnConnect: func() {
 			m.logf("[daemon] server %s: liba connected", srv.id)
 		},
@@ -938,13 +958,18 @@ func (m *Manager) launch(srv *server, cmd *agentlinkv1.StartServer) {
 		}
 	}
 
+	logPath := m.serverLogPath(srv.id, cmd.GetEnv())
+	srv.mu.Lock()
+	srv.logPath = logPath
+	srv.mu.Unlock()
+
 	handle, err := m.rt.Start(m.ctx, StartSpec{
 		ID:         srv.id,
 		ImageRef:   srv.imageRef,
 		Port:       port,
 		Region:     m.cfg.Region,
 		SocketPath: m.socketPath(srv.id),
-		LogPath:    filepath.Join(m.logDir, srv.id+".log"),
+		LogPath:    logPath,
 		CPUMillis:  cpu,
 		MemMB:      mem,
 		Env:        cmd.GetEnv(),
@@ -1137,10 +1162,56 @@ func (m *Manager) storeState(srv *server) {
 	}
 }
 
+// scopeLabelRe — алфавит слага проекта и имени окружения на стороне master
+// (store.projectSlugRe / store.envNameRe). Пара приезжает от master'а в
+// env-мапе StartServer и становится КАТАЛОГОМ на диске, поэтому проверяется
+// здесь ещё раз: агент не обязан доверять тому, что в паре нет `..` или `/`.
+var scopeLabelRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
+
+// serverLogPath — куда шим пишет вывод дедика. С tracker #994 путь несёт пару
+// (project, env), которую master кладёт в env-мапу StartServer
+// (BIRDMAN_PROJECT/BIRDMAN_ENV): vector парсит пару из ПУТИ и лейблует ей стрим
+// в VictoriaLogs, а master сужает по этим лейблам запрос привязанного ключа
+// (docs/specs/master.md §6). Почему путь, а не статический лейбл в конфиге
+// шиппера: конфиг рендерит ansible по ХОСТУ, а окружение ноды меняется через
+// API без перерендера — инвариант I6 запрещает выводить окружение истории из
+// текущей строки ноды. Пара, приехавшая вместе с дедиком, этой болезнью не
+// болеет: она чеканится в момент старта и потом не меняется.
+//
+// Пары нет или она не проходит алфавит (старый master, run-once, мусор) →
+// прежний плоский путь: логи не теряются, просто остаются без лейблов.
+func (m *Manager) serverLogPath(id string, env map[string]string) string {
+	if !m.cfg.LogScopeDirs {
+		// Выключено по умолчанию: бинарь агента обновляется сам, а конфиг
+		// шиппера кладёт ansible — они приезжают НЕ вместе. Подробности и
+		// цена — config.LogScopeDirs.
+		return filepath.Join(m.logDir, id+".log")
+	}
+	project, envName := env["BIRDMAN_PROJECT"], env["BIRDMAN_ENV"]
+	if !scopeLabelRe.MatchString(project) || !scopeLabelRe.MatchString(envName) {
+		if project != "" || envName != "" {
+			m.logf("[daemon] server %s: scope (%q, %q) is not a valid label pair — log stays unlabelled",
+				id, project, envName)
+		}
+		return filepath.Join(m.logDir, id+".log")
+	}
+	dir := filepath.Join(m.logDir, project, envName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		m.logf("[daemon] server %s: log dir %s: %v — log stays unlabelled", id, dir, err)
+		return filepath.Join(m.logDir, id+".log")
+	}
+	return filepath.Join(dir, id+".log")
+}
+
 // appendLibaLog appends a structured liba log frame to the server log file
 // (the container stdout/stderr go there via the shim).
-func (m *Manager) appendLibaLog(id, level, msg string) {
-	path := filepath.Join(m.logDir, id+".log")
+func (m *Manager) appendLibaLog(srv *server, level, msg string) {
+	// Кадры liba обязаны попадать в ТОТ ЖЕ файл, что и вывод шима, — иначе лог
+	// дедика раздвоится по двум путям. Путь берётся у сервера (см.
+	// logFilePath): он известен с момента старта, а после рестарта агента
+	// резолвится по файловой системе, потому что пары в label'ах контейнера нет.
+	id := srv.id
+	path := srv.logFilePath(m.logDir)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		m.logf("[daemon] server %s: liba log: %v", id, err)

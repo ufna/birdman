@@ -207,16 +207,6 @@
     mode: "0644"
   notify: Restart birdman-agent
 
-- name: Enable and start birdman-agent
-  ansible.builtin.systemd_service:
-    name: birdman-agent.service
-    enabled: true
-    state: started
-    daemon_reload: true
-
-- name: Apply tmpfiles and pending restarts
-  ansible.builtin.meta: flush_handlers
-
 # --- vector: шиппер логов дедиков в VictoriaLogs (спека логи v1) ---
 
 - name: Create vector directories
@@ -253,7 +243,22 @@
   register: birdman_vector_compose_up
   changed_when: "'Started' in birdman_vector_compose_up.stderr or 'Created' in birdman_vector_compose_up.stderr"
 
-- name: Apply pending vector restart
+# Агент стартует/рестартует ПОСЛЕ того, как vector получил свой конфиг
+# (tracker #994). Порядок несущий: `log_scope_dirs` в agent.yaml переводит
+# дедики на путь {project}/{env}, а старый `include` шиппера этот путь не видит
+# — рестарт агента раньше конфига vector'а оставлял бы ноду в окне «агент
+# размечает, шиппер не видит», и, оборвись прогон в этом окне (таймаут
+# `--wait`, отказ pull), окно жило бы до следующего ручного прогона. Оба
+# хендлера сбрасываются здесь, одним flush, уже после `compose up --wait`, так
+# что контейнер vector'а к этому моменту существует (первый прогон роли тоже).
+- name: Enable and start birdman-agent
+  ansible.builtin.systemd_service:
+    name: birdman-agent.service
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Apply tmpfiles and pending restarts (агент — после конфига vector'а)
   ansible.builtin.meta: flush_handlers
 
 # --- нодовый vmagent: метрики агента в центральный VM через оверлей (5.2).

@@ -32,6 +32,12 @@ var ErrNoLogs = errors.New("no logs for server")
 // follow → after the existing content, keep following {id}.log. emit errors
 // abort the stream and are returned as-is.
 func Stream(ctx context.Context, dir, id string, tailLines int, follow bool, emit func([]byte) error) error {
+	// dir is the ROOT of the server log tree; since #994 a labelled dedik
+	// writes into {root}/{project}/{env}/, so resolve the actual directory
+	// from the filesystem (see ServerDir). Live-tail of a reaped server keeps
+	// working: the resolution looks at files, not at the in-memory map.
+	root := dir
+	dir = ServerDir(root, id)
 	activePath := filepath.Join(dir, id+".log")
 
 	var sources []string
@@ -104,14 +110,19 @@ func Stream(ctx context.Context, dir, id string, tailLines int, follow bool, emi
 	if !follow {
 		return nil
 	}
-	return followFile(ctx, activePath, activeOffset, emit)
+	return followFile(ctx, root, id, activePath, activeOffset, emit)
 }
 
 // followFile polls path for appended data from offset (-1 → from current
 // end once the file appears). Truncation (copy-truncate rotation) resets the
 // cursor to 0. The follow ends cleanly when the file is finalized (gone,
 // with a .gz left behind — the server stopped).
-func followFile(ctx context.Context, path string, offset int64, emit func([]byte) error) error {
+//
+// While the file has never been seen (offset < 0) the path is re-resolved on
+// every miss: following a server that has not logged yet starts before its
+// directory exists, and since #994 that directory depends on the dedik's
+// (project, env) — resolving once would follow the flat fallback forever.
+func followFile(ctx context.Context, root, id, path string, offset int64, emit func([]byte) error) error {
 	buf := make([]byte, chunkSize)
 	t := time.NewTicker(followPoll)
 	defer t.Stop()
@@ -125,6 +136,9 @@ func followFile(ctx context.Context, path string, offset int64, emit func([]byte
 		if err != nil {
 			if _, gzErr := os.Stat(path + ".gz"); gzErr == nil && offset >= 0 {
 				return nil // finalized: the server stopped, backlog was emitted
+			}
+			if offset < 0 {
+				path = filepath.Join(ServerDir(root, id), id+".log")
 			}
 			continue // not created yet (or transient) — keep waiting
 		}

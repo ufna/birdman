@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -406,36 +407,44 @@ func TestServerLogsProxy(t *testing.T) {
 	}
 }
 
-// TestQueryProxiesRefuseBoundKeys (#990): сырые query-проксии (LogsQL → VL,
-// PromQL → VM) закрыты для ПРИВЯЗАННОГО ключа. #988 закрыл привязкой live-tail
-// /v1/servers/{id}/logs, но те же байты игрового вывода дедика чужого проекта
-// доставались тем же readonly-ключом через /v1/logs/query: запрос едет в
-// апстрим как есть, а стримы VL лейблованы server_id/node/region — сузить их по
-// проекту нечем. Проверяются обе стороны: привязанный не получает НИЧЕГО (403 и
-// апстрим даже не вызван), глобальный и admin получают ровно те же байты, что и
-// раньше. Отдельно — cookie-сессия привязанного ключа: POST /v1/session не
-// требует admin, поэтому «сессия панели = admin» — ложная посылка, и гейт обязан
-// ловить сессию так же, как Bearer.
-func TestQueryProxiesRefuseBoundKeys(t *testing.T) {
+// TestQueryProxiesNarrowToBoundScope (tracker #994, продолжение #990): сырые
+// query-проксии (LogsQL → VL, PromQL → VM) больше не закрыты для ПРИВЯЗАННОГО
+// ключа — они СУЖАЮТСЯ его парой (project, env). #990 отвечал здесь глухим 403,
+// потому что лейбла владельца в стримах VL не было вовсе; теперь его чеканит
+// агент в пути файла лога, и запрос можно сузить, не разбирая его.
+//
+// Что именно доказывает этот тест: ЧТО МАСТЕР ОТПРАВИЛ В АПСТРИМ. Энфорсмент
+// самого фильтра выполняет VictoriaLogs/VictoriaMetrics, и никакой тест против
+// фейкового апстрима его доказать не может — это делает интеграционный
+// TestLiveUpstreamLogsNarrowing/TestLiveUpstreamMetricsNarrowing (живые VL/VM, включаются
+// BIRDMAN_TEST_VL_URL/BIRDMAN_TEST_VM_URL). Поэтому здесь сверяется контракт
+// границы: запрос клиента доезжает ДОСЛОВНО, фильтр master'а приклеен, а
+// клиентские ручки сужения (extra_stream_filters / extra_filters / extra_label)
+// до апстрима не доезжают ВООБЩЕ — именно ими сужение и снималось бы.
+func TestQueryProxiesNarrowToBoundScope(t *testing.T) {
 	st := testdb.New(t)
 	log := opsLog()
 	m := metrics.New(st, log)
 	mm := matchmaker.New(st, m, matchmaker.Config{}, log)
 	dep := deploy.New(deploy.Options{Store: st, Sender: &testdb.CommandRecorder{}, Log: log})
 
-	// Фейковые апстримы: считают вызовы и отдают опознаваемое тело — «положительная
-	// половина» обязана увидеть ИМЕННО эти байты, иначе 200 ничего не доказывает.
+	// Фейковые апстримы: считают вызовы, ЗАПОМИНАЮТ пришедшую query-строку и
+	// отдают опознаваемое тело — «положительная половина» обязана увидеть
+	// ИМЕННО эти байты, иначе 200 ничего не доказывает.
 	const logLine = `{"_time":"2026-08-11T10:00:00Z","_msg":"secret dedik output","server_id":"s1"}`
 	const vmBody = `{"status":"success","data":{"resultType":"vector","result":[]}}`
 	var vlCalls, vmCalls int
+	var gotVL, gotVM url.Values
 	vl := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		vlCalls++
+		gotVL = r.URL.Query()
 		w.Header().Set("Content-Type", "application/stream+json")
 		_, _ = w.Write([]byte(logLine + "\n"))
 	}))
 	t.Cleanup(vl.Close)
 	vm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		vmCalls++
+		gotVM = r.URL.Query()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(vmBody))
 	}))
@@ -471,98 +480,175 @@ func TestQueryProxiesRefuseBoundKeys(t *testing.T) {
 	global := &client{t: t, base: ts.URL, key: globalSecret}
 	admin := &client{t: t, base: ts.URL, key: adminSecret}
 
-	logsPath := `/v1/logs/query?query={server_id="s1"}&start=0&end=10`
-	proxies := []struct {
-		name string
-		path string
-		want string // байты, которые обязан увидеть непривязанный ключ
+	const wantStreamFilter = `{project="neighbour",env="dev"}`
+	// Запрос панели как он есть: селектор по ЧУЖОМУ дедику плюс пайп. Ровно эта
+	// форма и была утечкой #990, и ровно на ней ломается «просто подставить
+	// фильтр в текст запроса».
+	foreignLogsQuery := `{server_id="s1"} | sort by (_time) desc`
+	logsPath := "/v1/logs/query?query=" + url.QueryEscape(foreignLogsQuery) + "&start=0&end=10"
+
+	// 1) ЛОГИ, привязанный ключ: 200 (не 403 — дверь #990 снята), апстрим вызван,
+	//    запрос клиента доехал ДОСЛОВНО, фильтр master'а приклеен.
+	code, body := bound.doRaw("GET", logsPath)
+	if code != 200 {
+		t.Fatalf("logs/bound: %d (%s), want 200 — привязанный ключ снова читает СВОИ логи", code, body)
+	}
+	if !strings.Contains(string(body), logLine) {
+		t.Fatalf("logs/bound: тело = %q, want содержащее %q (иначе 200 ничего не доказывает)", body, logLine)
+	}
+	if got := gotVL.Get("query"); got != foreignLogsQuery {
+		t.Fatalf("logs/bound: апстрим получил query = %q, want %q дословно (запрос не переписывается)", got, foreignLogsQuery)
+	}
+	if got := gotVL.Get("extra_stream_filters"); got != wantStreamFilter {
+		t.Fatalf("logs/bound: extra_stream_filters = %q, want %q — БЕЗ ЭТОГО ПРИВЯЗАННЫЙ КЛЮЧ ЧИТАЕТ ЧУЖОЕ", got, wantStreamFilter)
+	}
+	if got := gotVL.Get("limit"); got != "1000" {
+		t.Fatalf("logs/bound: limit = %q, want 1000 (клампинг остаётся)", got)
+	}
+	for _, k := range []string{"start", "end"} {
+		if gotVL.Get(k) == "" {
+			t.Fatalf("logs/bound: параметр %s не доехал до апстрима — диапазон времени потерян", k)
+		}
+	}
+
+	// 2) ПОПЫТКА СНЯТЬ СУЖЕНИЕ СВОИМИ ЖЕ ПАРАМЕТРАМИ. Привязанный ключ шлёт
+	//    собственные extra_stream_filters/extra_filters — до апстрима не должно
+	//    доехать НИ ОДНОГО из них: master пересобирает query-строку из белого
+	//    списка. Это главная мутационная ловушка: стоит начать «дописывать» в
+	//    пришедшую строку вместо пересборки — тест краснеет.
+	smuggle := logsPath +
+		"&extra_stream_filters=" + url.QueryEscape(`{project="game"}`) +
+		"&extra_filters=" + url.QueryEscape(`{project="game"}`) +
+		"&extra_label=project%3Dgame"
+	if code, body := bound.doRaw("GET", smuggle); code != 200 {
+		t.Fatalf("logs/bound+smuggle: %d (%s), want 200", code, body)
+	}
+	if got := gotVL["extra_stream_filters"]; len(got) != 1 || got[0] != wantStreamFilter {
+		t.Fatalf("logs/bound+smuggle: extra_stream_filters = %q, want ровно [%q] — клиентский параметр протёк", got, wantStreamFilter)
+	}
+	if got, ok := gotVL["extra_filters"]; ok {
+		t.Fatalf("logs/bound+smuggle: клиентский extra_filters доехал до апстрима: %q", got)
+	}
+	if got, ok := gotVL["extra_label"]; ok {
+		t.Fatalf("logs/bound+smuggle: клиентский extra_label доехал до апстрима: %q", got)
+	}
+
+	// 3) МЕТРИКИ, привязанный ключ: обе ручки (query и query_range) — одна дверь
+	//    из двух была бы повторением ошибки #988/#990.
+	metricProxies := []struct {
+		name, path string
+		wantParams []string
 	}{
-		{"logs", logsPath, logLine},
-		{"metrics", "/v1/metrics/query?query=up", vmBody},
-		{"metrics_range", "/v1/metrics/query_range?query=up&start=0&end=10&step=15", vmBody},
+		{"metrics", "/v1/metrics/query?query=up&time=5", []string{"query", "time"}},
+		{"metrics_range", "/v1/metrics/query_range?query=up&start=0&end=10&step=15", []string{"query", "start", "end", "step"}},
 	}
-
-	// 1) Привязанный ключ: 403 и апстрим НЕ вызван (утечки нет даже на уровне
-	//    «сходили и выбросили»).
-	for _, p := range proxies {
-		beforeVL, beforeVM := vlCalls, vmCalls
-		code, body := bound.doRaw("GET", p.path)
-		if code != 403 {
-			t.Fatalf("%s: привязанный ключ получил %d (%s), want 403", p.name, code, body)
+	for _, p := range metricProxies {
+		smug := p.path + "&extra_label=project%3Dgame&" + url.QueryEscape("extra_filters[]") + "=" + url.QueryEscape(`{project="game"}`)
+		code, body := bound.doRaw("GET", smug)
+		if code != 200 {
+			t.Fatalf("%s/bound: %d (%s), want 200", p.name, code, body)
 		}
-		if !strings.Contains(string(body), "key is bound to neighbour/dev") {
-			t.Fatalf("%s: тело 403 = %s, want «key is bound to neighbour/dev»", p.name, body)
+		if !strings.Contains(string(body), vmBody) {
+			t.Fatalf("%s/bound: тело = %q, want содержащее %q", p.name, body, vmBody)
 		}
-		if vlCalls != beforeVL || vmCalls != beforeVM {
-			t.Fatalf("%s: апстрим вызван на запрещённом запросе (vl %d→%d, vm %d→%d)",
-				p.name, beforeVL, vlCalls, beforeVM, vmCalls)
+		want := []string{"project=neighbour", "env=dev"}
+		if got := gotVM["extra_label"]; !slices.Equal(got, want) {
+			t.Fatalf("%s/bound: extra_label = %q, want ровно %q — БЕЗ ЭТОГО ПРИВЯЗАННЫЙ КЛЮЧ ЧИТАЕТ ЧУЖИЕ СЕРИИ", p.name, got, want)
 		}
-	}
-
-	// 2) Глобальный и admin-ключ: 200 и РОВНО те байты, что отдал апстрим.
-	//    admin здесь не второй случай привязки, а регресс-страховка по скоупу:
-	//    привязка с admin несовместима, так что обе ноги идут одной веткой
-	//    key.Project == nil.
-	for _, p := range proxies {
-		for _, c := range []struct {
-			who string
-			cl  *client
-		}{{"global", global}, {"admin", admin}} {
-			code, body := c.cl.doRaw("GET", p.path)
-			if code != 200 {
-				t.Fatalf("%s/%s: %d (%s), want 200 — гейт бьёт по своим", p.name, c.who, code, body)
-			}
-			if !strings.Contains(string(body), p.want) {
-				t.Fatalf("%s/%s: тело = %q, want содержащее %q (иначе 200 ничего не доказывает)",
-					p.name, c.who, body, p.want)
+		// extra_filters[] у VM складываются по ИЛИ — протёкший клиентский
+		// параметр РАСШИРИЛ бы выдачу до чужих проектов, а не сузил.
+		if got, ok := gotVM["extra_filters[]"]; ok {
+			t.Fatalf("%s/bound: клиентский extra_filters[] доехал до апстрима: %q (у VM это ИЛИ — прямое расширение)", p.name, got)
+		}
+		if got := gotVM.Get("query"); got != "up" {
+			t.Fatalf("%s/bound: query = %q, want %q дословно", p.name, got, "up")
+		}
+		for _, k := range p.wantParams {
+			if gotVM.Get(k) == "" {
+				t.Fatalf("%s/bound: параметр %s не доехал до апстрима", p.name, k)
 			}
 		}
 	}
 
-	// 3) Порядок гейтов: разрешение РАНЬШЕ состояния. Кривой limit — всё равно
-	//    403, а не 400; ненастроенный master — всё равно 403, а не 503. Иначе
-	//    ответ 403-ей ручки рассказывал бы, подключены ли VL/VM.
-	if code, body := bound.doRaw("GET", "/v1/logs/query?query=x&limit=abc"); code != 403 {
-		t.Fatalf("кривой limit у привязанного ключа: %d (%s), want 403 (разрешение раньше валидации)", code, body)
+	// 4) Глобальный и admin-ключ: passthrough как был — те же байты и НИ ОДНОГО
+	//    приклеенного фильтра (сужать глобальный ключ было бы регрессом
+	//    функциональности, а не безопасностью). admin здесь не второй случай
+	//    привязки, а регресс-страховка по скоупу: привязка с admin несовместима.
+	for _, c := range []struct {
+		who string
+		cl  *client
+	}{{"global", global}, {"admin", admin}} {
+		code, body := c.cl.doRaw("GET", logsPath)
+		if code != 200 || !strings.Contains(string(body), logLine) {
+			t.Fatalf("logs/%s: %d (%s), want 200 с байтами апстрима", c.who, code, body)
+		}
+		if got, ok := gotVL["extra_stream_filters"]; ok {
+			t.Fatalf("logs/%s: passthrough сужен фильтром %q — глобальный ключ видит весь флот", c.who, got)
+		}
+		code, body = c.cl.doRaw("GET", "/v1/metrics/query?query=up")
+		if code != 200 || !strings.Contains(string(body), vmBody) {
+			t.Fatalf("metrics/%s: %d (%s), want 200 с байтами апстрима", c.who, code, body)
+		}
+		if got, ok := gotVM["extra_label"]; ok {
+			t.Fatalf("metrics/%s: passthrough сужен %q", c.who, got)
+		}
 	}
+
+	// 5) Клампинг limit и валидация — на привязанном ключе работают как на всех.
+	if code, body := bound.doRaw("GET", "/v1/logs/query?query=*&limit=99999"); code != 200 {
+		t.Fatalf("logs/bound limit=99999: %d (%s), want 200", code, body)
+	}
+	if got := gotVL.Get("limit"); got != "10000" {
+		t.Fatalf("logs/bound: limit = %q, want 10000 (клампинг сохраняется при сужении)", got)
+	}
+	beforeVL := vlCalls
+	if code, body := bound.doRaw("GET", "/v1/logs/query?query=*&limit=abc"); code != 400 {
+		t.Fatalf("logs/bound limit=abc: %d (%s), want 400", code, body)
+	}
+	if vlCalls != beforeVL {
+		t.Fatalf("кривой limit доехал до апстрима (vl %d→%d)", beforeVL, vlCalls)
+	}
+
+	// 6) Cookie-сессия ПРИВЯЗАННОГО ключа сужается так же, как Bearer. POST
+	//    /v1/session не требует admin (session.go: requireScope на нём нет),
+	//    сессия наследует ключ целиком вместе с привязкой — «сессия панели =
+	//    admin» ложная посылка (#990). 401 здесь означал бы, что кука не доехала
+	//    и проверка выродилась.
+	b := &browser{t: t, base: ts.URL}
+	code2, _, resp := b.do("POST", "/v1/session", map[string]any{"api_key": boundSecret})
+	if code2 != 200 {
+		t.Fatalf("логин привязанным ключом: %d, want 200 (сессию заводит любой ключ)", code2)
+	}
+	bb := &browser{t: t, base: ts.URL, cookie: sessionCookieOf(t, resp)}
+	if code2, sbody, _ := bb.do("GET", "/v1/session", nil); code2 != 200 {
+		t.Fatalf("кука не аутентифицирует: %d %v", code2, sbody)
+	}
+	if code2, _, _ := bb.do("GET", logsPath, nil); code2 != 200 {
+		t.Fatalf("сессия привязанного ключа: %d, want 200", code2)
+	}
+	if got := gotVL.Get("extra_stream_filters"); got != wantStreamFilter {
+		t.Fatalf("сессия привязанного ключа: extra_stream_filters = %q, want %q — привязка в сессии потеряна", got, wantStreamFilter)
+	}
+	// Метрики через сессию — та же нога (мутация «снять сужение только с
+	// proxyVictoria» иначе остаётся зелёной на cookie-пути).
+	if code2, _, _ := bb.do("GET", "/v1/metrics/query?query=up", nil); code2 != 200 {
+		t.Fatalf("сессия привязанного ключа, метрики: %d, want 200", code2)
+	}
+	if got := gotVM["extra_label"]; !slices.Equal(got, []string{"project=neighbour", "env=dev"}) {
+		t.Fatalf("сессия привязанного ключа, метрики: extra_label = %q — привязка в сессии потеряна", got)
+	}
+
+	// 7) Ненастроенный master: привязанный ключ теперь ДОПУЩЕН, поэтому видит
+	//    состояние проксии как все (503), а не 403. Порядок «разрешение раньше
+	//    состояния» (#988) при этом сохранён — 403 остался только для
+	//    непригодной к сужению пары, см. TestNarrowScope.
 	tsOff := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", "", log))
 	t.Cleanup(tsOff.Close)
 	boundOff := &client{t: t, base: tsOff.URL, key: boundSecret}
-	for _, p := range proxies {
-		if code, body := boundOff.doRaw("GET", p.path); code != 403 {
-			t.Fatalf("%s на ненастроенном master: %d (%s), want 403 (не 503 — состояние проксии не для чужих)",
-				p.name, code, body)
+	for _, p := range []string{"/v1/logs/query?query=*", "/v1/metrics/query?query=up"} {
+		if code, body := boundOff.doRaw("GET", p); code != 503 {
+			t.Fatalf("%s на ненастроенном master: %d (%s), want 503", p, code, body)
 		}
-	}
-
-	// 4) Cookie-сессия ПРИВЯЗАННОГО ключа — тот же 403. POST /v1/session не
-	//    требует admin (session.go: requireScope на нём нет), сессия наследует
-	//    ключ целиком вместе с привязкой; 401 здесь означал бы, что кука не
-	//    доехала и проверка выродилась.
-	b := &browser{t: t, base: ts.URL}
-	code, _, resp := b.do("POST", "/v1/session", map[string]any{"api_key": boundSecret})
-	if code != 200 {
-		t.Fatalf("логин привязанным ключом: %d, want 200 (сессию заводит любой ключ)", code)
-	}
-	bb := &browser{t: t, base: ts.URL, cookie: sessionCookieOf(t, resp)}
-	if code, body, _ := bb.do("GET", "/v1/session", nil); code != 200 {
-		t.Fatalf("кука не аутентифицирует: %d %v", code, body)
-	}
-	beforeVL := vlCalls
-	code, sbody, _ := bb.do("GET", logsPath, nil)
-	if code != 403 {
-		t.Fatalf("сессия привязанного ключа получила логи: %d %v, want 403", code, sbody)
-	}
-	// Тело сверяем так же, как в Bearer-ноге, и не ради красоты: без него ветка
-	// остаётся зелёной, когда 403 прилетел ПО ДРУГОЙ ПРИЧИНЕ (скажем, CSRF-гейт
-	// по недосмотру распространили на GET), а привязка в сессии при этом
-	// потеряна. Проверено мутацией: «сессия теряет привязку» + «CSRF на GET»
-	// вместе давали зелёный тест на дырявом коде.
-	if detail, _ := sbody["detail"].(string); !strings.Contains(detail, "key is bound to neighbour/dev") {
-		t.Fatalf("сессия: detail = %q, want «key is bound to neighbour/dev» (403 должен быть ОТ ГЕЙТА привязки)", detail)
-	}
-	if vlCalls != beforeVL {
-		t.Fatalf("сессия привязанного ключа дошла до апстрима (vl %d→%d)", beforeVL, vlCalls)
 	}
 }
 

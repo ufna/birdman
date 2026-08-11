@@ -5,6 +5,12 @@ capacity_slots: {{ birdman_capacity_slots }}
 port_range: [{{ birdman_port_range[0] }}, {{ birdman_port_range[1] }}]
 limits_default: { cpu_millis: {{ birdman_limits_default.cpu_millis }}, mem_mb: {{ birdman_limits_default.mem_mb }} }
 log_dir: {{ birdman_log_dir }}
+# tracker #994: лог дедика ложится в {log_dir}/servers/{project}/{env}/{id}.log —
+# пару в стрим-лейблы VictoriaLogs берут ИЗ ПУТИ (vector.yaml той же роли),
+# и по ним master сужает запрос привязанного ключа. Включается ЗДЕСЬ, а не
+# дефолтом бинаря: агент апгрейдится сам, конфиг vector'а кладёт ansible —
+# включить раньше шиппера значило бы перестать шипповать логи вовсе.
+log_scope_dirs: {{ birdman_log_scope_dirs | default(true) | bool | lower }}
 data_dir: {{ birdman_data_dir }}
 {% if birdman_agent_containerd_root | default('') %}
 # dual-fs watermark (agent.md §6, environments v1 §6в): ФС образов, если это

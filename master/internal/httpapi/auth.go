@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -210,26 +211,47 @@ func bindingLabel(key store.APIKey) string {
 	return *key.Project + "/" + keyEnv
 }
 
-// requireUnboundKey гейтит СЫРЫЕ query-проксии (LogsQL → VictoriaLogs, PromQL →
-// VictoriaMetrics): привязанному ключу они закрыты целиком, глобальный/admin
-// (привязка несовместима с admin) проходит как раньше. Почему не как
-// requireBinding: у запроса нет объекта, чью пару (project, env) можно сверить,
-// — есть произвольная программа на чужом языке, а проектного лейбла в стримах
-// VL нет вовсе (server_id/node/region). Сузить в принципе МОЖНО — по множеству
-// своих server_id, соответствие server_id→(project, env) master держит в БД
-// (ServerLogTarget, #988), — но это переписывание запроса и вопрос истории,
-// записанной без лейблов: отдельная карточка #994. Фильтровать ОТВЕТ вместо
-// запроса — защита от честного клиента, а не от атакующего: состав полей ответа
-// задаёт сам запрос (пайпы проксируются как есть). Поэтому #990 закрывает
-// дверь, а не сужает выдачу.
-func (s *Server) requireUnboundKey(w http.ResponseWriter, r *http.Request) bool {
+// scopeLabelRe — тот же алфавит, что у слагов проекта и имени окружения
+// (store.projectSlugRe / store.envNameRe). Пара из привязки ключа проверяется
+// им ПОВТОРНО, перед тем как уехать в фильтр запроса к апстриму: значение
+// склеивается в выражение на чужом языке (LogsQL `{project="…"}`,
+// `extra_label=project=…`), и единственная причина, по которой склейка
+// безопасна, — что в паре нет ни кавычки, ни фигурной скобки, ни запятой, ни
+// знака равенства. Строка, пришедшая из БД мимо этого алфавита (ряд старше
+// CHECK'а, будущее расширение алфавита), обязана падать ЗАКРЫТО — обратно в
+// дверь #990, а не в фильтр, который апстрим разберёт не так, как мы задумали.
+var scopeLabelRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
+
+// narrowScope возвращает пару (project, env), которой сужается запрос к сырой
+// query-проксии (LogsQL → VictoriaLogs, PromQL → VictoriaMetrics).
+//
+// narrow=false — ключ глобальный/admin (привязка с admin несовместима):
+// passthrough как был, сужать не по чему и незачем.
+// ok=false — ответ уже написан (403), вызывающий обязан выйти.
+//
+// Это замена глухого гейта #990 (tracker #994): у запроса по-прежнему нет
+// объекта, чью пару можно сверить как в requireBinding, — есть произвольная
+// программа на языке апстрима. Но с тех пор у стримов VL появились лейблы
+// project/env (их чеканит агент в пути файла лога), а значит сузить запрос
+// МОЖНО, не разбирая его: master пересобирает query-строку апстрима из белого
+// списка параметров и добавляет фильтр САМ (ops.go). Фильтровать ОТВЕТ вместо
+// запроса по-прежнему нельзя: состав и значения полей ответа задаёт сам запрос.
+func (s *Server) narrowScope(w http.ResponseWriter, r *http.Request) (project, env string, narrow, ok bool) {
 	key, _ := keyFromContext(r.Context())
 	if key.Project == nil {
-		return true
+		return "", "", false, true
 	}
-	writeError(w, http.StatusForbidden, "forbidden",
-		fmt.Sprintf("key is bound to %s: raw query proxy is global-key only", bindingLabel(key)))
-	return false
+	env = ""
+	if key.Env != nil {
+		env = *key.Env
+	}
+	if !scopeLabelRe.MatchString(*key.Project) || !scopeLabelRe.MatchString(env) {
+		writeError(w, http.StatusForbidden, "forbidden",
+			fmt.Sprintf("key is bound to %s: scope is not narrowable, raw query proxy is global-key only",
+				bindingLabel(key)))
+		return "", "", false, false
+	}
+	return *key.Project, env, true, true
 }
 
 // bindProject resolves the project a request acts on when the field is optional:

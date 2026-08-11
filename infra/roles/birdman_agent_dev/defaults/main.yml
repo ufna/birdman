@@ -50,6 +50,10 @@ birdman_public_ip: "{{ ansible_host }}"
 birdman_vector_image: timberio/vector:0.56.0-alpine
 birdman_vector_dir: /opt/birdman/vector             # compose.yml (аналог birdman_master_dir у master-роли)
 # /insert — база; loki-sink vector сам допишет /loki/api/v1/push
+# tracker #994: логи дедиков ложатся в подкаталоги {project}/{env} — пара едет
+# в стрим-лейблы VL, master сужает по ней запрос привязанного ключа. Флаг и
+# vector.yaml этой же роли обязаны ехать ВМЕСТЕ.
+birdman_log_scope_dirs: true
 birdman_vl_sink_url: "http://127.0.0.1:9428/insert"
 birdman_vector_data_dir: /var/lib/birdman/vector   # checkpoint + disk-буфер
 

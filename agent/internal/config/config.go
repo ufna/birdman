@@ -100,6 +100,23 @@ type Config struct {
 	MetricsAddr string `yaml:"metrics_addr"`
 	// QoSEchoAddr is the public UDP echo for client QoS probes (agent.md §8).
 	QoSEchoAddr string `yaml:"qos_echo_addr"`
+	// LogScopeDirs makes the agent write a dedik's log into
+	// {log_dir}/servers/{project}/{env}/{id}.log instead of the flat
+	// {log_dir}/servers/{id}.log (agent.md §5, tracker #994): the pair rides in
+	// the PATH so the shipper can label the VictoriaLogs stream with the owner
+	// of the output, which is what lets master narrow a bound key's query.
+	//
+	// DEFAULT false, AND THAT IS A ROLLOUT DECISION, not a preference. The
+	// agent binary upgrades itself (POST /v1/agent-upgrade, dev-стенд катает
+	// его на каждый пуш), while the shipper config is rendered by ansible —
+	// the two do NOT arrive together. An agent that started writing into
+	// subdirectories before its vector got the matching `include` would ship
+	// NOTHING: the old glob (`servers/*.log`) does not match the new path, and
+	// the fleet's logs would silently stop reaching VictoriaLogs. So the switch
+	// is turned on by the same ansible role that installs the new shipper
+	// config (`birdman_log_scope_dirs`, роль birdman_agent_dev), and a bare
+	// binary upgrade keeps the old, safe layout.
+	LogScopeDirs bool `yaml:"log_scope_dirs"`
 	// LogMaxSizeMB rotates a dedik log above this size (100MB × 2, §5).
 	LogMaxSizeMB int `yaml:"log_max_size_mb"`
 	// LogRetentionDays removes gzipped dedik logs older than this (§5).

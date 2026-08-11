@@ -69,10 +69,40 @@ func (r *Rotator) Run(done <-chan struct{}) {
 	}
 }
 
+// ServerDir resolves the directory holding the log files of one server.
+//
+// Since tracker #994 the agent writes a dedik's output into
+// {root}/{project}/{env}/{id}.log: vector parses the pair out of the PATH and
+// labels the VictoriaLogs stream with it, so master can narrow a bound key's
+// LogsQL to its own project (docs/specs/master.md §6). The pair must ride with
+// the DEDIK, not with the host — a node's env changes through the master API
+// without re-rendering any node config (invariant I6), so a static per-host
+// label would drift.
+//
+// The pair is deliberately NOT kept in agent memory: after an agent restart
+// the server map is rebuilt from container labels, which do not carry it. The
+// directory is resolved from the filesystem instead — the path IS where the
+// pair lives. Falls back to root, which covers both logs written before the
+// upgrade (they stay flat and unlabeled — a bound key does not get them, see
+// the spec) and run-once mode, where there is no fleet and no pair.
+func ServerDir(root, id string) string {
+	// id приходит от master'а и подставляется в ГЛОБ. Метасимвол в нём заставил
+	// бы резолвер найти чужой файл, а разделитель пути — выйти из дерева; такой
+	// id не резолвим вовсе (плоский фоллбэк), а не резолвим «как получится».
+	if id == "" || strings.ContainsAny(id, `*?[]\/`) {
+		return root
+	}
+	matches, err := filepath.Glob(filepath.Join(root, "*", "*", id+".log*"))
+	if err == nil && len(matches) > 0 {
+		return filepath.Dir(matches[0])
+	}
+	return root
+}
+
 // RotateOnce copy-truncates every live server log above MaxSize.
 func (r *Rotator) RotateOnce() {
 	for _, id := range r.live() {
-		path := filepath.Join(r.cfg.Dir, id+".log")
+		path := filepath.Join(ServerDir(r.cfg.Dir, id), id+".log")
 		st, err := os.Stat(path)
 		if err != nil || st.Size() < r.cfg.MaxSize {
 			continue
@@ -88,8 +118,9 @@ func (r *Rotator) RotateOnce() {
 // Finalize gzips the log files of a stopped server ({id}.log{,.1} → .gz).
 // Call it after the container is deleted — the shim no longer writes.
 func (r *Rotator) Finalize(id string) {
+	dir := ServerDir(r.cfg.Dir, id)
 	for _, name := range []string{id + ".log.1", id + ".log"} {
-		path := filepath.Join(r.cfg.Dir, name)
+		path := filepath.Join(dir, name)
 		if _, err := os.Stat(path); err != nil {
 			continue
 		}
@@ -103,12 +134,11 @@ func (r *Rotator) Finalize(id string) {
 // SweepOnce enforces retention and finalizes logs of servers that are no
 // longer supervised (safety net for finalizes missed across agent restarts;
 // grace of one sweep period avoids racing a starting server).
+// Since #994 the tree is two levels deep ({project}/{env}/{id}.log) for logs
+// written by a labelling agent and flat for everything older, so the sweep
+// walks instead of reading one directory — otherwise retention would silently
+// stop reclaiming disk the moment the pair started riding in the path.
 func (r *Rotator) SweepOnce() {
-	entries, err := os.ReadDir(r.cfg.Dir)
-	if err != nil {
-		r.cfg.Logf("[logrot] sweep: %v", err)
-		return
-	}
 	live := map[string]bool{}
 	for _, id := range r.live() {
 		live[id] = true
@@ -116,15 +146,17 @@ func (r *Rotator) SweepOnce() {
 	cutoff := time.Now().Add(-r.cfg.Retention)
 	staleCutoff := time.Now().Add(-2 * r.cfg.SweepEvery)
 
-	for _, e := range entries {
+	err := filepath.WalkDir(r.cfg.Dir, func(path string, e os.DirEntry, err error) error {
+		if err != nil {
+			return nil //nolint:nilerr // unreadable entry: skip, keep sweeping
+		}
 		name := e.Name()
 		if e.IsDir() {
-			continue
+			return nil
 		}
-		path := filepath.Join(r.cfg.Dir, name)
 		info, err := e.Info()
 		if err != nil {
-			continue
+			return nil //nolint:nilerr
 		}
 		switch {
 		case strings.HasSuffix(name, ".gz"):
@@ -138,7 +170,7 @@ func (r *Rotator) SweepOnce() {
 		case strings.HasSuffix(name, ".log") || strings.HasSuffix(name, ".log.1"):
 			id := strings.TrimSuffix(strings.TrimSuffix(name, ".1"), ".log")
 			if live[id] {
-				continue
+				return nil
 			}
 			// Not supervised and not written for a while — the server is
 			// gone; compress like Finalize would have.
@@ -150,6 +182,10 @@ func (r *Rotator) SweepOnce() {
 				}
 			}
 		}
+		return nil
+	})
+	if err != nil {
+		r.cfg.Logf("[logrot] sweep: %v", err)
 	}
 }
 
