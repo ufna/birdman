@@ -464,7 +464,7 @@ func (c *dbCollector) Collect(ch chan<- prometheus.Metric) {
 	// second half of the CertExpiry alert alongside tls_cert_expiry above.
 	if nrows, err := c.st.Pool.Query(ctx, `
 		select hostname, extract(epoch from cert_not_after)
-		from nodes where cert_not_after is not null`); err != nil {
+		from nodes where cert_not_after is not null and state <> 'dead'`); err != nil {
 		c.log.Error("metrics: node cert expiry query failed", "err", err)
 	} else {
 		for nrows.Next() {
@@ -593,9 +593,16 @@ func (c *dbCollector) Collect(ch chan<- prometheus.Metric) {
 
 	c.collectServerInfo(ctx, ch)
 
+	// Ревокнутые ноды серии НЕ получают. `dead` ставится ТОЛЬКО ручной
+	// ревокацией (ops.md §1, автоматикой никогда) — это заявление оператора
+	// «бокса больше нет, перестань за ним следить». Пока серия эмитится, её
+	// heartbeat_age растёт вечно и NodeDown по ней горит вечно; такой шум хуже
+	// отсутствующего алерта, потому что маскирует НАСТОЯЩИЙ NodeDown. Убираем
+	// серию — staleness гасит алерт сам. Поймано на дев-стенде 11.08.2026: две
+	// ревокнутые ноды держали NodeDown в firing 24 дня.
 	rows, err = c.st.Pool.Query(ctx, `
 		select hostname, region, greatest(extract(epoch from (now() - last_heartbeat_at)), 0)
-		from nodes where last_heartbeat_at is not null`)
+		from nodes where last_heartbeat_at is not null and state <> 'dead'`)
 	if err != nil {
 		c.log.Error("metrics: heartbeat query failed", "err", err)
 		return

@@ -281,3 +281,46 @@ func labelsMatch(pairs []*dto.LabelPair, want map[string]string) bool {
 	}
 	return true
 }
+
+// TestRevokedNodeEmitsNoAlertableSeries: `dead` is set ONLY by explicit manual
+// revocation — the operator saying "this box is gone, stop caring". Its
+// heartbeat age grows forever and its cert eventually expires, so as long as
+// either series is emitted, NodeDown and CertExpiry fire for it permanently.
+// That noise is worse than a missing alert: it masks the real NodeDown, which
+// is the one alert that must never be ignored. Dropping the series lets
+// staleness resolve the alert on its own.
+func TestRevokedNodeEmitsNoAlertableSeries(t *testing.T) {
+	st := testdb.New(t)
+	ctx := context.Background()
+	f := testdb.Seed(t, st, "eu", 8)
+
+	notAfter := time.Now().Add(90 * 24 * time.Hour).UTC().Truncate(time.Second)
+	if err := st.SetNodeCert(ctx, f.NodeID, "0abc", notAfter, store.EventNodeEnrolled, "0.2.0"); err != nil {
+		t.Fatalf("SetNodeCert: %v", err)
+	}
+	if _, err := st.Pool.Exec(ctx,
+		`update nodes set last_heartbeat_at = now() - interval '10 days' where id = $1::uuid`, f.NodeID); err != nil {
+		t.Fatalf("age heartbeat: %v", err)
+	}
+
+	live := metrics.New(st, testLog())
+	if !gaugeSeriesPresent(t, live.Registry, "birdman_node_heartbeat_age_seconds", map[string]string{"node": "node-1", "region": "eu"}) {
+		t.Fatal("a live node must emit heartbeat age")
+	}
+	if !gaugeSeriesPresent(t, live.Registry, "birdman_node_cert_expiry_timestamp_seconds", map[string]string{"node": "node-1"}) {
+		t.Fatal("a live node must emit cert expiry")
+	}
+
+	// Revocation: the only path to `dead` (ops.md §1 — never set by automation).
+	if _, err := st.Pool.Exec(ctx, `update nodes set state = 'dead' where id = $1::uuid`, f.NodeID); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+
+	revoked := metrics.New(st, testLog())
+	if gaugeSeriesPresent(t, revoked.Registry, "birdman_node_heartbeat_age_seconds", map[string]string{"node": "node-1", "region": "eu"}) {
+		t.Error("revoked node still emits heartbeat age — NodeDown would fire forever")
+	}
+	if gaugeSeriesPresent(t, revoked.Registry, "birdman_node_cert_expiry_timestamp_seconds", map[string]string{"node": "node-1"}) {
+		t.Error("revoked node still emits cert expiry — CertExpiry would fire forever")
+	}
+}
