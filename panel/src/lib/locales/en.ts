@@ -355,6 +355,9 @@ export const en = {
   'events.eventsCount.other': '{count} events',
   'events.ofTotal': 'of {total}',
   'events.pageOf': 'p. {page}/{pages}',
+  'events.scope.platform': 'platform',
+  'events.scope.platformHint':
+    'Platform event: it belongs to the installation, not to a project, and stays visible whichever project is selected.',
   'period.all': 'all time',
   'period.15m': '15 minutes',
   'period.1h': '1 hour',

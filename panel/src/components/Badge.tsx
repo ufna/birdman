@@ -7,6 +7,8 @@
 
 import { useT } from '../lib/i18n';
 import type { MessageKey } from '../lib/i18n';
+import type { ApiEvent } from '../lib/api';
+import { eventProjectOf } from '../lib/project';
 
 export type Tone = 'good' | 'warn' | 'dead' | 'accent' | 'neutral';
 
@@ -240,6 +242,28 @@ export function StateBadge({ state, tone, domain }: { state: string; tone: Tone;
     >
       <span aria-hidden className="size-1.5 rounded-full bg-current" />
       {label}
+    </span>
+  );
+}
+
+/**
+ * Честная подпись «платформенное» — на событии, у которого проекта нет вовсе
+ * (бекап, ротация CA, сессия панели: они принадлежат установке, а не проекту).
+ * Сужение ленты НЕ скрывающее и на сервере, и в keepForProject — такое событие
+ * остаётся видимым при любом выбранном проекте, и без подписи оператор прочтёт
+ * его как событие текущего проекта. Образец — PlatformChip на алертах
+ * (screens/Alerts.tsx): подписываем только то, про что мастер сказал явно —
+ * поле `project` события (эпик #968), а не догадка по payload.
+ */
+export function EventScopeChip({ event }: { event: ApiEvent }) {
+  const { t } = useT();
+  if (eventProjectOf(event) !== undefined) return null;
+  return (
+    <span
+      title={t('events.scope.platformHint')}
+      className="shrink-0 rounded border border-line px-1.5 py-0.5 text-[10px] tracking-wide text-muted uppercase"
+    >
+      {t('events.scope.platform')}
     </span>
   );
 }

@@ -331,6 +331,9 @@ export const ru: Record<MessageKey, string> = {
   'events.eventsCount.other': '{count} события',
   'events.ofTotal': 'из {total}',
   'events.pageOf': 'стр. {page}/{pages}',
+  'events.scope.platform': 'платформенное',
+  'events.scope.platformHint':
+    'Платформенное событие: принадлежит установке, а не проекту, и видно при любом выбранном проекте.',
   'period.all': 'всё время',
   'period.15m': '15 минут',
   'period.1h': '1 час',

@@ -1,8 +1,9 @@
 // События: полная лента GET /v1/events с фильтрами (kind, node, период) и
-// пагинацией + live-prepend через SSE. У /v1/events серверных фильтров и
-// offset нет (только limit) — фильтры и пагинация клиентские поверх окна,
-// размер окна регулируется селектором «окно» (TODO: серверные фильтры/
-// keyset-пагинация, panel.md §3).
+// пагинацией + live-prepend через SSE. Серверных параметров у /v1/events два —
+// limit и project (эпик #968): ПРОЕКТНОЕ сужение делает сервер, и второй копии
+// этого правила в браузере нет. Остальные фильтры и пагинация — клиентские
+// поверх окна, размер окна регулируется селектором «окно» (TODO: серверные
+// фильтры/keyset-пагинация, panel.md §3).
 
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
@@ -10,12 +11,12 @@ import { api } from '../lib/api';
 import type { ApiEvent, NodeInfo } from '../lib/api';
 import { useLive } from '../lib/live';
 import { useEnv, eventEnvOf } from '../lib/env';
-import { useProject, useProjectList, eventProjectOf } from '../lib/project';
+import { useProjectList, useFeedScope, scopeProject, keepForProject } from '../lib/project';
 import { useServerDrawer } from '../lib/drawer';
 import { shortId, summarizePayload } from '../lib/format';
 import { useT, useFormat } from '../lib/i18n';
 import type { I18nContextValue, MessageKey } from '../lib/i18n';
-import { EVENT_KINDS, StateBadge, toneOfEventKind } from '../components/Badge';
+import { EVENT_KINDS, EventScopeChip, StateBadge, toneOfEventKind } from '../components/Badge';
 import { Card, CardHeader, EmptyState, ErrorNote, LoadingRow } from '../components/ui';
 
 const PAGE_SIZE = 50;
@@ -36,7 +37,9 @@ function kindLabel(kind: string, i18n: Pick<I18nContextValue, 't' | 'has'>): str
 export function Events() {
   const { subscribe } = useLive();
   const { selected } = useEnv();
-  const { selected: project } = useProject();
+  // Не `useProject().selected`: тот не различает «проект неизвестен» и «проектов
+  // нет», а лента обязана вести себя по-разному — см. FeedScope.
+  const scope = useFeedScope();
   const i18n = useT();
   const { t, tp } = i18n;
   const nodes = useProjectList((project) => api.listNodes({ project }), []);
@@ -51,13 +54,26 @@ export function Events() {
   const [period, setPeriod] = useState('all');
   const [page, setPage] = useState(0);
 
-  // Загрузка окна ленты (перезагрузка при смене размера окна или по «Повторить»).
+  // Загрузка окна ленты. Перезагружается при смене размера окна, по «Повторить»
+  // И ПРИ СМЕНЕ ПРОЕКТА: сужение серверное (#985), поэтому новый срез можно
+  // получить только новым запросом — экран не перемонтируется (роутинг идёт по
+  // пути, а путь при переключении проекта не меняется), и без scope в
+  // зависимостях единственный запрос за жизнь экрана уходил бы в окне, когда
+  // проект ещё не известен, то есть БЕЗ фильтра (поймано ревью #987).
   useEffect(() => {
+    // Проект неизвестен (список грузится / не приехал) — молчим: голый запрос
+    // привёз бы события ВСЕХ проектов. Это НЕ то же, что «проектов нет вовсе»,
+    // где голый запрос безопасен и обязан показать платформенные события.
+    if (scope.kind === 'wait') {
+      setAll(null);
+      setFailed(false);
+      return;
+    }
     let cancelled = false;
     setAll(null);
     setFailed(false);
     api
-      .listEvents(limit, project)
+      .listEvents(limit, scopeProject(scope))
       .then((list) => {
         if (!cancelled) setAll(list);
       })
@@ -67,19 +83,23 @@ export function Events() {
     return () => {
       cancelled = true;
     };
-  }, [limit, reloadKey]);
+  }, [limit, reloadKey, scope]);
 
-  // Live-prepend новых событий (dedup по id), с капом в размер окна.
+  // Live-prepend новых событий (dedup по id), с капом в размер окна. Стрим —
+  // единственный источник, который сервер панели не сужает (он один на сессию,
+  // см. keepForProject), поэтому чужое отсеиваем НА ВХОДЕ: так список остаётся
+  // одним срезом, а показ не превращается во вторую копию правила сужения.
   useEffect(
     () =>
       subscribe((e) => {
+        if (keepForProject([e.event], scopeProject(scope)).length === 0) return;
         setAll((prev) => {
           if (prev === null) return prev;
           if (prev.some((x) => x.id === e.id)) return prev;
           return [e.event, ...prev].slice(0, limit);
         });
       }),
-    [subscribe, limit],
+    [subscribe, limit, scope],
   );
 
   const kinds = useMemo(() => {
@@ -98,17 +118,13 @@ export function Events() {
       // env-фильтр (environments v1 §7, M13): при выбранном env показываем только
       // события этого env; события БЕЗ env (старые/безадресные) — только в «All».
       if (selected !== null && eventEnvOf(e) !== selected) return false;
-      // проектный фильтр (мультипроект W2) — НЕ скрывающий: убирает только
-      // события ЧУЖОГО проекта, неатрибутированные остаются (у events нет
-      // project_id, а режима «Все проекты» не существует — см. keepForProject).
-      const evProject = eventProjectOf(e);
-      if (project !== null && evProject !== undefined && evProject !== project) return false;
+      // Проектного фильтра здесь БОЛЬШЕ НЕТ (эпик #968): окно ленты приезжает
+      // уже суженным сервером по ?project=, а вторая копия того же правила в
+      // браузере только скрывала бы, что сужение не доехало. Live-prepend в
+      // этот список кладёт события, уже прошедшие keepForProject (см. ниже).
       return true;
     });
-    // project В ЗАВИСИМОСТЯХ ОБЯЗАТЕЛЕН: без него смена проекта не
-    // пересчитывает фильтр — лента остаётся от прежнего проекта до любого
-    // постороннего изменения (поймано ревью #948).
-  }, [all, kind, node, period, selected, project]);
+  }, [all, kind, node, period, selected]);
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const clampedPage = Math.min(page, pageCount - 1);
@@ -186,6 +202,9 @@ function EventRows({ events }: { events: ApiEvent[] }) {
         <li key={e.id} className="flex items-start gap-3 px-4 py-2.5">
           <span className="tabular shrink-0 pt-0.5 font-mono text-xs text-muted">{fmt.stamp(e.ts)}</span>
           <StateBadge state={e.kind} tone={toneOfEventKind(e.kind)} domain="event" />
+          {/* Платформенное событие видно при любом выбранном проекте — подпись
+              не даёт прочесть его как событие текущего проекта. */}
+          <EventScopeChip event={e} />
           <span className="min-w-0 flex-1 pt-0.5 text-xs">
             <span className="text-muted">{refsOf(e, open, t)}</span>
             {Object.keys(e.payload).length > 0 && <span className="text-ink/80">{summarizePayload(e.payload)}</span>}

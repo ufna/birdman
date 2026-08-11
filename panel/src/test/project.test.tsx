@@ -3,10 +3,13 @@
 // с ?project= нового проекта».
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { Environment, ProjectInfo } from '../lib/api';
 import { I18nProvider } from '../lib/i18n';
 import { EnvProvider, useEnv } from '../lib/env';
+import { LiveContext } from '../lib/live';
+import type { StreamEvent } from '../lib/sse';
+import { EventsFeed } from '../components/EventsFeed';
 import {
   PROJECT_STORAGE_KEY,
   ProjectProvider,
@@ -47,6 +50,84 @@ afterEach(() => {
   vi.unstubAllGlobals();
   localStorage.clear();
 });
+
+// --- фикстуры и стабы для лент событий (экран Событий + лента Обзора) ---
+
+interface EventFixture {
+  id: number;
+  ts: string;
+  kind: string;
+  project?: string;
+  payload: Record<string, unknown>;
+}
+
+const gameEvent: EventFixture = {
+  id: 1, ts: '2026-08-01T10:00:00Z', kind: 'version_registered', project: 'game', payload: { semver: '1.0.0' },
+};
+const arenaEvent: EventFixture = {
+  id: 2, ts: '2026-08-01T11:00:00Z', kind: 'version_registered', project: 'arena', payload: { semver: '9.9.9' },
+};
+// Без поля project — платформенное: принадлежит установке, а не проекту.
+const platformEvent: EventFixture = {
+  id: 3, ts: '2026-08-01T12:00:00Z', kind: 'backup_failed', payload: { note: 'nightly' },
+};
+
+/**
+ * Стаб мастера для лент. `/v1/events` ведёт себя КАК СЕРВЕР: с `?project=`
+ * отдаёт события этого проекта плюс платформенные (сужение не скрывающее,
+ * master store/events.go), а БЕЗ параметра — вообще всё, события всех проектов.
+ * Второе и делает голый запрос опасным: клиентского фильтра списка больше нет.
+ */
+function stubFeedApi(urls: string[], events: EventFixture[]) {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((url: string) => {
+      const u = String(url);
+      urls.push(u);
+      if (u.startsWith('/v1/projects')) return Promise.resolve(jsonRes({ projects: [game, arena] }));
+      if (u.startsWith('/v1/environments')) return Promise.resolve(jsonRes({ environments: [] }));
+      if (u.startsWith('/v1/nodes')) return Promise.resolve(jsonRes({ nodes: [] }));
+      if (u.startsWith('/v1/events')) {
+        const want = new URL(u, 'http://x').searchParams.get('project');
+        const list =
+          want === null ? events : events.filter((e) => e.project === undefined || e.project === want);
+        return Promise.resolve(jsonRes({ events: list }));
+      }
+      return Promise.resolve(jsonRes({}));
+    }),
+  );
+}
+
+/** Запросы к ленте, ушедшие БЕЗ `?project=`; их не должно быть ни одного. */
+const bareFeedRequests = (urls: string[]) =>
+  urls.filter((u) => u.startsWith('/v1/events') && !u.includes('project='));
+
+/** Строка ленты (`<li>`), содержащая заданный текст. */
+function rowOf(text: RegExp): HTMLElement {
+  const li = screen.getByText(text).closest('li');
+  if (li === null) throw new Error(`строка ленты с ${String(text)} не найдена`);
+  return li;
+}
+
+/** Управляемый LiveContext: тест сам решает, когда стрим прислал событие. */
+function makeLive() {
+  const listeners = new Set<(e: StreamEvent) => void>();
+  const value = {
+    status: 'live' as const,
+    subscribe: (fn: (e: StreamEvent) => void) => {
+      listeners.add(fn);
+      return () => {
+        listeners.delete(fn);
+      };
+    },
+  };
+  const emit = (e: EventFixture) => {
+    listeners.forEach((fn) => {
+      fn({ id: e.id, kind: e.kind, event: e });
+    });
+  };
+  return { emit, value };
+}
 
 // --- чистые хелперы ---
 
@@ -106,7 +187,10 @@ describe('project — eventProjectOf / keepForProject (события из жи�
   });
 
   it('проект не выбран → лента не режется', () => {
+    // null — проекта ещё нет; '' — провайдера нет вовсе (изолированный
+    // юнит-тест экрана). Обе трактовки значат «проектного измерения нет».
     expect(keepForProject([ev(1, 'game'), ev(2, 'arena')], null)).toHaveLength(2);
+    expect(keepForProject([ev(1, 'game'), ev(2, 'arena')], '')).toHaveLength(2);
   });
 });
 
@@ -315,35 +399,16 @@ describe('EnvProvider под ProjectProvider', () => {
     });
   });
 
-  // Регрессия по ревью #948: `project` использовался в useMemo фильтра ленты,
-  // но отсутствовал в его зависимостях — смена проекта не пересчитывала
-  // фильтр, и на экране оставались события ПРЕЖНЕГО проекта. Тест ловит
-  // именно это: сам список событий при переключении НЕ перезапрашивается
-  // (у /v1/events нет ?project=), значит пересчёт может дать только пересборка
-  // мемо — без неё видимый набор не изменится.
-  it('экран Событий пересчитывает ленту при смене проекта (deps useMemo)', async () => {
-    // Сервер сужает ленту сам (#985) — мок обязан вести себя так же, иначе
-    // тест проверял бы клиентский фильтр, которого на этом пути больше нет.
-    const events = [
-      { id: 1, ts: '2026-08-01T10:00:00Z', kind: 'version_registered', project: 'game', payload: { semver: '1.0.0' } },
-      { id: 2, ts: '2026-08-01T11:00:00Z', kind: 'version_registered', project: 'arena', payload: { semver: '9.9.9' } },
-    ];
-    vi.stubGlobal(
-      'fetch',
-      vi.fn((url: string) => {
-        const u = String(url);
-        if (u.startsWith('/v1/projects')) return Promise.resolve(jsonRes({ projects: [game, arena] }));
-        if (u.startsWith('/v1/environments')) return Promise.resolve(jsonRes({ environments: [] }));
-        if (u.startsWith('/v1/nodes')) return Promise.resolve(jsonRes({ nodes: [] }));
-        if (u.startsWith('/v1/events')) {
-          const want = new URL(u, 'http://x').searchParams.get('project');
-          return Promise.resolve(
-            jsonRes({ events: want === null ? events : events.filter((e) => e.project === want) }),
-          );
-        }
-        return Promise.resolve(jsonRes({}));
-      }),
-    );
+  // --- лента событий: сужение СЕРВЕРНОЕ (эпик #968) ---
+  //
+  // Клиентского проектного фильтра у списка больше нет, поэтому единственная
+  // защита от чужих событий — сам ЗАПРОС. Значит и проверять надо запрос, как в
+  // кейсе про Флот выше: утверждения про видимый набор переживают откат
+  // серверного сужения, пока в браузере лежит вторая копия правила (ревью #987).
+
+  it('экран Событий: голого /v1/events не бывает, смена проекта перезапрашивает суженную ленту', async () => {
+    const urls: string[] = [];
+    stubFeedApi(urls, [gameEvent, arenaEvent, platformEvent]);
     render(
       <I18nProvider initialLang="en">
         <ProjectProvider>
@@ -357,17 +422,257 @@ describe('EnvProvider под ProjectProvider', () => {
       </I18nProvider>,
     );
 
-    // my-game: своё событие видно, чужое (arena) — нет.
     await waitFor(() => {
       expect(screen.getByText(/1\.0\.0/)).toBeTruthy();
     });
+    // Сужение серверное: голой ленты (события всех проектов сразу) быть не
+    // должно НИ ОДНОГО раза — в том числе в окне, пока грузится /v1/projects.
+    expect(bareFeedRequests(urls)).toEqual([]);
+    expect(urls).toContain('/v1/events?limit=500&project=game');
     expect(screen.queryByText(/9\.9\.9/)).toBeNull();
 
+    // Сменить ОКНО ленты, затем проект. Порядок не случаен: раньше первый шаг
+    // маскировал дефект (эффект перезапускался по limit, и запрос ВПЕРВЫЕ уходил
+    // суженным), а второй его показывал — рефетча по смене проекта не было, и
+    // своих событий нового проекта на экране не появлялось вовсе (ревью #987).
+    fireEvent.change(screen.getByRole('combobox', { name: 'Feed window size' }), { target: { value: '200' } });
+    await waitFor(() => {
+      expect(urls).toContain('/v1/events?limit=200&project=game');
+    });
+
     fireEvent.change(await screen.findByRole('combobox', { name: 'Project' }), { target: { value: 'arena' } });
+    await waitFor(() => {
+      expect(urls).toContain('/v1/events?limit=200&project=arena');
+    });
     await waitFor(() => {
       expect(screen.getByText(/9\.9\.9/)).toBeTruthy();
     });
     expect(screen.queryByText(/1\.0\.0/)).toBeNull();
+    expect(bareFeedRequests(urls)).toEqual([]);
+  });
+
+  // «Проект неизвестен» и «проектов нет» — РАЗНЫЕ состояния, и лента обязана
+  // вести себя по-разному. Спутать их — значит либо показать чужое (первое как
+  // второе), либо спрятать платформенные события на свежей установке (второе
+  // как первое). Второе и произошло в первой попытке доработки #987.
+
+  it('список проектов ещё грузится → лента не запрашивается (чей это срез — неизвестно)', async () => {
+    const urls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        const u = String(url);
+        urls.push(u);
+        // /v1/projects не отвечает никогда — провайдер остаётся в loading.
+        if (u.startsWith('/v1/projects')) return new Promise<Response>(() => undefined);
+        return Promise.resolve(jsonRes({}));
+      }),
+    );
+    render(
+      <I18nProvider initialLang="en">
+        <ProjectProvider>
+          <DrawerProvider>
+            <Events />
+          </DrawerProvider>
+        </ProjectProvider>
+      </I18nProvider>,
+    );
+    await waitFor(() => {
+      expect(urls.some((u) => u.startsWith('/v1/projects'))).toBe(true);
+    });
+    expect(urls.some((u) => u.startsWith('/v1/events'))).toBe(false);
+  });
+
+  it('/v1/projects упал → лента тоже не запрашивается (сужать нечем, но чужое возможно)', async () => {
+    const urls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        urls.push(String(url));
+        return Promise.resolve(jsonRes({ error: 'boom' }, 500));
+      }),
+    );
+    render(
+      <I18nProvider initialLang="en">
+        <ProjectProvider>
+          <DrawerProvider>
+            <Events />
+          </DrawerProvider>
+        </ProjectProvider>
+      </I18nProvider>,
+    );
+    await waitFor(() => {
+      expect(urls.some((u) => u.startsWith('/v1/projects'))).toBe(true);
+    });
+    // Список не приехал — проекты могут существовать, значит голый запрос
+    // показал бы чужое. Молчим (в шапке при этом висит чип-предупреждение).
+    expect(urls.some((u) => u.startsWith('/v1/events'))).toBe(false);
+  });
+
+  it('проектов нет вовсе (свежая установка) → лента ЗАПРАШИВАЕТСЯ и платформенные видны', async () => {
+    const urls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        const u = String(url);
+        urls.push(u);
+        if (u.startsWith('/v1/projects')) return Promise.resolve(jsonRes({ projects: [] }));
+        if (u.startsWith('/v1/events')) return Promise.resolve(jsonRes({ events: [platformEvent] }));
+        return Promise.resolve(jsonRes({}));
+      }),
+    );
+    render(
+      <I18nProvider initialLang="en">
+        <ProjectProvider>
+          <DrawerProvider>
+            <Events />
+          </DrawerProvider>
+        </ProjectProvider>
+      </I18nProvider>,
+    );
+    // Проект заводится только первым касанием (master ensureProject), и ровно
+    // в этом окне случаются платформенные события: создание ключа, бекап,
+    // серты. Сужать здесь нечем И НЕЧЕГО — чужих проектов не существует,
+    // поэтому голый запрос безопасен, а молчание спрятало бы единственное,
+    // что на установке вообще есть (приёмка «платформенные видны»).
+    await screen.findByText(/nightly/);
+    expect(urls).toContain('/v1/events?limit=500');
+    expect(within(rowOf(/nightly/)).getByText('platform')).toBeTruthy();
+  });
+
+  it('платформенное событие видно при выбранном проекте и ПОДПИСАНО (EN+RU)', async () => {
+    const urls: string[] = [];
+    stubFeedApi(urls, [gameEvent, arenaEvent, platformEvent]);
+    const en = render(
+      <I18nProvider initialLang="en">
+        <ProjectProvider>
+          <DrawerProvider>
+            <Events />
+          </DrawerProvider>
+        </ProjectProvider>
+      </I18nProvider>,
+    );
+    await screen.findByText(/nightly/);
+    // Платформенное событие остаётся видимым при выбранном проекте (сужение не
+    // скрывающее) — и подписано, иначе оператор прочтёт его как своё.
+    expect(within(rowOf(/nightly/)).getByText('platform')).toBeTruthy();
+    // Проектное событие подписи НЕ получает — иначе она ничего не значит.
+    expect(within(rowOf(/1\.0\.0/)).queryByText('platform')).toBeNull();
+    en.unmount();
+
+    render(
+      <I18nProvider initialLang="ru">
+        <ProjectProvider>
+          <DrawerProvider>
+            <Events />
+          </DrawerProvider>
+        </ProjectProvider>
+      </I18nProvider>,
+    );
+    await screen.findByText(/nightly/);
+    expect(within(rowOf(/nightly/)).getByText('платформенное')).toBeTruthy();
+  });
+
+  it('экран Событий: чужое событие из ЖИВОГО стрима в ленту не попадает, платформенное попадает', async () => {
+    const urls: string[] = [];
+    stubFeedApi(urls, [gameEvent]);
+    const live = makeLive();
+    render(
+      <I18nProvider initialLang="en">
+        <LiveContext.Provider value={live.value}>
+          <ProjectProvider>
+            <DrawerProvider>
+              <Events />
+            </DrawerProvider>
+          </ProjectProvider>
+        </LiveContext.Provider>
+      </I18nProvider>,
+    );
+    await waitFor(() => {
+      expect(screen.getByText(/1\.0\.0/)).toBeTruthy();
+    });
+    act(() => {
+      live.emit(arenaEvent);
+      live.emit(platformEvent);
+    });
+    // Стрим — единственный источник, который сервер панели не сужает: #999 сузил
+    // его по ПРИВЯЗКЕ КЛЮЧА, а сессия панели ходит непривязанным admin-ключом.
+    // Поэтому чужое отсекается на входе в список, платформенное остаётся.
+    expect(screen.queryByText(/9\.9\.9/)).toBeNull();
+    expect(screen.getByText(/nightly/)).toBeTruthy();
+  });
+
+  it('лента Обзора запрашивает события с ?project= и голой ленты не спрашивает', async () => {
+    const urls: string[] = [];
+    stubFeedApi(urls, [gameEvent, arenaEvent, platformEvent]);
+    render(
+      <I18nProvider initialLang="en">
+        <ProjectProvider>
+          <div>
+            <ProjectSelector />
+            <EventsFeed />
+          </div>
+        </ProjectProvider>
+      </I18nProvider>,
+    );
+    await waitFor(() => {
+      expect(urls).toContain('/v1/events?limit=40&project=game');
+    });
+    // Раньше первый запрос уходил, пока грузился /v1/projects, — чужое событие
+    // приезжало в браузер с полным payload, и прятал его только клиентский
+    // фильтр. «Не приезжают вовсе» значит, что такого запроса нет.
+    expect(bareFeedRequests(urls)).toEqual([]);
+    expect(screen.queryByText(/9\.9\.9/)).toBeNull();
+
+    fireEvent.change(await screen.findByRole('combobox', { name: 'Project' }), { target: { value: 'arena' } });
+    await waitFor(() => {
+      expect(urls).toContain('/v1/events?limit=40&project=arena');
+    });
+    expect(bareFeedRequests(urls)).toEqual([]);
+  });
+
+  // Лента Обзора — вторая лента, и правила у неё те же. Держим их под теми же
+  // утверждениями: без этого её половину диффа можно откатить незамеченной.
+
+  it('лента Обзора: чужое событие из ЖИВОГО стрима не попадает в окно, платформенное попадает', async () => {
+    const urls: string[] = [];
+    stubFeedApi(urls, [gameEvent]);
+    const live = makeLive();
+    render(
+      <I18nProvider initialLang="en">
+        <LiveContext.Provider value={live.value}>
+          <ProjectProvider>
+            <EventsFeed />
+          </ProjectProvider>
+        </LiveContext.Provider>
+      </I18nProvider>,
+    );
+    await waitFor(() => {
+      expect(screen.getByText(/1\.0\.0/)).toBeTruthy();
+    });
+    act(() => {
+      live.emit(arenaEvent);
+      live.emit(platformEvent);
+    });
+    // Отсев именно НА ВХОДЕ, а не в показе: иначе чужие события занимают места
+    // в окне FEED_CAP и вытесняют свои ещё до того, как их кто-то увидит.
+    expect(screen.queryByText(/9\.9\.9/)).toBeNull();
+    expect(screen.getByText(/nightly/)).toBeTruthy();
+  });
+
+  it('лента Обзора: платформенное событие подписано', async () => {
+    const urls: string[] = [];
+    stubFeedApi(urls, [gameEvent, platformEvent]);
+    render(
+      <I18nProvider initialLang="en">
+        <ProjectProvider>
+          <EventsFeed />
+        </ProjectProvider>
+      </I18nProvider>,
+    );
+    await screen.findByText(/nightly/);
+    expect(within(rowOf(/nightly/)).getByText('platform')).toBeTruthy();
+    expect(within(rowOf(/1\.0\.0/)).queryByText('platform')).toBeNull();
   });
 
   // Статистика — единственный экран, который НЕЛЬЗЯ сузить в браузере:
