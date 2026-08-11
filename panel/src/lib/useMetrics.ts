@@ -22,10 +22,47 @@ function isForbidden(e: unknown): boolean {
   return e instanceof ApiError && e.status === 403;
 }
 
+/**
+ * Машинный код жёсткой ошибки графика — `ApiError.code` (`unauthorized`,
+ * `bad_response`, `bad_data`/`metrics_error` от VM, `http_500`…), либо `null`,
+ * если запрос до master вообще не дошёл (`fetch` отверг: сеть/CORS, ApiError
+ * нет).
+ *
+ * КОД, а не `ApiError.message` (tracker #996). Сообщение собирается как
+ * `${code}: ${detail}`, где `detail` — свободная английская проза мастера или
+ * VictoriaMetrics; вложенное в `t('metric.error', {error})`, оно давало в
+ * русском интерфейсе строку вида `forbidden: key is bound to game/dev: raw
+ * query proxy is global-key only` — нарушение правила «панель 100% EN+RU, без
+ * сквозных строк мастера» (panel.md §1 п.6).
+ *
+ * Тип `string | null` сам по себе НЕ уже прежнего `string` — прозу в него
+ * можно положить, и компилятор смолчит. Инвариант «в UI едет токен, а не
+ * текст» держит не тип, а `errorCodeOf` ниже: один санитайзер на границе
+ * состояния вместо дисциплины каждого вызывающего.
+ */
+export type MetricErrorCode = string | null;
+
+/** Форма машинного токена: `unauthorized`, `bad_data`, `http_500`. */
+const CODE_TOKEN = /^[a-z][a-z0-9_]{0,39}$/;
+
+/**
+ * `ApiError` → код для показа. Код КЛАМПИТСЯ до формы токена, потому что
+ * «в `code` лежит код» — не гарантия, а надежда на форму чужого тела: у
+ * VM/Prometheus поле `error` это проза, и стоит хоть одному апстриму или
+ * будущему обработчику ошибиться конвертом, как в UI поедет предложение. Не
+ * прошло — показываем `http_<status>`: он всегда есть, всегда токен и всё ещё
+ * отвечает на вопрос «что именно вернулось».
+ */
+function errorCodeOf(e: unknown): MetricErrorCode {
+  if (!(e instanceof ApiError)) return null;
+  return CODE_TOKEN.test(e.code) ? e.code : `http_${e.status}`;
+}
+
 export interface QueryRangeState {
   status: MetricStatus;
   series: MetricSeries[] | null;
-  error: string;
+  /** Заполнен только при status='error'; см. MetricErrorCode. */
+  errorCode: MetricErrorCode;
 }
 
 interface UseQueryRangeOpts {
@@ -46,7 +83,7 @@ interface UseQueryRangeOpts {
 export function useQueryRange({ query, windowMs = 30 * 60_000, range, refreshMs = 15_000 }: UseQueryRangeOpts): QueryRangeState {
   const [status, setStatus] = useState<MetricStatus>('loading');
   const [series, setSeries] = useState<MetricSeries[] | null>(null);
-  const [error, setError] = useState('');
+  const [errorCode, setErrorCode] = useState<MetricErrorCode>(null);
 
   const rangeStart = range?.start;
   const rangeEnd = range?.end;
@@ -93,7 +130,11 @@ export function useQueryRange({ query, windowMs = 30 * 60_000, range, refreshMs 
           if (forbidden) stopPolling();
           setSeries((prev) => {
             if (prev === null) {
-              setError(e instanceof Error ? e.message : String(e));
+              // Только КОД, и только прошедший санитайзер: текст мастера или VM
+              // в состояние графика не попадает (tracker #996). Не-ApiError
+              // (fetch отверг запрос) кода не имеет — это null, у него свой
+              // текст «master недоступен».
+              setErrorCode(errorCodeOf(e));
               setStatus(forbidden ? 'forbidden' : 'error');
             }
             return prev;
@@ -111,7 +152,7 @@ export function useQueryRange({ query, windowMs = 30 * 60_000, range, refreshMs 
     };
   }, [query, windowMs, refreshMs, rangeStart, rangeEnd, isStatic]);
 
-  return { status, series, error };
+  return { status, series, errorCode };
 }
 
 export interface InstantState {

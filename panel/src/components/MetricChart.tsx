@@ -35,7 +35,7 @@ export function MetricChart({
   height = 150,
   refreshMs = 15_000,
 }: MetricChartProps) {
-  const { status, series, error: errorMsg } = useQueryRange({ query, windowMs, range, refreshMs });
+  const { status, series, errorCode } = useQueryRange({ query, windowMs, range, refreshMs });
 
   const aligned = useMemo(() => toAlignedData(series ?? []), [series]);
   const hasData = aligned.x.length > 0;
@@ -53,7 +53,7 @@ export function MetricChart({
         {status === 'ok' && hasData ? (
           <Plot aligned={aligned} unit={unit} height={height} />
         ) : (
-          <MetricMessage status={status} hasData={hasData} error={errorMsg} height={height} />
+          <MetricMessage status={status} hasData={hasData} errorCode={errorCode} height={height} />
         )}
       </div>
     </div>

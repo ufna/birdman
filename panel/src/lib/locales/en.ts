@@ -227,7 +227,14 @@ export const en = {
   'metric.loading': 'Loading metrics…',
   'metric.unconfigured': "Metrics aren't configured on this master (victoriametrics_url is empty).",
   'metric.unreachable': 'VictoriaMetrics is unavailable — no data right now.',
-  'metric.error': 'Metrics unavailable: {error}',
+  // Жёсткая ошибка графика. `{code}` — машинный код (ApiError.code), а НЕ
+  // сообщение мастера: до #996 сюда интерполировался `${code}: ${detail}` из
+  // тела ответа, то есть английская проза мастера/VM попадала на график в
+  // русском интерфейсе. Сам код не переводится намеренно — panel.md §1 п.6
+  // ставит сырые коды в один ряд с semver и id.
+  'metric.error': 'Metrics unavailable (error {code}).',
+  'metric.err.expired': 'The session has expired — sign in again to see metrics.',
+  'metric.err.offline': "Couldn't reach master — check the connection.",
   'metric.noData': 'No data for the selected period.',
   'metric.players': 'Players',
   'metric.tick': 'Tick, ms',

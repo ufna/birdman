@@ -140,6 +140,16 @@ type Unavailable = { kind: 'unavailable'; reason: 'unconfigured' | 'upstream' };
  */
 async function fetchVM(path: string, signal?: AbortSignal): Promise<Unavailable | { kind: 'body'; body: unknown }> {
   const res = await fetch(path, { credentials: 'same-origin', signal });
+  // 502/504 — мягкая недоступность НЕЗАВИСИМО от тела, и решается это ДО
+  // разбора JSON (tracker #996). Апстрим на этих кодах чаще всего отвечает не
+  // JSON'ом, а HTML-страницей шлюза: `JSON.parse` бросал раньше, чем дело
+  // доходило до проверки статуса, и самый частый в self-host случай «VM за
+  // nginx лёг» показывал `bad_response` вместо готового человеческого
+  // «VictoriaMetrics недоступна» (а до #996 — ещё и кусок этой HTML-страницы
+  // как текст ошибки).
+  if (res.status === 502 || res.status === 504) {
+    return { kind: 'unavailable', reason: 'upstream' };
+  }
   const text = await res.text();
   let body: unknown;
   try {
@@ -151,17 +161,25 @@ async function fetchVM(path: string, signal?: AbortSignal): Promise<Unavailable 
   if (res.status === 503 && errCode === 'metrics_unconfigured') {
     return { kind: 'unavailable', reason: 'unconfigured' };
   }
-  // VM настроена, но лежит/не отвечает — прокси отдаёт 502/504 upstream.
-  if (res.status === 502 || res.status === 504 || errCode === 'upstream' || errCode === 'bad_gateway') {
+  if (errCode === 'upstream' || errCode === 'bad_gateway') {
     return { kind: 'unavailable', reason: 'upstream' };
+  }
+  // Конверт VM разбираем ДО общей ветки `!res.ok` (tracker #996). У двух
+  // апстримов РАЗНАЯ форма ошибки, и поле `error` значит в них разное: у
+  // master это машинный код (`{"error":"internal","detail":"…"}`), у
+  // VM/Prometheus — человеческая ПРОЗА, а код лежит в `errorType`
+  // (`{"status":"error","errorType":"422","error":"cannot parse query: …"}`).
+  // Настоящая VM отвечает на отвергнутый запрос НЕ 200, а 422/400/503, то есть
+  // до перестановки эта проза читалась как код и уезжала в UI — ровно дефект
+  // #996, только через другую дверь. Master проксирует тело VM вербатим
+  // (`httpapi/ops.go`), так что различать формы обязана панель.
+  const vm = body as VMResponse | undefined;
+  if (vm?.status === 'error') {
+    throw new ApiError(res.status, vm.errorType ?? 'metrics_error', vm.error);
   }
   if (!res.ok) {
     const e = body as { error?: string; detail?: string } | undefined;
     throw new ApiError(res.status, e?.error ?? `http_${res.status}`, e?.detail);
-  }
-  const vm = body as VMResponse | undefined;
-  if (vm?.status === 'error') {
-    throw new ApiError(res.status, vm.errorType ?? 'metrics_error', vm.error);
   }
   return { kind: 'body', body };
 }

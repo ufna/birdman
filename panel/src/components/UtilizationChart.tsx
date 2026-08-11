@@ -28,7 +28,7 @@ export function UtilizationChart({
 }) {
   const { t } = useT();
   const query = serversByStateQuery();
-  const { status, series, error } = useQueryRange({ query, windowMs, refreshMs });
+  const { status, series, errorCode } = useQueryRange({ query, windowMs, refreshMs });
 
   const states = useMemo(() => utilizationSeriesModel(series ?? []), [series]);
   const aligned = useMemo(
@@ -53,7 +53,7 @@ export function UtilizationChart({
           </ul>
         </>
       ) : (
-        <MetricMessage status={status} hasData={hasData} error={error} height={height} />
+        <MetricMessage status={status} hasData={hasData} errorCode={errorCode} height={height} />
       )}
     </div>
   );

@@ -172,10 +172,13 @@ describe('MetricMessage: статус forbidden не отрисовываетс�
     expect(screen.getByText(/your key is bound to game\/dev/)).toBeTruthy();
   });
 
-  it('непривязанная → текст про скоуп; сырое сообщение мастера не подставляется', () => {
-    renderAs(<MetricMessage status="forbidden" hasData={false} error="forbidden: raw query proxy is global-key only" height={120} />, UNBOUND);
+  // Проп переименован в #996: раньше сюда приезжало `error` = ApiError.message
+  // (проза мастера), теперь — только машинный код. Сырое сообщение мастера
+  // подставить больше НЕЛЬЗЯ: тип его не принимает (проверку держит tsc, а
+  // содержательные тексты — metricMessage.test.tsx).
+  it('непривязанная → текст про скоуп, а не код ошибки', () => {
+    renderAs(<MetricMessage status="forbidden" hasData={false} errorCode="forbidden" height={120} />, UNBOUND);
     expect(screen.getByText(new RegExp(FORBIDDEN_EN.slice(0, 30)))).toBeTruthy();
-    expect(document.body.textContent).not.toContain('raw query proxy is global-key only');
   });
 });
 
