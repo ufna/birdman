@@ -136,7 +136,18 @@ func New(st *store.Store, log *slog.Logger) *Metrics {
 	m.agentlink = &agentlinkCollector{st: st, log: log}
 	reg.MustRegister(m.AllocDuration, m.AllocFailures, m.MMQueueDepth, m.MMTimeToMatch, m.MMTickets, m.DeployPrepull,
 		m.AgentlinkRegistriesWithheld, m.ImageRemovals)
-	reg.MustRegister(&dbCollector{st: st, log: log})
+	dbc := &dbCollector{st: st, log: log, allocFailures: m.AllocFailures}
+	reg.MustRegister(dbc)
+	// Нули заводятся СРАЗУ, а не только на скрейпе: коллекторы регистрируются
+	// по отдельности, и серии, созданные во время сбора, попали бы в выдачу лишь
+	// со следующего раза. Отказ аллокации между стартом и вторым скрейпом
+	// остался бы невидимым для increase() — ровно тот сценарий, который и чиним
+	// (после каждого рестарта master дыра взводилась заново).
+	func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		dbc.preinitAllocFailures(ctx)
+	}()
 	reg.MustRegister(m.agentlink)
 	reg.MustRegister(collectors.NewGoCollector())
 	reg.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
@@ -367,6 +378,63 @@ func (c *agentlinkCollector) Collect(ch chan<- prometheus.Metric) {
 type dbCollector struct {
 	st  *store.Store
 	log *slog.Logger
+	// allocFailures — тот же CounterVec, что инкрементят матчмейкер и allocate.
+	// Коллектор его НЕ эмитит (вектор зарегистрирован сам по себе), а только
+	// ПРЕ-ИНИЦИАЛИЗИРУЕТ нулями, см. preinitAllocFailures.
+	allocFailures *prometheus.CounterVec
+}
+
+// allocFailureReasons — закрытый набор причин отказа аллокации (он же в Help
+// самого счётчика). Держать список здесь приходится потому, что причина —
+// строковый лейбл, а не тип; добавил причину в коде — добавь сюда, иначе её
+// первый отказ снова станет невидимым для increase().
+var allocFailureReasons = []string{"no_capacity", "bad_request", "env_required", "internal"}
+
+// preinitAllocFailures заводит серии birdman_allocation_failures_total со
+// значением 0 для каждой пары (причина, проект).
+//
+// Зачем: счётчик живёт В ПАМЯТИ процесса, и серия пары рождается только в
+// момент первого отказа — сразу со значением 1. increase() по серии, которая
+// всегда читалась 1, даёт 0, поэтому BufferEmptyAllocFail и AllocationFailures
+// пропускали ПЕРВЫЙ отказ, а после каждого рестарта master дыра взводилась
+// заново. Явный ноль даёт increase() от чего расти.
+//
+// Источник проектов — БД на каждом скрейпе, а не хук на создание проекта:
+// коллектор и так ходит в базу, новый проект подхватывается сам, а мёртвая
+// серия исчезает вместе с рестартом. Кардинальность — причины × проекты,
+// то есть единицы серий, а не открытое множество.
+//
+// При сбое запроса не делаем НИЧЕГО (та же дисциплина, что у нулевой базы
+// событий и collectReadyZeros): выдуманный ноль после икоты базы для
+// increase() выглядит как сброс счётчика.
+func (c *dbCollector) preinitAllocFailures(ctx context.Context) {
+	if c.allocFailures == nil {
+		return
+	}
+	rows, err := c.st.Pool.Query(ctx, `select slug from projects`)
+	if err != nil {
+		c.log.Error("metrics: projects query failed", "err", err)
+		return
+	}
+	defer rows.Close()
+	var slugs []string
+	for rows.Next() {
+		var slug string
+		if err := rows.Scan(&slug); err != nil {
+			c.log.Error("metrics: projects scan failed", "err", err)
+			return
+		}
+		slugs = append(slugs, slug)
+	}
+	if err := rows.Err(); err != nil {
+		c.log.Error("metrics: projects rows failed", "err", err)
+		return
+	}
+	for _, slug := range slugs {
+		for _, reason := range allocFailureReasons {
+			c.allocFailures.WithLabelValues(reason, slug)
+		}
+	}
 }
 
 func (c *dbCollector) Describe(ch chan<- *prometheus.Desc) {
@@ -391,6 +459,10 @@ func (c *dbCollector) Describe(ch chan<- *prometheus.Desc) {
 func (c *dbCollector) Collect(ch chan<- prometheus.Metric) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+
+	// Нулевая база счётчика отказов аллокации — до всего остального: серии
+	// должны существовать ДО первого отказа, иначе increase() его не увидит.
+	c.preinitAllocFailures(ctx)
 
 	// Product + alert-feed metrics (ops.md §1). Each logs-and-continues so one
 	// failed query does not blank the rest.

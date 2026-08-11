@@ -321,3 +321,33 @@ tests:
               summary: 'BufferEmpty(non-prod): проект game, окружение dev, регион eu без ready-серверов'
               description: 'sum(birdman_servers{state="ready", production="false"}) == 0 for a (region, project, env) triple for longer than the threshold (ops.md §1 BufferEmpty). Grouping by env is required: dev and staging share the production=false slice, and an empty ready buffer in one would be masked by servers of the other.'
               description_ru: 'sum(birdman_servers{state="ready", production="false"}) == 0 по тройке (регион, проект, окружение) дольше порога (ops.md §1 BufferEmpty). Окружение в группировке обязательно: dev и staging живут в одном срезе production=false, и пустой ready-буфер одного маскировался бы серверами другого.'
+
+  # tracker #966: счётчик отказов аллокации живёт в памяти процесса, поэтому без
+  # пре-инициализации серия рождалась сразу со значением 1 — increase() по ней
+  # даёт 0, и ПЕРВЫЙ отказ (а после каждого рестарта master — снова первый)
+  # алерт не видел.
+  #
+  # Шаг 30с намеренно: окно правила [1m], и при шаге 1м в него попадала бы одна
+  # точка, по которой increase() не считается вовсе. Проверяем на целой минуте —
+  # правила вычисляются на границах интервала группы.
+  - interval: 30s
+    name: 'первый отказ аллокации виден только с нулевой базой'
+    input_series:
+      # БЕЗ пре-инициализации: серия родилась со значением 1 — роста нет.
+      - series: 'birdman_allocation_failures_total{reason="no_capacity",project="lonely"}'
+        values: '_ _ 1 1 1 1 1 1'
+      # С нулевой базой: 0 → 1, рост виден.
+      - series: 'birdman_allocation_failures_total{reason="no_capacity",project="game"}'
+        values: '0 0 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: BufferEmptyAllocFail
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              project: game
+              reason: no_capacity
+            exp_annotations:
+              summary: 'BufferEmpty: проект game, no_capacity аллокаций за 1м: 1'
+              description: 'No free slots available for allocation (ops.md §1 BufferEmpty).'
+              description_ru: 'Нет свободных слотов под аллокацию (ops.md §1 BufferEmpty).'

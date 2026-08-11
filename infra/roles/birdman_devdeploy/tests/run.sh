@@ -316,5 +316,29 @@ grep -q '^agent:' "$T/state/rejected" 2>/dev/null && no "фоллбэк отве
 grep -q 'birdman_devdeploy_agents_behind 0' "$T/textfile/birdman-devdeploy.prom" 2>/dev/null &&
   ok "дрейфа нет — цепочка дошла" || no "дрейф остался при рабочем фоллбэке"
 
+# Регрессия из ревью #982: пустой redirect_url бывает по ДВУМ разным причинам, и
+# путать их нельзя. Реестр недоступен (curl вернул ненулевой код) → отдать
+# прямую ссылку значит послать агенту заведомо нерабочий адрес: он не скачает,
+# не перепредставится, словит таймаут — и ИСПРАВНАЯ сборка уедет в rejected
+# навсегда. Транзиентный сбой сети не имеет права отвергать сборку.
+setup "агенты: реестр НЕДОСТУПЕН — версия не отвергается"
+fleet
+python3 - "$T/bin/curl" <<'PYSTUB'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+old = """  */v2/*/blobs/*)"""
+new = """  */v2/*/blobs/*)
+    # реестр лежит: ненулевой код, пустое тело — как curl -f на 5xx/сети
+    [ -n "$want_redirect" ] && exit 7"""
+assert old in s
+open(p, "w").write(s.replace(old, new, 1))
+PYSTUB
+run
+[ ! -f "$T/upgrades.log" ] && ok "команда с нерабочей ссылкой не ушла" || no "агенту ушла ссылка при лежащем реестре"
+grep -q '^agent:' "$T/state/rejected" 2>/dev/null && no "сбой сети отверг исправную сборку" || ok "версия НЕ отвергнута при недоступном реестре"
+grep -q 'birdman_devdeploy_agents_behind 2' "$T/textfile/birdman-devdeploy.prom" 2>/dev/null &&
+  ok "дрейф виден — человек узнает" || no "дрейф не отражён"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
