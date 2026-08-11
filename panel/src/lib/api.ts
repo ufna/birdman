@@ -554,6 +554,10 @@ export const api = {
     request<{ node: NodeInfo }>('POST', `/v1/nodes/${encodeURIComponent(id)}/drain`).then((r) => r.node),
   undrainNode: (id: string) =>
     request<{ node: NodeInfo }>('POST', `/v1/nodes/${encodeURIComponent(id)}/undrain`).then((r) => r.node),
+  /** Вывод ноды из флота навсегда: state → dead. 409, если у ноды есть живые
+   *  дедики — такую выводит drain, ревокация оборвала бы матч. */
+  revokeNode: (id: string) =>
+    request<{ node: NodeInfo }>('POST', `/v1/nodes/${encodeURIComponent(id)}/revoke`).then((r) => r.node),
 
   // --- П2: статистика / cost (скоуп readonly) ---
 

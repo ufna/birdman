@@ -204,6 +204,76 @@ func (s *Store) GetNode(ctx context.Context, id string) (Node, error) {
 	return n, nil
 }
 
+// RevokeNode retires a node for good (POST /v1/nodes/{id}/revoke): state → `dead`.
+//
+// Это ЕДИНСТВЕННЫЙ путь в `dead` — автоматика туда не переводит никогда, она
+// доводит молчащую ноду только до `down` (MarkDownNodes). Ревокация означает
+// «бокса больше нет, перестань за ним следить», и у неё три следствия, ради
+// которых она и нужна:
+//   - окружение перестаёт блокировать sweep снятия образов: его выборка смотрит
+//     `n.state = 'down'` (versions.go), `dead` туда не попадает, и живые ноды
+//     окружения снова чистят диски;
+//   - метрики мёртвой ноды больше не эмитятся (`state <> 'dead'` в выборках
+//     heartbeat-age и cert-expiry), поэтому NodeDown/CertExpiry перестают гореть
+//     вечно и не маскируют настоящий отказ;
+//   - панель убирает ноду из списка по умолчанию.
+//
+// Строку НЕ удаляем: `servers.node_id references nodes(id)`, каскад унёс бы
+// историю матчей вместе с нодой.
+//
+// Предусловие — нет живых серверов (creating/ready/allocated/draining), иначе
+// ErrConflict: ревокация ноды с живым матчем оборвала бы игру, для вывода живой
+// ноды есть drain. Идемпотентна: повтор на `dead` возвращает ноду без второго
+// события (панель может отправить дважды, ретрай не должен плодить историю).
+//
+// Воскрешения бояться не нужно: Hello поднимает состояние только из
+// `quarantine|down` (heartbeat.go), `dead` он не трогает.
+func (s *Store) RevokeNode(ctx context.Context, nodeID string) (Node, error) {
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return Node{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	var cur, hostname, region, env string
+	err = tx.QueryRow(ctx, `
+		select state, hostname, region, env from nodes where id = $1::uuid for update`,
+		nodeID).Scan(&cur, &hostname, &region, &env)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Node{}, fmt.Errorf("node %s: %w", nodeID, ErrNotFound)
+	}
+	if err != nil {
+		return Node{}, err
+	}
+	if cur == "dead" {
+		return s.GetNode(ctx, nodeID)
+	}
+
+	var live bool
+	if err := tx.QueryRow(ctx, `
+		select exists(select 1 from servers
+		              where node_id = $1::uuid
+		                and state in ('creating','ready','allocated','draining'))`,
+		nodeID).Scan(&live); err != nil {
+		return Node{}, err
+	}
+	if live {
+		return Node{}, fmt.Errorf("node %s has live servers, drain it first: %w", nodeID, ErrConflict)
+	}
+
+	if _, err := tx.Exec(ctx, `update nodes set state = 'dead' where id = $1::uuid`, nodeID); err != nil {
+		return Node{}, err
+	}
+	if err := insertEvent(ctx, tx, EventNodeRevoked, EventRef{NodeID: &nodeID},
+		map[string]any{"from": cur, "hostname": hostname, "region": region, "env": env}); err != nil {
+		return Node{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Node{}, err
+	}
+	return s.GetNode(ctx, nodeID)
+}
+
 // DrainNode marks a node draining (итерация 4, docs/specs/master.md §6): the
 // reconcile loop stops placing new servers on it and reaps its ready buffer,
 // while allocated servers play their matches out. Idempotent; a node_drain

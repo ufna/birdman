@@ -113,6 +113,12 @@ const (
 	EventNodeRecovered  = "node_recovered"
 	EventNodeDrain      = "node_drain"   // admin drained a node (итерация 4)
 	EventNodeUndrain    = "node_undrain" // admin lifted a node drain (итерация 4)
+	// EventNodeRevoked — нода выведена из флота навсегда (POST
+	// /v1/nodes/{id}/revoke): state → dead. Payload {from, hostname, region, env}.
+	// Единственный путь в `dead`: автоматика туда не переводит НИКОГДА — она
+	// доводит молчащую ноду только до `down` (EventNodeDown). Строка ноды
+	// остаётся: на неё ссылается история серверов и матчей.
+	EventNodeRevoked = "node_revoked"
 	// EventNodeEnvChanged — нода переведена в другое окружение (environments v1,
 	// PATCH /v1/nodes/{id} {env}). Payload {from, to}. Разрешён только пустой
 	// ноде в любом стейте, кроме dead (§2).

@@ -75,6 +75,30 @@ func (s *Server) setNodeDrain(w http.ResponseWriter, r *http.Request, drain bool
 	writeJSON(w, http.StatusOK, map[string]any{"node": node})
 }
 
+// handleRevokeNode retires a node for good: state → `dead` (store.RevokeNode).
+// Единственный путь в `dead` — до него состояние доводилось только SQL-ом на
+// боксе. 409, если у ноды есть живые серверы: живую ноду выводит drain, а
+// ревокация оборвала бы идущий матч. Повтор на уже мёртвой ноде — 200 без
+// второго события.
+//
+// Агенту НИЧЕГО не шлём, в отличие от drain: ревокация — заявление «этого бокса
+// больше нет». Если он всё-таки жив и переподключится, Hello не воскресит его
+// (heartbeat поднимает только из quarantine|down), а команда в очереди мёртвой
+// ноды копилась бы впустую.
+func (s *Server) handleRevokeNode(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := uuid.Parse(id); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "node id must be a uuid")
+		return
+	}
+	node, err := s.st.RevokeNode(r.Context(), id)
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"node": node})
+}
+
 // --- server logs proxy (итерация 4, docs/specs/agent.md §5) ---
 
 // handleServerLogs proxies a dedicated-server log stream from the owning node's

@@ -78,6 +78,9 @@ func New(st *store.Store, m *metrics.Metrics, mm *matchmaker.Matchmaker, dep *de
 	s.mux.HandleFunc("GET /v1/nodes", s.requireScope(ScopeReadonly, s.handleListNodes))
 	s.mux.HandleFunc("POST /v1/nodes/{id}/drain", s.requireScope(ScopeAdmin, s.handleDrainNode))
 	s.mux.HandleFunc("POST /v1/nodes/{id}/undrain", s.requireScope(ScopeAdmin, s.handleUndrainNode))
+	// Вывод ноды из флота навсегда: state → dead (ops.go). Отдельный глагол, а не
+	// DELETE: строка ноды остаётся (на неё ссылается история серверов и матчей).
+	s.mux.HandleFunc("POST /v1/nodes/{id}/revoke", s.requireScope(ScopeAdmin, s.handleRevokeNode))
 	// Move a node to another environment (environments v1 §2, environments.go).
 	s.mux.HandleFunc("PATCH /v1/nodes/{id}", s.requireScope(ScopeAdmin, s.handleSetNodeEnv))
 	// Public internal-CA cert bundle (mTLS agentlink v1, ca.go) — ansible

@@ -148,12 +148,21 @@ describe('Fleet — перевод ноды в другое окружение (
     expect((await screen.findByRole('alert')).textContent).toContain('env is required');
   });
 
-  it('dead-нода → кнопки перевода нет', async () => {
+  // Выведенная нода скрыта по умолчанию (иначе «убрать её» из панели по-прежнему
+  // невозможно), но не исчезает бесследно: чекбокс возвращает её, и действий у
+  // неё по-прежнему нет — мастер откажет и в переводе, и в дрейне.
+  it('dead-нода скрыта, чекбокс её возвращает — и действий у неё нет', async () => {
     vi.stubGlobal('fetch', fleetFetch([mkNode({ id: 'n1', env: 'dev', state: 'dead', hostname: 'dead-1' })], []));
     renderFleet(baseEnv);
+
+    const toggle = await screen.findByRole('checkbox', { name: /Show 1 retired/ });
+    expect(screen.queryByText('dead-1')).toBeNull();
+
+    fireEvent.click(toggle);
     expect(await screen.findByText('dead-1')).toBeTruthy();
     expect(screen.queryByRole('button', { name: /Move to env/ })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Drain' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Retire' })).toBeNull();
   });
 
   it('список окружений пуст/недоступен → переводить некуда, кнопки нет', async () => {

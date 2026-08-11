@@ -65,12 +65,22 @@ export function Fleet() {
     return m;
   }, [servers.data]);
 
-  const sortedNodes = useMemo(
+  // Выведенные из флота (dead) по умолчанию скрыты: это ноды, про которые
+  // оператор уже сказал «бокса нет», и держать их в списке вечно — то же, что
+  // не иметь возможности их убрать. Скрываем ТОЛЬКО dead: down и quarantine
+  // остаются на виду, их оператор как раз и должен видеть.
+  const [showRetired, setShowRetired] = useState(false);
+  const allNodes = useMemo(
     () =>
       keepForEnv([...(nodes.data ?? [])], selected, (n) => n.env).sort(
         (a, b) => a.region.localeCompare(b.region) || a.hostname.localeCompare(b.hostname),
       ),
     [nodes.data, selected],
+  );
+  const retiredCount = useMemo(() => allNodes.filter((n) => n.state === 'dead').length, [allNodes]);
+  const sortedNodes = useMemo(
+    () => (showRetired ? allNodes : allNodes.filter((n) => n.state !== 'dead')),
+    [allNodes, showRetired],
   );
 
   const columns = useMemo<ColumnDef<NodeInfo, unknown>[]>(
@@ -168,7 +178,26 @@ export function Fleet() {
     <Card>
       <CardHeader
         title={t('nav.fleet')}
-        aside={<span className="font-mono text-xs text-muted">{tp('fleet.nodesCount', sortedNodes.length)}</span>}
+        aside={
+          <div className="flex items-center gap-3">
+            {/* Чекбокс появляется только когда выведенные ноды есть: иначе он
+                предлагал бы показать пустоту и мозолил глаза на здоровом флоте. */}
+            {retiredCount > 0 && (
+              <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted">
+                <input
+                  type="checkbox"
+                  checked={showRetired}
+                  onChange={(e) => {
+                    setShowRetired(e.target.checked);
+                  }}
+                  className="size-3.5 accent-[var(--accent)]"
+                />
+                {tp('fleet.showRetired', retiredCount)}
+              </label>
+            )}
+            <span className="font-mono text-xs text-muted">{tp('fleet.nodesCount', sortedNodes.length)}</span>
+          </div>
+        }
       />
       {nodes.data === undefined ? (
         <LoadingRow />
@@ -232,6 +261,23 @@ function NodeActions({ node, onDone }: { node: NodeInfo; onDone: () => void }) {
       }}
       className="flex justify-end gap-2"
     >
+      {/* Вывод из флота — только у ноды, которая уже не работает: active-ноду
+          сначала выводят дрейном (иначе ревокация обрывает живые матчи, и мастер
+          всё равно ответит 409). Тон dead: действие терминальное, обратного
+          пути из панели нет. */}
+      {node.state !== 'active' && (
+        <ConfirmButton
+          label={t('fleet.revoke')}
+          tone="dead"
+          title={t('fleet.revoke.title', { host: node.hostname })}
+          description={t('fleet.revoke.desc')}
+          confirmLabel={t('fleet.revoke')}
+          onConfirm={async () => {
+            await api.revokeNode(node.id);
+            onDone();
+          }}
+        />
+      )}
       {moveTargets.length > 0 && <MoveEnvDialog node={node} targets={moveTargets} onDone={onDone} />}
       {draining ? (
         <ConfirmButton
