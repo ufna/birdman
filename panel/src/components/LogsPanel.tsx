@@ -73,6 +73,10 @@ function LogsHistory({ serverId }: { serverId: string }) {
   const [reloadKey, setReloadKey] = useState(0);
   const [state, setState] = useState<HistoryState>({ status: 'loading' });
   const [loadingMore, setLoadingMore] = useState(false);
+  // Ошибка ИМЕННО «показать ещё»: раньше она глоталась молча и кнопка просто
+  // переставала работать без объяснения (tracker #1000). Отдельно от state,
+  // потому что уже показанные строки при этом остаются на экране.
+  const [moreError, setMoreError] = useState<Error | null>(null);
 
   // Guard от гонки устаревшего ответа (тот же idiom, что screens/Logs.tsx):
   // монотонный счётчик поколений, ОБЩИЙ для основной загрузки истории и
@@ -84,6 +88,7 @@ function LogsHistory({ serverId }: { serverId: string }) {
   useEffect(() => {
     const seq = ++seqRef.current;
     setState({ status: 'loading' });
+    setMoreError(null);
     const start = Math.floor(Date.now() / 1000) - rangeSec;
     queryLogs({ query: serverHistoryQuery(serverId, appliedText), start, limit: HISTORY_LIMIT })
       .then((res) => {
@@ -112,6 +117,7 @@ function LogsHistory({ serverId }: { serverId: string }) {
     // страницы (floor+(-1) молча топил строки между границей и oldest).
     const end = new Date(oldest.time).getTime() / 1000;
     setLoadingMore(true);
+    setMoreError(null);
     queryLogs({ query: serverHistoryQuery(serverId, appliedText), start, end, limit: HISTORY_LIMIT })
       .then((res) => {
         setLoadingMore(false);
@@ -123,9 +129,12 @@ function LogsHistory({ serverId }: { serverId: string }) {
             : prev,
         );
       })
-      .catch(() => {
+      .catch((e: unknown) => {
         setLoadingMore(false);
-        // Тихо: уже показанные строки остаются, ошибку «показать ещё» не эскалируем.
+        if (seq !== seqRef.current) return; // страница протухла — её ошибка тоже
+        // Уже показанные строки остаются, но отказ НАЗЫВАЕМ: молчащая кнопка
+        // неотличима от сломанной панели (tracker #1000).
+        setMoreError(e instanceof Error ? e : new Error(String(e)));
       });
   };
 
@@ -194,6 +203,7 @@ function LogsHistory({ serverId }: { serverId: string }) {
               </div>
             ))}
           </div>
+          {moreError !== null && <ErrorNote error={moreError} retry={loadMore} />}
           {state.hasMore && (
             <button
               type="button"

@@ -82,6 +82,10 @@ export const en = {
 
   // — shared UI blocks —
   'ui.err.forbidden': 'Access denied: you need a key with the readonly or admin scope.',
+  // Отказ по ПРИВЯЗКЕ ключа, а не по скоупу (tracker #1000). Говорим про ключ,
+  // а не «эти данные вам недоступны навсегда»: серверное сужение (#994) вернёт
+  // привязанному оператору его собственные данные.
+  'ui.err.boundKey': 'Request refused: your key is bound to {project}/{env} and has no access to this data.',
   'ui.err.loadFailed': "Couldn't load data: {detail}",
 
   // — table column headers (shared) —

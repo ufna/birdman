@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { ApiError } from '../lib/api';
 import { useT } from '../lib/i18n';
+import { useBindingRefusal } from '../lib/session';
 
 export function Card({ children, className = '' }: { children: ReactNode; className?: string }) {
   return (
@@ -68,8 +69,13 @@ export function LiveValue({ value }: { value: string | number }) {
 
 export function ErrorNote({ error, retry }: { error: Error; retry?: () => void }) {
   const { t } = useT();
+  // 403 объясняем по СЕССИИ, а не догадкой: привязан ключ — причина привязка,
+  // иначе прежний текст про скоуп (tracker #1000, lib/session.tsx).
+  const bound = useBindingRefusal();
   const detail =
-    error instanceof ApiError && error.status === 403 ? t('ui.err.forbidden') : error.message;
+    error instanceof ApiError && error.status === 403
+      ? (bound ?? t('ui.err.forbidden'))
+      : error.message;
   return (
     <div className="flex items-center justify-between gap-3 rounded-lg bg-dead-bg px-4 py-2.5 text-sm text-dead">
       <span>{t('ui.err.loadFailed', { detail })}</span>

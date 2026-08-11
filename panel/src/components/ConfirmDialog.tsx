@@ -8,6 +8,7 @@ import * as AlertDialog from '@radix-ui/react-alert-dialog';
 import { ApiError } from '../lib/api';
 import { useT } from '../lib/i18n';
 import type { I18nContextValue } from '../lib/i18n';
+import { useBindingRefusal } from '../lib/session';
 
 export type ActionTone = 'accent' | 'dead';
 
@@ -46,6 +47,11 @@ export function ConfirmButton({
   errorOverride,
 }: ConfirmButtonProps) {
   const { t } = useT();
+  // 403 в диалоге действия — тот же класс лжи, что чинит #1000 на чтениях:
+  // «Недостаточно прав для этого действия» привязанному ключу называет скоуп,
+  // хотя отказ пришёл по привязке (`requireBinding` — deploy/rollback/promote,
+  // master §6). Привязанный ключ с deploy достигает этих кнопок штатно.
+  const bound = useBindingRefusal();
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -60,7 +66,7 @@ export function ConfirmButton({
       })
       .catch((e: unknown) => {
         setPending(false);
-        setError(errorOverride?.(e) ?? errMessage(e, t));
+        setError(errorOverride?.(e) ?? errMessage(e, t, bound));
       });
   };
 
@@ -128,9 +134,12 @@ export function ConfirmButton({
   );
 }
 
-function errMessage(e: unknown, t: I18nContextValue['t']): string {
+/** `bound` — текст отказа по привязке (useBindingRefusal) или undefined у
+ *  непривязанного ключа; во втором случае остаётся прежний
+ *  `confirm.err.forbidden` про права — текст ДЕЙСТВИЯ, а не чтения. */
+function errMessage(e: unknown, t: I18nContextValue['t'], bound: string | undefined): string {
   if (e instanceof ApiError) {
-    if (e.status === 403) return t('confirm.err.forbidden');
+    if (e.status === 403) return bound ?? t('confirm.err.forbidden');
     if (e.status === 409) return e.detail ?? t('confirm.err.conflict');
     return e.detail !== undefined ? `${e.code}: ${e.detail}` : e.code;
   }

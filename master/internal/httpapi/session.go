@@ -14,8 +14,9 @@ import (
 
 // Browser session auth for the panel (docs/specs/panel.md §1 п.5):
 // POST /v1/session exchanges an API key for an HttpOnly cookie; the session
-// lives in master memory (TTL 24h) and inherits the key's scopes. A master
-// restart drops sessions — the panel falls back to the login screen.
+// lives in master memory (TTL 24h) and inherits the key WHOLE — scopes and the
+// (project, env) binding alike, so both are reported back (sessionResponse).
+// A master restart drops sessions — the panel falls back to the login screen.
 //
 // CSRF: SameSite=Lax already blocks cross-site POSTs; on top of that every
 // non-GET request authenticated by cookie must carry the custom header
@@ -103,6 +104,49 @@ type createSessionRequest struct {
 	APIKey string `json:"api_key"`
 }
 
+// sessionBinding — привязка ключа (project, env) в ответе сессии.
+type sessionBinding struct {
+	Project string `json:"project"`
+	Env     string `json:"env"`
+}
+
+// sessionResponse — тело POST/GET /v1/session. Binding ADDITIVE (tracker #1000):
+// у глобального/admin-ключа поле отсутствует целиком, то есть для клиента,
+// написанного до #1000, тело не изменилось. Отдаём вложенным объектом, а не
+// плоскими project/env: наличие ОДНОГО поля = «ключ привязан», клиенту не надо
+// разбирать полупару, и верхний уровень не занимается словом project, у
+// которого в панели уже есть другое значение (выбранный проект).
+//
+// Зачем это вообще: сессия наследует ключ ЦЕЛИКОМ (create ниже кладёт весь
+// store.APIKey), поэтому привязка гейтит запросы панели (#974, #988, #990), а
+// панель о ней не знала — и любой 403 объясняла единственным, что видела,
+// скоупами («нужен ключ со скоупом readonly или admin») даже привязанному
+// readonly-ключу, у которого readonly есть. Диагностика без этого поля
+// принципиально не может быть честной.
+type sessionResponse struct {
+	Scopes  []string        `json:"scopes"`
+	Name    string          `json:"name"`
+	Binding *sessionBinding `json:"binding,omitempty"`
+}
+
+// sessionResponseFor описывает ключ так, как его видит панель.
+// Полупара (Project задан, Env nil) недостижима при живом CHECK
+// api_keys_binding_all_or_nothing, но достижима по схеме; такой ключ
+// keyAllowed не пропускает НИКУДА, поэтому он именно привязан — отдаём
+// binding с пустым env, а не «глобальный» (иначе панель объявила бы
+// безвыходно запертый ключ свободным).
+func sessionResponseFor(key store.APIKey) sessionResponse {
+	resp := sessionResponse{Scopes: key.Scopes, Name: key.Name}
+	if key.Project != nil {
+		env := ""
+		if key.Env != nil {
+			env = *key.Env
+		}
+		resp.Binding = &sessionBinding{Project: *key.Project, Env: env}
+	}
+	return resp
+}
+
 // handleCreateSession is the panel login: verify the API key, set the
 // session cookie, return the granted scopes for the UI.
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
@@ -128,18 +172,18 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.SetCookie(w, sessionCookieFor(id, int(sessionTTL.Seconds()), requestIsHTTPS(r)))
-	writeJSON(w, http.StatusOK, map[string]any{"scopes": key.Scopes, "name": key.Name})
+	writeJSON(w, http.StatusOK, sessionResponseFor(key))
 }
 
-// handleGetSession reports the caller's scopes (cookie or bearer) — the
-// panel probes it on load to skip the login screen.
+// handleGetSession reports the caller's scopes and key binding (cookie or
+// bearer) — the panel probes it on load to skip the login screen.
 func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 	key, _, ok := s.auth.authenticate(r)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "no active session")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"scopes": key.Scopes, "name": key.Name})
+	writeJSON(w, http.StatusOK, sessionResponseFor(key))
 }
 
 // handleDeleteSession is logout: idempotent, always clears the cookie.

@@ -66,6 +66,7 @@ export const ru: Record<MessageKey, string> = {
 
   // — общие блоки UI —
   'ui.err.forbidden': 'Не хватает прав: нужен ключ со скоупом readonly или admin.',
+  'ui.err.boundKey': 'Запрос отклонён: ключ привязан к {project}/{env} и не имеет доступа к этим данным.',
   'ui.err.loadFailed': 'Не удалось загрузить данные: {detail}',
 
   // — заголовки колонок (общие) —

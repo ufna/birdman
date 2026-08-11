@@ -7,6 +7,20 @@ export type Scope = 'admin' | 'deploy' | 'matchmaking' | 'allocate' | 'readonly'
 export interface SessionInfo {
   scopes: Scope[];
   name: string;
+  /**
+   * Привязка ключа, которым вошли (master §6 «Сессия сообщает привязку ключа»,
+   * tracker #1000). Отсутствует у глобального/admin-ключа — поле additive, у
+   * master'а до #1000 его нет вовсе, поэтому проверять надо наличие, а не
+   * пустоту. Панель по нему называет ЧЕСТНУЮ причину 403: привязанный ключ
+   * гейтится не скоупом (readonly у него есть), а привязкой.
+   *
+   * Тип — тот же `KeyBinding` (объявлен ниже, рядом с `ApiKey`), что и у
+   * создания ключа: одна сущность — один тип. Форма записи при этом РАЗНАЯ:
+   * `/v1/apikeys` кладёт `project`/`env` плоско в тело ключа, сессия — во
+   * вложенное `binding`. См. `docs/specs/master.md`, абзац «Сессия сообщает
+   * привязку ключа», там эта цена названа.
+   */
+  binding?: KeyBinding;
 }
 
 export interface NodeInfo {

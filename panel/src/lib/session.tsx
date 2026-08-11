@@ -6,7 +6,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { api, ApiError } from './api';
-import type { SessionInfo } from './api';
+import type { KeyBinding, SessionInfo } from './api';
+import { useT } from './i18n';
 import type { I18nContextValue } from './i18n';
 
 interface SessionContextValue {
@@ -96,6 +97,44 @@ export function canDeploy(s: SessionInfo): boolean {
 /** true, если сессия admin — гейтит операции с тачкой (Drain/Undrain). */
 export function canAdmin(s: SessionInfo): boolean {
   return s.scopes.includes('admin');
+}
+
+/**
+ * Привязка ключа текущей сессии или undefined, если ключ глобальный (а также
+ * пока сессия не загружена / её нет). Master отдаёт поле только привязанному
+ * ключу — master.md §6 «Сессия сообщает привязку ключа».
+ */
+export function useKeyBinding(): KeyBinding | undefined {
+  return useSession().session?.binding;
+}
+
+/**
+ * Текст отказа 403 ПО ПРИВЯЗКЕ — или undefined, если ключ сессии не привязан
+ * (tracker #1000).
+ *
+ * До #1000 панель знала о сессии только скоупы и потому объясняла ЛЮБОЙ 403
+ * нехваткой скоупа: привязанному readonly-ключу она говорила «нужен ключ со
+ * скоупом readonly или admin», хотя readonly у него есть, — локализованный, но
+ * ложный диагноз. Теперь причина берётся из сессии.
+ *
+ * Возвращает undefined, а НЕ готовый запасной текст, нарочно: у каждой
+ * поверхности свой правильный запасной вариант. У чтений это `ui.err.forbidden`
+ * («нужен readonly или admin»), у диалога действия — `confirm.err.forbidden`
+ * («недостаточно прав для этого действия»), и подставить туда первый значило бы
+ * заменить одну ложь другой: действию нужен deploy/admin, а не readonly.
+ * Поэтому вызывающий пишет `useBindingRefusal() ?? t(<свой ключ>)`.
+ *
+ * Формулировка намеренно говорит про КЛЮЧ, а не про «логи/метрики привязанным
+ * недоступны»: серверное сужение (#994) вернёт привязанному оператору его
+ * собственные данные, и текст обязан пережить это, не превратившись во вторую
+ * ложь.
+ */
+export function useBindingRefusal(): string | undefined {
+  const { t } = useT();
+  const binding = useKeyBinding();
+  return binding === undefined
+    ? undefined
+    : t('ui.err.boundKey', { project: binding.project, env: binding.env });
 }
 
 /** Человеческое сообщение об ошибке логина (локализуется через переданный t). */
