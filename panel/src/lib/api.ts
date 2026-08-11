@@ -110,6 +110,29 @@ export interface EnvironmentUsage {
   api_keys: number;
 }
 
+/** Состав проекта (GET /v1/projects/{slug}/usage). `nodes` считает только живые:
+ *  выведенные каскадятся вместе с проектом и удалению не мешают. */
+export interface ProjectUsage {
+  environments: number;
+  versions: number;
+  fleets: number;
+  nodes: number;
+  servers: number;
+  matches: number;
+  api_keys: number;
+}
+
+/** Тело ответа 200 у DELETE непустого проекта — что именно снёс каскад. */
+export interface ProjectDeleted {
+  slug: string;
+  environments: number;
+  versions: number;
+  fleets: number;
+  matches: number;
+  servers: number;
+  api_keys_revoked: number;
+}
+
 /** Тело ответа 200 у DELETE непустого окружения — что именно снёс каскад. */
 export interface EnvironmentDeleted {
   name: string;
@@ -475,7 +498,7 @@ export function qs(params: Record<string, string | number | undefined>): string 
   return parts.length > 0 ? `?${parts.join('&')}` : '';
 }
 
-async function request<T>(method: 'GET' | 'POST' | 'PATCH' | 'DELETE', path: string, body?: unknown): Promise<T> {
+async function request<T>(method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE', path: string, body?: unknown): Promise<T> {
   const headers: Record<string, string> = {};
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   // SameSite=Lax + кастомный заголовок — CSRF-защита v0 (master session.go).
@@ -576,6 +599,24 @@ export const api = {
 
   /** Список проектов (readonly), старейший первым — источник селектора проекта. */
   listProjects: () => request<{ projects: ProjectInfo[] }>('GET', '/v1/projects').then((r) => r.projects),
+  /** Явное создание проекта (admin): 409, если слаг занят. В отличие от
+   *  upsertProject, который на опечатке молча перезаписал бы чужой match_size. */
+  createProject: (slug: string, matchSize: number) =>
+    request<{ project: ProjectInfo }>('POST', '/v1/projects', { slug, match_size: matchSize }).then((r) => r.project),
+  /** Правка размера матча (admin). Тот же PUT, что и раньше. */
+  upsertProject: (slug: string, matchSize: number) =>
+    request<{ project: ProjectInfo }>('PUT', `/v1/projects/${encodeURIComponent(slug)}`, {
+      match_size: matchSize,
+    }).then((r) => r.project),
+  /** Состав проекта (admin) — показывается в диалоге удаления ДО подтверждения. */
+  projectUsage: (slug: string) =>
+    request<{ usage: ProjectUsage }>('GET', `/v1/projects/${encodeURIComponent(slug)}/usage`).then((r) => r.usage),
+  /** Удалить проект вместе с содержимым (admin): 409, пока есть живые ноды;
+   *  непустой требует confirm, равного слагу; пустой сносится без него (204). */
+  deleteProject: (slug: string, confirm: string) =>
+    request<{ deleted: ProjectDeleted } | undefined>('DELETE', `/v1/projects/${encodeURIComponent(slug)}`, {
+      confirm,
+    }).then((r) => r?.deleted),
 
   // --- Окружения (environments v1 §2): список — readonly, CRUD — admin ---
 

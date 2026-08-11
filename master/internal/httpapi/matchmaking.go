@@ -228,6 +228,84 @@ type upsertProjectRequest struct {
 	MatchSize int32 `json:"match_size"`
 }
 
+type createProjectRequest struct {
+	Slug      string `json:"slug"`
+	MatchSize int32  `json:"match_size"`
+}
+
+type deleteProjectRequest struct {
+	Confirm string `json:"confirm"`
+}
+
+// handleCreateProject is POST /v1/projects (admin) — ЯВНОЕ заведение проекта из
+// админки. Отличие от идемпотентного `PUT /v1/projects/{slug}` не косметическое:
+// PUT на опечатке в слаге молча перезаписал бы match_size существующего проекта,
+// а форма создания обязана сказать «такой уже есть» (409).
+//
+// 201 с проектом; 400 — плохой слаг или match_size; 409 — слаг занят.
+func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
+	var req createProjectRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	p, err := s.st.CreateProject(r.Context(), req.Slug, req.MatchSize)
+	if errors.Is(err, store.ErrConflict) {
+		storeError(w, err)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"project": p})
+}
+
+// handleProjectUsage is GET /v1/projects/{slug}/usage (admin): состав проекта.
+// Панель зовёт его при открытии диалога удаления — оператор видит, что именно
+// исчезнет, и почему удаление заблокировано, если в проекте остались ноды.
+func (s *Server) handleProjectUsage(w http.ResponseWriter, r *http.Request) {
+	usage, err := s.st.ProjectUsage(r.Context(), r.PathValue("slug"))
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"usage": usage})
+}
+
+// handleDeleteProject is DELETE /v1/projects/{slug} (admin), тело
+// необязательное: {"confirm":"<slug>"}. Симметрично удалению окружения:
+//
+//   - 404 — неизвестный проект;
+//   - 409 — в проекте есть ЖИВЫЕ ноды (выведенные каскадятся);
+//   - 204 — проект пуст: удалён, confirm не нужен;
+//   - 400 — проект непустой, а confirm отсутствует или не равен слагу точно;
+//   - 200 {"deleted": {...}} — снесён каскадом, состав в теле.
+func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
+	var req deleteProjectRequest
+	if !decodeOptionalJSON(w, r, &req) {
+		return
+	}
+	res, err := s.st.DeleteProject(r.Context(), r.PathValue("slug"), req.Confirm)
+	if errors.Is(err, store.ErrConfirmRequired) {
+		writeError(w, http.StatusBadRequest, "bad_request", "confirm must equal the project slug")
+		return
+	}
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	// Отозванные ключи гасим в кэше аутентификатора сразу — иначе ключ
+	// удалённого проекта продолжал бы пускать до истечения кэша.
+	for _, id := range res.RevokedKeyIDs {
+		s.auth.invalidateKey(id)
+	}
+	if res.WasEmpty {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": res})
+}
+
 // handleListProjects is GET /v1/projects (readonly) — the panel's project
 // selector reads it (мультипроект W1). Readonly on purpose, unlike the admin
 // PUT below: a readonly session must still be able to see WHICH project it is

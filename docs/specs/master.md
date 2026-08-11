@@ -294,6 +294,9 @@ POST /v1/rollback: шаг 3 в обратную сторону (образы у�
 | `PUT /v1/fleets/{region}` | admin | buffer, max_servers, reap_ttl; **`env` в теле обязателен** (environments v1 §2; валидация active_version×env — БД-FK + 400) |
 | `GET /v1/projects` | readonly | список проектов `[{id, slug, match_size, created_at}]`, старейший первым — источник селектора проекта в панели (мультипроект W1). Readonly по замыслу: панель обязана показывать, в каком проекте работает, и readonly-сессии тоже |
 | `PUT /v1/projects/{slug}` | admin | match_size проекта (уточнено в v0) |
+| `POST /v1/projects` | admin | явное создание проекта: 201, `409` на занятом слаге (в отличие от идемпотентного PUT, который молча перезаписал бы чужой `match_size`). Событие `project_created` |
+| `GET /v1/projects/{slug}/usage` | admin | состав проекта (окружения/версии/флоты/живые ноды/матчи/серверы/ключи) — панель показывает его ДО подтверждения удаления |
+| `DELETE /v1/projects/{slug}` | admin | удаление каскадом, тело `{"confirm":"<slug>"}`. `409`, пока есть ЖИВЫЕ ноды (выведенные каскадятся); `204` для пустого проекта; `400` без точного confirm; ключи проекта отзываются необратимо. Событие `project_deleted` |
 | `POST /v1/versions` | deploy | регистрация билда из CI; **`env` обязателен** (заменил `channel`); привязанный ключ — только свой env |
 | `POST /v1/deploy` · `/v1/rollback` | deploy | см. §5; rollback скоупится env версии — `env` обязателен при >1 env с окном deprecated, иначе sole-fallback |
 | `POST /v1/promote` | deploy | промоут `{version_id, to_env}` → регистрация в to_env (тот же image_ref, `promoted_from`) + деплой; идемпотентен; привязанный ключ — только в свой env (см. §Окружения) |

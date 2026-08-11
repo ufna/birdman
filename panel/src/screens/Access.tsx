@@ -25,6 +25,7 @@ import { StateBadge, toneOfKeyStatus } from '../components/Badge';
 import { ConfirmButton } from '../components/ConfirmDialog';
 import { RegistriesSection } from '../components/RegistriesSection';
 import { EnvironmentsSection } from '../components/EnvironmentsSection';
+import { ProjectsSection } from '../components/ProjectsSection';
 import { EnvTag } from '../components/EnvTag';
 import { Card, CardHeader, ErrorNote, LoadingRow } from '../components/ui';
 
@@ -70,6 +71,7 @@ export function Access() {
           <KeysTable keys={keys.data} reload={keys.reload} />
         )}
       </Card>
+      <ProjectsSection />
       <EnvironmentsSection />
       <RegistriesSection />
     </div>

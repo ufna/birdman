@@ -119,6 +119,12 @@ const (
 	// доводит молчащую ноду только до `down` (EventNodeDown). Строка ноды
 	// остаётся: на неё ссылается история серверов и матчей.
 	EventNodeRevoked = "node_revoked"
+	// EventProjectCreated / EventProjectDeleted — явное управление проектами из
+	// админки (POST/DELETE /v1/projects). До них проект заводился молча внутри
+	// ensureProject (побочный эффект регистрации ноды или версии) и не удалялся
+	// никак, поэтому следа в аудите у обеих операций не было вовсе.
+	EventProjectCreated = "project_created"
+	EventProjectDeleted = "project_deleted"
 	// EventNodeEnvChanged — нода переведена в другое окружение (environments v1,
 	// PATCH /v1/nodes/{id} {env}). Payload {from, to}. Разрешён только пустой
 	// ноде в любом стейте, кроме dead (§2).

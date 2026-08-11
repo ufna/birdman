@@ -26,6 +26,9 @@ export const en = {
   'common.close': 'Close',
   'common.cancel': 'Cancel',
   'common.running': 'Working…',
+  'common.edit': 'Edit',
+  'common.save': 'Save',
+  'common.delete': 'Delete',
   'common.retry': 'Retry',
   'common.loading': 'Loading…',
   'common.port': 'port',
@@ -779,6 +782,35 @@ export const en = {
   'access.create.bindingGlobal': 'Global (all environments)',
 
   // Access: Environments admin section.
+  'access.projects': 'Projects',
+  'access.projects.hint':
+    'A project is the top-level dimension: environments, versions, fleets, nodes and keys all live inside one. The slug cannot be renamed — API keys, matchmaking and CI are tied to it.',
+  'access.projects.add': 'New project',
+  'access.projects.edit': 'Project {slug}',
+  'access.projects.current': 'open',
+  'access.projects.slug': 'Slug',
+  'access.projects.slug.hint': 'Lowercase letters, digits and dashes, up to 32 characters.',
+  'access.projects.matchSize': 'match size {size}',
+  'access.projects.matchSize.label': 'Players per match',
+  'access.projects.err.matchSize': 'Players per match must be a whole number, 1 or more.',
+  'access.projects.err.save': 'Could not save the project.',
+  'access.projects.toast.created': 'Project {slug} created',
+  'access.projects.toast.saved': 'Project {slug} saved',
+  'access.projects.toast.deleted': 'Project {slug} deleted',
+  'access.projects.toast.deletedCascade':
+    'Project {slug} deleted: {environments} environment(s), {versions} version(s), {keys} key(s) revoked',
+  'access.projects.delete.title': 'Delete project {slug}?',
+  'access.projects.delete.desc':
+    'Everything inside goes with it: environments, versions, fleets, matches and their history. Bound API keys are revoked for good — CI using them stops working. This cannot be undone.',
+  'access.projects.delete.usage': 'What is inside',
+  'access.projects.delete.usage.environments': 'Environments',
+  'access.projects.delete.usage.versions': 'Versions',
+  'access.projects.delete.usage.matches': 'Matches',
+  'access.projects.delete.usage.keys': 'Live keys',
+  'access.projects.delete.nodesBlock':
+    '{count} live node(s) still belong to this project. Retire or move them on the Fleet screen first.',
+  'access.projects.delete.confirmLabel': 'Type the project slug to confirm',
+  'access.projects.delete.err': 'Could not delete the project.',
   'access.environments': 'Environments',
   'access.environments.hint':
     'Environments are a per-project platform dimension. Behaviour follows the production flag, not the name.',

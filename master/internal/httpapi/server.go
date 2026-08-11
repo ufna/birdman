@@ -103,6 +103,12 @@ func New(st *store.Store, m *metrics.Metrics, mm *matchmaker.Matchmaker, dep *de
 	// правка match_size остаётся admin.
 	s.mux.HandleFunc("GET /v1/projects", s.requireScope(ScopeReadonly, s.handleListProjects))
 	s.mux.HandleFunc("PUT /v1/projects/{slug}", s.requireScope(ScopeAdmin, s.handleUpsertProject))
+	// Явное управление проектами из админки (matchmaking.go): POST создаёт и
+	// падает на занятом слаге (в отличие от идемпотентного PUT), DELETE сносит
+	// каскадом с подтверждением вводом слага, usage показывает состав заранее.
+	s.mux.HandleFunc("POST /v1/projects", s.requireScope(ScopeAdmin, s.handleCreateProject))
+	s.mux.HandleFunc("GET /v1/projects/{slug}/usage", s.requireScope(ScopeAdmin, s.handleProjectUsage))
+	s.mux.HandleFunc("DELETE /v1/projects/{slug}", s.requireScope(ScopeAdmin, s.handleDeleteProject))
 	// Environments CRUD (environments v1 §2, environments.go). List/usage are
 	// readonly; create/patch/delete are admin. DELETE сносит окружение вместе с
 	// содержимым (нужен confirm с именем), usage — состав для диалога удаления.

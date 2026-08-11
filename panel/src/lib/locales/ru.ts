@@ -10,6 +10,9 @@ export const ru: Record<MessageKey, string> = {
   'common.close': 'Закрыть',
   'common.cancel': 'Отмена',
   'common.running': 'Выполняем…',
+  'common.edit': 'Изменить',
+  'common.save': 'Сохранить',
+  'common.delete': 'Удалить',
   'common.retry': 'Повторить',
   'common.loading': 'Загрузка…',
   'common.port': 'порт',
@@ -763,6 +766,35 @@ export const ru: Record<MessageKey, string> = {
   'access.create.bindingGlobal': 'Глобальный (все окружения)',
 
   // Доступ: секция-админка «Окружения».
+  'access.projects': 'Проекты',
+  'access.projects.hint':
+    'Проект — верхнее измерение: окружения, версии, флоты, ноды и ключи живут внутри него. Слаг не переименовывается — на него завязаны API-ключи, матчмейкинг и CI.',
+  'access.projects.add': 'Новый проект',
+  'access.projects.edit': 'Проект {slug}',
+  'access.projects.current': 'открыт',
+  'access.projects.slug': 'Слаг',
+  'access.projects.slug.hint': 'Строчные буквы, цифры и дефисы, до 32 символов.',
+  'access.projects.matchSize': 'матч на {size}',
+  'access.projects.matchSize.label': 'Игроков в матче',
+  'access.projects.err.matchSize': 'Игроков в матче — целое число, не меньше 1.',
+  'access.projects.err.save': 'Не удалось сохранить проект.',
+  'access.projects.toast.created': 'Проект {slug} создан',
+  'access.projects.toast.saved': 'Проект {slug} сохранён',
+  'access.projects.toast.deleted': 'Проект {slug} удалён',
+  'access.projects.toast.deletedCascade':
+    'Проект {slug} удалён: окружений {environments}, версий {versions}, отозвано ключей {keys}',
+  'access.projects.delete.title': 'Удалить проект {slug}?',
+  'access.projects.delete.desc':
+    'Вместе с ним исчезает всё внутри: окружения, версии, флоты, матчи и их история. Привязанные API-ключи отзываются необратимо — CI, который ими ходит, перестанет работать. Отменить это нельзя.',
+  'access.projects.delete.usage': 'Что внутри',
+  'access.projects.delete.usage.environments': 'Окружения',
+  'access.projects.delete.usage.versions': 'Версии',
+  'access.projects.delete.usage.matches': 'Матчи',
+  'access.projects.delete.usage.keys': 'Живые ключи',
+  'access.projects.delete.nodesBlock':
+    'В проекте ещё {count} живых нод. Сначала выведите их из флота или переведите — на экране «Флот».',
+  'access.projects.delete.confirmLabel': 'Введите слаг проекта для подтверждения',
+  'access.projects.delete.err': 'Не удалось удалить проект.',
   'access.environments': 'Окружения',
   'access.environments.hint':
     'Окружения — измерение платформы на проект. Поведение ведёт флаг production, не имя.',
