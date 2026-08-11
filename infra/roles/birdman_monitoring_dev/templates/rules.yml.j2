@@ -332,8 +332,8 @@ groups:
         annotations:
           summary: {% raw %}'DevDeployFailed: авто-выкат дев-стенда упал и откатился'{% endraw %}
 
-          description: 'The dev-stand pull deployer rejected a build: either the sha256 did not match or the master failed its /healthz gate and was rolled back to the previous binary. The bad artifact is recorded in /var/lib/birdman-master/rejected and will not be retried — the next develop build supersedes it. See `journalctl -u birdman-devdeploy`.'
-          description_ru: 'Деплоер отверг сборку: не сошлась sha256 либо мастер не прошёл /healthz и откачен на предыдущий бинарь. Артефакт записан в /var/lib/birdman-master/rejected и повторяться не будет — его вытеснит следующая сборка из develop. Смотри `journalctl -u birdman-devdeploy`.'
+          description: 'The dev-stand pull deployer rejected a build: either the sha256 did not match or the master failed its /healthz gate and was rolled back to the previous binary. The bad artifact is recorded in /var/lib/birdman-master/rejected and will not be retried — the next main build supersedes it. See `journalctl -u birdman-devdeploy`.'
+          description_ru: 'Деплоер отверг сборку: не сошлась sha256 либо мастер не прошёл /healthz и откачен на предыдущий бинарь. Артефакт записан в /var/lib/birdman-master/rejected и повторяться не будет — его вытеснит следующая сборка из main. Смотри `journalctl -u birdman-devdeploy`.'
 
       - alert: DevDeployStale
         expr: birdman_devdeploy_last_success_timestamp > 0 and (time() - birdman_devdeploy_last_success_timestamp) > {{ birdman_devdeploy_stale_after_h }} * 3600

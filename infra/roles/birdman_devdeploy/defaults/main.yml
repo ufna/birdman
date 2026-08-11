@@ -3,7 +3,7 @@
 # master-бокс: он и держит admin-ключ, и слушает master API на localhost.
 #
 # Это дев-обвязка, НЕ часть self-host по умолчанию: у self-host-оператора свой
-# релизный цикл, и авто-выкат из чужого develop ему не нужен.
+# релизный цикл, и авто-выкат чужой ветки разработки ему не нужен.
 birdman_devdeploy_enabled: true
 
 birdman_devdeploy_repo: ufna/birdman

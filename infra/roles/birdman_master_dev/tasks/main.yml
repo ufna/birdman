@@ -114,7 +114,7 @@
 - name: Note that the pull deployer owns the master binary
   ansible.builtin.debug:
     msg: >-
-      Бинарь мастера не трогаю: им владеет birdman-devdeploy (выкат из develop).
+      Бинарь мастера не трогаю: им владеет birdman-devdeploy (выкат из main).
       Ручная замена — останови таймер или положи /etc/birdman/devdeploy.disabled.
   when:
     - birdman_devdeploy_enabled | default(false) | bool

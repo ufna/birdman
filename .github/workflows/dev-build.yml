@@ -1,6 +1,6 @@
 name: dev-build
 
-# Пуш в develop собирает платформу и публикует rolling-prerelease `dev`.
+# Пуш в main собирает платформу и публикует rolling-prerelease `dev`.
 # Выкатывает НЕ этот workflow: на дев-боксе крутится pull-деплоер
 # (infra/roles/birdman_devdeploy), который сам ходит за этим релизом,
 # сверяет sha256, ставит и откатывается при провале health-gate.
@@ -10,7 +10,7 @@ name: dev-build
 # Здесь секретов нет вообще — хватает встроенного GITHUB_TOKEN.
 on:
   push:
-    branches: [develop]
+    branches: [main]
     paths:
       - 'master/**'
       - 'agent/**'
@@ -107,6 +107,6 @@ jobs:
           gh release delete dev --yes --cleanup-tag || true
           gh release create dev --prerelease --target "$GITHUB_SHA" \
             --title "dev (${GITHUB_SHA::7})" \
-            --notes "Автосборка из develop. Выкатывается pull-деплоером дев-стенда (infra/roles/birdman_devdeploy). Не релиз — не использовать в self-host." \
+            --notes "Автосборка из main. Выкатывается pull-деплоером дев-стенда (infra/roles/birdman_devdeploy). Не релиз — не использовать в self-host." \
             dist/birdman-master dist/birdman-master.sha256 \
             dist/birdman-agent dist/birdman-agent.sha256 dist/MANIFEST
