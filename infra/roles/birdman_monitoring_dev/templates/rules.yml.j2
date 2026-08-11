@@ -335,6 +335,17 @@ groups:
           description: 'The dev-stand pull deployer rejected a build: either the sha256 did not match or the master failed its /healthz gate and was rolled back to the previous binary. The bad artifact is recorded in /var/lib/birdman-master/rejected and will not be retried — the next main build supersedes it. See `journalctl -u birdman-devdeploy`.'
           description_ru: 'Деплоер отверг сборку: не сошлась sha256 либо мастер не прошёл /healthz и откачен на предыдущий бинарь. Артефакт записан в /var/lib/birdman-master/rejected и повторяться не будет — его вытеснит следующая сборка из main. Смотри `journalctl -u birdman-devdeploy`.'
 
+      - alert: DevDeployAgentsBehind
+        expr: birdman_devdeploy_agents_behind > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: {% raw %}'DevDeployAgentsBehind: агенты dev-окружения отстали от целевой версии'{% endraw %}
+
+          description: 'One or more live dev-environment nodes have not reached the target agent version for half an hour. This is drift by fact, whatever the cause: the registry not handing out a signed link, the version parked in /var/lib/birdman-master/rejected after a canary failure, or a chain that never finished. The master deploy itself keeps succeeding, so neither DevDeployFailed nor DevDeployStale covers this. See `journalctl -u birdman-devdeploy`.'
+          description_ru: 'Одна или несколько живых нод dev-окружения полчаса не доходят до целевой версии агента. Это дрейф по факту, какой бы ни была причина: реестр не отдаёт подписанную ссылку, версия лежит в /var/lib/birdman-master/rejected после провала канарейки, цепочка не довершилась. Выкат мастера при этом успешен, поэтому ни DevDeployFailed, ни DevDeployStale такого не покажут. Смотри `journalctl -u birdman-devdeploy`.'
+
       - alert: DevDeployStale
         expr: birdman_devdeploy_last_success_timestamp > 0 and (time() - birdman_devdeploy_last_success_timestamp) > {{ birdman_devdeploy_stale_after_h }} * 3600
         for: 15m

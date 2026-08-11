@@ -85,26 +85,27 @@ print(d.get(sys.argv[1], ""))
 
 # Токен живёт минуты, а тик с ожиданием агентов может пережить исходный —
 # поэтому кэш с коротким TTL, а не один токен на весь прогон.
+#
+# Функция НЕ печатает токен и вызывается БЕЗ подстановки: `t="$(reg_token)"`
+# выполнил бы её в подоболочке, и присваивания REG_TOKEN/REG_TOKEN_AT не
+# вернулись бы в родителя — кэш существовал бы только в комментарии, а токен
+# перезапрашивался бы на каждый блоб.
 REG_TOKEN=""
 REG_TOKEN_AT=0
-reg_token() {
+reg_token_ensure() {
   local now
   now="$(date +%s)"
   if [ -n "$REG_TOKEN" ] && [ "$((now - REG_TOKEN_AT))" -lt 120 ]; then
-    printf '%s' "$REG_TOKEN"
     return 0
   fi
-  local t
-  t="$(curl -fsS --max-time 30 "$TOKEN_URL" | json_get token)"
-  [ -n "$t" ] || return 1
-  REG_TOKEN="$t"
+  REG_TOKEN="$(curl -fsS --max-time 30 "$TOKEN_URL" | json_get token)"
+  [ -n "$REG_TOKEN" ] || return 1
   REG_TOKEN_AT="$now"
-  printf '%s' "$t"
 }
 
 manifest_json() {
-  local t
-  t="$(reg_token)" || return 1
+  reg_token_ensure || return 1
+  local t="$REG_TOKEN"
   curl -fsS --max-time 30 -H "Authorization: Bearer $t" \
     -H "Accept: application/vnd.oci.image.manifest.v1+json" \
     "$REG_BASE/manifests/$TAG"
@@ -131,7 +132,8 @@ for layer in d.get("layers", []):
 
 blob_fetch() { # <digest> [выходной-файл] — тело в stdout либо в файл
   local digest="$1" out="${2:-}" t
-  t="$(reg_token)" || return 1
+  reg_token_ensure || return 1
+  t="$REG_TOKEN"
   if [ -n "$out" ]; then
     curl -fsSL --max-time 120 -H "Authorization: Bearer $t" -o "$out" "$REG_BASE/blobs/$digest"
   else
@@ -145,7 +147,8 @@ blob_fetch() { # <digest> [выходной-файл] — тело в stdout л�
 # поэтому резолвится непосредственно перед командой конкретной ноде.
 blob_url() {
   local digest="$1" t
-  t="$(reg_token)" || return 1
+  reg_token_ensure || return 1
+  t="$REG_TOKEN"
   curl -fsS --max-time 30 -o /dev/null -w '%{redirect_url}' \
     -H "Authorization: Bearer $t" "$REG_BASE/blobs/$digest"
 }
@@ -156,6 +159,13 @@ M_FAILURE=0
 M_ROLLBACKS=0
 M_AGENT_OK=0
 M_AGENT_FAIL=0
+# Сколько живых нод dev-окружения ещё не на целевой версии агента. Гейдж, а не
+# счётчик: он показывает ДРЕЙФ по факту, каким бы ни была его причина —
+# осечка реестра, версия в rejected после провала канарейки, зависшая цепочка.
+# Отдельные счётчики на каждую ветку отказа этого не давали: шаг агентов мог
+# тихо не состояться, а last_success при этом обновлялся шагом мастера, и ни
+# DevDeployFailed, ни DevDeployStale не загорались бы.
+M_AGENTS_BEHIND=0
 
 load_metrics() {
   # shellcheck source=/dev/null
@@ -171,6 +181,7 @@ M_FAILURE=$M_FAILURE
 M_ROLLBACKS=$M_ROLLBACKS
 M_AGENT_OK=$M_AGENT_OK
 M_AGENT_FAIL=$M_AGENT_FAIL
+M_AGENTS_BEHIND=$M_AGENTS_BEHIND
 EOF
   mv "$METRICS.tmp" "$METRICS"
 
@@ -191,6 +202,9 @@ birdman_devdeploy_rollbacks_total $M_ROLLBACKS
 # TYPE birdman_devdeploy_agent_upgrades_total counter
 birdman_devdeploy_agent_upgrades_total{status="ok"} $M_AGENT_OK
 birdman_devdeploy_agent_upgrades_total{status="failed"} $M_AGENT_FAIL
+# HELP birdman_devdeploy_agents_behind Живые ноды dev-окружения, не дошедшие до целевой версии агента.
+# TYPE birdman_devdeploy_agents_behind gauge
+birdman_devdeploy_agents_behind $M_AGENTS_BEHIND
 EOF
   mv "$PROM.tmp" "$PROM"
 }
@@ -370,6 +384,23 @@ for n in rows:
 ' "$1" "$2" "$DEV_ENV"
 }
 
+# Пересчёт дрейфа в конце тика. Считает по тем же правилам, что и цепочка
+# апгрейда (живые ноды нашего env, версия ≠ целевой), поэтому 0 означает
+# «все дошли», а не «шаг отработал».
+#
+# Известный предел: если не читается admin-ключ, считать не из чего — гейдж
+# замирает на прошлом значении (без мастера цепочка всё равно невозможна).
+AGENT_TARGET_VERSION=""
+AGENT_LOCAL_HOST=""
+recount_agents_behind() {
+  [ -n "$AGENT_TARGET_VERSION" ] || return 0
+  [ -n "$ADMIN_KEY" ] || ADMIN_KEY="$(cat "$ADMIN_KEY_FILE" 2>/dev/null)"
+  [ -n "$ADMIN_KEY" ] || return 0
+  local host
+  host="${AGENT_LOCAL_HOST:-${BIRDMAN_DEVDEPLOY_LOCAL_HOSTNAME:-$(hostname)}}"
+  M_AGENTS_BEHIND="$(agent_targets "$AGENT_TARGET_VERSION" "$host" | grep -c '[^[:space:]]')"
+}
+
 wait_agent_version() {
   local node_id="$1" target="$2"
   local deadline=$(($(date +%s) + AGENT_TIMEOUT))
@@ -388,6 +419,9 @@ upgrade_agents() {
   mf="$(manifest_json)"
   target="$(blob_fetch "$(blob_digest "$mf" MANIFEST)" | awk -F= '/^agent_version=/{print $2}' | tr -d ' \t\r\n')"
   [ -n "$target" ] || return 0
+  # Запоминаем ДО всех ранних выходов: пересчёт дрейфа в конце тика обязан
+  # видеть цель и когда версия отвергнута, и когда шаг оборвался на осечке.
+  AGENT_TARGET_VERSION="$target"
   if rejected_has "agent:$target"; then
     return 0
   fi
@@ -408,6 +442,7 @@ upgrade_agents() {
 
   local local_host targets
   local_host="${BIRDMAN_DEVDEPLOY_LOCAL_HOSTNAME:-$(hostname)}"
+  AGENT_LOCAL_HOST="$local_host"
   targets="$(agent_targets "$target" "$local_host")"
   [ -n "$targets" ] || return 0
 
@@ -481,6 +516,9 @@ main() {
   if [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ]; then
     if [ -z "$SKIP_AGENTS" ]; then
       upgrade_agents
+      # Отдельно от результата шага: он мог оборваться на инфраструктурной
+      # осечке, и именно тогда дрейф должен стать видимым.
+      recount_agents_behind
     fi
   fi
 

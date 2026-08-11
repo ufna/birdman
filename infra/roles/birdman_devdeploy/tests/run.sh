@@ -245,6 +245,8 @@ grep -q 'signed.test' "$T/upgrades.log" 2>/dev/null && ok "агенту ушла
   ok "URL реестра агенту не отдаётся" || no "агенту отдали URL, который он не скачает"
 grep -q 'birdman_devdeploy_agent_upgrades_total{status="ok"} 2' "$T/textfile/birdman-devdeploy.prom" 2>/dev/null &&
   ok "оба апгрейда посчитаны" || no "счётчик успешных апгрейдов неверен"
+grep -q 'birdman_devdeploy_agents_behind 0' "$T/textfile/birdman-devdeploy.prom" 2>/dev/null &&
+  ok "дрейфа нет — гейдж 0" || no "гейдж дрейфа не обнулился после успешной цепочки"
 
 # Типичный случай в жизни: мастер уже актуален (тик — no-op), а агенты отстали.
 # Целевая версия агента обязана браться из MANIFEST независимо от того,
@@ -282,6 +284,30 @@ grep -q 'birdman_devdeploy_agent_upgrades_total{status="failed"} 1' "$T/textfile
 rm -f "$T/upgrades.log" "$T/fail_n-local"
 run
 [ ! -f "$T/upgrades.log" ] && ok "отвергнутая версия агента не ретраится" || no "rejected-версия агента пошла в повтор"
+# Главное про отвергнутую версию: ретрая нет — значит ноды так и останутся на
+# старом агенте. Молчать об этом нельзя, иначе дрейф не увидит никто:
+# DevDeployFailed не горит (выкат мастера успешен), DevDeployStale тоже.
+grep -q 'birdman_devdeploy_agents_behind 2' "$T/textfile/birdman-devdeploy.prom" 2>/dev/null &&
+  ok "дрейф после rejected виден в гейдже" || no "дрейф после rejected не отражён в метрике"
+
+# Инфраструктурная осечка реестра: подписанной ссылки нет. Версию отвергать
+# нельзя (сборка ни при чём), но дрейф обязан быть виден.
+setup "агенты: реестр не отдал подписанную ссылку"
+fleet
+python3 - "$T/bin/curl" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+# Ломаем ровно резолв подписанной ссылки, всё остальное оставляем рабочим.
+s = s.replace("""    if [ -n "$want_redirect" ]; then printf 'https://signed.test/%s' "$dg"; exit 0; fi""",
+              """    if [ -n "$want_redirect" ]; then printf ''; exit 0; fi""")
+open(p, 'w').write(s)
+PY
+run
+[ ! -f "$T/upgrades.log" ] && ok "без ссылки команда не уходит" || no "ушла команда с пустым URL"
+grep -q '^agent:' "$T/state/rejected" 2>/dev/null && no "осечка реестра отвергла версию" || ok "версия НЕ отвергнута (осечка ≠ плохая сборка)"
+grep -q 'birdman_devdeploy_agents_behind 2' "$T/textfile/birdman-devdeploy.prom" 2>/dev/null &&
+  ok "дрейф при осечке реестра виден" || no "осечка реестра осталась невидимой"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
