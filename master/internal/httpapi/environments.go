@@ -46,14 +46,26 @@ type setNodeEnvRequest struct {
 	Env string `json:"env"`
 }
 
-// handleListEnvironments is GET /v1/environments?project= (readonly). project is
-// resolved to the sole project when omitted (single-project convention), and an
-// explicitly named one is validated against the DB (projectFilter, tracker
-// #961): раньше опечатка отдавала пустой список окружений — неотличимо от
-// «у проекта их нет». Резолв проверять незачем — такой проект существует
-// по построению.
+// handleListEnvironments is GET /v1/environments?project= (readonly). Для
+// глобального ключа поведение прежнее: project резолвится в единственный проект
+// при пустом параметре (single-project convention), явный слаг валидируется по
+// БД (tracker #961) — раньше опечатка отдавала пустой список окружений,
+// неотличимо от «у проекта их нет». Резолв проверять незачем — такой проект
+// существует по построению.
+//
+// Привязанный ключ (tenantScope, #993) получает ровно ОДНО окружение — своё:
+// проект берётся из привязки (sole-резолв ему не нужен и на мультипроектной
+// платформе больше не даёт `400 project is required`), а список фильтруется до
+// имени пары. Фильтр здесь, а не в сторе, потому что сужение до одного имени —
+// свойство ГРАНИЦЫ, а не запроса: `ListEnvironments` остаётся «все окружения
+// проекта» для всех остальных вызывающих.
+//
+// Именно эта ручка была главным перечислителем чужих имён окружений: #989
+// закрыл `GET /v1/environments/{project}/{name}/usage` пар-точным гейтом, но
+// имена соседних окружений (и своего проекта, и чужого) отдавал этот листинг.
+// Теперь пар-точность одинакова на обеих ручках.
 func (s *Server) handleListEnvironments(w http.ResponseWriter, r *http.Request) {
-	project, ok := s.projectFilter(w, r)
+	project, env, ok := s.tenantScope(w, r, false)
 	if !ok {
 		return
 	}
@@ -70,7 +82,22 @@ func (s *Server) handleListEnvironments(w http.ResponseWriter, r *http.Request) 
 		storeError(w, err)
 		return
 	}
+	if env != "" {
+		envs = keepEnvironment(envs, env)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"environments": emptyNotNull(envs)})
+}
+
+// keepEnvironment оставляет окружение с этим именем (0 или 1 строка: имя
+// уникально внутри проекта). Вызывается только для привязанного ключа.
+func keepEnvironment(envs []store.Environment, name string) []store.Environment {
+	out := make([]store.Environment, 0, 1)
+	for _, e := range envs {
+		if e.Name == name {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // handleCreateEnvironment is POST /v1/environments (admin). 201 on success;
@@ -152,12 +179,15 @@ func (s *Server) handlePatchEnvironment(w http.ResponseWriter, r *http.Request) 
 // неотличимость уже дана порядком, покупать её кодом незачем, а `403 key is
 // bound to X/Y` — честный ответ своему же оператору, промахнувшемуся окружением.
 //
-// ГРАНИЦЫ, чтобы следующий не прочитал больше написанного: закрыта РУЧКА, а не
-// enumerability окружений. Имена чужих окружений по-прежнему выдают ЛИСТИНГИ с
-// ?project= (`/v1/environments`, `/v1/nodes` полем env, …) — привязка там не
-// энфорсится вовсе; больше того, сама валидация ?env= (#971) работает оракулом
-// имён (`?project=X&env=ghost` → 400 «no such environment»). Это отдельное
-// решение уровня спеки — карточка #993.
+// ГРАНИЦЫ (переписано #993). Когда #989 закрыл эту ручку, имена чужих окружений
+// по-прежнему выдавали ЛИСТИНГИ с ?project= (`/v1/environments`, `/v1/nodes`
+// полем env, …), а сама валидация ?env= (#971) работала оракулом имён
+// (`?project=X&env=ghost` → 400 «no such environment»). Решением владельца по
+// #993 привязка стала арендаторской границей на ЧТЕНИЯХ: листинги сужаются
+// привязкой (tenantScope), оракул ?env= для привязанного ключа закрыт. Так что
+// enumerability чужих окружений закрыта теперь не «только на этой ручке», а на
+// классе — но ровно для ПРИВЯЗАННОГО ключа: глобальный видит платформу по
+// построению, и это не дефект, а определение глобального ключа.
 func (s *Server) handleEnvironmentUsage(w http.ResponseWriter, r *http.Request) {
 	project, name := r.PathValue("project"), r.PathValue("name")
 	if !s.requireBinding(w, r, project, name) {

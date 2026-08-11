@@ -54,11 +54,13 @@ func (s *Server) handleCreateNode(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleListNodes is GET /v1/nodes?project=&env= (readonly). Оба фильтра
-// необязательны; пустые = весь флот (поведение до мультипроекта W2). `project`
-// валидируется по БД — опечатка даёт 400, а не молча суженный флот
-// (projectFilter, tracker #961).
+// необязательны; для глобального ключа пустые = весь флот (поведение до
+// мультипроекта W2), слаг валидируется по БД — опечатка даёт 400, а не молча
+// суженный флот (tracker #961). Привязанный ключ видит ТОЛЬКО ноды своей пары,
+// в том числе без параметров вовсе (tenantScope, #993): раньше отсюда утекали
+// hostname и public_ip чужих нод.
 func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
-	project, env, ok := s.scopeFilter(w, r)
+	project, env, ok := s.tenantScope(w, r, true)
 	if !ok {
 		return
 	}
@@ -76,14 +78,18 @@ func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
 // --- servers ---
 
 // handleListServers is GET /v1/servers?project=&region=&state= (readonly).
-// `project` валидируется по БД (projectFilter, tracker #961).
+// `project` валидируется по БД (tracker #961), привязанный ключ сужается до
+// своей пары (tenantScope, #993). `?env=` ручка НЕ принимает и не начинает
+// принимать здесь — env приходит только из привязки, поэтому передаётся в
+// фильтр стора, а не читается из query.
 func (s *Server) handleListServers(w http.ResponseWriter, r *http.Request) {
-	project, ok := s.projectFilter(w, r)
+	project, env, ok := s.tenantScope(w, r, false)
 	if !ok {
 		return
 	}
 	servers, err := s.st.ListServers(r.Context(), store.ServerFilter{
 		Project: project,
+		Env:     env,
 		Region:  r.URL.Query().Get("region"),
 		State:   r.URL.Query().Get("state"),
 	})
@@ -164,10 +170,12 @@ func (s *Server) handleCreateVersion(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleListVersions is GET /v1/versions?project=&env= (readonly). Оба фильтра
-// необязательны; пустые = все версии (поведение до мультипроекта W2). `project`
-// валидируется по БД (projectFilter, tracker #961).
+// необязательны; для глобального ключа пустые = все версии (поведение до
+// мультипроекта W2), слаг валидируется по БД (tracker #961). Привязанный ключ
+// видит только версии своей пары (tenantScope, #993) — отсюда утекали
+// `image_ref` чужих сборок.
 func (s *Server) handleListVersions(w http.ResponseWriter, r *http.Request) {
-	project, env, ok := s.scopeFilter(w, r)
+	project, env, ok := s.tenantScope(w, r, true)
 	if !ok {
 		return
 	}
@@ -246,7 +254,29 @@ func (s *Server) handleUpsertFleet(w http.ResponseWriter, r *http.Request) {
 
 // --- events ---
 
+// handleListEvents is GET /v1/events?project=&limit= (readonly). Слаг
+// валидируется по БД (#961): опечатка → 400, а не молча суженная лента.
+// Привязанный ключ сужается до своего проекта (tenantScope, #993).
+//
+// ГЕЙТ ПЕРВЫМ, до разбора `?limit=`: иначе `?limit=abc&project=<чужой>` отвечал
+// бы 400 вместо 403 — не оракул сам по себе (limit о тенанте ничего не знает),
+// но правило «гейт настолько рано, насколько позволяет адресация» (#989) стоит
+// держать буквально, чтобы следующий не выводил из порядка исключений.
+//
+// ДВЕ ГРАНИЦЫ этого сужения, названные явно:
+//   - у событий НЕТ измерения env (колонка `events.project_id` есть с миграции
+//     000019, `env` — нет), поэтому привязанный ключ видит события своего
+//     проекта по ВСЕМ его окружениям, а не только по своей паре;
+//   - фильтр остаётся НЕ СКРЫВАЮЩИМ (эпик #968): платформенное событие
+//     (`project_id is null` — бекапы, CA, сессии панели) видно под любым
+//     фильтром, в том числе привязанному ключу. Это та же осознанная сторона,
+//     что у алертов (#995) и у пика CCU (I5): показать лишнее безопаснее, чем
+//     спрятать «мастер лежит».
 func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
+	project, _, ok := s.tenantScope(w, r, false)
+	if !ok {
+		return
+	}
 	limit := 100
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		n, err := strconv.Atoi(raw)
@@ -255,12 +285,6 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		limit = n
-	}
-	// Слаг валидируется общим projectFilter (#961): опечатка → 400, а не молча
-	// суженная лента.
-	project, ok := s.projectFilter(w, r)
-	if !ok {
-		return
 	}
 	events, err := s.st.ListEvents(r.Context(), limit, project)
 	if err != nil {

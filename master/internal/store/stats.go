@@ -106,33 +106,56 @@ type RegionUtil struct {
 	Draining      int    `json:"draining"`       // servers in state=draining
 }
 
+// RegionUtilFilter сужает снимок ёмкости до пары (project, env). Пустые поля =
+// платформенный снимок, каким он был до tracker #993 (и каким остаётся для
+// глобального ключа — единственный вызывающий, httpapi.handleStatsCost,
+// заполняет фильтр из ПРИВЯЗКИ ключа, а не из query-параметров).
+type RegionUtilFilter struct {
+	Project string // слаг проекта
+	Env     string // окружение (колонки nodes.env / servers.env)
+}
+
 // RegionUtilization returns a per-region snapshot of capacity vs. live server
 // slots — the Cost-view utilization tile. It is a point-in-time snapshot;
 // utilization over time is available to the panel via the metrics proxy
 // (birdman_servers / node capacity, query_range). Regions with capacity but no
 // live servers still appear (zeros), and vice versa.
-func (s *Store) RegionUtilization(ctx context.Context) ([]RegionUtil, error) {
+//
+// При непустом фильтре обе половины снимка (ёмкость нод и занятость серверов)
+// сужаются ОДИНАКОВО — иначе арендатор увидел бы свои серверы на фоне общей
+// ёмкости платформы, то есть утилизацию больше 100% или, наоборот, «у нас всё
+// свободно» по чужим слотам.
+func (s *Store) RegionUtilization(ctx context.Context, f RegionUtilFilter) ([]RegionUtil, error) {
 	// Capacity of active nodes, and live server counts by state, merged by
 	// region. FULL JOIN so a region shows up whether it has nodes, servers, or
-	// both.
+	// both. Пустой фильтр обнуляет оба предиката ($1 = '' / $2 = ''), поэтому
+	// план и результат для платформенного снимка прежние.
 	rows, err := s.Pool.Query(ctx, `
 		with cap as (
-			select region, sum(capacity_slots)::int as capacity
-			from nodes where state = 'active' group by region
+			select n.region, sum(n.capacity_slots)::int as capacity
+			from nodes n join projects p on p.id = n.project_id
+			where n.state = 'active'
+			  and ($1 = '' or p.slug = $1)
+			  and ($2 = '' or n.env = $2)
+			group by n.region
 		),
 		srv as (
 			select n.region,
 			       count(*) filter (where s.state = 'allocated')::int as allocated,
 			       count(*) filter (where s.state = 'ready')::int     as ready,
 			       count(*) filter (where s.state = 'draining')::int  as draining
-			from servers s join nodes n on n.id = s.node_id
+			from servers s
+			join nodes n on n.id = s.node_id
+			join projects p on p.id = s.project_id
+			where ($1 = '' or p.slug = $1)
+			  and ($2 = '' or s.env = $2)
 			group by n.region
 		)
 		select coalesce(cap.region, srv.region) as region,
 		       coalesce(cap.capacity, 0),
 		       coalesce(srv.allocated, 0), coalesce(srv.ready, 0), coalesce(srv.draining, 0)
 		from cap full join srv on cap.region = srv.region
-		order by region`)
+		order by region`, f.Project, f.Env)
 	if err != nil {
 		return nil, err
 	}

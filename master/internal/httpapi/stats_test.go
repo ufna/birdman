@@ -534,7 +534,9 @@ func TestStatsCostRollupBacked(t *testing.T) {
 			if err != nil {
 				t.Fatalf("reference StatMatches: %v", err)
 			}
-			util, err := st.RegionUtilization(ctx)
+			// Пустой фильтр = платформенный снимок: ключ теста глобальный, поэтому
+			// эталон обязан считаться ровно так же, как его считает хендлер (#993).
+			util, err := st.RegionUtilization(ctx, store.RegionUtilFilter{})
 			if err != nil {
 				t.Fatalf("reference RegionUtilization: %v", err)
 			}

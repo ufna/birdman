@@ -160,9 +160,42 @@ func (s *Server) requireBinding(w http.ResponseWriter, r *http.Request, project,
 	}
 	// key.Project здесь гарантированно не nil: для глобального ключа keyAllowed
 	// вернул бы true.
+	writeBindingDenied(w, r)
+	return false
+}
+
+// writeBindingDenied пишет отказ по привязке — ОДНО тело на все поверхности:
+// поточечный гейт над адресуемым объектом (requireBinding) и арендаторская
+// граница на листингах (tenantScope, #993) отвечают байт-в-байт одинаково.
+// Это не косметика: на листингах отказ обязан быть неотличим для живого и для
+// выдуманного проекта/окружения, а разные тексты в двух местах — тот же оракул,
+// только на строке вместо статуса (урок #989). Звать только для привязанного
+// ключа (key.Project != nil); у глобального отказа быть не может.
+func writeBindingDenied(w http.ResponseWriter, r *http.Request) {
+	key, _ := keyFromContext(r.Context())
 	writeError(w, http.StatusForbidden, "forbidden",
 		fmt.Sprintf("key is bound to %s", bindingLabel(key)))
-	return false
+}
+
+// keyBinding отдаёт пару (project, env), к которой привязан ключ запроса, и
+// bound=false для глобального ключа. Admin привязать нельзя (store.CreateAPIKey
+// отвергает admin+binding), сессия панели наследует ключ логина целиком —
+// поэтому и admin-ключ, и admin-сессия здесь всегда bound=false и проходят
+// чтения как раньше.
+//
+// Полупара (Project задан, Env nil) недостижима при живом CHECK
+// api_keys_binding_all_or_nothing, но достижима по схеме: тогда env="" и
+// сужение идёт только по проекту — строго уже, чем «вся платформа» до #993,
+// и без разыменования nil.
+func keyBinding(r *http.Request) (project, env string, bound bool) {
+	key, ok := keyFromContext(r.Context())
+	if !ok || key.Project == nil {
+		return "", "", false
+	}
+	if key.Env != nil {
+		env = *key.Env
+	}
+	return *key.Project, env, true
 }
 
 // bindingLabel форматирует пару привязки для тела 403. Полупара (Project задан,

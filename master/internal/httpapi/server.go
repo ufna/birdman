@@ -283,11 +283,86 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "panel": panelState})
 }
 
-// projectFilter разбирает необязательный `?project=` — ОДИН общий вход для всех
-// чтений, которые сужаются по проекту (tracker #961). Пусто = вся платформа
+// tenantScope — ЕДИНЫЙ вход всех ЛИСТИНГОВ и агрегатов (tracker #993): он и
+// разбирает `?project=`/`?env=`, и энфорсит привязку ключа. Возвращает пару
+// (project, env), которой сужается выдача; пустое поле = «не сужать».
+//
+// Решение владельца по #993: привязка ключа — АРЕНДАТОРСКАЯ ГРАНИЦА НА ЧТЕНИЯХ,
+// а не только поточечный гейт над адресуемым объектом (#974/#988/#989). До неё
+// привязанный readonly-ключ проекта Б читал через `?project=<чужой>` имена
+// окружений, hostname и public_ip нод, image_ref версий, матчи, ленту событий и
+// агрегаты проекта А — замерено в карточке. Отсюда две ОБЯЗАТЕЛЬНЫЕ половины:
+//
+//   - явный ЧУЖОЙ `?project=` (или `?env=`) → `403 key is bound to X/Y`;
+//   - ПУСТОЙ параметр у привязанного ключа → выдача сужается до его пары, а НЕ
+//     до всей платформы. Без этой половины дыра обходится удалением параметра,
+//     то есть первая половина не значит ничего.
+//
+// Совместимость для тех, кто читал всю платформу привязанным ключом, сломана
+// СОЗНАТЕЛЬНО — принятая цена решения. Глобальный ключ, admin и сессия панели
+// работают как раньше: у них привязки нет (admin+binding запрещён на создании
+// ключа), поэтому ветка ниже даже не выполняется.
+//
+// ПОРЯДОК: для привязанного ключа гейт стоит ПЕРВЫМ и в БД не ходит ВООБЩЕ —
+// пара известна из самого ключа, сверять её с чем-то в сторе незачем (правило
+// #989: гейт настолько рано, насколько позволяет адресация). Следствие, ради
+// которого это и сделано так: отказ формируется раньше, чем о существовании
+// проекта/окружения что-либо известно, поэтому `?project=game` (живой чужой) и
+// `?project=zzz` (выдуманный) дают БАЙТ-В-БАЙТ один ответ. Провалидируй мы слаг
+// до гейта — код ответа (400 против 403) сам стал бы оракулом существования,
+// то есть дыра переехала бы, а не закрылась.
+//
+// ЭТИМ ЖЕ ГЕЙТОМ закрыт оракул `?env=` (#971), и это часть приёмки #993, а не
+// follow-up: до него `scopeFilter` валидировал `?env=` по паре и отдавал ЛЮБОМУ
+// readonly-ключу `400 no such environment game/ghost`, то есть перечислял
+// окружения чужих проектов. Привязанный ключ теперь не доходит до
+// GetEnvironment/EnvironmentNameExists ни на одном пути, и `?env=ghost`
+// неотличим от `?env=<существующее чужое>`. Перебор закрыт и ВНУТРИ своего
+// проекта: привязка — пара, поэтому чужой env своего проекта тоже 403 (та же
+// пар-точность, что у `GET /v1/environments/{project}/{name}/usage`, #989).
+//
+// readEnv=true — только для ручек, которые `?env=` РЕАЛЬНО читают (`/v1/nodes`,
+// `/v1/versions`, `/v1/stats/*`). На остальных параметр как игнорировался, так
+// и игнорируется — гейтить то, что не влияет на выдачу, значило бы отвечать
+// по-разному на запросы с одинаковым результатом. Сужение по env там всё равно
+// происходит: env берётся из ПРИВЯЗКИ, а не из query.
+func (s *Server) tenantScope(w http.ResponseWriter, r *http.Request, readEnv bool) (project, env string, ok bool) {
+	if bp, be, bound := keyBinding(r); bound {
+		q := r.URL.Query()
+		if p := q.Get("project"); p != "" && p != bp {
+			writeBindingDenied(w, r)
+			return "", "", false
+		}
+		if readEnv {
+			if e := q.Get("env"); e != "" && e != be {
+				writeBindingDenied(w, r)
+				return "", "", false
+			}
+		}
+		return bp, be, true
+	}
+	project, ok = s.validateProjectParam(w, r)
+	if !ok {
+		return "", "", false
+	}
+	if !readEnv {
+		return project, "", true
+	}
+	return s.validateEnvParam(w, r, project)
+}
+
+// validateProjectParam разбирает необязательный `?project=` — ТОЛЬКО валидация
+// параметра, БЕЗ арендаторской границы (tracker #961). Пусто = вся платформа
 // (поведение до мультипроекта). Непустой слаг ВАЛИДИРУЕТСЯ по БД: опечатка даёт
 // `400 bad_request "no such project <slug>"`, а не молча суженную выдачу. Пишет
 // свой ответ об ошибке и возвращает ok=false, когда запрос продолжать нельзя.
+//
+// НОВОМУ ЧТЕНИЮ НУЖЕН tenantScope, а не эта функция: она namesake прежнего
+// `projectFilter` и переименована именно затем, чтобы безопасным по умолчанию
+// входом стал гейт, а исключение было громким. Прямых вызывающих осталось
+// ровно два — `GET /v1/alerts/active` и `/history`: у алертов не-скрывающий
+// контракт («платформенный алерт виден под любым фильтром»), поэтому граница
+// там строится по своему правилу и отдельной карточкой (#995).
 //
 // ПРАВИЛО (docs/specs/master.md §6): `?project=` на аутентифицированном чтении
 // валидируется ВСЕГДА. Раньше правила не было, и каждая волна выбирала сама:
@@ -311,7 +386,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 //   - `GET /v1/alerts/rules` — фильтр не принимает вовсе (каталог конфигурации);
 //   - `project` в теле `POST /v1/alerts/mutes` — матчер хранимого правила, а не
 //     фильтр над данными (см. handleCreateAlertMute).
-func (s *Server) projectFilter(w http.ResponseWriter, r *http.Request) (string, bool) {
+func (s *Server) validateProjectParam(w http.ResponseWriter, r *http.Request) (string, bool) {
 	project := r.URL.Query().Get("project")
 	if project == "" { // пусто = вся платформа, к БД не ходим
 		return "", true
@@ -327,8 +402,10 @@ func (s *Server) projectFilter(w http.ResponseWriter, r *http.Request) (string, 
 	return project, true
 }
 
-// scopeFilter validates BOTH scope query parameters — ?project= и ?env= — и
-// возвращает их для передачи в фильтры стора.
+// validateEnvParam валидирует `?env=` при уже разобранном project — вторая
+// половина прежнего `scopeFilter` (tracker #971). Вызывается ТОЛЬКО с
+// непривязанного пути tenantScope: привязанному ключу сюда дороги нет, иначе
+// эта же валидация работала бы оракулом ИМЁН окружений (см. tenantScope).
 //
 // Раньше эта проверка жила только в статистике (statsScope), а листинги нод и
 // версий брали ?env= сырым: опечатка молча давала пустой список — ровно то
@@ -341,12 +418,8 @@ func (s *Server) projectFilter(w http.ResponseWriter, r *http.Request) (string, 
 //   - project пуст, env задан → достаточно, чтобы окружение с таким именем
 //     существовало хоть у одного проекта: пары без проекта нет, но защита от
 //     опечатки остаётся.
-func (s *Server) scopeFilter(w http.ResponseWriter, r *http.Request) (project, env string, ok bool) {
-	project, ok = s.projectFilter(w, r)
-	if !ok {
-		return "", "", false
-	}
-	env = r.URL.Query().Get("env")
+func (s *Server) validateEnvParam(w http.ResponseWriter, r *http.Request, project string) (string, string, bool) {
+	env := r.URL.Query().Get("env")
 	if env == "" {
 		return project, "", true
 	}
@@ -371,7 +444,6 @@ func (s *Server) scopeFilter(w http.ResponseWriter, r *http.Request) (project, e
 	}
 	return "", env, true
 }
-
 
 // storeError maps store sentinel errors to HTTP responses. ErrBadEnv (окружение,
 // названное запросом, не существует) — это плохой ВВОД, а не отсутствующий ресурс:

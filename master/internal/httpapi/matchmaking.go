@@ -310,13 +310,46 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 // selector reads it (мультипроект W1). Readonly on purpose, unlike the admin
 // PUT below: a readonly session must still be able to see WHICH project it is
 // looking at, and the payload carries nothing secret (slug, match_size).
+//
+// ПРИВЯЗАННЫЙ КЛЮЧ ВИДИТ ТОЛЬКО СВОЙ ПРОЕКТ (#993). Раскрытие слагов было
+// «известным и принятым» (#961) ровно потому, что привязка тогда НЕ была
+// границей на чтениях: перечислять слаги было не страшнее, чем читать по ним
+// данные. Решение владельца эту посылку сняло, и оставить перечисление всех
+// тенантов значило бы закрыть чтение данных, оставив открытым чтение состава
+// платформы — та самая асимметрия «правило есть, но применяется не везде»,
+// ради которой заведены #961/#971/#974/#988/#989.
+//
+// Обоснование 400-не-оракула из `validateProjectParam` (server.go) при этом
+// НЕ ломается, хотя и опирается на «`GET /v1/projects` и так перечисляет все
+// слаги»: 400 остался достижим только для НЕпривязанного ключа, а он этот
+// список и получает целиком. Привязанный до валидации не доходит — tenantScope
+// отвечает 403 раньше.
+//
+// Сужение фильтром, а не запросом: `ListProjects` — «все проекты» для
+// остальных вызывающих, а строка привязки существует по FK, так что список из
+// одного элемента здесь пустым не бывает.
 func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 	projects, err := s.st.ListProjects(r.Context())
 	if err != nil {
 		storeError(w, err)
 		return
 	}
+	if bp, _, bound := keyBinding(r); bound {
+		projects = keepProject(projects, bp)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"projects": emptyNotNull(projects)})
+}
+
+// keepProject оставляет проект с этим слагом (0 или 1 строка: слаг уникален).
+// Вызывается только для привязанного ключа.
+func keepProject(projects []store.Project, slug string) []store.Project {
+	out := make([]store.Project, 0, 1)
+	for _, p := range projects {
+		if p.Slug == slug {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func (s *Server) handleUpsertProject(w http.ResponseWriter, r *http.Request) {

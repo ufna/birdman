@@ -41,10 +41,15 @@ type Match struct {
 
 type MatchFilter struct {
 	Project string
-	Region  string
-	State   string
-	Limit   int
-	Offset  int
+	// Env — окружение матча (колонка `matches.env`, environments v1). Как и у
+	// ServerFilter.Env, это носитель арендаторской границы: `GET /v1/matches`
+	// сам `?env=` не принимает, значение приходит из привязки ключа
+	// (httpapi.tenantScope, tracker #993). Пусто = не сужать.
+	Env    string
+	Region string
+	State  string
+	Limit  int
+	Offset int
 }
 
 const matchSelect = `
@@ -75,6 +80,9 @@ func (s *Store) ListMatches(ctx context.Context, f MatchFilter) ([]Match, error)
 	}
 	if f.Project != "" {
 		add("p.slug = $%d", f.Project)
+	}
+	if f.Env != "" {
+		add("m.env = $%d", f.Env)
 	}
 	if f.Region != "" {
 		add("m.region = $%d", f.Region)

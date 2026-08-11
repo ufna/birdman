@@ -12,8 +12,13 @@ import (
 
 type ServerFilter struct {
 	Project string
-	Region  string
-	State   string
+	// Env — окружение сервера (денормализованная колонка `servers.env`,
+	// миграция 000013). Появилось как носитель арендаторской границы: `GET
+	// /v1/servers` сам `?env=` не принимает, значение приходит из привязки
+	// ключа (httpapi.tenantScope, tracker #993). Пусто = не сужать.
+	Env    string
+	Region string
+	State  string
 }
 
 // ListServers returns servers, newest first, with optional filters.
@@ -33,6 +38,9 @@ func (s *Store) ListServers(ctx context.Context, f ServerFilter) ([]Server, erro
 	}
 	if f.Project != "" {
 		add("p.slug = $%d", f.Project)
+	}
+	if f.Env != "" {
+		add("s.env = $%d", f.Env)
 	}
 	if f.Region != "" {
 		add("n.region = $%d", f.Region)

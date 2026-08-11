@@ -48,12 +48,16 @@ const (
 
 // --- handlers ---
 
+// handleStatsOverview is GET /v1/stats/overview?days=&project=&env= (readonly).
+// Гейт привязки (tenantScope, #993) стоит ПЕРВЫМ — раньше разбора `?days=`: по
+// правилу «гейт настолько рано, насколько позволяет адресация» (#989). Для
+// привязанного ключа агрегаты считаются по его паре, чужой явный слаг → 403.
 func (s *Server) handleStatsOverview(w http.ResponseWriter, r *http.Request) {
-	days, ok := statsDays(w, r)
+	project, env, ok := s.tenantScope(w, r, true)
 	if !ok {
 		return
 	}
-	project, env, ok := s.scopeFilter(w, r)
+	days, ok := statsDays(w, r)
 	if !ok {
 		return
 	}
@@ -72,12 +76,14 @@ func (s *Server) handleStatsOverview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, stats.BuildOverviewFromDaily(dims, peak, ttm, axis, days, now))
 }
 
+// handleStatsCost is GET /v1/stats/cost?days=&project=&env= (readonly). Гейт
+// привязки — первым, как в overview выше.
 func (s *Server) handleStatsCost(w http.ResponseWriter, r *http.Request) {
-	days, ok := statsDays(w, r)
+	project, env, ok := s.tenantScope(w, r, true)
 	if !ok {
 		return
 	}
-	project, env, ok := s.scopeFilter(w, r)
+	days, ok := statsDays(w, r)
 	if !ok {
 		return
 	}
@@ -88,10 +94,17 @@ func (s *Server) handleStatsCost(w http.ResponseWriter, r *http.Request) {
 		storeError(w, err)
 		return
 	}
-	// Utilization is a current, platform-wide capacity snapshot (RegionUtil has
-	// no env dimension), left unscoped by ?env= on purpose: it is orthogonal to
-	// the historical, env-scoped slot-hours the ?env= filter narrows above.
-	util, err := s.st.RegionUtilization(r.Context())
+	// Utilization is a current capacity snapshot, left unscoped by the ?env=/
+	// ?project= QUERY on purpose: it is orthogonal to the historical, env-scoped
+	// slot-hours the filter narrows above, и панель подписывает его как
+	// платформенный. Сужается он ТОЛЬКО привязкой ключа (#993) — иначе снимок
+	// «сколько всего слотов в eu и сколько из них занято» оставался бы
+	// платформенным агрегатом в ответе арендатору, при том что сами его ноды и
+	// серверы (`/v1/nodes`, `/v1/servers`) уже сужены. Именно ПРИВЯЗКА, а не
+	// разобранная пара: у глобального ключа bound=false → фильтр пуст → ответ
+	// байт-в-байт прежний, включая случай `?project=game` в панели.
+	bp, be, _ := keyBinding(r)
+	util, err := s.st.RegionUtilization(r.Context(), store.RegionUtilFilter{Project: bp, Env: be})
 	if err != nil {
 		storeError(w, err)
 		return

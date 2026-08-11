@@ -19,16 +19,20 @@ var matchStates = map[string]bool{
 }
 
 // handleListMatches is GET /v1/matches?project=&region=&state=&limit=&offset=
-// (readonly). `project` валидируется по БД (projectFilter, tracker #961) — тот
-// же класс плохого ввода, что и неизвестный `state` ниже.
+// (readonly). `project` валидируется по БД (tracker #961) — тот же класс
+// плохого ввода, что и неизвестный `state` ниже. Привязанный ключ сужается до
+// своей пары (tenantScope, #993): листинг обязан быть согласован с
+// `GET /v1/matches/{id}`, который привязку энфорсит с #974 — иначе то же самое
+// достаётся списком вместо адреса.
 func (s *Server) handleListMatches(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	project, ok := s.projectFilter(w, r)
+	project, env, ok := s.tenantScope(w, r, false)
 	if !ok {
 		return
 	}
 	f := store.MatchFilter{
 		Project: project,
+		Env:     env,
 		Region:  q.Get("region"),
 		State:   q.Get("state"),
 	}

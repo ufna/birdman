@@ -31,8 +31,8 @@ import (
 // Project scoping (tracker #955): /v1/alerts/{active,history} report `project`
 // (from the alert's label) and a derived `scope` ("project"|"platform"), and
 // accept ?project= — a NON-hiding filter, see keepAlertForProject below. The
-// slug itself is validated against the DB (projectFilter, tracker #961): a typo
-// is a 400, never a quietly narrowed screen.
+// slug itself is validated against the DB (validateProjectParam, tracker
+// #961): a typo is a 400, never a quietly narrowed screen.
 //
 // Mutes (POST/GET/DELETE /v1/alerts/mutes) are master state (table alert_mutes,
 // store/alerts.go) — the source of truth. A mute is reflected as muted:true on
@@ -156,7 +156,13 @@ func (s *Server) handleAlertsActive(w http.ResponseWriter, r *http.Request) {
 	// Валидация ?project= — ДО апстрима: опечатка не тратит запрос к vmalert и не
 	// превращается в 502, когда vmalert лежит. После 503 alerts_unconfigured выше:
 	// «на этом мастере алертов нет вовсе» — факт более фундаментальный, чем ввод.
-	project, ok := s.projectFilter(w, r)
+	//
+	// validateProjectParam, а НЕ tenantScope: арендаторская граница #993 сюда
+	// намеренно не заведена. У алертов свой не-скрывающий контракт (платформенный
+	// алерт виден под любым фильтром), поэтому «сузить до привязки» для них —
+	// другое правило («project алерта == привязка ИЛИ пусто») и другая карточка
+	// (#995). До неё привязанный ключ видит здесь алерты чужих проектов.
+	project, ok := s.validateProjectParam(w, r)
 	if !ok {
 		return
 	}
@@ -290,8 +296,8 @@ func alertScope(project string) string {
 // platform slice of peak CCU (store/rollup.go, decision I5/W3).
 //
 // The requested slug IS validated against the DB before this filter ever runs
-// (projectFilter in server.go, tracker #961) — so `want` here is always a real
-// project. Non-hiding and validated are two different questions and both are
+// (validateProjectParam in server.go, tracker #961) — so `want` here is always
+// a real project. Non-hiding and validated are two different questions and both are
 // answered "yes": a typo can no longer masquerade as "platform alerts only",
 // which on THIS screen is indistinguishable from the desired state of "all
 // quiet", while a real project still keeps every platform alert in view.
@@ -336,7 +342,9 @@ type webhookLine struct {
 func (s *Server) handleAlertHistory(w http.ResponseWriter, r *http.Request) {
 	// Валидация ?project= — до чтения лога: опечатка обязана давать 400 и на
 	// мастере, где лог-сина ещё нет (там ответ иначе неотличим от «всё спокойно»).
-	project, ok := s.projectFilter(w, r)
+	// validateProjectParam, а не tenantScope — причина та же, что в
+	// handleAlertsActive выше (#995).
+	project, ok := s.validateProjectParam(w, r)
 	if !ok {
 		return
 	}
