@@ -1,0 +1,6 @@
+---
+- name: devdeploy + monitoring rules
+  hosts: birdman_dev
+  become: true
+  roles:
+    - birdman_devdeploy
