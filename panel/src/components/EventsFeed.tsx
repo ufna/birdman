@@ -27,7 +27,7 @@ export function EventsFeed() {
   useEffect(() => {
     let cancelled = false;
     api
-      .listEvents(40)
+      .listEvents(40, project)
       .then((list) => {
         if (!cancelled) setEvents(list);
       })
@@ -37,7 +37,9 @@ export function EventsFeed() {
     return () => {
       cancelled = true;
     };
-  }, []);
+    // project в deps: сменился проект — перезапрашиваем ленту, иначе на экране
+    // осталась бы выдача прошлого среза.
+  }, [project]);
 
   useEffect(
     () =>
@@ -55,8 +57,9 @@ export function EventsFeed() {
   if (events === null) return <LoadingRow />;
   // env-фильтр (environments v1 §8, M13) — то же правило, что экран Events:
   // события БЕЗ env видны только в «All»; version_promoted несёт env в to_env.
-  // Проектный фильтр поверх него — НЕ скрывающий: у проекта нет режима «Все»,
-  // поэтому уходят только события ЧУЖОГО проекта (мультипроект W2).
+  // Проектный фильтр поверх него нужен ТОЛЬКО для событий из живого стрима:
+  // список сервер уже сузил сам (#985), а стрим один на сессию и о выбранном
+  // проекте не знает (см. keepForProject).
   const visible = keepForProject(keepForEnv(events, selected, eventEnvOf), project);
   if (visible.length === 0) {
     return <EmptyState>{events.length > 0 ? t('events.emptyFilter') : t('events.none')}</EmptyState>;

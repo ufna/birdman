@@ -57,7 +57,7 @@ export function Events() {
     setAll(null);
     setFailed(false);
     api
-      .listEvents(limit)
+      .listEvents(limit, project)
       .then((list) => {
         if (!cancelled) setAll(list);
       })

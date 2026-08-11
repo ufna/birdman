@@ -84,9 +84,14 @@ type FleetConfig struct {
 }
 
 type Event struct {
-	ID        int64          `json:"id"`
-	TS        time.Time      `json:"ts"`
-	Kind      string         `json:"kind"`
+	ID   int64     `json:"id"`
+	TS   time.Time `json:"ts"`
+	Kind string    `json:"kind"`
+	// Project — слаг владельца события (эпик #968). Пусто = платформенное
+	// событие: бекапы, CA, сессии панели проекта не имеют. Панели поле нужно
+	// для событий, приходящих ЖИВЫМ стримом: их серверный фильтр не проходит
+	// (стрим один на сессию), и раньше проект приходилось угадывать по payload.
+	Project   string         `json:"project,omitempty"`
 	NodeID    *string        `json:"node_id,omitempty"`
 	ServerID  *string        `json:"server_id,omitempty"`
 	MatchID   *string        `json:"match_id,omitempty"`

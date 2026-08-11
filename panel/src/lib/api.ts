@@ -187,6 +187,9 @@ export interface ApiEvent {
   id: number;
   ts: string;
   kind: string;
+  /** Слаг владельца события (эпик #968). Пусто/нет — платформенное событие
+   *  (бекапы, CA, сессии панели): оно принадлежит установке, а не проекту. */
+  project?: string;
   node_id?: string;
   server_id?: string;
   match_id?: string;
@@ -557,8 +560,12 @@ export const api = {
     request<{ matches: Match[] }>('GET', `/v1/matches${qs(f)}`).then((r) => r.matches),
   getMatch: (id: string) =>
     request<{ match: Match }>('GET', `/v1/matches/${encodeURIComponent(id)}`).then((r) => r.match),
-  listEvents: (limit = 50) =>
-    request<{ events: ApiEvent[] }>('GET', `/v1/events${qs({ limit })}`).then((r) => r.events),
+  /** Лента событий. `project` сужает СЕРВЕРНО и не скрывающе: уходят события
+   *  явно чужого проекта, платформенные видны под любым фильтром (#985). */
+  listEvents: (limit = 50, project?: string | null) =>
+    request<{ events: ApiEvent[] }>('GET', `/v1/events${qs({ limit, project: project ?? undefined })}`).then(
+      (r) => r.events,
+    ),
 
   // --- П1: операции (скоуп deploy/admin; кнопки скрыты у readonly) ---
 

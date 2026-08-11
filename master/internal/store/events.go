@@ -71,9 +71,9 @@ func (s *Store) ListEvents(ctx context.Context, limit int, project string) ([]Ev
 		limit = 1000
 	}
 	rows, err := s.Pool.Query(ctx, `
-		select e.id, e.ts, e.kind, e.node_id::text, e.server_id::text, e.match_id::text,
-		       e.version_id::text, e.payload
-		from events e
+		select e.id, e.ts, e.kind, coalesce(p.slug, ''), e.node_id::text, e.server_id::text,
+		       e.match_id::text, e.version_id::text, e.payload
+		from events e left join projects p on p.id = e.project_id
 		where $2 = '' or e.project_id is null
 		   or e.project_id = (select p.id from projects p where p.slug = $2)
 		order by e.ts desc, e.id desc limit $1`, limit, project)
@@ -85,7 +85,7 @@ func (s *Store) ListEvents(ctx context.Context, limit int, project string) ([]Ev
 	for rows.Next() {
 		var e Event
 		var payload []byte
-		if err := rows.Scan(&e.ID, &e.TS, &e.Kind, &e.NodeID, &e.ServerID, &e.MatchID, &e.VersionID, &payload); err != nil {
+		if err := rows.Scan(&e.ID, &e.TS, &e.Kind, &e.Project, &e.NodeID, &e.ServerID, &e.MatchID, &e.VersionID, &payload); err != nil {
 			return nil, err
 		}
 		if len(payload) > 0 {
@@ -103,8 +103,10 @@ func (s *Store) ListEventsAfter(ctx context.Context, afterID int64, limit int) (
 		limit = 1000
 	}
 	rows, err := s.Pool.Query(ctx, `
-		select id, ts, kind, node_id::text, server_id::text, match_id::text, version_id::text, payload
-		from events where id > $1 order by id limit $2`, afterID, limit)
+		select e.id, e.ts, e.kind, coalesce(p.slug, ''), e.node_id::text, e.server_id::text,
+		       e.match_id::text, e.version_id::text, e.payload
+		from events e left join projects p on p.id = e.project_id
+		where e.id > $1 order by e.id limit $2`, afterID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -113,7 +115,7 @@ func (s *Store) ListEventsAfter(ctx context.Context, afterID int64, limit int) (
 	for rows.Next() {
 		var e Event
 		var payload []byte
-		if err := rows.Scan(&e.ID, &e.TS, &e.Kind, &e.NodeID, &e.ServerID, &e.MatchID, &e.VersionID, &payload); err != nil {
+		if err := rows.Scan(&e.ID, &e.TS, &e.Kind, &e.Project, &e.NodeID, &e.ServerID, &e.MatchID, &e.VersionID, &payload); err != nil {
 			return nil, err
 		}
 		if len(payload) > 0 {

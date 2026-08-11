@@ -77,32 +77,36 @@ describe('project — storedProject', () => {
   });
 });
 
-describe('project — eventProjectOf / keepForProject (лента событий)', () => {
-  const ev = (id: number, payload: Record<string, unknown>) => ({
+// Эпик #968 закрыт: проект приезжает ПОЛЕМ события (колонка events.project_id),
+// а не угадывается по payload. Список сервер сужает сам; эти функции остались
+// для событий из живого стрима — он один на сессию и о выбранном проекте не
+// знает (LiveProvider по устройству дерева стоит выше ProjectProvider).
+describe('project — eventProjectOf / keepForProject (события из живого стрима)', () => {
+  const ev = (id: number, project?: string) => ({
     id,
     ts: '2026-08-01T00:00:00Z',
     kind: 'version_registered',
-    payload,
+    project,
+    payload: {},
   });
 
-  it('проект события берётся из payload.project; иначе undefined', () => {
-    expect(eventProjectOf(ev(1, { project: 'game' }))).toBe('game');
-    expect(eventProjectOf(ev(2, {}))).toBeUndefined();
-    // Не строка — тоже «не знаем», а не приведение к строке.
-    expect(eventProjectOf(ev(3, { project: 42 }))).toBeUndefined();
+  it('проект берётся из поля события; пусто — платформенное', () => {
+    expect(eventProjectOf(ev(1, 'game'))).toBe('game');
+    expect(eventProjectOf(ev(2))).toBeUndefined();
+    // Пустая строка = платформенное событие, а не проект с пустым именем.
+    expect(eventProjectOf(ev(3, ''))).toBeUndefined();
   });
 
   it('фильтр НЕ скрывающий: уходят только события ЧУЖОГО проекта', () => {
-    const events = [ev(1, { project: 'game' }), ev(2, { project: 'arena' }), ev(3, {})];
+    const events = [ev(1, 'game'), ev(2, 'arena'), ev(3)];
     const kept = keepForProject(events, 'game');
-    // Событие без атрибуции ОСТАЁТСЯ: у проекта нет режима «Все», и строгий
-    // фильтр спрятал бы его навсегда — это была бы потеря данных.
+    // Платформенное событие ОСТАЁТСЯ: спрятать его значило бы утверждать, что
+    // при выбранном проекте на платформе ничего не происходит.
     expect(kept.map((e) => e.id)).toEqual([1, 3]);
   });
 
   it('проект не выбран → лента не режется', () => {
-    const events = [ev(1, { project: 'game' }), ev(2, { project: 'arena' })];
-    expect(keepForProject(events, null)).toHaveLength(2);
+    expect(keepForProject([ev(1, 'game'), ev(2, 'arena')], null)).toHaveLength(2);
   });
 });
 
@@ -318,9 +322,11 @@ describe('EnvProvider под ProjectProvider', () => {
   // (у /v1/events нет ?project=), значит пересчёт может дать только пересборка
   // мемо — без неё видимый набор не изменится.
   it('экран Событий пересчитывает ленту при смене проекта (deps useMemo)', async () => {
+    // Сервер сужает ленту сам (#985) — мок обязан вести себя так же, иначе
+    // тест проверял бы клиентский фильтр, которого на этом пути больше нет.
     const events = [
-      { id: 1, ts: '2026-08-01T10:00:00Z', kind: 'version_registered', payload: { project: 'game', semver: '1.0.0' } },
-      { id: 2, ts: '2026-08-01T11:00:00Z', kind: 'version_registered', payload: { project: 'arena', semver: '9.9.9' } },
+      { id: 1, ts: '2026-08-01T10:00:00Z', kind: 'version_registered', project: 'game', payload: { semver: '1.0.0' } },
+      { id: 2, ts: '2026-08-01T11:00:00Z', kind: 'version_registered', project: 'arena', payload: { semver: '9.9.9' } },
     ];
     vi.stubGlobal(
       'fetch',
@@ -329,7 +335,12 @@ describe('EnvProvider под ProjectProvider', () => {
         if (u.startsWith('/v1/projects')) return Promise.resolve(jsonRes({ projects: [game, arena] }));
         if (u.startsWith('/v1/environments')) return Promise.resolve(jsonRes({ environments: [] }));
         if (u.startsWith('/v1/nodes')) return Promise.resolve(jsonRes({ nodes: [] }));
-        if (u.startsWith('/v1/events')) return Promise.resolve(jsonRes({ events }));
+        if (u.startsWith('/v1/events')) {
+          const want = new URL(u, 'http://x').searchParams.get('project');
+          return Promise.resolve(
+            jsonRes({ events: want === null ? events : events.filter((e) => e.project === want) }),
+          );
+        }
         return Promise.resolve(jsonRes({}));
       }),
     );
