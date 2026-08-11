@@ -146,11 +146,24 @@ blob_fetch() { # <digest> [выходной-файл] — тело в stdout л�
 # умеет (agent/internal/daemon/manager.go: applyUpgrade). Ссылка живёт минуты,
 # поэтому резолвится непосредственно перед командой конкретной ноде.
 blob_url() {
-  local digest="$1" t
+  local digest="$1" t url
   reg_token_ensure || return 1
   t="$REG_TOKEN"
-  curl -fsS --max-time 30 -o /dev/null -w '%{redirect_url}' \
-    -H "Authorization: Bearer $t" "$REG_BASE/blobs/$digest"
+  url="$(curl -fsS --max-time 30 -o /dev/null -w '%{redirect_url}' \
+    -H "Authorization: Bearer $t" "$REG_BASE/blobs/$digest")"
+  if [ -n "$url" ]; then
+    printf '%s' "$url"
+    return 0
+  fi
+  # Реестр ответил телом, а не 307. Сегодня GHCR так не делает, но опираться на
+  # редирект как на контракт нельзя: пустая ссылка иначе откладывала бы шаг
+  # агентов КАЖДЫЙ тик бесконечно (дрейф виден через agents_behind, но требует
+  # человека там, где мог бы не требовать). Отдаём прямой адрес блоба: для
+  # ПУБЛИЧНОГО пакета он тоже качается, просто без подписи.
+  # В stderr, а НЕ в stdout: функция вызывается через $( ), и строка лога иначе
+  # уехала бы В САМ URL. journald пишет оба потока, так что видно её одинаково.
+  log "реестр отдал блоб без редиректа — агенту уходит прямая ссылка" >&2
+  printf '%s' "$REG_BASE/blobs/$digest"
 }
 
 # --- метрики (textfile-коллектор node_exporter) ------------------------------

@@ -292,22 +292,29 @@ grep -q 'birdman_devdeploy_agents_behind 2' "$T/textfile/birdman-devdeploy.prom"
 
 # Инфраструктурная осечка реестра: подписанной ссылки нет. Версию отвергать
 # нельзя (сборка ни при чём), но дрейф обязан быть виден.
-setup "агенты: реестр не отдал подписанную ссылку"
+# tracker #982: сегодня GHCR отвечает на блоб 307-редиректом, но опираться на
+# это как на контракт нельзя. Если реестр однажды отдаст блоб телом, шаг агентов
+# не должен вставать НАВСЕГДА: уходит прямая ссылка на блоб — для публичного
+# пакета она тоже качается, просто без подписи.
+setup "агенты: реестр без редиректа — уходит прямая ссылка, цепочка живёт"
 fleet
-python3 - "$T/bin/curl" <<'PY'
+python3 - "$T/bin/curl" <<'PYSTUB'
 import sys
 p = sys.argv[1]
 s = open(p).read()
-# Ломаем ровно резолв подписанной ссылки, всё остальное оставляем рабочим.
-s = s.replace("""    if [ -n "$want_redirect" ]; then printf 'https://signed.test/%s' "$dg"; exit 0; fi""",
-              """    if [ -n "$want_redirect" ]; then printf ''; exit 0; fi""")
-open(p, 'w').write(s)
-PY
+old = """    if [ -n "$want_redirect" ]; then printf 'https://signed.test/%s' "$dg"; exit 0; fi"""
+new = """    if [ -n "$want_redirect" ]; then printf ''; exit 0; fi"""
+assert old in s
+open(p, "w").write(s.replace(old, new))
+PYSTUB
 run
-[ ! -f "$T/upgrades.log" ] && ok "без ссылки команда не уходит" || no "ушла команда с пустым URL"
-grep -q '^agent:' "$T/state/rejected" 2>/dev/null && no "осечка реестра отвергла версию" || ok "версия НЕ отвергнута (осечка ≠ плохая сборка)"
-grep -q 'birdman_devdeploy_agents_behind 2' "$T/textfile/birdman-devdeploy.prom" 2>/dev/null &&
-  ok "дрейф при осечке реестра виден" || no "осечка реестра осталась невидимой"
+n="$(wc -l <"$T/upgrades.log" 2>/dev/null | tr -d ' ')"
+[ "$n" = 2 ] && ok "цепочка агентов отработала без редиректа" || no "без редиректа цепочка встала: $n команд"
+grep -q 'registry.test/v2/ufna/birdman-dev/blobs/sha256:' "$T/upgrades.log" 2>/dev/null &&
+  ok "агенту ушла прямая ссылка на блоб" || no "прямой ссылки в команде нет"
+grep -q '^agent:' "$T/state/rejected" 2>/dev/null && no "фоллбэк отверг версию" || ok "версия не отвергнута"
+grep -q 'birdman_devdeploy_agents_behind 0' "$T/textfile/birdman-devdeploy.prom" 2>/dev/null &&
+  ok "дрейфа нет — цепочка дошла" || no "дрейф остался при рабочем фоллбэке"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
