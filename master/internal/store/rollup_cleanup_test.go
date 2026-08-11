@@ -115,3 +115,31 @@ func TestDeleteEnvironmentClearsOwnRollupsOnly(t *testing.T) {
 		t.Fatalf("снесены роллапы чужого проекта: осталось %d, ждём 1", neighbour)
 	}
 }
+
+// TestDeleteProjectKeepsUnattributedRollups: строка project='' — НЕ ничейный
+// мусор, а документированный маркер «не атрибутировано» (миграция 000017):
+// комбинация (day, region, semver, env), которую делят два проекта, при
+// бэкфилле осознанно осталась без владельца. Каскад одного из проектов такую
+// строку трогать не имеет права — в ней и чужие цифры тоже.
+func TestDeleteProjectKeepsUnattributedRollups(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10)
+	ctx := context.Background()
+
+	seedRollup(t, st, f.Project, "dev", "1.0.0")
+	seedRollup(t, st, "", "dev", "9.9.9") // не атрибутирована
+
+	if _, err := st.RevokeNode(ctx, f.NodeID); err != nil {
+		t.Fatalf("revoke node: %v", err)
+	}
+	if _, err := st.DeleteProject(ctx, f.Project, f.Project); err != nil {
+		t.Fatalf("delete project: %v", err)
+	}
+
+	if n := rollupCount(t, st, f.Project); n != 0 {
+		t.Fatalf("свои роллапы остались: %d", n)
+	}
+	if n := rollupCount(t, st, ""); n != 1 {
+		t.Fatalf("снесена неатрибутированная строка (в ней есть чужие цифры): осталось %d, ждём 1", n)
+	}
+}

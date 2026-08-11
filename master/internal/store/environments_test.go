@@ -336,9 +336,14 @@ func TestEnvironmentsDeleteCascade(t *testing.T) {
 	if _, _, err := st.RevokeAPIKey(ctx, deadKey.ID); err != nil {
 		t.Fatalf("pre-revoke: %v", err)
 	}
+	// Project в дименшенах ОБЯЗАТЕЛЕН — так их и строит живой пайплайн
+	// (statsrollup из stats.AggregateDaily). Без него роллап ложится строкой
+	// project='' — а это не «строка проекта game», а документированный маркер
+	// «не атрибутировано» (миграция 000017): такая строка принадлежит нескольким
+	// проектам сразу, и каскад одного из них её не трогает by design.
 	if err := st.UpsertRollupDay(ctx, time.Now().UTC(), []store.RollupDim{
-		{Region: "eu", Semver: "1.0.0", Env: "dev", Matches: 1},
-		{Region: "eu", Semver: "1.0.0", Env: "prod", Matches: 1},
+		{Project: "game", Region: "eu", Semver: "1.0.0", Env: "dev", Matches: 1},
+		{Project: "game", Region: "eu", Semver: "1.0.0", Env: "prod", Matches: 1},
 	}, 3, nil); err != nil {
 		t.Fatalf("rollup: %v", err)
 	}
