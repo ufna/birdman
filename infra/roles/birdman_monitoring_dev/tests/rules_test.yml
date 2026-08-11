@@ -46,11 +46,12 @@ tests:
           - exp_labels:
               severity: critical
               project: game
+              env: prod
               region: eu
             exp_annotations:
-              summary: 'BufferEmpty(prod): проект game, регион eu без ready-серверов'
-              description: 'sum(birdman_servers{state="ready", production="true"}) == 0 for a (region, project) pair for longer than the threshold (ops.md §1 BufferEmpty).'
-              description_ru: 'sum(birdman_servers{state="ready", production="true"}) == 0 по паре (регион, проект) дольше порога (ops.md §1 BufferEmpty).'
+              summary: 'BufferEmpty(prod): проект game, окружение prod, регион eu без ready-серверов'
+              description: 'sum(birdman_servers{state="ready", production="true"}) == 0 for a (region, project, env) triple for longer than the threshold (ops.md §1 BufferEmpty). Grouping by env is required: one production slice of a project may hold several environments in the same region, and an empty buffer in one would be masked by servers of another.'
+              description_ru: 'sum(birdman_servers{state="ready", production="true"}) == 0 по тройке (регион, проект, окружение) дольше порога (ops.md §1 BufferEmpty). Окружение в группировке обязательно: внутри одного production-среза у проекта их может быть несколько в одном регионе, и пустой буфер одного маскировался бы серверами другого.'
 
   # The non-prod twin of the pair — warning, not critical.
   - interval: 1m
@@ -65,11 +66,12 @@ tests:
           - exp_labels:
               severity: warning
               project: game
+              env: dev
               region: eu
             exp_annotations:
-              summary: 'BufferEmpty(non-prod): проект game, регион eu без ready-серверов'
-              description: 'sum(birdman_servers{state="ready", production="false"}) == 0 for a (region, project) pair for longer than the threshold (ops.md §1 BufferEmpty).'
-              description_ru: 'sum(birdman_servers{state="ready", production="false"}) == 0 по паре (регион, проект) дольше порога (ops.md §1 BufferEmpty).'
+              summary: 'BufferEmpty(non-prod): проект game, окружение dev, регион eu без ready-серверов'
+              description: 'sum(birdman_servers{state="ready", production="false"}) == 0 for a (region, project, env) triple for longer than the threshold (ops.md §1 BufferEmpty). Grouping by env is required: dev and staging share the production=false slice, and an empty ready buffer in one would be masked by servers of the other.'
+              description_ru: 'sum(birdman_servers{state="ready", production="false"}) == 0 по тройке (регион, проект, окружение) дольше порога (ops.md §1 BufferEmpty). Окружение в группировке обязательно: dev и staging живут в одном срезе production=false, и пустой ready-буфер одного маскировался бы серверами другого.'
       # ...and the prod twin stays silent on a non-prod fleet.
       - eval_time: 6m
         alertname: BufferEmptyReadyProd
@@ -103,11 +105,12 @@ tests:
           - exp_labels:
               severity: critical
               project: a
+              env: prod
               region: eu
             exp_annotations:
-              summary: 'BufferEmpty(prod): проект a, регион eu без ready-серверов'
-              description: 'sum(birdman_servers{state="ready", production="true"}) == 0 for a (region, project) pair for longer than the threshold (ops.md §1 BufferEmpty).'
-              description_ru: 'sum(birdman_servers{state="ready", production="true"}) == 0 по паре (регион, проект) дольше порога (ops.md §1 BufferEmpty).'
+              summary: 'BufferEmpty(prod): проект a, окружение prod, регион eu без ready-серверов'
+              description: 'sum(birdman_servers{state="ready", production="true"}) == 0 for a (region, project, env) triple for longer than the threshold (ops.md §1 BufferEmpty). Grouping by env is required: one production slice of a project may hold several environments in the same region, and an empty buffer in one would be masked by servers of another.'
+              description_ru: 'sum(birdman_servers{state="ready", production="true"}) == 0 по тройке (регион, проект, окружение) дольше порога (ops.md §1 BufferEmpty). Окружение в группировке обязательно: внутри одного production-среза у проекта их может быть несколько в одном регионе, и пустой буфер одного маскировался бы серверами другого.'
 
   # --- The same class next door: increase() over a series born at 1 ---
 
@@ -293,3 +296,28 @@ tests:
               summary: 'AgentUpgradeFailed: неудачных апгрейдов агента за 10м: 1'
               description: 'Agent did not come back online with the new version (agent.md §7; rollback via ansible).'
               description_ru: 'Агент не вышел на связь с новой версией (agent.md §7; откат — ansible).'
+
+  # tracker #967: два окружения одного проекта в ОДНОМ регионе и одном
+  # production-срезе. Пустой ready-буфер dev обязан зажечь алерт, даже когда
+  # staging полон: до сужения по env сумма по (region, project) была > 0, и
+  # дежурный не узнавал о голом окружении вообще.
+  - interval: 1m
+    name: 'два окружения в одном регионе — пустой dev не маскируется полным staging'
+    input_series:
+      - series: 'birdman_servers{project="game",env="dev",production="false",state="ready",region="eu",version="1.0.0"}'
+        values: '0+0x10'
+      - series: 'birdman_servers{project="game",env="staging",production="false",state="ready",region="eu",version="1.0.0"}'
+        values: '3+0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: BufferEmptyReadyNonProd
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              project: game
+              env: dev
+              region: eu
+            exp_annotations:
+              summary: 'BufferEmpty(non-prod): проект game, окружение dev, регион eu без ready-серверов'
+              description: 'sum(birdman_servers{state="ready", production="false"}) == 0 for a (region, project, env) triple for longer than the threshold (ops.md §1 BufferEmpty). Grouping by env is required: dev and staging share the production=false slice, and an empty ready buffer in one would be masked by servers of the other.'
+              description_ru: 'sum(birdman_servers{state="ready", production="false"}) == 0 по тройке (регион, проект, окружение) дольше порога (ops.md §1 BufferEmpty). Окружение в группировке обязательно: dev и staging живут в одном срезе production=false, и пустой ready-буфер одного маскировался бы серверами другого.'

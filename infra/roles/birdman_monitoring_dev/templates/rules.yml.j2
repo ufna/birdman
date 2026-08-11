@@ -72,26 +72,26 @@ groups:
       # среза production НЕТ) остаётся страховкой, но он ловит уже СЛУЧИВШИЙСЯ
       # отказ аллокации — эта пара превентивна, поэтому её и чинили.
       - alert: BufferEmptyReadyProd
-        expr: sum by (region, project) (birdman_servers{state="ready", production="true"}) == 0
+        expr: sum by (region, project, env) (birdman_servers{state="ready", production="true"}) == 0
         for: {{ birdman_ready_empty_for }}
         labels:
           severity: critical
         annotations:
-          summary: {% raw %}'BufferEmpty(prod): проект {{ $labels.project }}, регион {{ $labels.region }} без ready-серверов'{% endraw %}
+          summary: {% raw %}'BufferEmpty(prod): проект {{ $labels.project }}, окружение {{ $labels.env }}, регион {{ $labels.region }} без ready-серверов'{% endraw %}
 
-          description: 'sum(birdman_servers{state="ready", production="true"}) == 0 for a (region, project) pair for longer than the threshold (ops.md §1 BufferEmpty).'
-          description_ru: 'sum(birdman_servers{state="ready", production="true"}) == 0 по паре (регион, проект) дольше порога (ops.md §1 BufferEmpty).'
+          description: 'sum(birdman_servers{state="ready", production="true"}) == 0 for a (region, project, env) triple for longer than the threshold (ops.md §1 BufferEmpty). Grouping by env is required: one production slice of a project may hold several environments in the same region, and an empty buffer in one would be masked by servers of another.'
+          description_ru: 'sum(birdman_servers{state="ready", production="true"}) == 0 по тройке (регион, проект, окружение) дольше порога (ops.md §1 BufferEmpty). Окружение в группировке обязательно: внутри одного production-среза у проекта их может быть несколько в одном регионе, и пустой буфер одного маскировался бы серверами другого.'
 
       - alert: BufferEmptyReadyNonProd
-        expr: sum by (region, project) (birdman_servers{state="ready", production="false"}) == 0
+        expr: sum by (region, project, env) (birdman_servers{state="ready", production="false"}) == 0
         for: {{ birdman_ready_empty_for }}
         labels:
           severity: warning
         annotations:
-          summary: {% raw %}'BufferEmpty(non-prod): проект {{ $labels.project }}, регион {{ $labels.region }} без ready-серверов'{% endraw %}
+          summary: {% raw %}'BufferEmpty(non-prod): проект {{ $labels.project }}, окружение {{ $labels.env }}, регион {{ $labels.region }} без ready-серверов'{% endraw %}
 
-          description: 'sum(birdman_servers{state="ready", production="false"}) == 0 for a (region, project) pair for longer than the threshold (ops.md §1 BufferEmpty).'
-          description_ru: 'sum(birdman_servers{state="ready", production="false"}) == 0 по паре (регион, проект) дольше порога (ops.md §1 BufferEmpty).'
+          description: 'sum(birdman_servers{state="ready", production="false"}) == 0 for a (region, project, env) triple for longer than the threshold (ops.md §1 BufferEmpty). Grouping by env is required: dev and staging share the production=false slice, and an empty ready buffer in one would be masked by servers of the other.'
+          description_ru: 'sum(birdman_servers{state="ready", production="false"}) == 0 по тройке (регион, проект, окружение) дольше порога (ops.md §1 BufferEmpty). Окружение в группировке обязательно: dev и staging живут в одном срезе production=false, и пустой ready-буфер одного маскировался бы серверами другого.'
 
       # BufferEmpty (2/2): аллокации падают из-за отсутствия ёмкости. Метрика
       # birdman_allocation_failures_total НЕ несёт лейбла production (пары по
