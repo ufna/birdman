@@ -256,7 +256,13 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
-	events, err := s.st.ListEvents(r.Context(), limit)
+	// Слаг валидируется общим projectFilter (#961): опечатка → 400, а не молча
+	// суженная лента.
+	project, ok := s.projectFilter(w, r)
+	if !ok {
+		return
+	}
+	events, err := s.st.ListEvents(r.Context(), limit, project)
 	if err != nil {
 		storeError(w, err)
 		return

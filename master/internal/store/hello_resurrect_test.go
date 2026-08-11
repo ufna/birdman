@@ -69,7 +69,7 @@ func TestHelloResurrectsLeaseFailedServers(t *testing.T) {
 		t.Fatalf("reaped must never resurrect, got %s", sv.State)
 	}
 
-	events, err := st.ListEvents(ctx, 50)
+	events, err := st.ListEvents(ctx, 50, "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -315,7 +315,7 @@ func TestPromoteVersion(t *testing.T) {
 	if n, err := st.CountEvents(ctx, store.EventVersionPromoted); err != nil || n != 1 {
 		t.Fatalf("version_promoted: want exactly 1 (insert only, not on reuse), got %d (err %v)", n, err)
 	}
-	evs, err := st.ListEvents(ctx, 100)
+	evs, err := st.ListEvents(ctx, 100, "")
 	if err != nil {
 		t.Fatal(err)
 	}

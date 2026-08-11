@@ -157,7 +157,7 @@ func TestRunOnceDumpFailure(t *testing.T) {
 		t.Fatalf("run row: %+v", runs)
 	}
 	// Событие backup_failed.
-	events, err := st.ListEvents(ctx, 10)
+	events, err := st.ListEvents(ctx, 10, "")
 	if err != nil {
 		t.Fatalf("events: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestRunOnceRecordsFailureOnDeadContext(t *testing.T) {
 			t.Fatalf("run row stuck in %q (want error or no row at all): %+v", run.Result, run)
 		}
 	}
-	events, err := st.ListEvents(context.Background(), 10)
+	events, err := st.ListEvents(context.Background(), 10, "")
 	if err != nil {
 		t.Fatalf("events: %v", err)
 	}

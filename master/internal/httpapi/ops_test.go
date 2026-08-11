@@ -164,7 +164,7 @@ func TestAgentUpgradeEventRedactsURL(t *testing.T) {
 		t.Fatal("agent must receive the URL verbatim, signature included")
 	}
 
-	events, err := st.ListEvents(ctx, 10)
+	events, err := st.ListEvents(ctx, 10, "")
 	if err != nil {
 		t.Fatalf("list events: %v", err)
 	}

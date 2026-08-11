@@ -475,7 +475,7 @@ func TestEnvironmentsDeleteCascade(t *testing.T) {
 	}
 
 	// --- Событие environment_deleted с составом (payload) + аудит отзыва ключа.
-	evs, err := st.ListEvents(ctx, 200)
+	evs, err := st.ListEvents(ctx, 200, "")
 	if err != nil {
 		t.Fatal(err)
 	}

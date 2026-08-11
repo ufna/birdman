@@ -116,7 +116,7 @@ func nodeState(t *testing.T, st *store.Store, nodeID string) string {
 
 func lastEvent(t *testing.T, st *store.Store, kind string) store.Event {
 	t.Helper()
-	events, err := st.ListEvents(context.Background(), 200)
+	events, err := st.ListEvents(context.Background(), 200, "")
 	if err != nil {
 		t.Fatalf("list events: %v", err)
 	}

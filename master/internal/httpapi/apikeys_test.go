@@ -152,7 +152,7 @@ func TestAPIKeysCRUD(t *testing.T) {
 	if n, err := st.CountEvents(ctx, store.EventAPIKeyRevoked); err != nil || n < 2 {
 		t.Fatalf("apikey_revoked events = %d err=%v, want >=2", n, err)
 	}
-	events, err := st.ListEvents(ctx, 100)
+	events, err := st.ListEvents(ctx, 100, "")
 	if err != nil {
 		t.Fatal(err)
 	}

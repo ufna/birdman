@@ -140,7 +140,7 @@ func TestSetNodeCert(t *testing.T) {
 	// The cert write and its audit event are one transaction (design §3): a
 	// node_enrolled event exists, references the node, and its payload carries
 	// exactly {serial, not_after, agent_version} — no token, no key material.
-	evs, err := st.ListEvents(ctx, 10)
+	evs, err := st.ListEvents(ctx, 10, "")
 	if err != nil {
 		t.Fatal(err)
 	}

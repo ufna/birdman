@@ -367,7 +367,7 @@ func credFor(t *testing.T, ctx context.Context, st *store.Store, host string) st
 // substrings — the write-only guarantee (no token in an audit event).
 func assertNoTokenInEvents(t *testing.T, ctx context.Context, st *store.Store, tokens ...string) {
 	t.Helper()
-	events, err := st.ListEvents(ctx, 200)
+	events, err := st.ListEvents(ctx, 200, "")
 	if err != nil {
 		t.Fatal(err)
 	}
