@@ -58,16 +58,31 @@ jobs:
       - name: Test agent
         run: cd agent && go test ./...
 
-      - name: Build panel
-        run: |
-          cd panel
-          npm ci
-          npm run build
+      # Именно ./panel/build.sh, а не «npm run build» руками: сборка сама по
+      # себе кладёт результат в panel/dist, а master встраивает go:embed'ом
+      # ДРУГОЙ каталог — master/internal/panelui/static. Копирование делает
+      # build.sh, и повторять его здесь значило бы держать вторую копию правды,
+      # которая однажды разъедется (и разъехалась: CI-бинарь ушёл на стенд без
+      # панели, отдавая placeholder «панель не была собрана в этот бинарь»).
+      # node в раннере ≥20, поэтому build.sh идёт хостовым путём, без docker.
+      - name: Build panel and stage it for go:embed
+        run: ./panel/build.sh
 
       # Версия задаётся ЯВНО и обязана совпадать в трёх местах: ldflags агента,
       # поле agent_version в MANIFEST и тело POST /v1/agent-upgrade у деплоера.
       # Разъехались — watchdog мастера сверит re-Hello с чужой строкой и будет
       # слать ложные agent_upgrade_failed.
+      # Гейт против того же класса поломки: собрать мастера без панели легко и
+      # тихо (go:embed на пустом каталоге не падает — бинарь просто отдаёт
+      # placeholder), а увидит это только человек, открывший панель.
+      - name: Assert the panel is staged for embedding
+        run: |
+          set -euo pipefail
+          test -s master/internal/panelui/static/index.html || {
+            echo "панель не выложена в master/internal/panelui/static — бинарь уехал бы без неё"
+            exit 1
+          }
+
       - name: Build binaries
         id: build
         env:
