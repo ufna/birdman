@@ -445,14 +445,16 @@ func (s *Store) DeleteEnvironment(ctx context.Context, project, name, confirm st
 	}
 	res.Versions = int(n.RowsAffected())
 
-	// match_stats_daily — платформенная таблица БЕЗ project_id (I5): строки
-	// адресуются (day, region, semver, env). Поэтому чистим её только когда имя
-	// окружения не занято ДРУГИМ проектом — иначе снесли бы чужие роллапы.
-	if _, err := tx.Exec(ctx, `
-		delete from match_stats_daily
-		where env = $2
-		  and not exists (select 1 from environments where name = $2 and project_id <> $1::uuid)`,
-		projectID, name); err != nil {
+	// Роллапы адресуются парой (project, env): project_id (uuid) в таблице нет,
+	// но колонка `project` есть и входит в первичный ключ (миграция 000017).
+	// Прежняя адресация по одному имени окружения промахивалась в обе стороны:
+	// dev/prod сидируются каждому проекту, поэтому «имя занято другим» истинно
+	// почти всегда и не удалялось НИЧЕГО (осиротевшие роллапы доставались
+	// следующему окружению с тем же именем), а на уникальном имени, наоборот,
+	// сносились строки чужих проектов.
+	if _, err := tx.Exec(ctx,
+		`delete from match_stats_daily where project = $1 and env = $2`,
+		project, name); err != nil {
 		return res, err
 	}
 
