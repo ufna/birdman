@@ -131,7 +131,7 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: {% raw %}'CrashLoop: событий crash_loop за 5м: {{ $value }}'{% endraw %}
+          summary: {% raw %}'CrashLoop: проект {{ $labels.project }}, событий crash_loop за 5м: {{ $value }}'{% endraw %}
 
           description: 'A bad release is likely — roll back (ops.md §6 runbook 3).'
           description_ru: 'Вероятен плохой релиз — rollback (ops.md §6 runbook 3).'
@@ -262,7 +262,7 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: {% raw %}'AgentUpgradeFailed: неудачных апгрейдов агента за 10м: {{ $value }}'{% endraw %}
+          summary: {% raw %}'AgentUpgradeFailed: проект {{ $labels.project }}, неудачных апгрейдов агента за 10м: {{ $value }}'{% endraw %}
 
           description: 'Agent did not come back online with the new version (agent.md §7; rollback via ansible).'
           description_ru: 'Агент не вышел на связь с новой версией (agent.md §7; откат — ansible).'

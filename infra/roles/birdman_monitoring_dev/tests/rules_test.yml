@@ -121,7 +121,7 @@ tests:
   - interval: 1m
     name: 'events counter born at 1 — the first event of a kind is invisible'
     input_series:
-      - series: 'birdman_events_total{kind="crash_loop"}'
+      - series: 'birdman_events_total{kind="crash_loop",project="game"}'
         values: '_ _ 1 1 1 1 1 1'
     alert_rule_test:
       - eval_time: 4m
@@ -136,7 +136,7 @@ tests:
   - interval: 1m
     name: 'zero baseline — the first crash_loop fires'
     input_series:
-      - series: 'birdman_events_total{kind="crash_loop"}'
+      - series: 'birdman_events_total{kind="crash_loop",project="game"}'
         values: '0 0 1 1 1 1 1 1'
     alert_rule_test:
       - eval_time: 4m
@@ -145,8 +145,9 @@ tests:
           - exp_labels:
               severity: critical
               kind: crash_loop
+              project: game
             exp_annotations:
-              summary: 'CrashLoop: событий crash_loop за 5м: 1'
+              summary: 'CrashLoop: проект game, событий crash_loop за 5м: 1'
               description: 'A bad release is likely — roll back (ops.md §6 runbook 3).'
               description_ru: 'Вероятен плохой релиз — rollback (ops.md §6 runbook 3).'
 
@@ -283,7 +284,7 @@ tests:
   - interval: 1m
     name: 'zero baseline — the first agent_upgrade_failed fires'
     input_series:
-      - series: 'birdman_events_total{kind="agent_upgrade_failed"}'
+      - series: 'birdman_events_total{kind="agent_upgrade_failed",project="game"}'
         values: '0 0 1 1 1 1 1 1'
     alert_rule_test:
       - eval_time: 4m
@@ -292,8 +293,9 @@ tests:
           - exp_labels:
               severity: critical
               kind: agent_upgrade_failed
+              project: game
             exp_annotations:
-              summary: 'AgentUpgradeFailed: неудачных апгрейдов агента за 10м: 1'
+              summary: 'AgentUpgradeFailed: проект game, неудачных апгрейдов агента за 10м: 1'
               description: 'Agent did not come back online with the new version (agent.md §7; rollback via ansible).'
               description_ru: 'Агент не вышел на связь с новой версией (agent.md §7; откат — ansible).'
 
@@ -351,3 +353,50 @@ tests:
               summary: 'BufferEmpty: проект game, no_capacity аллокаций за 1м: 1'
               description: 'No free slots available for allocation (ops.md §1 BufferEmpty).'
               description_ru: 'Нет свободных слотов под аллокацию (ops.md §1 BufferEmpty).'
+
+  # tracker #986 (эпик #968): CrashLoop и AgentUpgradeFailed были платформенными
+  # — падающий в цикле дедик проекта А будил дежурного проекта Б, и по алерту
+  # нельзя было понять, чей проект страдает. Теперь серия несёт project, и алерт
+  # наследует его сам.
+  - interval: 1m
+    name: 'crash_loop проекта А не приходит от имени проекта Б'
+    input_series:
+      - series: 'birdman_events_total{kind="crash_loop",project="alpha"}'
+        values: '0 0 1 1 1 1 1 1'
+      # У соседа тишина — его нулевая база существует ровно для того, чтобы
+      # increase() не выдумывал ему чужой рост.
+      - series: 'birdman_events_total{kind="crash_loop",project="beta"}'
+        values: '0 0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: CrashLoop
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              kind: crash_loop
+              project: alpha
+            exp_annotations:
+              summary: 'CrashLoop: проект alpha, событий crash_loop за 5м: 1'
+              description: 'A bad release is likely — roll back (ops.md §6 runbook 3).'
+              description_ru: 'Вероятен плохой релиз — rollback (ops.md §6 runbook 3).'
+
+  # Платформенная половина: событие, не принадлежащее проекту (пустой лейбл),
+  # обязано будить по-прежнему — иначе сужение превратилось бы в глухоту.
+  - interval: 1m
+    name: 'платформенный crash_loop (пустой проект) продолжает гореть'
+    input_series:
+      - series: 'birdman_events_total{kind="crash_loop",project=""}'
+        values: '0 0 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: CrashLoop
+        exp_alerts:
+          # Пустой лейбл Prometheus не хранит вовсе — в ожиданиях его нет, и
+          # именно так платформенное событие отличается от проектного.
+          - exp_labels:
+              severity: critical
+              kind: crash_loop
+            exp_annotations:
+              summary: 'CrashLoop: проект , событий crash_loop за 5м: 1'
+              description: 'A bad release is likely — roll back (ops.md §6 runbook 3).'
+              description_ru: 'Вероятен плохой релиз — rollback (ops.md §6 runbook 3).'

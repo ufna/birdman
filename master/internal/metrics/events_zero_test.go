@@ -27,7 +27,9 @@ func TestEventsZeroBaselineNotFabricatedOnQueryFailure(t *testing.T) {
 	// Здоровая база: нулевая база событий эмитится — иначе тест ничего не
 	// доказывал бы (проверяем сам факт наличия серии до поломки).
 	healthy := metrics.New(st, testLog())
-	if countSeries(t, healthy.Registry, "birdman_events_total", map[string]string{"kind": "crash_loop"}) == 0 {
+	if countSeries(t, healthy.Registry, "birdman_events_total", map[string]string{
+		"kind": "crash_loop", "project": "game",
+	}) == 0 {
 		t.Fatal("на здоровой базе нулевая база events отсутствует — сломана предпосылка теста")
 	}
 
@@ -48,7 +50,9 @@ func TestEventsZeroBaselineNotFabricatedOnQueryFailure(t *testing.T) {
 	}
 
 	m := metrics.New(st, testLog())
-	if n := countSeries(t, m.Registry, "birdman_events_total", map[string]string{"kind": "crash_loop"}); n != 0 {
+	if n := countSeries(t, m.Registry, "birdman_events_total", map[string]string{
+		"kind": "crash_loop", "project": "game",
+	}); n != 0 {
 		t.Fatalf("частично прочитанная картина событий выдумала нулевую базу (%d серий): для increase() это сброс счётчика", n)
 	}
 	// Остальной скрейп обязан выжить: коллектор логирует-и-продолжает, как соседи.

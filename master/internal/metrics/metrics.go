@@ -205,8 +205,9 @@ var (
 	// count is monotonic and survives a master restart — a real counter.
 	eventsTotalDesc = prometheus.NewDesc(
 		"birdman_events_total",
-		"Total events by kind (append-only feed; crash_loop feeds the CrashLoop alert).",
-		[]string{"kind"}, nil)
+		"Total events by kind and project (append-only feed; crash_loop feeds the CrashLoop alert). "+
+			"An empty project means a platform event (backups, CA, panel sessions) that belongs to no project.",
+		[]string{"kind", "project"}, nil)
 	matchesRunningDesc = prometheus.NewDesc(
 		"birdman_matches_running",
 		"Matches currently in the running state (product metric).",
@@ -407,27 +408,34 @@ var allocFailureReasons = []string{"no_capacity", "bad_request", "env_required",
 // При сбое запроса не делаем НИЧЕГО (та же дисциплина, что у нулевой базы
 // событий и collectReadyZeros): выдуманный ноль после икоты базы для
 // increase() выглядит как сброс счётчика.
-func (c *dbCollector) preinitAllocFailures(ctx context.Context) {
-	if c.allocFailures == nil {
-		return
-	}
+// projectSlugs — desired state проектного измерения: кто есть в БД, тот и
+// получает нулевые серии. Общий источник для нулевых баз отказов аллокации
+// (#966) и событий (#986): оба обязаны существовать ДО первого факта, иначе
+// increase() не увидит его.
+func (c *dbCollector) projectSlugs(ctx context.Context) ([]string, error) {
 	rows, err := c.st.Pool.Query(ctx, `select slug from projects`)
 	if err != nil {
-		c.log.Error("metrics: projects query failed", "err", err)
-		return
+		return nil, err
 	}
 	defer rows.Close()
 	var slugs []string
 	for rows.Next() {
 		var slug string
 		if err := rows.Scan(&slug); err != nil {
-			c.log.Error("metrics: projects scan failed", "err", err)
-			return
+			return nil, err
 		}
 		slugs = append(slugs, slug)
 	}
-	if err := rows.Err(); err != nil {
-		c.log.Error("metrics: projects rows failed", "err", err)
+	return slugs, rows.Err()
+}
+
+func (c *dbCollector) preinitAllocFailures(ctx context.Context) {
+	if c.allocFailures == nil {
+		return
+	}
+	slugs, err := c.projectSlugs(ctx)
+	if err != nil {
+		c.log.Error("metrics: projects query failed", "err", err)
 		return
 	}
 	for _, slug := range slugs {
@@ -466,21 +474,27 @@ func (c *dbCollector) Collect(ch chan<- prometheus.Metric) {
 
 	// Product + alert-feed metrics (ops.md §1). Each logs-and-continues so one
 	// failed query does not blank the rest.
-	if erows, err := c.st.Pool.Query(ctx, `select kind, count(*) from events group by kind`); err != nil {
+	// Проект берётся ИЗ КОЛОНКИ events.project_id (эпик #968, миграция 000019),
+	// а не угадывается по payload: пустая строка означает платформенное событие
+	// (бекапы, CA, сессии) — оно принадлежит не проекту, а установке.
+	if erows, err := c.st.Pool.Query(ctx, `
+		select e.kind, coalesce(p.slug, ''), count(*)
+		from events e left join projects p on p.id = e.project_id
+		group by e.kind, coalesce(p.slug, '')`); err != nil {
 		c.log.Error("metrics: events query failed", "err", err)
 	} else {
 		seen := make(map[string]bool, len(alertEventKinds))
 		ok := true
 		for erows.Next() {
-			var kind string
+			var kind, project string
 			var n float64
-			if err := erows.Scan(&kind, &n); err != nil {
+			if err := erows.Scan(&kind, &project, &n); err != nil {
 				c.log.Error("metrics: events scan failed", "err", err)
 				ok = false
 				break
 			}
-			seen[kind] = true
-			ch <- prometheus.MustNewConstMetric(eventsTotalDesc, prometheus.CounterValue, n, kind)
+			seen[kind+"\x00"+project] = true
+			ch <- prometheus.MustNewConstMetric(eventsTotalDesc, prometheus.CounterValue, n, kind, project)
 		}
 		erows.Close()
 		if err := erows.Err(); ok && err != nil {
@@ -497,10 +511,24 @@ func (c *dbCollector) Collect(ch chan<- prometheus.Metric) {
 		// on a clean read — inventing a 0 after a failed/partial query would
 		// fake a counter reset and could fire the alert on the next real event
 		// twice over.
+		//
+		// С проектным измерением набор нулей стал (вид × проект) и берётся из
+		// DESIRED STATE — списка проектов в БД, — а НЕ из фактических строк
+		// events. Если бы серии заводились по факту, вид, которого у проекта ещё
+		// не было, снова родился бы сразу с 1: те же грабли, только в новой
+		// размерности. Плюс платформенная серия с пустым проектом: у CrashLoop
+		// есть события, не принадлежащие никакому проекту.
 		if ok {
-			for _, kind := range alertEventKinds {
-				if !seen[kind] {
-					ch <- prometheus.MustNewConstMetric(eventsTotalDesc, prometheus.CounterValue, 0, kind)
+			projects, perr := c.projectSlugs(ctx)
+			if perr != nil {
+				c.log.Error("metrics: projects query failed", "err", perr)
+			} else {
+				for _, kind := range alertEventKinds {
+					for _, project := range append([]string{""}, projects...) {
+						if !seen[kind+"\x00"+project] {
+							ch <- prometheus.MustNewConstMetric(eventsTotalDesc, prometheus.CounterValue, 0, kind, project)
+						}
+					}
 				}
 			}
 		}

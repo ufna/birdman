@@ -178,13 +178,19 @@ func TestReadyBufferZeroNotFabricatedOnQueryFailure(t *testing.T) {
 // from; it costs exactly two series.
 func TestEventsCounterZeroBaseline(t *testing.T) {
 	st := testdb.New(t)
-	testdb.Seed(t, st, "eu", 8) // seeds node/version events, никаких crash_loop
+	f := testdb.Seed(t, st, "eu", 8) // seeds node/version events, никаких crash_loop
 
 	m := metrics.New(st, testLog())
 
+	// С проектным измерением (#986) нулевая база стала (вид × проект) плюс
+	// платформенная серия с пустым проектом: событие вида crash_loop бывает и
+	// не принадлежащим никакому проекту.
 	for _, kind := range []string{store.EventCrashLoop, store.EventAgentUpgradeFailed} {
-		if got := findCounter(t, m.Registry, "birdman_events_total", map[string]string{"kind": kind}); got != 0 {
-			t.Fatalf("events_total{kind=%q} = %v, want an explicit 0 baseline", kind, got)
+		for _, project := range []string{f.Project, ""} {
+			labels := map[string]string{"kind": kind, "project": project}
+			if got := findCounter(t, m.Registry, "birdman_events_total", labels); got != 0 {
+				t.Fatalf("events_total{kind=%q,project=%q} = %v, want an explicit 0 baseline", kind, project, got)
+			}
 		}
 	}
 }
