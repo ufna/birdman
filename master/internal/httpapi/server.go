@@ -270,7 +270,17 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "degraded", "db": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	// panel: embedded|placeholder — вкомпилирована ли в этот бинарь панель.
+	// Здоровье БД про неё не знает ничего, поэтому бинарь без панели проходил
+	// health-gate деплоера идеально: откат не срабатывал, deployed.json писался,
+	// метрика успеха обновлялась, и дефект замечал только человек, открывший
+	// панель через несколько часов (#983). Признак отдаёт САМ мастер — деплоеру
+	// не приходится знать, как выглядит непособранная панель.
+	panelState := "placeholder"
+	if panelui.Embedded() {
+		panelState = "embedded"
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "panel": panelState})
 }
 
 // projectFilter разбирает необязательный `?project=` — ОДИН общий вход для всех

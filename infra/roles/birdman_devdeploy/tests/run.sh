@@ -104,7 +104,9 @@ esac
 case "$url" in
   */healthz)
     if [ -f "$T/health_bad" ]; then echo '{"status":"degraded"}'; exit 22; fi
-    echo '{"status":"ok"}'; exit 0 ;;
+    # $T/panel_placeholder — мастер поднялся, но панель в бинарь не попала (#983)
+    if [ -f "$T/panel_placeholder" ]; then echo '{"status":"ok","panel":"placeholder"}'; exit 0; fi
+    echo '{"status":"ok","panel":"embedded"}'; exit 0 ;;
   */v1/nodes*)
     [ -f "$T/nodes.json" ] || exit 22
     cat "$T/nodes.json"; exit 0 ;;
@@ -339,6 +341,33 @@ run
 grep -q '^agent:' "$T/state/rejected" 2>/dev/null && no "сбой сети отверг исправную сборку" || ok "версия НЕ отвергнута при недоступном реестре"
 grep -q 'birdman_devdeploy_agents_behind 2' "$T/textfile/birdman-devdeploy.prom" 2>/dev/null &&
   ok "дрейф виден — человек узнает" || no "дрейф не отражён"
+
+# tracker #983: бинарь без панели проходил health-gate идеально — /healthz
+# пингует БД и про панель не знает. Теперь мастер сам отдаёт panel=placeholder,
+# и деплоер обязан считать такой выкат провальным: откатить и запомнить sha
+# отвергнутой сборки, как при любом провале гейта.
+setup "выкат без панели откатывается, хотя БД здорова"
+touch "$T/panel_placeholder"
+run
+[ "$(cat "$T/usr/birdman-master")" = MASTER-BINARY-V1 ] && ok "откат на .prev" || no "безпанельная сборка осталась на боксе"
+grep -q '^master:' "$T/state/rejected" 2>/dev/null && ok "sha записан в rejected" || no "rejected пуст"
+grep -q 'birdman_devdeploy_rollbacks_total 1' "$T/textfile/birdman-devdeploy.prom" 2>/dev/null &&
+  ok "откат посчитан" || no "счётчик откатов не сдвинулся"
+
+# Мастер старой сборки поля panel не отдаёт — это НЕ повод откатываться, иначе
+# первый же выкат на боксе со старым бинарём уходил бы в вечный откат.
+setup "старый мастер без поля panel выкатывается как раньше"
+python3 - "$T/bin/curl" <<'PYSTUB'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+old = """    echo '{"status":"ok","panel":"embedded"}'; exit 0 ;;"""
+new = """    echo '{"status":"ok"}'; exit 0 ;;"""
+assert old in s
+open(p, "w").write(s.replace(old, new))
+PYSTUB
+run
+[ "$(cat "$T/usr/birdman-master")" = MASTER-BINARY-V2 ] && ok "выкат прошёл" || no "старый мастер вызвал ложный откат"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

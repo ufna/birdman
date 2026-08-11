@@ -33,6 +33,26 @@ func Handler() http.Handler {
 	return NewHandler(sub)
 }
 
+// Embedded reports whether a real panel build is compiled into this binary.
+//
+// Тот же fs.Stat("index.html"), которым хендлер решает, отдавать SPA или
+// placeholder, — намеренно ОДИН источник правды. Проверять сборку по содержимому
+// HTML («есть ли в ответе маркер placeholder'а») значило бы завести вторую копию
+// правды о том, как выглядит непособранная панель: ровно та мина, из-за которой
+// случился #978, когда CI собирал панель не тем способом.
+//
+// Нужен деплоеру: health-gate по /healthz пингует БД и про панель не знает
+// НИЧЕГО, поэтому бинарь без панели проходил его идеально — откат не срабатывал,
+// и дефект замечал только человек, открывший панель (#983).
+func Embedded() bool {
+	sub, err := fs.Sub(embedded, "static")
+	if err != nil {
+		return false
+	}
+	_, err = fs.Stat(sub, "index.html")
+	return err == nil
+}
+
 // NewHandler serves a panel build from fsys (split from Handler for tests).
 func NewHandler(fsys fs.FS) http.Handler {
 	return &handler{fsys: fsys}
