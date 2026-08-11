@@ -6,7 +6,14 @@
 # релизный цикл, и авто-выкат чужой ветки разработки ему не нужен.
 birdman_devdeploy_enabled: true
 
-birdman_devdeploy_repo: ufna/birdman
+# Дев-сборки лежат OCI-артефактом в GHCR-пакете, а не релизами GitHub: релиз —
+# обещание пользователям, а здесь чистый дев-стейт (решение владельца
+# 11.08.2026). Пакет ПУБЛИЧНЫЙ — бокс тянет его анонимным pull-токеном, и
+# никаких учётных данных реестра на боксе не заводится.
+birdman_devdeploy_registry: ghcr.io
+birdman_devdeploy_package: ufna/birdman-dev
+# Подвижный тег канала (не ветка): его переставляет dev-build.yml на каждую
+# сборку из main.
 birdman_devdeploy_tag: dev
 # Тик таймера. 60с — компромисс между «увидел билд сразу» и шумом в журнале.
 birdman_devdeploy_interval_s: 60

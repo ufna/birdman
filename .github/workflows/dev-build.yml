@@ -1,6 +1,8 @@
 name: dev-build
 
-# Пуш в main собирает платформу и публикует rolling-prerelease `dev`.
+# Пуш в main собирает платформу и публикует её OCI-артефактом в GHCR-пакет
+# ghcr.io/<owner>/birdman-dev с подвижным тегом `dev`. Ни релизов, ни тегов
+# репозитория: дев-стейт не должен выглядеть как обещание пользователям.
 # Выкатывает НЕ этот workflow: на дев-боксе крутится pull-деплоер
 # (infra/roles/birdman_devdeploy), который сам ходит за этим релизом,
 # сверяет sha256, ставит и откатывается при провале health-gate.
@@ -20,7 +22,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+  packages: write
 
 # Burst из пушей схлопывается в последнюю сборку — та же семантика «только
 # вперёд», что у auto_deploy версий: промежуточные на стенд не едут.
@@ -79,14 +82,14 @@ jobs:
           (cd master && go build -trimpath -ldflags "-s -w" -o ../dist/birdman-master ./cmd/birdman-master)
           (cd agent && go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o ../dist/birdman-agent ./cmd/birdman-agent)
 
-      - name: Checksums and manifest
+      # Отдельные .sha256 больше не нужны: в OCI-артефакте digest блоба И ЕСТЬ
+      # sha256 файла, и деплоер сверяет содержимое именно с ним.
+      - name: Manifest
         env:
           AGENT_VERSION: ${{ steps.build.outputs.version }}
         run: |
           set -euo pipefail
           cd dist
-          sha256sum birdman-master | awk '{print $1}' > birdman-master.sha256
-          sha256sum birdman-agent  | awk '{print $1}' > birdman-agent.sha256
           {
             echo "commit=$GITHUB_SHA"
             echo "agent_version=$AGENT_VERSION"
@@ -95,18 +98,63 @@ jobs:
           } > MANIFEST
           cat MANIFEST
 
-      # Тег фиксированный: у деплоера стабильный URL вида
-      # https://github.com/<repo>/releases/download/dev/<asset>, листать релизы
-      # не нужно. Пересоздание вместо правки — атомарнее; короткое окно 404
-      # деплоер переживает как обычный no-op.
-      - name: Publish rolling dev prerelease
+      # Дев-сборки НЕ становятся релизами: релиз — обещание пользователям, а
+      # здесь чистый дев-стейт, и публичный репозиторий не должен им обрастать
+      # (решение владельца 11.08.2026). Артефакты уезжают OCI-артефактом в
+      # GHCR-пакет с подвижным тегом `dev` — Releases и теги остаются чистыми.
+      #
+      # oras ставится по закреплённой версии И сверенной sha256: скачанный из
+      # сети бинарь, которому мы отдаём push-права на пакет, обязан быть тем
+      # самым.
+      - name: Install oras (pinned)
+        run: |
+          set -euo pipefail
+          VER=1.2.3
+          SHA=b4efc97a91f471f323f193ea4b4d63d8ff443ca3aab514151a30751330852827
+          curl -fsSL -o oras.tgz "https://github.com/oras-project/oras/releases/download/v${VER}/oras_${VER}_linux_amd64.tar.gz"
+          echo "$SHA  oras.tgz" | sha256sum -c -
+          tar -xzf oras.tgz oras
+          sudo install -m 0755 oras /usr/local/bin/oras
+          rm -f oras oras.tgz
+
+      # Каждый файл кладётся ОТДЕЛЬНЫМ блобом (а не слоем-тарболом): его digest
+      # и есть sha256 файла, поэтому деплоеру не нужны .sha256-ассеты — он
+      # сверяет содержимое с именем содержимого. Плюс агент может скачать свой
+      # бинарь одним GET'ом, без распаковки.
+      - name: Push dev artifact to GHCR
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release delete dev --yes --cleanup-tag || true
-          gh release create dev --prerelease --target "$GITHUB_SHA" \
-            --title "dev (${GITHUB_SHA::7})" \
-            --notes "Автосборка из main. Выкатывается pull-деплоером дев-стенда (infra/roles/birdman_devdeploy). Не релиз — не использовать в self-host." \
-            dist/birdman-master dist/birdman-master.sha256 \
-            dist/birdman-agent dist/birdman-agent.sha256 dist/MANIFEST
+          PKG="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/birdman-dev"
+          echo "$GH_TOKEN" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          cd dist
+          oras push "$PKG:dev" \
+            --artifact-type application/vnd.birdman.devbuild.v1 \
+            --annotation "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --annotation "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            birdman-master:application/octet-stream \
+            birdman-agent:application/octet-stream \
+            MANIFEST:text/plain
+          echo "· опубликовано: $PKG:dev ($GITHUB_SHA)"
+
+      # Прошлые сборки остаются в пакете безымянными версиями. Чистка —
+      # best-effort и только при наличии секрета PACKAGES_TOKEN (PAT с
+      # delete:packages): встроенный GITHUB_TOKEN пользовательские пакеты
+      # удалять не может, а заводить обязательный секрет ради косметики в
+      # публичном репозитории мы не будем.
+      - name: Prune untagged package versions (optional)
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_TOKEN }}
+        run: |
+          set -uo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "PACKAGES_TOKEN не задан — безымянные версии пакета остаются (это не ошибка)"
+            exit 0
+          fi
+          gh api --paginate "/user/packages/container/birdman-dev/versions" \
+            --jq '.[] | select((.metadata.container.tags | length) == 0) | .id' \
+            | while read -r id; do
+                gh api --method DELETE "/user/packages/container/birdman-dev/versions/$id" >/dev/null \
+                  && echo "· удалена безымянная версия $id" || true
+              done

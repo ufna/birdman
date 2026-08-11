@@ -19,43 +19,87 @@ else sha() { shasum -a 256 "$1" | awk '{print $1}'; }; fi
 ok() { PASS=$((PASS + 1)); printf '  ok   %s\n' "$1"; }
 no() { FAIL=$((FAIL + 1)); printf '  FAIL [%s] %s\n' "$CASE" "$1"; }
 
-# setup <имя кейса> — свежий временный мир: заглушки, фикстуры релиза,
-# «установленный» бинарь мастера версии V1 и новая сборка V2 в релизе.
+# publish — превратить каталог $T/artifact в OCI-артефакт реестра: каждый файл
+# отдельным блобом, digest = sha256 содержимого (ровно то, что делает
+# `oras push file:mediaType`). Манифест несёт title-аннотации — по ним деплоер
+# и находит нужный блоб.
+publish() {
+  mkdir -p "$T/registry/blobs"
+  : >"$T/registry/layers.txt"
+  local f d
+  for f in birdman-master birdman-agent MANIFEST; do
+    [ -f "$T/artifact/$f" ] || continue
+    d="sha256:$(sha "$T/artifact/$f")"
+    cp "$T/artifact/$f" "$T/registry/blobs/$d"
+    printf '%s %s\n' "$f" "$d" >>"$T/registry/layers.txt"
+  done
+  python3 - "$T/registry/layers.txt" >"$T/registry/manifest.json" <<'PY'
+import json, sys
+layers = []
+for line in open(sys.argv[1]):
+    title, digest = line.split()
+    layers.append({
+        "mediaType": "application/octet-stream",
+        "digest": digest,
+        "annotations": {"org.opencontainers.image.title": title},
+    })
+print(json.dumps({"schemaVersion": 2, "layers": layers}))
+PY
+}
+
+# setup <имя кейса> — свежий временный мир: заглушки, фикстуры артефакта,
+# «установленный» бинарь мастера версии V1 и новая сборка V2 в реестре.
 setup() {
   CASE="$1"
   printf '\n· %s\n' "$CASE"
   T="$(mktemp -d)"
   export T
-  mkdir -p "$T/bin" "$T/state" "$T/etc" "$T/release" "$T/usr" "$T/textfile"
+  mkdir -p "$T/bin" "$T/state" "$T/etc" "$T/artifact" "$T/usr" "$T/textfile"
 
   printf 'MASTER-BINARY-V1' >"$T/usr/birdman-master"
-  printf 'MASTER-BINARY-V2' >"$T/release/birdman-master"
-  sha "$T/release/birdman-master" >"$T/release/birdman-master.sha256"
-  printf 'AGENT-BINARY-V2' >"$T/release/birdman-agent"
-  sha "$T/release/birdman-agent" >"$T/release/birdman-agent.sha256"
+  printf 'MASTER-BINARY-V2' >"$T/artifact/birdman-master"
+  printf 'AGENT-BINARY-V2' >"$T/artifact/birdman-agent"
   printf 'commit=abc1234\nagent_version=dev-abc1234\nrun_id=1\nbuilt_at=2026-08-11T00:00:00Z\n' \
-    >"$T/release/MANIFEST"
+    >"$T/artifact/MANIFEST"
+  publish
   printf 'test-admin-key' >"$T/etc/master-admin.key"
 
-  # curl: URL — последний аргумент. /healthz отдаёт статус (или 22 при
-  # $T/health_bad), остальное — файл из $T/release по basename. Запросы к
-  # master API логируются в $T/api.log для проверок шага агентов.
+  # curl: URL — последний аргумент. Заглушка играет OCI-реестр (токен, манифест,
+  # блобы с 307 на подписанный URL), /healthz и master API. Запросы логируются
+  # в $T/api.log для проверок шага агентов.
   cat >"$T/bin/curl" <<'STUB'
 #!/usr/bin/env bash
-url="${!#}"; out=""; prev=""; body=""; follow=""
+url="${!#}"; out=""; prev=""; body=""; follow=""; want_redirect=""
 for a in "$@"; do
   [ "$prev" = "-o" ] && out="$a"
   [ "$prev" = "-d" ] && body="$a"
+  [ "$prev" = "-w" ] && case "$a" in *redirect_url*) want_redirect=1 ;; esac
   case "$a" in -*L*) follow=1 ;; esac
   prev="$a"
 done
 echo "$url ${body}" >> "$T/api.log"
-# GitHub отдаёт ассеты релиза 302-редиректом на objects.githubusercontent.com.
-# Без -L curl вернёт ПУСТОЕ тело и код 0 — молча, без ошибки. Моделируем это:
-# запрос к релизу без -L отдаёт пустоту.
 case "$url" in
-  */releases/download/*|file://*)
-    [ -n "$follow" ] || exit 0 ;;
+  */token\?*|*/token)
+    echo '{"token":"anon-test-token"}'; exit 0 ;;
+  */v2/*/manifests/*)
+    [ -f "$T/registry/manifest.json" ] || exit 22
+    cat "$T/registry/manifest.json"; exit 0 ;;
+  */v2/*/blobs/*)
+    dg="${url##*/blobs/}"
+    [ -f "$T/registry/blobs/$dg" ] || exit 22
+    # Резолв подписанной ссылки (curl -o /dev/null -w '%{redirect_url}').
+    if [ -n "$want_redirect" ]; then printf 'https://signed.test/%s' "$dg"; exit 0; fi
+    # Реестр отвечает 307 на pkg-containers.githubusercontent.com: без -L curl
+    # вернёт ПУСТОЕ тело и код 0 — молча, без ошибки. Моделируем эту мину.
+    [ -n "$follow" ] || exit 0
+    if [ -n "$out" ]; then cp "$T/registry/blobs/$dg" "$out"; else cat "$T/registry/blobs/$dg"; fi
+    exit 0 ;;
+  https://signed.test/*)
+    # То, что дёрнет агент: подписанная ссылка отдаёт блоб БЕЗ заголовков.
+    dg="${url##*/}"
+    [ -f "$T/registry/blobs/$dg" ] || exit 22
+    if [ -n "$out" ]; then cp "$T/registry/blobs/$dg" "$out"; else cat "$T/registry/blobs/$dg"; fi
+    exit 0 ;;
 esac
 case "$url" in
   */healthz)
@@ -82,9 +126,9 @@ json.dump(d, open(path, "w"))
 PY
     echo '{"upgrading":["x"]}'; exit 0 ;;
 esac
-name="${url##*/}"
-[ -f "$T/release/$name" ] || exit 22
-if [ -n "$out" ]; then cp "$T/release/$name" "$out"; else cat "$T/release/$name"; fi
+# Неизвестный URL — отказ, а не молчаливая выдача файла: заглушка не должна
+# «случайно» отвечать на запрос, которого мы не предусмотрели.
+exit 22
 STUB
 
   cat >"$T/bin/systemctl" <<'STUB'
@@ -95,7 +139,8 @@ STUB
   chmod +x "$T/bin/curl" "$T/bin/systemctl"
   export PATH="$T/bin:$PATH"
   export BIRDMAN_DEVDEPLOY_CONF="$T/etc/devdeploy.conf"
-  export BIRDMAN_DEVDEPLOY_BASE_URL="file://$T/release"
+  export BIRDMAN_DEVDEPLOY_REG_BASE="https://registry.test/v2/ufna/birdman-dev"
+  export BIRDMAN_DEVDEPLOY_TOKEN_URL="https://registry.test/token?scope=repository:ufna/birdman-dev:pull&service=registry.test"
   export BIRDMAN_DEVDEPLOY_BIN="$T/usr/birdman-master"
   export BIRDMAN_DEVDEPLOY_STATE_DIR="$T/state"
   export BIRDMAN_DEVDEPLOY_LOCK="$T/lock"
@@ -124,8 +169,11 @@ rm -f "$T/systemctl.log"
 run
 [ ! -f "$T/systemctl.log" ] && ok "повторный тик — no-op" || no "повторный тик дёрнул systemctl"
 
-setup "битая sha отвергается"
-echo deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef >"$T/release/birdman-master.sha256"
+# Подмена содержимого блоба при неизменном манифесте: ровно то, что должен
+# поймать деплоер — digest в манифесте больше не описывает то, что скачалось.
+setup "содержимое не сошлось с digest — отвергается"
+BAD="$(grep '^birdman-master ' "$T/registry/layers.txt" | awk '{print $2}')"
+printf 'TAMPERED' >"$T/registry/blobs/$BAD"
 run
 [ "$(cat "$T/usr/birdman-master")" = MASTER-BINARY-V1 ] && ok "бинарь не тронут" || no "поставился битый бинарь"
 [ ! -f "$T/systemctl.log" ] && ok "рестарта не было" || no "был лишний рестарт"
@@ -146,10 +194,10 @@ touch "$T/etc/devdeploy.disabled"
 run
 [ "$(cat "$T/usr/birdman-master")" = MASTER-BINARY-V1 ] && ok "выключен — ничего не делает" || no "сработал при kill-switch"
 
-setup "релиз недоступен"
-rm -f "$T/release/birdman-master.sha256"
+setup "артефакт недоступен"
+rm -f "$T/registry/manifest.json"
 run
-[ "$(cat "$T/usr/birdman-master")" = MASTER-BINARY-V1 ] && ok "нет релиза — тихий no-op" || no "тронул бинарь без релиза"
+[ "$(cat "$T/usr/birdman-master")" = MASTER-BINARY-V1 ] && ok "нет артефакта — тихий no-op" || no "тронул бинарь без артефакта"
 
 setup "метрики пишутся"
 run
@@ -190,6 +238,11 @@ head -1 "$T/upgrades.log" 2>/dev/null | grep -q 'n-local' && ok "канарей�
 tail -1 "$T/upgrades.log" 2>/dev/null | grep -q 'n-remote' && ok "удалённая после канарейки" || no "порядок нарушен"
 ! grep -qv 'node_id' "$T/upgrades.log" 2>/dev/null && ok "node_id есть в КАЖДОЙ команде" || no "нашлась команда без node_id"
 grep -q 'dev-abc1234' "$T/upgrades.log" 2>/dev/null && ok "версия из MANIFEST" || no "версия не из MANIFEST"
+# Агент качает бинарь сам и Bearer'а не умеет — в команде обязана ехать
+# ПОДПИСАННАЯ ссылка реестра, а не URL, требующий заголовка.
+grep -q 'signed.test' "$T/upgrades.log" 2>/dev/null && ok "агенту ушла подписанная ссылка" || no "агенту ушла ссылка без подписи"
+! grep -q '"url":"https://registry.test' "$T/upgrades.log" 2>/dev/null &&
+  ok "URL реестра агенту не отдаётся" || no "агенту отдали URL, который он не скачает"
 grep -q 'birdman_devdeploy_agent_upgrades_total{status="ok"} 2' "$T/textfile/birdman-devdeploy.prom" 2>/dev/null &&
   ok "оба апгрейда посчитаны" || no "счётчик успешных апгрейдов неверен"
 

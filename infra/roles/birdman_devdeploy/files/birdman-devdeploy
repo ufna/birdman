@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # birdman-devdeploy — pull-деплоер дев-стенда.
 #
-# Раз в тик: сходить за rolling-prerelease `dev`, сверить sha256 с тем, что
-# установлено, поставить, перезапустить мастера и убедиться по /healthz, что он
-# поднялся. Не поднялся — вернуть предыдущий бинарь и запомнить sha как
-# отвергнутый, чтобы не катать битую сборку по кругу (та же семантика, что у
-# auto_deploy версий: упавшая версия не ретраится, её вытеснит следующий билд).
+# Раз в тик: сходить за дев-сборкой, сверить sha256 с тем, что установлено,
+# поставить, перезапустить мастера и убедиться по /healthz, что он поднялся.
+# Не поднялся — вернуть предыдущий бинарь и запомнить sha как отвергнутый,
+# чтобы не катать битую сборку по кругу (та же семантика, что у auto_deploy
+# версий: упавшая версия не ретраится, её вытеснит следующий билд).
+#
+# Артефакты живут OCI-артефактом в GHCR-пакете (`ghcr.io/<owner>/birdman-dev`,
+# подвижный тег `dev`), а НЕ релизами GitHub: релиз — это обещание
+# пользователям, а здесь чистый дев-стейт, и публичный репозиторий не должен им
+# обрастать (решение владельца 11.08.2026).
 #
 # Почему pull, а не push из CI: репозиторий публичный, и push означал бы ключ к
 # инфраструктуре в его настройках. Здесь бокс ходит наружу сам, только по HTTPS,
@@ -22,9 +27,11 @@ CONF="${BIRDMAN_DEVDEPLOY_CONF:-/etc/birdman/devdeploy.conf}"
 # shellcheck source=/dev/null
 [ -r "$CONF" ] && . "$CONF"
 
-REPO="${BIRDMAN_DEVDEPLOY_REPO:-ufna/birdman}"
+REGISTRY="${BIRDMAN_DEVDEPLOY_REGISTRY:-ghcr.io}"
+PACKAGE="${BIRDMAN_DEVDEPLOY_PACKAGE:-ufna/birdman-dev}"
 TAG="${BIRDMAN_DEVDEPLOY_TAG:-dev}"
-BASE_URL="${BIRDMAN_DEVDEPLOY_BASE_URL:-https://github.com/$REPO/releases/download/$TAG}"
+REG_BASE="${BIRDMAN_DEVDEPLOY_REG_BASE:-https://$REGISTRY/v2/$PACKAGE}"
+TOKEN_URL="${BIRDMAN_DEVDEPLOY_TOKEN_URL:-https://$REGISTRY/token?scope=repository:$PACKAGE:pull&service=$REGISTRY}"
 BIN="${BIRDMAN_DEVDEPLOY_BIN:-/usr/local/bin/birdman-master}"
 SERVICE="${BIRDMAN_DEVDEPLOY_SERVICE:-birdman-master}"
 STATE_DIR="${BIRDMAN_DEVDEPLOY_STATE_DIR:-/var/lib/birdman-master}"
@@ -56,19 +63,91 @@ else
   sha_of() { shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'; }
 fi
 
-# fetch <относительное-имя> [выходной-файл] — тело в stdout либо в файл.
+# --- OCI-реестр как транспорт артефактов -------------------------------------
 #
-# -L обязателен: GitHub отдаёт ассеты релиза 302-редиректом на
-# objects.githubusercontent.com, и без него curl вернёт ПУСТОЕ тело с кодом 0 —
-# отказ, который выглядит как «релиза нет». Именно на этом первый боевой тик и
-# споткнулся 11.08.2026.
-fetch() {
-  local name="$1" out="${2:-}"
-  if [ -n "$out" ]; then
-    curl -fsSL --max-time 120 -o "$out" "$BASE_URL/$name"
-  else
-    curl -fsSL --max-time 30 "$BASE_URL/$name"
+# Пакет ПУБЛИЧНЫЙ, но реестр по спеке всё равно требует Bearer: pull-токен
+# выдаётся кому угодно и без учётной записи — секретов на боксе не появляется,
+# модель «бокс ходит наружу сам» сохраняется целиком.
+#
+# -L обязателен на блобах: реестр отвечает 307 на подписанный URL в
+# pkg-containers.githubusercontent.com; без него curl вернёт пустое тело.
+
+json_get() { # <ключ> — значение поля верхнего уровня из JSON на stdin
+  python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+print(d.get(sys.argv[1], ""))
+' "$1" 2>/dev/null
+}
+
+# Токен живёт минуты, а тик с ожиданием агентов может пережить исходный —
+# поэтому кэш с коротким TTL, а не один токен на весь прогон.
+REG_TOKEN=""
+REG_TOKEN_AT=0
+reg_token() {
+  local now
+  now="$(date +%s)"
+  if [ -n "$REG_TOKEN" ] && [ "$((now - REG_TOKEN_AT))" -lt 120 ]; then
+    printf '%s' "$REG_TOKEN"
+    return 0
   fi
+  local t
+  t="$(curl -fsS --max-time 30 "$TOKEN_URL" | json_get token)"
+  [ -n "$t" ] || return 1
+  REG_TOKEN="$t"
+  REG_TOKEN_AT="$now"
+  printf '%s' "$t"
+}
+
+manifest_json() {
+  local t
+  t="$(reg_token)" || return 1
+  curl -fsS --max-time 30 -H "Authorization: Bearer $t" \
+    -H "Accept: application/vnd.oci.image.manifest.v1+json" \
+    "$REG_BASE/manifests/$TAG"
+}
+
+# blob_digest <manifest-json> <имя-файла> — digest блоба по title-аннотации.
+# Digest блоба И ЕСТЬ sha256 файла (oras кладёт каждый файл отдельным блобом),
+# поэтому отдельные .sha256-ассеты больше не нужны: целостность сверяется с
+# именем содержимого, а не с рядом лежащей строкой.
+blob_digest() {
+  printf '%s' "$1" | python3 -c '
+import sys, json
+title = sys.argv[1]
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for layer in d.get("layers", []):
+    if (layer.get("annotations") or {}).get("org.opencontainers.image.title") == title:
+        print(layer.get("digest", ""))
+        break
+' "$2" 2>/dev/null
+}
+
+blob_fetch() { # <digest> [выходной-файл] — тело в stdout либо в файл
+  local digest="$1" out="${2:-}" t
+  t="$(reg_token)" || return 1
+  if [ -n "$out" ]; then
+    curl -fsSL --max-time 120 -H "Authorization: Bearer $t" -o "$out" "$REG_BASE/blobs/$digest"
+  else
+    curl -fsSL --max-time 30 -H "Authorization: Bearer $t" "$REG_BASE/blobs/$digest"
+  fi
+}
+
+# blob_url <digest> — подписанный URL блоба, который качается БЕЗ заголовков.
+# Нужен шагу агентов: агент тянет свой бинарь сам, обычным GET, и Bearer'а не
+# умеет (agent/internal/daemon/manager.go: applyUpgrade). Ссылка живёт минуты,
+# поэтому резолвится непосредственно перед командой конкретной ноде.
+blob_url() {
+  local digest="$1" t
+  t="$(reg_token)" || return 1
+  curl -fsS --max-time 30 -o /dev/null -w '%{redirect_url}' \
+    -H "Authorization: Bearer $t" "$REG_BASE/blobs/$digest"
 }
 
 # --- метрики (textfile-коллектор node_exporter) ------------------------------
@@ -161,13 +240,15 @@ health_wait() {
 }
 
 # --- шаг мастера -------------------------------------------------------------
-# Коды: 0 выкачено · 1 нечего делать · 2 релиз недоступен · 3 sha не сошлась
+# Коды: 0 выкачено · 1 нечего делать · 2 артефакт недоступен · 3 sha не сошлась
 #       4 откат после провала health-gate
 deploy_master() {
-  local want have tmp got
-  want="$(fetch birdman-master.sha256 | tr -d ' \t\r\n')"
+  local mf digest want have tmp got
+  mf="$(manifest_json)"
+  digest="$(blob_digest "$mf" birdman-master)"
+  want="${digest#sha256:}"
   if [ "${#want}" -ne 64 ]; then
-    log "релиз $TAG недоступен или sha256 не читается — пропускаю тик"
+    log "артефакт $PACKAGE:$TAG недоступен или не несёт birdman-master — пропускаю тик"
     return 2
   fi
 
@@ -181,7 +262,7 @@ deploy_master() {
   fi
 
   tmp="$(mktemp)"
-  if ! fetch birdman-master "$tmp"; then
+  if ! blob_fetch "$digest" "$tmp"; then
     log "не смог скачать бинарь мастера"
     rm -f "$tmp"
     return 2
@@ -193,9 +274,10 @@ deploy_master() {
     return 3
   fi
 
-  local commit agent_version
-  commit="$(fetch MANIFEST | awk -F= '/^commit=/{print $2}')"
-  agent_version="$(fetch MANIFEST | awk -F= '/^agent_version=/{print $2}')"
+  local manifest_txt commit agent_version
+  manifest_txt="$(blob_fetch "$(blob_digest "$mf" MANIFEST)")"
+  commit="$(printf '%s\n' "$manifest_txt" | awk -F= '/^commit=/{print $2}')"
+  agent_version="$(printf '%s\n' "$manifest_txt" | awk -F= '/^agent_version=/{print $2}')"
 
   log "ставлю мастера $want (commit ${commit:-?})"
   [ -f "$BIN" ] && cp -p "$BIN" "$BIN.prev"
@@ -302,17 +384,19 @@ upgrade_agents() {
   # Целевая версия берётся из MANIFEST, а НЕ из результата шага мастера:
   # типичный тик — мастер уже актуален (no-op), и если бы версия приезжала
   # только вместе с выкатом, отставшие агенты не сошлись бы никогда.
-  local target
-  target="$(fetch MANIFEST | awk -F= '/^agent_version=/{print $2}' | tr -d ' \t\r\n')"
+  local mf target
+  mf="$(manifest_json)"
+  target="$(blob_fetch "$(blob_digest "$mf" MANIFEST)" | awk -F= '/^agent_version=/{print $2}' | tr -d ' \t\r\n')"
   [ -n "$target" ] || return 0
   if rejected_has "agent:$target"; then
     return 0
   fi
 
-  local sha
-  sha="$(fetch birdman-agent.sha256 | tr -d ' \t\r\n')"
+  local adigest sha
+  adigest="$(blob_digest "$mf" birdman-agent)"
+  sha="${adigest#sha256:}"
   if [ "${#sha}" -ne 64 ]; then
-    log "sha256 агента не читается — шаг агентов пропущен"
+    log "digest агента не читается — шаг агентов пропущен"
     return 1
   fi
 
@@ -327,10 +411,20 @@ upgrade_agents() {
   targets="$(agent_targets "$target" "$local_host")"
   [ -n "$targets" ] || return 0
 
-  local url="$BASE_URL/birdman-agent"
-  local node_id hostname
+  local node_id hostname url
   while IFS="$(printf '\t')" read -r node_id hostname; do
     [ -n "$node_id" ] || continue
+
+    # Подписанная ссылка резолвится ПЕРЕД каждой нодой, а не один раз на цикл:
+    # она живёт минуты, а цепочка ждёт re-Hello каждой ноды до AGENT_TIMEOUT.
+    url="$(blob_url "$adigest")"
+    if [ -z "$url" ]; then
+      # Инфраструктурный отказ, а НЕ плохая сборка: версию НЕ отвергаем —
+      # следующий тик попробует снова.
+      log "реестр не отдал подписанную ссылку на бинарь агента — шаг отложен"
+      return 1
+    fi
+
     log "апгрейд агента $hostname ($node_id) до $target"
     if ! curl -fsS --max-time 15 -X POST \
       -H "Authorization: Bearer $ADMIN_KEY" -H "Content-Type: application/json" \

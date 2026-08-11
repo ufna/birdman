@@ -3,7 +3,8 @@
 #
 # Присваивание через `: "${VAR:=…}"` — переменные окружения сильнее файла:
 # ручной прогон и тесты могут переопределить любую строку.
-: "${BIRDMAN_DEVDEPLOY_REPO:={{ birdman_devdeploy_repo }}}"
+: "${BIRDMAN_DEVDEPLOY_REGISTRY:={{ birdman_devdeploy_registry }}}"
+: "${BIRDMAN_DEVDEPLOY_PACKAGE:={{ birdman_devdeploy_package }}}"
 : "${BIRDMAN_DEVDEPLOY_TAG:={{ birdman_devdeploy_tag }}}"
 : "${BIRDMAN_DEVDEPLOY_BIN:={{ birdman_devdeploy_bin }}}"
 : "${BIRDMAN_DEVDEPLOY_SERVICE:={{ birdman_devdeploy_service }}}"
