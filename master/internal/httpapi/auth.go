@@ -158,16 +158,44 @@ func (s *Server) requireBinding(w http.ResponseWriter, r *http.Request, project,
 	if keyAllowed(key, project, env) {
 		return true
 	}
-	// Полупара (Project задан, Env nil) недостижима при живом CHECK
-	// api_keys_binding_all_or_nothing, но достижима по схеме — не разыменовываем
-	// key.Env вслепую, иначе форматирование 403 паникнет (w11). key.Project здесь
-	// гарантированно не nil: для глобального ключа keyAllowed вернул бы true.
+	// key.Project здесь гарантированно не nil: для глобального ключа keyAllowed
+	// вернул бы true.
+	writeError(w, http.StatusForbidden, "forbidden",
+		fmt.Sprintf("key is bound to %s", bindingLabel(key)))
+	return false
+}
+
+// bindingLabel форматирует пару привязки для тела 403. Полупара (Project задан,
+// Env nil) недостижима при живом CHECK api_keys_binding_all_or_nothing, но
+// достижима по схеме — не разыменовываем key.Env вслепую, иначе форматирование
+// 403 паникнет (w11). Вызывать только для привязанного ключа (Project != nil).
+func bindingLabel(key store.APIKey) string {
 	keyEnv := "<nil>"
 	if key.Env != nil {
 		keyEnv = *key.Env
 	}
+	return *key.Project + "/" + keyEnv
+}
+
+// requireUnboundKey гейтит СЫРЫЕ query-проксии (LogsQL → VictoriaLogs, PromQL →
+// VictoriaMetrics): привязанному ключу они закрыты целиком, глобальный/admin
+// (привязка несовместима с admin) проходит как раньше. Почему не как
+// requireBinding: у запроса нет объекта, чью пару (project, env) можно сверить,
+// — есть произвольная программа на чужом языке, а проектного лейбла в стримах
+// VL нет вовсе (server_id/node/region). Сузить в принципе МОЖНО — по множеству
+// своих server_id, соответствие server_id→(project, env) master держит в БД
+// (ServerLogTarget, #988), — но это переписывание запроса и вопрос истории,
+// записанной без лейблов: отдельная карточка #994. Фильтровать ОТВЕТ вместо
+// запроса — защита от честного клиента, а не от атакующего: состав полей ответа
+// задаёт сам запрос (пайпы проксируются как есть). Поэтому #990 закрывает
+// дверь, а не сужает выдачу.
+func (s *Server) requireUnboundKey(w http.ResponseWriter, r *http.Request) bool {
+	key, _ := keyFromContext(r.Context())
+	if key.Project == nil {
+		return true
+	}
 	writeError(w, http.StatusForbidden, "forbidden",
-		fmt.Sprintf("key is bound to %s/%s", *key.Project, keyEnv))
+		fmt.Sprintf("key is bound to %s: raw query proxy is global-key only", bindingLabel(key)))
 	return false
 }
 

@@ -325,6 +325,15 @@ func (s *Server) handleMetricsQueryRange(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) proxyVictoria(w http.ResponseWriter, r *http.Request, path string) {
+	// Порядок как в #988: сначала РАЗРЕШЕНИЕ, потом состояние проксии — иначе
+	// 403 зависел бы от того, настроена ли VM, и отвечал бы на вопрос, который
+	// вызывающему знать не положено. Привязанному ключу сырой PromQL закрыт
+	// (#990): произвольный PromQL нельзя сузить, не переписав его (проектный
+	// лейбл есть у части серий — master-derived, metrics.go; у нодовых, от
+	// vmagent ноды, только node/region).
+	if !s.requireUnboundKey(w, r) {
+		return
+	}
 	if s.vmURL == "" {
 		writeError(w, http.StatusServiceUnavailable, "metrics_unconfigured",
 			"victoriametrics_url is not set on this master")
@@ -362,6 +371,14 @@ func (s *Server) proxyVictoria(w http.ResponseWriter, r *http.Request, path stri
 // clamped on master (default 1000, max 10000) so the panel can't accidentally
 // pull unbounded result sets through the proxy.
 func (s *Server) handleLogsQuery(w http.ResponseWriter, r *http.Request) {
+	// Гейт #990 — ДО состояния проксии и ДО валидации limit (тот же порядок,
+	// что #988 завёл на live-tail): привязанный ключ проекта А доставал через
+	// эту ручку ровно те байты игрового вывода дедика проекта Б, которые #988
+	// закрыл на /v1/servers/{id}/logs — LogsQL едет в апстрим как есть, а
+	// проектного лейбла в стримах VL нет (server_id/node/region).
+	if !s.requireUnboundKey(w, r) {
+		return
+	}
 	if s.vlURL == "" {
 		writeError(w, http.StatusServiceUnavailable, "logs_unconfigured",
 			"victorialogs_url is not set on this master")

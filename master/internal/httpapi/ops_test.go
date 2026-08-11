@@ -406,6 +406,166 @@ func TestServerLogsProxy(t *testing.T) {
 	}
 }
 
+// TestQueryProxiesRefuseBoundKeys (#990): сырые query-проксии (LogsQL → VL,
+// PromQL → VM) закрыты для ПРИВЯЗАННОГО ключа. #988 закрыл привязкой live-tail
+// /v1/servers/{id}/logs, но те же байты игрового вывода дедика чужого проекта
+// доставались тем же readonly-ключом через /v1/logs/query: запрос едет в
+// апстрим как есть, а стримы VL лейблованы server_id/node/region — сузить их по
+// проекту нечем. Проверяются обе стороны: привязанный не получает НИЧЕГО (403 и
+// апстрим даже не вызван), глобальный и admin получают ровно те же байты, что и
+// раньше. Отдельно — cookie-сессия привязанного ключа: POST /v1/session не
+// требует admin, поэтому «сессия панели = admin» — ложная посылка, и гейт обязан
+// ловить сессию так же, как Bearer.
+func TestQueryProxiesRefuseBoundKeys(t *testing.T) {
+	st := testdb.New(t)
+	log := opsLog()
+	m := metrics.New(st, log)
+	mm := matchmaker.New(st, m, matchmaker.Config{}, log)
+	dep := deploy.New(deploy.Options{Store: st, Sender: &testdb.CommandRecorder{}, Log: log})
+
+	// Фейковые апстримы: считают вызовы и отдают опознаваемое тело — «положительная
+	// половина» обязана увидеть ИМЕННО эти байты, иначе 200 ничего не доказывает.
+	const logLine = `{"_time":"2026-08-11T10:00:00Z","_msg":"secret dedik output","server_id":"s1"}`
+	const vmBody = `{"status":"success","data":{"resultType":"vector","result":[]}}`
+	var vlCalls, vmCalls int
+	vl := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		vlCalls++
+		w.Header().Set("Content-Type", "application/stream+json")
+		_, _ = w.Write([]byte(logLine + "\n"))
+	}))
+	t.Cleanup(vl.Close)
+	vm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		vmCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(vmBody))
+	}))
+	t.Cleanup(vm.Close)
+
+	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, vm.URL, vl.URL, log))
+	t.Cleanup(ts.Close)
+	ctx := t.Context()
+
+	if _, err := st.CreateProject(ctx, "neighbour", 2); err != nil {
+		t.Fatal(err)
+	}
+	nProject, nEnv := "neighbour", "dev"
+	_, boundSecret, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{
+		Name: "ro-neighbour", Scopes: []string{httpapi.ScopeReadonly}, Project: &nProject, Env: &nEnv,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, globalSecret, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{
+		Name: "ro-global", Scopes: []string{httpapi.ScopeReadonly},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, adminSecret, err := st.CreateAPIKey(ctx, store.CreateAPIKeyParams{
+		Name: "admin", Scopes: []string{httpapi.ScopeAdmin},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound := &client{t: t, base: ts.URL, key: boundSecret}
+	global := &client{t: t, base: ts.URL, key: globalSecret}
+	admin := &client{t: t, base: ts.URL, key: adminSecret}
+
+	logsPath := `/v1/logs/query?query={server_id="s1"}&start=0&end=10`
+	proxies := []struct {
+		name string
+		path string
+		want string // байты, которые обязан увидеть непривязанный ключ
+	}{
+		{"logs", logsPath, logLine},
+		{"metrics", "/v1/metrics/query?query=up", vmBody},
+		{"metrics_range", "/v1/metrics/query_range?query=up&start=0&end=10&step=15", vmBody},
+	}
+
+	// 1) Привязанный ключ: 403 и апстрим НЕ вызван (утечки нет даже на уровне
+	//    «сходили и выбросили»).
+	for _, p := range proxies {
+		beforeVL, beforeVM := vlCalls, vmCalls
+		code, body := bound.doRaw("GET", p.path)
+		if code != 403 {
+			t.Fatalf("%s: привязанный ключ получил %d (%s), want 403", p.name, code, body)
+		}
+		if !strings.Contains(string(body), "key is bound to neighbour/dev") {
+			t.Fatalf("%s: тело 403 = %s, want «key is bound to neighbour/dev»", p.name, body)
+		}
+		if vlCalls != beforeVL || vmCalls != beforeVM {
+			t.Fatalf("%s: апстрим вызван на запрещённом запросе (vl %d→%d, vm %d→%d)",
+				p.name, beforeVL, vlCalls, beforeVM, vmCalls)
+		}
+	}
+
+	// 2) Глобальный и admin-ключ: 200 и РОВНО те байты, что отдал апстрим.
+	//    admin здесь не второй случай привязки, а регресс-страховка по скоупу:
+	//    привязка с admin несовместима, так что обе ноги идут одной веткой
+	//    key.Project == nil.
+	for _, p := range proxies {
+		for _, c := range []struct {
+			who string
+			cl  *client
+		}{{"global", global}, {"admin", admin}} {
+			code, body := c.cl.doRaw("GET", p.path)
+			if code != 200 {
+				t.Fatalf("%s/%s: %d (%s), want 200 — гейт бьёт по своим", p.name, c.who, code, body)
+			}
+			if !strings.Contains(string(body), p.want) {
+				t.Fatalf("%s/%s: тело = %q, want содержащее %q (иначе 200 ничего не доказывает)",
+					p.name, c.who, body, p.want)
+			}
+		}
+	}
+
+	// 3) Порядок гейтов: разрешение РАНЬШЕ состояния. Кривой limit — всё равно
+	//    403, а не 400; ненастроенный master — всё равно 403, а не 503. Иначе
+	//    ответ 403-ей ручки рассказывал бы, подключены ли VL/VM.
+	if code, body := bound.doRaw("GET", "/v1/logs/query?query=x&limit=abc"); code != 403 {
+		t.Fatalf("кривой limit у привязанного ключа: %d (%s), want 403 (разрешение раньше валидации)", code, body)
+	}
+	tsOff := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", "", log))
+	t.Cleanup(tsOff.Close)
+	boundOff := &client{t: t, base: tsOff.URL, key: boundSecret}
+	for _, p := range proxies {
+		if code, body := boundOff.doRaw("GET", p.path); code != 403 {
+			t.Fatalf("%s на ненастроенном master: %d (%s), want 403 (не 503 — состояние проксии не для чужих)",
+				p.name, code, body)
+		}
+	}
+
+	// 4) Cookie-сессия ПРИВЯЗАННОГО ключа — тот же 403. POST /v1/session не
+	//    требует admin (session.go: requireScope на нём нет), сессия наследует
+	//    ключ целиком вместе с привязкой; 401 здесь означал бы, что кука не
+	//    доехала и проверка выродилась.
+	b := &browser{t: t, base: ts.URL}
+	code, _, resp := b.do("POST", "/v1/session", map[string]any{"api_key": boundSecret})
+	if code != 200 {
+		t.Fatalf("логин привязанным ключом: %d, want 200 (сессию заводит любой ключ)", code)
+	}
+	bb := &browser{t: t, base: ts.URL, cookie: sessionCookieOf(t, resp)}
+	if code, body, _ := bb.do("GET", "/v1/session", nil); code != 200 {
+		t.Fatalf("кука не аутентифицирует: %d %v", code, body)
+	}
+	beforeVL := vlCalls
+	code, sbody, _ := bb.do("GET", logsPath, nil)
+	if code != 403 {
+		t.Fatalf("сессия привязанного ключа получила логи: %d %v, want 403", code, sbody)
+	}
+	// Тело сверяем так же, как в Bearer-ноге, и не ради красоты: без него ветка
+	// остаётся зелёной, когда 403 прилетел ПО ДРУГОЙ ПРИЧИНЕ (скажем, CSRF-гейт
+	// по недосмотру распространили на GET), а привязка в сессии при этом
+	// потеряна. Проверено мутацией: «сессия теряет привязку» + «CSRF на GET»
+	// вместе давали зелёный тест на дырявом коде.
+	if detail, _ := sbody["detail"].(string); !strings.Contains(detail, "key is bound to neighbour/dev") {
+		t.Fatalf("сессия: detail = %q, want «key is bound to neighbour/dev» (403 должен быть ОТ ГЕЙТА привязки)", detail)
+	}
+	if vlCalls != beforeVL {
+		t.Fatalf("сессия привязанного ключа дошла до апстрима (vl %d→%d)", beforeVL, vlCalls)
+	}
+}
+
 func hasCmd(cmds []testdb.SentCmd, pred func(*agentlinkv1.MasterMsg) bool) bool {
 	for _, c := range cmds {
 		if pred(c.Msg) {
