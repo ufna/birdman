@@ -116,7 +116,11 @@ export interface ProjectUsage {
   environments: number;
   versions: number;
   fleets: number;
+  /** Живые ноды — блокируют удаление. */
   nodes: number;
+  /** Выведенные (dead) — удалению не мешают, но делают проект непустым:
+   *  их история уезжает вместе с ним, поэтому спрашивается подтверждение. */
+  retired_nodes: number;
   servers: number;
   matches: number;
   api_keys: number;

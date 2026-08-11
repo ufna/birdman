@@ -34,14 +34,19 @@ type ProjectUsage struct {
 	Environments int `json:"environments"`
 	Versions     int `json:"versions"`
 	Fleets       int `json:"fleets"`
-	Nodes        int `json:"nodes"`
+	// Nodes — ЖИВЫЕ ноды: они блокируют удаление (осиротевший агент недопустим).
+	Nodes int `json:"nodes"`
+	// RetiredNodes — выведенные (dead). Удалению НЕ мешают: их бокса уже нет и
+	// они уезжают каскадом. Но проект с ними не «пустой»: вместе с ним исчезнет
+	// история этих нод, и подтверждение вводом слага обязано спрашиваться.
+	RetiredNodes int `json:"retired_nodes"`
 	Matches      int `json:"matches"`
 	Servers      int `json:"servers"`
 	APIKeys      int `json:"api_keys"`
 }
 
 func (u ProjectUsage) Empty() bool {
-	return u.Versions == 0 && u.Fleets == 0 && u.Nodes == 0 &&
+	return u.Versions == 0 && u.Fleets == 0 && u.Nodes == 0 && u.RetiredNodes == 0 &&
 		u.Matches == 0 && u.Servers == 0 && u.APIKeys == 0
 }
 
@@ -135,10 +140,12 @@ func projectUsage(ctx context.Context, db queryRower, projectID string) (Project
 		       (select count(*) from versions     where project_id = $1::uuid),
 		       (select count(*) from fleet_configs where project_id = $1::uuid),
 		       (select count(*) from nodes        where project_id = $1::uuid and state <> 'dead'),
+		       (select count(*) from nodes        where project_id = $1::uuid and state =  'dead'),
 		       (select count(*) from matches      where project_id = $1::uuid),
 		       (select count(*) from servers      where project_id = $1::uuid),
 		       (select count(*) from api_keys     where project_id = $1::uuid and revoked_at is null)`,
-		projectID).Scan(&u.Environments, &u.Versions, &u.Fleets, &u.Nodes, &u.Matches, &u.Servers, &u.APIKeys)
+		projectID).Scan(&u.Environments, &u.Versions, &u.Fleets, &u.Nodes, &u.RetiredNodes,
+		&u.Matches, &u.Servers, &u.APIKeys)
 	return u, err
 }
 

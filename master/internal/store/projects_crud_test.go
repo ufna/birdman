@@ -69,6 +69,16 @@ func TestDeleteProjectBlockedByLiveNode(t *testing.T) {
 	if usage.Nodes != 0 {
 		t.Fatalf("usage.Nodes = %d, want 0 (выведенные не считаются живыми)", usage.Nodes)
 	}
+	// …но «пустым» проект от этого не становится: выведенная нода — тоже
+	// история, которая уедет с проектом, поэтому подтверждение спрашивается.
+	// Дырку нашла Фаза D: без RetiredNodes в Empty() такой проект сносился
+	// молча, без единого вопроса.
+	if usage.RetiredNodes != 1 {
+		t.Fatalf("usage.RetiredNodes = %d, want 1", usage.RetiredNodes)
+	}
+	if _, err := st.DeleteProject(ctx, f.Project, ""); !errors.Is(err, store.ErrConfirmRequired) {
+		t.Fatalf("проект с выведенной нодой снёсся без подтверждения: %v", err)
+	}
 	if _, err := st.DeleteProject(ctx, f.Project, f.Project); err != nil {
 		t.Fatalf("delete after revoke: %v", err)
 	}

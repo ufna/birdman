@@ -791,6 +791,7 @@ export const ru: Record<MessageKey, string> = {
   'access.projects.delete.usage.versions': 'Версии',
   'access.projects.delete.usage.matches': 'Матчи',
   'access.projects.delete.usage.keys': 'Живые ключи',
+  'access.projects.delete.usage.retiredNodes': 'Выведенные ноды',
   'access.projects.delete.nodesBlock':
     'В проекте ещё {count} живых нод. Сначала выведите их из флота или переведите — на экране «Флот».',
   'access.projects.delete.confirmLabel': 'Введите слаг проекта для подтверждения',

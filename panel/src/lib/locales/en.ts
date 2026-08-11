@@ -807,6 +807,7 @@ export const en = {
   'access.projects.delete.usage.versions': 'Versions',
   'access.projects.delete.usage.matches': 'Matches',
   'access.projects.delete.usage.keys': 'Live keys',
+  'access.projects.delete.usage.retiredNodes': 'Retired nodes',
   'access.projects.delete.nodesBlock':
     '{count} live node(s) still belong to this project. Retire or move them on the Fleet screen first.',
   'access.projects.delete.confirmLabel': 'Type the project slug to confirm',

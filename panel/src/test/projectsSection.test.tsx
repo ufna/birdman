@@ -23,6 +23,7 @@ const emptyUsage: ProjectUsage = {
   versions: 0,
   fleets: 0,
   nodes: 0,
+  retired_nodes: 0,
   servers: 0,
   matches: 0,
   api_keys: 0,
@@ -93,6 +94,20 @@ describe('Админка → Проекты', () => {
     });
     expect(within(dialog).queryByPlaceholderText('game')).toBeNull();
     expect(within(dialog).getByRole('button', { name: 'Delete' }).hasAttribute('disabled')).toBe(true);
+  });
+
+  // Дырка, найденная Фазой D: выведенные ноды не блокируют удаление, но делают
+  // проект непустым — их история уедет вместе с ним, значит слаг спрашиваем.
+  it('проект с одними выведенными нодами всё равно требует ввода слага', async () => {
+    vi.stubGlobal('fetch', stubFetch({ ...emptyUsage, retired_nodes: 2 }));
+    renderSection();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    const dialog = await screen.findByRole('alertdialog');
+    const input = await within(dialog).findByPlaceholderText('game');
+    expect(within(dialog).getByRole('button', { name: 'Delete' }).hasAttribute('disabled')).toBe(true);
+    fireEvent.change(input, { target: { value: 'game' } });
+    expect(within(dialog).getByRole('button', { name: 'Delete' }).hasAttribute('disabled')).toBe(false);
   });
 
   it('непустой проект: кнопка оживает только после точного ввода слага', async () => {

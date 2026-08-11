@@ -265,6 +265,7 @@ function DeleteProjectAction({ project, onDone }: { project: ProjectInfo; onDone
     usage.versions === 0 &&
     usage.fleets === 0 &&
     usage.nodes === 0 &&
+    usage.retired_nodes === 0 &&
     usage.matches === 0 &&
     usage.servers === 0 &&
     usage.api_keys === 0;
@@ -340,6 +341,9 @@ function DeleteProjectAction({ project, onDone }: { project: ProjectInfo; onDone
                 <UsageRow label={t('access.projects.delete.usage.versions')} value={usage.versions} />
                 <UsageRow label={t('access.projects.delete.usage.matches')} value={usage.matches} />
                 <UsageRow label={t('access.projects.delete.usage.keys')} value={usage.api_keys} />
+                {usage.retired_nodes > 0 && (
+                  <UsageRow label={t('access.projects.delete.usage.retiredNodes')} value={usage.retired_nodes} />
+                )}
               </ul>
 
               {blocked ? (
