@@ -561,6 +561,224 @@ vol_case "compose без сервисов" 1 "рендер сломался" --a
 	services: {}
 YML
 
+# ─── ГЕЙТ 4: ОСТАЛЬНЫЕ ДВЕРИ хостового пути в контейнер (tracker #1097) ─────
+# Гейт 3 перебирает формы ОДНОЙ двери — `services.*.volumes`. Но хостовый путь
+# попадает в контейнер ещё двумя, и обе сторож не видел ВОВСЕ:
+#
+#   · именованный том, чьё верхнеуровневое определение несёт
+#     `driver_opts: {type: none, device: /srv/…, o: bind}` — у сервиса это
+#     выглядит как `type: volume`, и запись сознательно пропускалась (#1096);
+#   · `configs:`/`secrets:` с `file:` — вне swarm compose байнд-монтирует файл
+#     в контейнер с ХОСТОВЫМИ правами (uid/gid/mode там не работают), то есть
+#     это дословно #1072.
+#
+# Замерено на обеих: до перехода прогон давал RC=0 и «bind-маунтов нет» — ровно
+# то тихое зелёное, в котором alertmanager прожил 40 часов. Поэтому у каждой
+# двери здесь ДВА кейса — красный (иначе дверь не закрыта) и зелёный (иначе
+# «закрыто» могло бы значить «сломано и всегда красное»).
+echo
+echo "── остальные двери: driver_opts-bind и configs/secrets тоже под сторожем"
+
+# — ДВЕРЬ 2: bind, спрятанный в верхнеуровневом определении тома —
+vol_case "driver_opts bind: 0600 root в контейнер не от root (#1096)" 1 "не годится контейнеру" <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - conf:/etc/pg
+	volumes:
+	  conf:
+	    driver_opts:
+	      type: none
+	      device: /srv/fixture/secret.conf
+	      o: bind
+YML
+vol_case "driver_opts bind виден как настоящий маунт" 0 "проверено маунтов: 1" <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - conf:/etc/pg
+	volumes:
+	  conf:
+	    driver_opts:
+	      type: none
+	      device: /srv/fixture/pg.conf
+	      o: bind
+YML
+vol_case "driver_opts bind с относительным device" 1 "ОТНОСИТЕЛЬНЫЙ хостовый путь" <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - conf:/etc/pg
+	volumes:
+	  conf:
+	    driver_opts:
+	      type: none
+	      device: ./pg.conf
+	      o: bind
+YML
+# Обычный том под docker'ом обязан остаться пропуском — иначе «закрытая дверь»
+# сломала бы все настоящие composes ролей (у мастера том именно такой).
+vol_case "именованный том с name: остаётся без хостовой стороны" 0 "без хостовой стороны: 1" --allow-no-mounts <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - pgdata:/var/lib/postgresql/data
+	volumes:
+	  pgdata:
+	    name: birdman-pgdata
+YML
+
+# — РОСТ ФОРМ ГРОМКИЙ: всё, что не разобрано, роняет прогон, а не зеленеет —
+vol_case "ссылка на необъявленный том" 1 "нет в верхнеуровневой секции volumes" --allow-no-mounts <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - conf:/etc/pg
+YML
+vol_case "том с чужим драйвером" 1 "не local" --allow-no-mounts <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - conf:/etc/pg
+	volumes:
+	  conf:
+	    driver: rexray
+YML
+vol_case "том external" 1 "объявлен external" --allow-no-mounts <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - conf:/etc/pg
+	volumes:
+	  conf:
+	    external: true
+YML
+vol_case "driver_opts не про bind (nfs)" 1 "не берётся гадать" --allow-no-mounts <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - conf:/etc/pg
+	volumes:
+	  conf:
+	    driver_opts:
+	      type: nfs
+	      device: ":/exported"
+	      o: addr=10.0.0.1
+YML
+vol_case "неизвестный ключ в определении тома" 1 "ключи, которых сторож не знает" --allow-no-mounts <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - conf:/etc/pg
+	volumes:
+	  conf:
+	    выдумка: 1
+YML
+
+# — ДВЕРЬ 3: configs:/secrets: с file: —
+vol_case "configs file: 0600 root в контейнер не от root (#1072)" 1 "не годится контейнеру" <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    configs:
+	      - source: conf
+	        target: /etc/pg.conf
+	configs:
+	  conf:
+	    file: /srv/fixture/secret.conf
+YML
+vol_case "secrets file: 0600 root в контейнер не от root" 1 "не годится контейнеру" <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    secrets:
+	      - tok
+	secrets:
+	  tok:
+	    file: /srv/fixture/secret.conf
+YML
+vol_case "configs file: виден как настоящий маунт" 0 "проверено маунтов: 1" <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    configs:
+	      - conf
+	configs:
+	  conf:
+	    file: /srv/fixture/pg.conf
+YML
+vol_case "configs на путь, который роль не кладёт" 1 "НИ ОДНА таска роли" <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    configs:
+	      - conf
+	configs:
+	  conf:
+	    file: /srv/чужое/pg.conf
+YML
+# Содержимое не с хоста — законный пропуск, и он ПОСЧИТАН.
+vol_case "config из environment: хостовой стороны нет" 0 "без хостовой стороны: 1" --allow-no-mounts <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    configs:
+	      - conf
+	configs:
+	  conf:
+	    environment: PG_CONF
+YML
+vol_case "ссылка на необъявленный config" 1 "нет в верхнеуровневой секции configs" --allow-no-mounts <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    configs:
+	      - conf
+YML
+vol_case "неизвестный ключ в определении секрета" 1 "ключи, которых сторож не знает" --allow-no-mounts <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    secrets:
+	      - tok
+	secrets:
+	  tok:
+	    выдумка: 1
+YML
+
+# — маунты, ПРИВЕДЁННЫЕ со стороны: сторож их не разворачивает и молчать не смеет —
+# `volumes_from` особенно подл: тома он берёт у чужого сервиса, а образ (значит,
+# и uid) подставляет свой — то есть даже проверенный у соседа путь здесь снова
+# ничего не гарантирует.
+vol_case "volumes_from не проезжает молча" 1 "не разворачивает" --allow-no-mounts <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - /srv/fixture/pg.conf:/etc/pg.conf:ro
+	  side:
+	    image: busybox:1.36
+	    volumes_from:
+	      - db
+YML
+vol_case "extends не проезжает молча" 1 "не разворачивает" --allow-no-mounts <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    extends:
+	      file: base.yml
+	      service: base
+YML
+
 # ─── САМ РАННЕР: упавший посредине обязан быть красным (tracker #1089) ──────
 # Гейт, который умеет молча зеленеть, не гейт вовсе — и однажды именно этим
 # кончилось: раннер умер на `set -u` посреди новой таблицы форм и отрапортовал

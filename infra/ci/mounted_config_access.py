@@ -23,9 +23,9 @@ tasks/instances.yml), так что один generic-рендерер был б�
 раскладке. Что новый compose-шаблон не остался без сторожа, следит гейт
 покрытия в infra/ci/tests/run.sh.
 
-Что делает: берёт НАСТОЯЩИЙ рендер compose-файлов роли, достаёт из них
-bind-маунты «хостовый путь → сервис → образ», сопоставляет каждый путь с той
-таской роли, которая его кладёт, и требует доступности:
+Что делает: берёт НАСТОЯЩИЙ рендер compose-файлов роли, достаёт из них ВСЕ
+пары «хостовый путь → сервис → образ», сопоставляет каждый путь с той таской
+роли, которая его кладёт, и требует доступности:
 
   · путь мирочитаем (o+r, каталог — o+rx) → uid образа не нужен вовсе;
   · иначе владелец файла обязан совпасть с НАСТОЯЩИМ uid образа.
@@ -49,6 +49,54 @@ bind` + `source: pg-tuning.conf` снова уезжала в «bind-маунт�
 короткая запись (там так делает и compose), а в длинной решает type — который
 docker и сам требует («type is required»). Проверять формы руками: раздел «формы
 записи тома» в infra/ci/tests/run.sh.
+
+ТРИ ДВЕРИ, а не одна (tracker #1097). Перебор форм в `services.*.volumes` был
+закрыт ровно настолько, насколько его кто-то вспомнил, — и всё это время мимо
+сторожа шли ещё две двери, которыми хостовый путь попадает в контейнер. Обе
+сегодня в ролях не встречаются; ровно так же не встречался и дефект #1072 в
+трёх composes из четырёх — за сутки до того, как встретился:
+
+  1. `services.*.volumes` c bind — разбирается здесь же (см. выше);
+  2. ИМЕНОВАННЫЙ том, у которого верхнеуровневое определение несёт
+     `driver_opts: {type: none, device: /srv/…, o: bind}`. У сервиса такая
+     запись выглядит как `type: volume` и раньше СОЗНАТЕЛЬНО пропускалась как
+     «хостовой стороны нет»; хостовый путь лежит через секцию, в которую никто
+     не смотрел (tracker #1096);
+  3. `configs:` / `secrets:` с `file: /srv/…`. Вне swarm compose БАЙНД-МОНТИРУЕТ
+     этот файл в контейнер (а `uid`/`gid`/`mode` у записи вне swarm не работают),
+     то есть права остаются ХОСТОВЫЕ — дословно #1072: 0600 root:root в
+     контейнер от nobody. Сторож не видел этой двери вовсе.
+
+Поэтому имя тома больше не значит «проверять нечего»: оно значит «решение
+отложено до верхнеуровневой секции». Классифицируют определение —
+`named_volume_host()` и `content_host()`.
+
+РОСТ ФОРМ ТЕПЕРЬ ГРОМКИЙ. Перебирать формы бесконечно нельзя, но можно сделать
+НЕперебранную форму красной: у определения тома, конфига и секрета перечислены
+ключи, которые сторож понимает, и ЛЮБОЙ ключ вне списка (как и чужой драйвер, и
+`external: true`) роняет прогон. Это и есть разница между «список закрыт, пока
+кто-то помнит» и «список закрыт по построению»: новый способ подсунуть хостовый
+путь упрётся в отказ, а не проедет зелёным.
+
+Почему НЕ `docker compose config` (решение tracker #1097, замерено). Он и правда
+авторитетнее ручного разбора для ПЕРВОЙ двери — сам разворачивает короткую и
+длинную формы. Но:
+
+  · класс он не закрывает. Вторую дверь `config` переносит в вывод как есть
+    (у сервиса `type: volume`, device — в секции `volumes:`), третью — тоже:
+    разбирать их всё равно руками, а это и есть основная работа;
+  · он ЛОМАЕТ уже работающий громкий отказ. Замерено: `./conf` он разрешает в
+    <каталог рендера>/conf, то есть сегодняшний верный диагноз («ОТНОСИТЕЛЬНЫЙ
+    хостовый путь, пишите абсолютный») сменился бы уверенным враньём «ни одна
+    таска роли этот путь не кладёт»;
+  · он тянет docker+compose в КАЖДУЮ сьюту, включая мастерскую, которой docker
+    не нужен по построению, и добавляет пин версии compose рядом с пинами
+    образов.
+
+Замерено также, что `config` ВЫБРАСЫВАЕТ верхнеуровневые volumes/configs/secrets,
+на которые не ссылается ни один сервис. Для нас это верно по смыслу, но означает
+ещё одну чужую логику под проверкой. Итого: ручной разбор оставлен, а работа
+вложена в двери 2 и 3 и в громкий рост форм.
 
 Таски роли обходятся ОТ tasks/main.yml по include_tasks/import_tasks — с
 раскрытием loop и loop_control.loop_var, потому что часть путей роль кладёт
@@ -109,7 +157,24 @@ VAR = re.compile(r"\{\{\s*([a-zA-Z_]\w*(?:\.\w+)*)\s*\}\}")
 # compose. В длинной форме вид имени не значит ничего — там решает type.
 NAMED_VOLUME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*")
 # Длинные формы, у которых хостовой стороны нет вовсе: проверять нечего.
-HOSTLESS_TYPES = frozenset({"volume", "tmpfs", "npipe", "cluster", "image"})
+# `volume` СЮДА НЕ ВХОДИТ (tracker #1097): за именем тома может стоять bind
+# через driver_opts, и решает это верхнеуровневая секция volumes:, а не сервис.
+HOSTLESS_TYPES = frozenset({"tmpfs", "npipe", "cluster", "image"})
+# Ключи определения ВЕРХНЕУРОВНЕВОГО тома, которые сторож понимает. Всё, чего
+# здесь нет, роняет прогон: перебрать все будущие формы нельзя, а сделать
+# неперебранную форму красной — можно (tracker #1097).
+VOLUME_DEF_KEYS = frozenset({"name", "labels", "driver", "driver_opts", "external"})
+# То же для определения configs:/secrets:. `file` — хостовый путь (третья
+# дверь), `environment`/`content` — содержимое берётся не с хоста.
+CONTENT_DEF_KEYS = frozenset(
+    {"name", "labels", "file", "environment", "content", "external", "template_driver"}
+)
+# Ключи, которыми сервис ПРИВОДИТ маунты со стороны, а не объявляет их у себя:
+# `volumes_from` берёт тома другого сервиса (и подставляет под них СВОЙ образ,
+# то есть свой uid), `extends` дотягивает описание из другого файла. Сторож ни
+# то, ни другое не разворачивает — и молчать об этом не имеет права: маунт,
+# приехавший чужим ключом, был бы не проверен и при этом зелён (tracker #1097).
+IMPORTING_KEYS = ("volumes_from", "extends")
 LAYING = {
     "ansible.builtin.template": "file",
     "ansible.builtin.copy": "file",
@@ -285,32 +350,49 @@ def laid_paths(role: Path, variables: dict) -> dict[str, Laid]:
 
 
 class Mount(NamedTuple):
-    """Один bind-маунт: где записан, чем смонтирован, что монтирует."""
+    """Один хостовый путь, доехавший до контейнера: чем смонтирован и что."""
 
     where: str  # имя compose-файла
     service: str
     image: str
     host: str  # хостовая сторона, КАК ЗАПИСАНА в compose
     absolute: bool  # False — относительный путь: сопоставлять не с чем, см. main()
+    door: str  # какой дверью пришёл — попадает в отчёт, чтобы её было видно
 
 
-def volume_host(vol, where: str, service: str) -> str | None:
-    """Хостовая сторона тома, или None — если тома на хосте нет вовсе.
+def unclassifiable(where: str, what: str, why: str) -> NoReturn:
+    """Отказ на форме, которую сторож не понял. Одна дверь — один текст.
 
-    None означает СОЗНАТЕЛЬНЫЙ пропуск (именованный том, анонимный том, tmpfs):
-    хостового пути у такой записи не существует, проверять нечего. А вот
-    запись, которую классифицировать НЕЛЬЗЯ, роняет прогон: молча выброшенный
-    том — это ровно та дыра, из-за которой конфиг 0600 root:root, записанный
-    длинным синтаксисом, проезжал мимо сторожа (tracker #1089).
+    Молча пропущенная запись и есть та дыра, из-за которой конфиг 0600
+    root:root проезжал мимо сторожа (tracker #1089/#1097): «не понял» обязано
+    выглядеть как отказ, а не как «проверять нечего».
+    """
+    raise SystemExit(
+        f"{where}: {what} — {why}. Сторож не берётся гадать, ведёт ли эта запись"
+        " на хостовый путь: молча пропущенная дверь и есть та самая дыра"
+        " «выглядит покрытым», ради которой он написан. Научите разбирать эту"
+        " форму — infra/ci/mounted_config_access.py."
+    )
+
+
+class Source(NamedTuple):
+    """Что монтирует запись тома: путь на хосте либо ИМЯ верхнеуровневого тома."""
+
+    kind: str  # "path" | "named"
+    value: str
+
+
+def volume_source(vol, where: str, service: str) -> Source | None:
+    """Источник тома, или None — если хостовой стороны нет ПО СПЕКЕ.
+
+    None означает СОЗНАТЕЛЬНЫЙ пропуск (анонимный том, tmpfs): хостового пути
+    у такой записи не существует. А вот ИМЯ тома больше не пропуск, а
+    отложенное решение: за именем может стоять bind через driver_opts, и это
+    вторая дверь (tracker #1096/#1097) — её разбирает named_volume_host().
     """
 
-    def unclassifiable(why: str) -> NoReturn:
-        raise SystemExit(
-            f"{where}:{service}: запись тома {vol!r} — {why}. Сторож не берётся"
-            " гадать, bind это или именованный том: молча пропущенный том и есть"
-            " та самая дыра «выглядит покрытым», ради которой он написан. Научите"
-            " разбирать эту форму — infra/ci/mounted_config_access.py."
-        )
+    def bail(why: str) -> NoReturn:
+        unclassifiable(f"{where}:{service}", f"запись тома {vol!r}", why)
 
     if isinstance(vol, str):
         # Короткая форма. Одна только строка без двоеточия — АНОНИМНЫЙ том, и
@@ -323,7 +405,9 @@ def volume_host(vol, where: str, service: str) -> str | None:
         # тома (`- conf:/etc/conf` он трактует как ссылку на именованный том и
         # ругается «refers to undefined volume conf»).
         source = vol.split(":", 1)[0]
-        return None if NAMED_VOLUME.fullmatch(source) else source
+        if NAMED_VOLUME.fullmatch(source):
+            return Source("named", source)
+        return Source("path", source)
     if isinstance(vol, dict):
         # Длинная форма: {type, source, target, ...}. Легальна ровно так же, как
         # короткая, и первая редакция сторожа выбрасывала её целиком. Здесь всё
@@ -334,16 +418,26 @@ def volume_host(vol, where: str, service: str) -> str | None:
             # `type` в длинной форме обязателен, docker и сам такой compose не
             # берёт («services.db.volumes.0 type is required»), — значит, это не
             # «форма без type», а запись, которую мы не поняли.
-            unclassifiable("длинная форма без type (docker: «type is required»)")
+            bail("длинная форма без type (docker: «type is required»)")
         if vtype in HOSTLESS_TYPES:
             return None
+        if vtype == "volume":
+            # Решение отложено: `source` — это ИМЯ, и что за ним стоит, знает
+            # только верхнеуровневая секция volumes:. Без source том анонимный,
+            # хостовой стороны у него нет.
+            name = vol.get("source")
+            if name is None:
+                return None
+            if not isinstance(name, str) or not name:
+                bail("type: volume с нестроковым source")
+            return Source("named", name)
         if vtype != "bind":
-            unclassifiable(f"неизвестный type: {vtype!r}")
+            bail(f"неизвестный type: {vtype!r}")
         source = vol.get("source")
         if not isinstance(source, str) or not source:
             # type: bind без строкового source — bind без хостовой стороны не
             # бывает, значит форма не понята.
-            unclassifiable("type: bind без строкового source")
+            bail("type: bind без строкового source")
         # СКАЗАНО bind — значит источник хостовый, и прогонять его через имя
         # именованного тома нельзя: `source: pg-tuning.conf` под именованный том
         # ПОХОЖ, а разворачивает docker его в настоящий bind
@@ -351,12 +445,133 @@ def volume_host(vol, where: str, service: str) -> str | None:
         # длинной формой с ОТНОСИТЕЛЬНЫМ source, уезжал в «bind-маунтов нет» —
         # то же тихое зелёное, ради которого сторож и писался. Относительность
         # ловит ниже общая громкая ветка, здесь её решать нечем.
-        return source
-    unclassifiable("не строка и не словарь")
+        return Source("path", source)
+    bail("не строка и не словарь")
+
+
+def section(doc: dict, key: str) -> dict:
+    """Верхнеуровневая секция compose как словарь (её может не быть вовсе)."""
+    got = doc.get(key)
+    return got if isinstance(got, dict) else {}
+
+
+def definition(doc: dict, key: str, name: str, known: frozenset, tag: str, what: str):
+    """Верхнеуровневое определение `name` из секции `key`, уже провалидированное.
+
+    Ссылка на НЕОБЪЯВЛЕННОЕ имя — отказ, и это не придирка: docker такой compose
+    сам не берёт («refers to undefined volume»). Ключ вне `known` — тоже отказ:
+    так рост форм остаётся громким, а не проезжает зелёным (tracker #1097).
+    """
+    top = section(doc, key)
+    if name not in top:
+        unclassifiable(
+            tag, f"{what} «{name}»",
+            f"его нет в верхнеуровневой секции {key}: (docker и сам такой compose"
+            " не берёт)",
+        )
+    spec = top[name]
+    if spec is None:
+        spec = {}
+    if not isinstance(spec, dict):
+        unclassifiable(tag, f"{what} «{name}»", "определение — не словарь")
+    unknown = sorted(set(spec) - known)
+    if unknown:
+        unclassifiable(
+            tag, f"{what} «{name}»",
+            f"в определении ключи, которых сторож не знает: {', '.join(unknown)}",
+        )
+    if spec.get("external"):
+        unclassifiable(
+            tag, f"{what} «{name}»",
+            "объявлен external — его содержимое описано НЕ здесь, а создать его"
+            " могли и с хостовым путём (`docker volume create -o type=none -o"
+            " device=/srv/… -o o=bind`); отсюда этого не видно",
+        )
+    return spec
+
+
+def named_volume_host(doc: dict, name: str, tag: str) -> str | None:
+    """ВТОРАЯ ДВЕРЬ: хостовый путь за именем тома, или None — если его нет.
+
+    `driver_opts: {type: none, device: /srv/…, o: bind}` — это настоящий bind
+    хостового каталога, но у сервиса он выглядит как `type: volume`, и раньше
+    сторож пропускал его как «хостовой стороны нет» (tracker #1096).
+    """
+    spec = definition(doc, "volumes", name, VOLUME_DEF_KEYS, tag, "том")
+    driver = spec.get("driver")
+    opts = spec.get("driver_opts")
+    if driver is not None and driver != "local":
+        unclassifiable(
+            tag, f"том «{name}»",
+            f"драйвер «{driver}» — не local; чужой драйвер волен смонтировать что"
+            " угодно, в том числе хостовый каталог",
+        )
+    if opts is None:
+        return None  # обычный том под управлением docker: хостового пути нет
+    if not isinstance(opts, dict):
+        unclassifiable(tag, f"том «{name}»", "driver_opts — не словарь")
+    otype = opts.get("type")
+    if otype == "tmpfs":
+        return None
+    flags = {p.strip() for p in str(opts.get("o", "")).split(",")}
+    if otype == "none" and "bind" in flags:
+        device = opts.get("device")
+        if not isinstance(device, str) or not device:
+            unclassifiable(
+                tag, f"том «{name}»", "bind через driver_opts без строкового device"
+            )
+        return device
+    unclassifiable(
+        tag, f"том «{name}»",
+        f"driver_opts {opts!r} — это не «type: none + o: bind» (хостовый каталог)"
+        " и не tmpfs",
+    )
+
+
+def content_host(doc: dict, kind: str, name: str, tag: str) -> str | None:
+    """ТРЕТЬЯ ДВЕРЬ: хостовый путь за `configs:`/`secrets:`, или None.
+
+    Вне swarm compose БАЙНД-МОНТИРУЕТ `file:` в контейнер, а `uid`/`gid`/`mode`
+    у записи там не работают — права остаются хостовые. Это дословно #1072:
+    0600 root:root в контейнер, бегущий от nobody (tracker #1097).
+    """
+    what = "конфиг" if kind == "configs" else "секрет"
+    spec = definition(doc, kind, name, CONTENT_DEF_KEYS, tag, what)
+    if "file" in spec:
+        path = spec["file"]
+        if not isinstance(path, str) or not path:
+            unclassifiable(tag, f"{what} «{name}»", "file: не строка")
+        return path
+    # Содержимое не с хоста: compose берёт его из переменной окружения или из
+    # самого compose-файла, и класть его таской роли некому.
+    if "environment" in spec or "content" in spec:
+        return None
+    unclassifiable(
+        tag, f"{what} «{name}»",
+        "в определении нет ни file:, ни environment:, ни content: — откуда"
+        " берётся содержимое, непонятно",
+    )
+
+
+def content_names(svc: dict, kind: str, tag: str):
+    """Имена configs:/secrets:, на которые ссылается сервис (обе формы записи)."""
+    for ref in svc.get(kind) or []:
+        if isinstance(ref, str):
+            yield ref
+            continue
+        if isinstance(ref, dict):
+            src = ref.get("source")
+            if not isinstance(src, str) or not src:
+                unclassifiable(
+                    tag, f"запись {kind} {ref!r}", "длинная форма без строкового source"
+                )
+            yield src
+            continue
+        unclassifiable(tag, f"запись {kind} {ref!r}", "не строка и не словарь")
 
 
 def compose_mounts(compose: Path) -> tuple[list[Mount], int]:
-    """(bind-маунты, сколько записей сознательно пропущено как не-bind)."""
+    """(хостовые маунты всеми дверями, сколько записей сознательно пропущено)."""
     doc = yaml.safe_load(compose.read_text())
     if not isinstance(doc, dict) or not isinstance(doc.get("services"), dict) or not doc["services"]:
         raise SystemExit(
@@ -367,15 +582,51 @@ def compose_mounts(compose: Path) -> tuple[list[Mount], int]:
     out: list[Mount] = []
     hostless = 0
     for name, svc in doc["services"].items():
-        image = (svc or {}).get("image", "")
-        for vol in (svc or {}).get("volumes") or []:
-            host = volume_host(vol, compose.name, name)
-            if host is None:
+        svc = svc or {}
+        image = svc.get("image", "")
+        tag = f"{compose.name}:{name}"
+
+        for key in IMPORTING_KEYS:
+            if key in svc:
+                unclassifiable(
+                    tag, f"сервис использует {key}:",
+                    "он приводит маунты, описанные НЕ в этом сервисе, а сторож их"
+                    " не разворачивает; такой маунт остался бы непроверенным и"
+                    " при этом зелёным — а под volumes_from ещё и подставляется"
+                    " ДРУГОЙ образ, то есть другой uid",
+                )
+
+        def add(host: str, door: str) -> None:
+            out.append(
+                Mount(
+                    compose.name, name, image, host.rstrip("/") or "/",
+                    host.startswith("/"), door,
+                )
+            )
+
+        # Дверь 1: тома сервиса. Имя тома отправляется во вторую дверь.
+        for vol in svc.get("volumes") or []:
+            src = volume_source(vol, compose.name, name)
+            if src is None:
                 hostless += 1
                 continue
-            out.append(
-                Mount(compose.name, name, image, host.rstrip("/") or "/", host.startswith("/"))
-            )
+            if src.kind == "named":
+                host = named_volume_host(doc, src.value, tag)
+                if host is None:
+                    hostless += 1
+                    continue
+                add(host, f"том «{src.value}» (driver_opts bind)")
+                continue
+            add(src.value, "volumes")
+
+        # Дверь 3: configs:/secrets: с file:.
+        for kind in ("configs", "secrets"):
+            for ref in content_names(svc, kind, tag):
+                host = content_host(doc, kind, ref, tag)
+                if host is None:
+                    hostless += 1
+                    continue
+                add(host, f"{kind}: «{ref}»")
     return out, hostless
 
 
@@ -516,8 +767,11 @@ def main(argv: list[str]) -> int:
     problems: list[str] = []
     checked = 0
 
-    for where, service, image, host, absolute in sorted(mounts):
-        tag = f"{where}:{service}"
+    for where, service, image, host, absolute, door in sorted(mounts):
+        # Дверь названа в КАЖДОЙ строке отчёта: путь, пришедший через
+        # `configs:` или через driver_opts, глазами в compose не находится по
+        # самому пути — искать его надо в другой секции (tracker #1097).
+        tag = f"{where}:{service}" + ("" if door == "volumes" else f" [{door}]")
         if not absolute:
             # Разобрать разобрали, а вот СОПОСТАВИТЬ не с чем: относительный путь
             # считается от каталога compose-файла на боксе, и знать его отсюда
