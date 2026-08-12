@@ -318,9 +318,11 @@ export interface AlertRule {
 
 /**
  * Область алерта (мультипроект, трекер #955): `platform` — алерт не привязан к
- * проекту (MasterDown, NodeDown, DiskHigh, CertExpiry, BackupStale/Failed),
+ * проекту (ScrapeTargetDown, DiskHigh, CertExpiry, BackupStale/Failed),
  * `project` — привязан. Master выводит область из НАЛИЧИЯ лейбла `project` у
- * метрики, на которой построен expr.
+ * метрики, на которой построен expr. Поэтому перечень примеров не вечен:
+ * `NodeDown` был здесь до #1064, а с ним его серия получила `project` и он стал
+ * проектным; `MasterDown` правилом не заведён вовсе (`ops.md` §1).
  */
 export type AlertScope = 'project' | 'platform';
 

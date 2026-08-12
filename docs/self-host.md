@@ -323,9 +323,12 @@ but NOT everywhere at the same granularity, and the difference matters:
 
 **The two filters differ in one more way, and it is the one that surprises
 operators.** The second one is **non-hiding**: a row with no project — a
-platform event, a `MasterDown`/`NodeDown` alert — stays visible to every bound
-key, because otherwise a tenant would never learn that the platform itself is
-down. The first one — the raw observability proxies — **hides**: a log line or
+platform event, a `ScrapeTargetDown`/`DiskHigh` alert — stays visible to every
+bound key, because otherwise a tenant would never learn that the platform
+itself is down. (A silent master arrives as `ScrapeTargetDown`: the scrape has
+a `birdman-master` job. There is no `MasterDown` rule at all — it would need an
+EXTERNAL probe, see `ops.md` §1 — and `NodeDown` stopped being an example in
+#1064, when its series gained a `project` label.) The first one — the raw observability proxies — **hides**: a log line or
 a metric series that does not carry the pair is not served to a bound key at
 all. Measured on VictoriaLogs v1.51.0 / VictoriaMetrics v1.102.1: an unlabelled
 legacy log line and the label-less `birdman_players_online` series are returned

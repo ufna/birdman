@@ -148,8 +148,12 @@ func TestAlertsEndpoints(t *testing.T) {
 // TestAlertsProjectScope covers ?project= on /v1/alerts/{active,history}
 // (tracker #955). The load-bearing assertion is the SECOND one: the filter is
 // non-hiding, so a platform alert (no `project` label) must survive a project
-// selection — silently swallowing NodeDown/MasterDown would be worse than
-// showing a neighbour's alert, and a project has no "All" mode to get it back.
+// selection — silently swallowing ScrapeTargetDown/DiskHigh would be worse
+// than showing a neighbour's alert, and a project has no "All" mode to get it
+// back. (Those two are the label-less rules of today's rules.yml.j2; NodeDown,
+// which used to illustrate this, became a project alert in #1064, and the
+// fixture below still calls it platform only because it constructs a line with
+// no `project` label — that is the filter's input, not a claim about the rule.)
 //
 // The three slugs are REAL projects here (tracker #961): ?project= is validated
 // against the DB now, so a made-up slug tests the typo path, not the filter.
