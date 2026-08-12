@@ -320,9 +320,16 @@ but NOT everywhere at the same granularity, and the difference matters:
   and mutes. A key bound to `game/dev` sees `game/prod` events and alerts too:
   there is no per-environment split on those surfaces.
 
-Both kinds of filter are **non-hiding**: a row with no project — a platform
-event, a `MasterDown`/`NodeDown` alert — stays visible to every bound key.
-Otherwise a tenant would never learn that the platform itself is down.
+**The two filters differ in one more way, and it is the one that surprises
+operators.** The second one is **non-hiding**: a row with no project — a
+platform event, a `MasterDown`/`NodeDown` alert — stays visible to every bound
+key, because otherwise a tenant would never learn that the platform itself is
+down. The first one — the raw observability proxies — **hides**: a log line or
+a metric series that does not carry the pair is not served to a bound key at
+all. Measured on VictoriaLogs v1.51.0 / VictoriaMetrics v1.102.1: an unlabelled
+legacy log line and the label-less `birdman_players_online` series are returned
+to a global key and NOT returned to a bound one. That is the same trap as
+`log_scope_dirs` below — see "Who sees what" in section 4.
 
 What binding does not close at all: `GET /metrics` is unauthenticated and
 carries `{project, env, server_id}` (project slugs, environment names and the
@@ -378,19 +385,38 @@ metrics:
   victorialogs_url: "http://127.0.0.1:9428"
 ```
 
-Empty → the metrics/logs tabs answer `503` (`metrics_unconfigured` /
-`logs_unconfigured`), everything else works. That is NOT the whole failure
-model: with a URL set but the upstream down you get `502 upstream`, a bad
-`limit` gets `400`, and a bound key gets `200` with a narrowed — sometimes
-empty — result. A bound key against an upstream that cannot enforce the
-narrowing gets `503 logs_narrowing_unsupported` / `metrics_narrowing_unsupported`
-instead of everyone else's data (tracker #1007). Plus `403`, but only from the
-key's scope or from a pair that cannot be narrowed — binding by itself does NOT
-close these handles. Details right below, in this same section.
+**Leaving the block commented out is NOT "empty".** Master's own defaults for
+these two keys are the very URLs printed above — `http://127.0.0.1:8428` and
+`:9428` — and they are applied before the YAML is parsed, so a missing `metrics:`
+section does not clear them. Consequences, measured by feeding `deploy/master.yaml`
+verbatim to a master with nothing listening on those ports:
+
+- the reference stack happens to run on the same box → the tabs simply work,
+  configured or not;
+- nothing is listening there → all three handles answer **`502 upstream`**, not
+  `503`. The panel tells the two apart (`503` renders as "not configured", `502`
+  as "unavailable"), so this is the difference between being sent to fix a
+  config and being sent to fix a stack you never deployed. The master also logs
+  `ERROR upstream narrowing probe failed` for both upstreams at startup;
+- you actually want "not configured" → uncomment the block and set an
+  **explicit empty string**: `victoriametrics_url: ""`. Only that yields
+  `503 metrics_unconfigured` / `logs_unconfigured`.
+
+`503 *_unconfigured` is one of THREE upstream-side answers, and they mean
+different things: not configured (`503 *_unconfigured`), the upstream cannot
+be asked to narrow (`503 *_narrowing_unsupported`, bound keys only,
+tracker #1007), the upstream is not answering (`502 upstream`). On top of that
+a bound key gets `200` with a narrowed — sometimes empty — result, a bad `limit`
+on the logs proxy gets `400`, and `403` comes either from the key's scope or
+from a pair that cannot be narrowed at all — binding by itself does NOT close
+these handles. The exact order master checks them in is at the end of this
+section, "In which order master answers".
 
 **Who sees what (tracker #994).** A global (unbound) key uses both raw proxies —
 `GET /v1/logs/query` and `GET /v1/metrics/query`·`/query_range` — exactly as
-before: the query is forwarded to the upstream verbatim. A key **bound to a
+before: nothing is narrowed by a pair. "Verbatim", however, is true of the two
+metrics handles only; on the logs proxy master sets and clamps `limit` for
+everybody (see the end of this section). A key **bound to a
 (project, env) pair** gets `200`, but master NARROWS its query by that pair
 (`extra_stream_filters` for VictoriaLogs, `extra_label` for VictoriaMetrics), so
 it never receives another project's lines or series, whatever it asks for.
@@ -518,13 +544,55 @@ Consequences worth knowing up front:
   nothing), but an operator with a bound key will be left without their own
   logs. Never derive the pair from what the dedik prints to stdout: the access
   boundary would then be controlled by the dedik itself.
-- **Metrics: only series carrying the pair are visible.** Those are
-  `birdman_servers`, `birdman_versions`, `birdman_server_info`. Per-server
-  series are emitted by the agent (`birdman_server_players`,
-  `birdman_container_*`) and carry no pair, while platform aggregates
+- **Metrics: only series carrying the pair are visible.** Master emits it on
+  `birdman_servers`, `birdman_versions`, `birdman_server_info`. The agent's
+  per-server series (`birdman_server_players`, `birdman_server_tick_ms`,
+  `birdman_container_*`) carry it too **since tracker #1008** — but only for
+  dediks STARTED after that upgrade: the pair is stamped into container labels
+  at create and is never backfilled, so a dedik that was already running keeps
+  emitting `server_id` alone and stays invisible to a bound key until it is
+  recycled (those series age out with the VictoriaMetrics retention, 30 days in
+  the reference stack — the same trade as the unlabelled log lines above). The
+  pair is always stamped as a PAIR, never half of it. Platform aggregates
   (`birdman_players_online`, `birdman_matches_running`,
-  `birdman_node_capacity_slots`) are fleet-wide data by nature. For a bound
-  session those charts come back empty (`200` with an empty result, not `403`).
+  `birdman_node_capacity_slots`) are fleet-wide data by nature and carry no
+  pair at all. For a bound session everything without the pair comes back empty
+  (`200` with an empty result, not `403`) — and note that a single pairless
+  operand is enough to empty a whole expression: the panel's utilization
+  percentage dies on its `sum(birdman_node_capacity_slots)` denominator even
+  though its numerator is built on `birdman_servers` (measured: global `0.14`,
+  bound `result:[]`).
+
+**In which order master answers.** Measured against a running master, not read
+off the source: an earlier version of this document had the relative order of
+`400` and `502` backwards, and the only way to know is to run it. First match
+wins, top to bottom:
+
+1. no key → `401 unauthorized`;
+2. the key lacks the `readonly`/`admin` scope → `403 scope readonly required`.
+   That is about the SCOPE, not the binding, and it wins over everything below
+   — including an unset URL and a dead upstream, so it never reveals whether
+   the proxy is configured;
+3. the key's pair cannot be narrowed at all (it does not pass the slug
+   alphabet) → `403`, fail-closed. The only `403` binding itself produces, and
+   unreachable through the public API: the pair is validated when the key is
+   created;
+4. the upstream URL is an explicit empty string → `503 metrics_unconfigured` /
+   `logs_unconfigured`;
+5. a bad `limit` on the logs proxy → `400 bad_request`. After the `503` above,
+   but before ANYTHING involving the upstream — such a request never leaves
+   master. The metrics proxies have no `limit` of their own; for them it is
+   just another forwarded query arg;
+6. bound keys only — the narrowing probe (previous bullet):
+   `503 *_narrowing_unsupported` when the arg is swallowed, `502 upstream` when
+   there is no verdict;
+7. the real request fails → `502 upstream`;
+8. otherwise `200` — narrowed by the pair for a bound key.
+
+"Verbatim" holds for TWO of the three handles: the metrics proxies forward the
+query string exactly as it arrived, unknown args included. The logs proxy is
+never verbatim for anyone — master sets `limit` itself (default 1000) and clamps
+it at 10000, for a global key just as much as for a bound one.
 
 Reference monitoring stack (VM + vmagent + vmalert + Grafana + Postgres backups)
 — the ansible role `infra/roles/birdman_monitoring_dev` (`infra/README.md`, the
