@@ -7,8 +7,8 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { serverHistoryQuery, LOG_RANGE_PRESETS } from '../lib/logsql';
-import { queryLogs } from '../lib/logsHistory';
-import type { LogLine } from '../lib/logsHistory';
+import { LOGS_UNAVAILABLE_MESSAGE, queryLogs } from '../lib/logsHistory';
+import type { LogLine, LogsUnavailableReason } from '../lib/logsHistory';
 import { useT, useFormat } from '../lib/i18n';
 import { LogViewer } from './LogViewer';
 import { EmptyState, ErrorNote, Skeleton, SkeletonRegion } from './ui';
@@ -58,7 +58,7 @@ export function LogsPanel({ serverId, initialFollow = true }: { serverId: string
 type HistoryState =
   | { status: 'loading' }
   | { status: 'ok'; lines: LogLine[]; hasMore: boolean }
-  | { status: 'soft'; reason: 'unconfigured' | 'upstream' }
+  | { status: 'soft'; reason: LogsUnavailableReason }
   | { status: 'error'; error: Error };
 
 /** История одного дедика: диапазон + текстовый фильтр (Enter/кнопка) +
@@ -190,7 +190,9 @@ function LogsHistory({ serverId }: { serverId: string }) {
           }}
         />
       ) : state.status === 'soft' ? (
-        <EmptyState>{t(state.reason === 'unconfigured' ? 'logs.unconfigured' : 'logs.unavailable')}</EmptyState>
+        // Карта, а не тернарник (tracker #1076): третья причина — narrowing —
+        // иначе молча показалась бы текстом «хранилище недоступно».
+        <EmptyState>{t(LOGS_UNAVAILABLE_MESSAGE[state.reason])}</EmptyState>
       ) : state.lines.length === 0 ? (
         <EmptyState>{t('logs.empty')}</EmptyState>
       ) : (

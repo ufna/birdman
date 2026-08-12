@@ -109,6 +109,38 @@ describe('Logs — экран флит-поиска', () => {
     expect(await screen.findByText('Log storage is unavailable right now — live tail keeps working.')).toBeTruthy();
   });
 
+  // tracker #1076. Ради этой ветки карточка и заведена: #1007 сделал
+  // logs_narrowing_unsupported ШТАТНЫМ исходом для привязанного ключа на
+  // апстриме, не разбирающем extra_stream_filters, а экран показывал его
+  // жёсткой ошибкой с машинным кодом. Проверяем ОБА каталога: строка должна
+  // называть причину (апстрим, не логи) и опцию, которую чинить оператору.
+  it('narrowing (503 logs_narrowing_unsupported) → своя строка каталога EN, не ErrorNote и не «хранилище недоступно»', async () => {
+    const fetchMock = mockFetch(() => new Response(JSON.stringify({ error: 'logs_narrowing_unsupported' }), { status: 503 }));
+    vi.stubGlobal('fetch', fetchMock);
+    renderEn(<Logs />);
+    fireEvent.submit(screen.getByPlaceholderText('Search log text…').closest('form') as HTMLFormElement);
+    expect(
+      await screen.findByText(
+        'Log history is hidden: this master cannot narrow the search to your project — the configured VictoriaLogs does not understand the extra_stream_filters query arg. The operator has to fix victorialogs_url (self-host docs, §4). Live tail keeps working.',
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText('Log storage is unavailable right now — live tail keeps working.')).toBeNull();
+    expect(screen.queryByText(/Couldn't load data/)).toBeNull();
+  });
+
+  it('narrowing — та же ветка в RU: живой перевод, а не английский текст мастера', async () => {
+    const fetchMock = mockFetch(() => new Response(JSON.stringify({ error: 'logs_narrowing_unsupported' }), { status: 503 }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(
+      <I18nProvider initialLang="ru">
+        <Logs />
+      </I18nProvider>,
+    );
+    fireEvent.submit(screen.getByPlaceholderText('Поиск по тексту логов…').closest('form') as HTMLFormElement);
+    expect(await screen.findByText(/этот master не может сузить поиск до вашего проекта/)).toBeTruthy();
+    expect(screen.getByText(/victorialogs_url/)).toBeTruthy();
+  });
+
   it('жёсткая ошибка (500) → ErrorNote, не тихая заметка', async () => {
     const fetchMock = mockFetch(() => new Response(JSON.stringify({ error: 'internal', detail: 'boom' }), { status: 500 }));
     vi.stubGlobal('fetch', fetchMock);

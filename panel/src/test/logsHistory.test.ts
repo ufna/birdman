@@ -84,6 +84,36 @@ describe('queryLogs (GET /v1/logs/query)', () => {
     expect(await queryLogs({ query: '*' })).toEqual({ kind: 'unavailable', reason: 'unconfigured' });
   });
 
+  // tracker #1076. Штатный исход #1007 для привязанного ключа: апстрим не
+  // разбирает extra_stream_filters, master отказывает вместо выдачи всего
+  // флота. До этой карточки код улетал в ApiError — оператор видел на экране
+  // сырое `logs_narrowing_unsupported`, тогда как у метрик-близнеца
+  // (metrics_narrowing_unsupported) своя строка каталога есть.
+  it('503 logs_narrowing_unsupported → unavailable/narrowing, не бросает', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            error: 'logs_narrowing_unsupported',
+            detail: 'victorialogs_url ignores the extra_stream_filters query arg',
+          }),
+          { status: 503 },
+        ),
+      ),
+    );
+    expect(await queryLogs({ query: '*' })).toEqual({ kind: 'unavailable', reason: 'narrowing' });
+  });
+
+  // Мягкая ветка узкая: смягчается ПАРА (503 + код), а не сам 503 — иначе под
+  // «мягко» ушла бы любая пятисотка апстрима.
+  it('503 без узнаваемого кода → по-прежнему ApiError, мягкость не расползлась', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 503 })));
+    const err = await queryLogs({ query: '*' }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(503);
+  });
+
   it('502 upstream → unavailable/upstream, не бросает', async () => {
     vi.stubGlobal(
       'fetch',

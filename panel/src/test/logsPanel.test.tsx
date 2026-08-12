@@ -87,6 +87,20 @@ describe('LogsPanel — сегмент Live | История', () => {
     expect(await screen.findByText('Log storage is unavailable right now — live tail keeps working.')).toBeTruthy();
   });
 
+  // tracker #1076. Экран «Логи» — не единственный потребитель проксии: тот же
+  // 503 придёт и во вкладку «История» дровера, и текст у него должен быть СВОЙ,
+  // а не общий «хранилище недоступно» (до карточки оба места выбирали ключ
+  // тернарником `unconfigured ? … : 'logs.unavailable'`, то есть третья причина
+  // молча попадала в else).
+  it('unavailable/narrowing → своя заметка про апстрим, а не общее «хранилище недоступно»', async () => {
+    const fetchMock = mockFetch(() => new Response(JSON.stringify({ error: 'logs_narrowing_unsupported' }), { status: 503 }));
+    vi.stubGlobal('fetch', fetchMock);
+    renderEn(<LogsPanel serverId="srv-1" />);
+    fireEvent.click(screen.getByRole('button', { name: 'History' }));
+    expect(await screen.findByText(/this master cannot narrow the search to your project/)).toBeTruthy();
+    expect(screen.queryByText('Log storage is unavailable right now — live tail keeps working.')).toBeNull();
+  });
+
   it('пусто (ok, 0 строк) → «нет строк за период»', async () => {
     const fetchMock = mockFetch(() => new Response('', { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);

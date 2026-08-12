@@ -292,6 +292,11 @@ export const en = {
   'logs.more': 'Show more',
   'logs.unconfigured': "Log history isn't configured on this master (victorialogs_url is empty).",
   'logs.unavailable': 'Log storage is unavailable right now — live tail keeps working.',
+  // tracker #1007/#1076: the upstream does not parse the narrowing query arg, so
+  // master refuses instead of answering a project-bound key with the whole fleet.
+  // Twin of metric.err.narrowing, with the knob and the config option of logs.
+  'logs.narrowing':
+    'Log history is hidden: this master cannot narrow the search to your project — the configured VictoriaLogs does not understand the extra_stream_filters query arg. The operator has to fix victorialogs_url (self-host docs, §4). Live tail keeps working.',
 
   // — Logs screen: fleet-wide search (Task 6, "Логи v1") —
   'logs.search.textPlaceholder': 'Search log text…',

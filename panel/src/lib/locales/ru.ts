@@ -259,6 +259,11 @@ export const ru: Record<MessageKey, string> = {
   'logs.more': 'Показать ещё',
   'logs.unconfigured': 'История логов не настроена на этом master (victorialogs_url пуст).',
   'logs.unavailable': 'Хранилище логов сейчас недоступно — live-tail продолжает работать.',
+  // tracker #1007/#1076: апстрим не разбирает ручку сужения, поэтому master
+  // отказывает, а не отдаёт привязанному к проекту ключу весь флот. Близнец
+  // metric.err.narrowing — со своей ручкой и своей опцией конфига.
+  'logs.narrowing':
+    'История логов скрыта: этот master не может сузить поиск до вашего проекта — настроенная VictoriaLogs не понимает query-параметр extra_stream_filters. Чинить оператору: victorialogs_url (доки self-host, §4). Live-tail продолжает работать.',
 
   // — экран «Логи»: флит-поиск (задача 6, «Логи v1») —
   'logs.search.textPlaceholder': 'Поиск по тексту логов…',

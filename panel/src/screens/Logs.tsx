@@ -10,8 +10,8 @@
 import { useRef, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 import { fleetSearchQuery, LOG_RANGE_PRESETS } from '../lib/logsql';
-import { queryLogs } from '../lib/logsHistory';
-import type { LogLine } from '../lib/logsHistory';
+import { LOGS_UNAVAILABLE_MESSAGE, queryLogs } from '../lib/logsHistory';
+import type { LogLine, LogsUnavailableReason } from '../lib/logsHistory';
 import { useServerDrawer } from '../lib/drawer';
 import { useT, useFormat } from '../lib/i18n';
 import { shortId } from '../lib/format';
@@ -23,7 +23,7 @@ type SearchState =
   | { status: 'idle' }
   | { status: 'loading' }
   | { status: 'ok'; lines: LogLine[] }
-  | { status: 'soft'; reason: 'unconfigured' | 'upstream' }
+  | { status: 'soft'; reason: LogsUnavailableReason }
   | { status: 'error'; error: Error };
 
 export function Logs() {
@@ -188,7 +188,9 @@ function ResultsBody({ state, query, onRetry }: { state: SearchState; query: str
     );
   }
   if (state.status === 'soft') {
-    return <EmptyState>{t(state.reason === 'unconfigured' ? 'logs.unconfigured' : 'logs.unavailable')}</EmptyState>;
+    // Карта, а не тернарник: у каждой причины свой текст, и новая причина без
+    // строки каталога не соберётся (lib/logsHistory.ts, tracker #1076).
+    return <EmptyState>{t(LOGS_UNAVAILABLE_MESSAGE[state.reason])}</EmptyState>;
   }
   if (state.lines.length === 0) return <EmptyState>{t('logs.search.empty')}</EmptyState>;
   return <ResultRows lines={state.lines} query={query} />;

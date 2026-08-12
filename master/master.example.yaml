@@ -42,8 +42,9 @@ secrets_key_file: "/etc/birdman/secrets.key"
 # один: «не настроено» (503 *_unconfigured), «апстрим не умеет сужать» (503
 # *_narrowing_unsupported, tracker #1007) и «апстрим не отвечает» (502). Панель
 # разводит их: 503 *_unconfigured → мягкое «не настроено», 502/upstream →
-# «недоступно» (panel lib/metrics.ts, lib/logsHistory.ts), а у narrowing на
-# экране метрик своя строка каталога metric.err.narrowing (MetricMessage.tsx).
+# «недоступно» (panel lib/metrics.ts, lib/logsHistory.ts), а у narrowing своя
+# строка каталога на ОБОИХ экранах: metric.err.narrowing (MetricMessage.tsx) и
+# logs.narrowing (LOGS_UNAVAILABLE_MESSAGE в lib/logsHistory.ts, tracker #1076).
 # Поэтому путать их в доке дорого: 503 отправляет оператора чинить конфиг,
 # 502 — чинить стек.
 #
