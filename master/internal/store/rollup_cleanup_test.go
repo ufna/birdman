@@ -15,6 +15,12 @@ package store_test
 //
 // Тесты проверяют оба направления и на удалении проекта, и на удалении
 // окружения (там дефект был предсуществующим — из него и скопирован).
+//
+// Второй круг ревью нашёл ТОТ ЖЕ класс в СОСЕДНЕЙ таблице: колонку `project`
+// той же миграцией 000017 получила и match_ccu_daily, а каскад проекта её не
+// чистил — новый проект с тем же слагом наследовал пик CCU мёртвого. Это
+// закрыто ниже (TestDeleteProjectClearsOwnPeakCCU), и там же закреплена
+// разница в семантике ''-строки между двумя таблицами.
 
 import (
 	"context"
@@ -23,6 +29,7 @@ import (
 
 	"github.com/ufna/birdman/master/internal/store"
 	"github.com/ufna/birdman/master/internal/testdb"
+	"github.com/ufna/birdman/master/internal/utctime"
 )
 
 // seedRollup кладёт строку дневного роллапа для (project, env).
@@ -141,5 +148,98 @@ func TestDeleteProjectKeepsUnattributedRollups(t *testing.T) {
 	}
 	if n := rollupCount(t, st, ""); n != 1 {
 		t.Fatalf("снесена неатрибутированная строка (в ней есть чужие цифры): осталось %d, ждём 1", n)
+	}
+}
+
+// seedCCU кладёт строку дневного пика CCU для (day, project) — PK таблицы после
+// миграции 000017 ровно эта пара.
+func seedCCU(t *testing.T, st *store.Store, day time.Time, project string, peak int) {
+	t.Helper()
+	if _, err := st.Pool.Exec(context.Background(),
+		`insert into match_ccu_daily (day, project, peak_ccu) values ($1, $2, $3)`,
+		day, project, peak); err != nil {
+		t.Fatalf("seed ccu %s/%q: %v", utctime.DayKey(day), project, err)
+	}
+}
+
+func ccuCount(t *testing.T, st *store.Store, project string) int {
+	t.Helper()
+	var n int
+	if err := st.Pool.QueryRow(context.Background(),
+		`select count(*) from match_ccu_daily where project = $1`, project).Scan(&n); err != nil {
+		t.Fatalf("count ccu %q: %v", project, err)
+	}
+	return n
+}
+
+// TestDeleteProjectClearsOwnPeakCCU: тот же класс порчи, что у match_stats_daily
+// выше, но в СОСЕДНЕЙ таблице — колонку `project` обеим дала одна миграция
+// 000017, а каскад чистил только первую. Читает match_ccu_daily проектным срезом
+// store.RollupPeakCCU, им закрыта иммутабельная часть окна /v1/stats/overview.
+//
+// Видно это ровно на пересоздании проекта с ТЕМ ЖЕ слагом — а это не край:
+// переименования слага нет by design, и пересоздать проект под тем же именем —
+// штатный путь исправления ошибки.
+//
+// Три вещи проверяются ОДНОВРЕМЕННО, потому что порознь каждую легко выполнить
+// неверной правкой: свои строки ушли; ЧУЖИЕ (соседний проект) целы; ''-строка
+// цела — в ЭТОЙ таблице она не «не атрибутировано», как в match_stats_daily, а
+// платформенный пик И маркер «день посчитан», на наличии которого держится
+// различение «день был пустой» / «день не роллапился» (RollupPeakCCU).
+func TestDeleteProjectClearsOwnPeakCCU(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10)
+	ctx := context.Background()
+
+	if _, err := st.CreateProject(ctx, "neighbour", 2); err != nil {
+		t.Fatalf("create neighbour: %v", err)
+	}
+
+	// День из ИММУТАБЕЛЬНОЙ части окна: [today-29, today-2] пересчитывает
+	// statsrollup.Backfill при рестарте мастера, а тик — только [today-1, today].
+	// Поэтому без уборки строка живёт от удаления до ближайшего рестарта.
+	day := utctime.StartOfDay(time.Now().UTC().AddDate(0, 0, -10))
+	seedCCU(t, st, day, f.Project, 42)
+	seedCCU(t, st, day, "neighbour", 7)
+	seedCCU(t, st, day, "", 100) // платформенный пик + маркер «день посчитан»
+
+	if _, err := st.RevokeNode(ctx, f.NodeID); err != nil {
+		t.Fatalf("revoke node: %v", err)
+	}
+	if _, err := st.DeleteProject(ctx, f.Project, f.Project); err != nil {
+		t.Fatalf("delete project: %v", err)
+	}
+
+	if n := ccuCount(t, st, f.Project); n != 0 {
+		t.Fatalf("пик CCU удалённого проекта остался (%d строк): его унаследует новый проект с тем же слагом", n)
+	}
+	if n := ccuCount(t, st, "neighbour"); n != 1 {
+		t.Fatalf("снесён пик CCU ЧУЖОГО проекта: осталось %d, ждём 1", n)
+	}
+	if n := ccuCount(t, st, ""); n != 1 {
+		t.Fatalf("снесена ''-строка: это платформенный пик И маркер «день посчитан», осталось %d, ждём 1", n)
+	}
+
+	// Зеркало пробника ревьюера: пересоздаём проект под тем же слагом и
+	// спрашиваем ровно тем вызовом, которым ходит /v1/stats/overview|cost.
+	if _, err := st.CreateProject(ctx, f.Project, 10); err != nil {
+		t.Fatalf("recreate project: %v", err)
+	}
+	peaks, err := st.RollupPeakCCU(ctx, day, day, f.Project)
+	if err != nil {
+		t.Fatalf("peak ccu of recreated project: %v", err)
+	}
+	if len(peaks) != 0 {
+		t.Fatalf("новый проект с тем же слагом видит пик CCU мёртвого: %v", peaks)
+	}
+
+	// Контроль к предыдущей проверке: пустая выдача обязана значить «строк
+	// проекта нет», а не «запрос сломан» — платформенный срез того же дня цел.
+	platform, err := st.RollupPeakCCU(ctx, day, day, "")
+	if err != nil {
+		t.Fatalf("platform peak ccu: %v", err)
+	}
+	if platform[utctime.DayKey(day)] != 100 {
+		t.Fatalf("платформенный пик за день потерян — сломан маркер «день посчитан»: %v", platform)
 	}
 }
