@@ -496,7 +496,7 @@ func registryCredsToProto(creds []store.RegistryCred) []*agentlinkv1.RegistryCre
 // BroadcastRegistries rebuilds the registries snapshot from the database
 // once and Sends a fresh copy (its own cmd_id per node — Hub.Send stamps it)
 // to every currently connected node. Wired as the httpapi
-// onRegistriesChanged hook (main.go) so a successful POST/DELETE
+// onRegistriesChanged hook (main.go) so a successful POST/PATCH/DELETE
 // /v1/registries immediately refreshes every connected agent (design doc
 // §2). It runs synchronously on the HTTP request path by design: Hub.Send
 // only touches an in-memory queue and a buffered channel with a

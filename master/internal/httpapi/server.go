@@ -198,7 +198,7 @@ func (s *Server) WithAlertsSources(vmalertURL, alertsLogPath string) *Server {
 }
 
 // WithRegistriesHook wires a callback invoked after a successful registries
-// change (POST/DELETE /v1/registries) — T3 uses this to broadcast a fresh
+// change (POST/PATCH/DELETE /v1/registries) — T3 uses this to broadcast a fresh
 // SetRegistries snapshot to connected agents
 // (docs/superpowers/specs/2026-07-09-registries-design.md §2). Kept a setter
 // rather than a New parameter, like WithAlertsSources, so the existing New

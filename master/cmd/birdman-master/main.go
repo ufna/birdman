@@ -265,7 +265,7 @@ func run() error {
 	silenceMirror := amsilence.New(st, cfg.Alerts.AlertmanagerURL, log)
 	apiHandler := httpapi.New(st, m, mm, dep, hub, logRouter, cfg.Metrics.VictoriaMetricsURL, cfg.Metrics.VictoriaLogsURL, log).
 		WithAlertsSources(cfg.Alerts.VmalertURL, cfg.Alerts.LogPath).
-		// After every successful POST/DELETE /v1/registries, refresh every
+		// After every successful POST/PATCH/DELETE /v1/registries, refresh every
 		// connected agent's in-memory credential set (docs/superpowers/specs/
 		// 2026-07-09-registries-design.md §2, T3).
 		WithRegistriesHook(agentlinkSvc.BroadcastRegistries).

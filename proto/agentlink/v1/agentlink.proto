@@ -182,7 +182,7 @@ message RemoveImage {
 
 // SetRegistries carries the full set of private-registry credentials the
 // agent should use for image pulls (docs/superpowers/specs/2026-07-09-registries-design.md
-// §2; master admin API POST/DELETE /v1/registries). This is a full snapshot,
+// §2; master admin API POST/PATCH/DELETE /v1/registries). This is a full snapshot,
 // not a diff: every delivery replaces the agent's in-memory credential set
 // entirely. Master sends it to a newly-attached agent BEFORE replaying any
 // pending commands (so a replayed StartServer/PrePull for a private image

@@ -516,7 +516,7 @@ func TestAttachRegistriesSnapshotDBErrorFallsBackToNoPreface(t *testing.T) {
 // rebuilds the snapshot from the store once and Sends a fresh copy (its own
 // cmd_id per node) to every currently connected node. This is what the
 // httpapi onRegistriesChanged hook (wired in main.go) calls after every
-// successful POST/DELETE /v1/registries.
+// successful POST/PATCH/DELETE /v1/registries.
 func TestBroadcastRegistriesReachesAllConnectedNodes(t *testing.T) {
 	st := testdb.New(t)
 	f := testdb.Seed(t, st, "eu", 10)

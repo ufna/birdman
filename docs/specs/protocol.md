@@ -94,12 +94,13 @@ message Undrain { string cmd_id=1; }
 // вставляется первым в очередь — иначе реплеенный StartServer/PrePull
 // приватного образа обогнал бы креды и словил бы анонимный pull), и
 // broadcast'ом всем подключённым агентам при изменении реестров (`master.md`
-// §6, POST/DELETE `/v1/registries`). Коалесинг в Hub: постановка нового
-// SetRegistries в очередь ноды удаляет из pending старый неподтверждённый
-// SetRegistries — максимум одно висящее сообщение у когда-либо-не-ack'ающей
-// стороны. Агент держит набор ТОЛЬКО в памяти (не пишет на диск —
-// `agent.md` §10); токен никогда не логируется, не попадает в события/GET
-// (`master.md` §6).
+// §6, POST/PATCH/DELETE `/v1/registries` — PATCH-правка реестра, включая
+// ротацию токена, рассылает снапшот так же, как заведение и удаление).
+// Коалесинг в Hub: постановка нового SetRegistries в очередь ноды удаляет из
+// pending старый неподтверждённый SetRegistries — максимум одно висящее
+// сообщение у когда-либо-не-ack'ающей стороны. Агент держит набор ТОЛЬКО в
+// памяти (не пишет на диск — `agent.md` §10); токен никогда не логируется,
+// не попадает в события/GET (`master.md` §6).
 message SetRegistries { string cmd_id=1; repeated RegistryCred registries=2; } // снапшот (replace, не diff)
 message RegistryCred  { string host=1; string username=2; string token=3; } // host нормализован (lowercase, без схемы/пути); token никогда не логируется
 
