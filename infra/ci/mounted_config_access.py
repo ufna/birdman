@@ -40,6 +40,16 @@ bind-маунты «хостовый путь → сервис → образ»,
 ТИХИЙ И ЗЕЛЁНЫЙ — тот самый класс «выглядит покрытым», ради которого сторож и
 писался.
 
+Формы РАЗДЕЛЕНЫ по тому, как их классифицирует сам compose, и это тоже с
+кровью: вторая редакция сторожа применяла «имя без слэша = именованный том» и
+к длинной форме, где source сказан рядом с `type: bind`, — и запись `type:
+bind` + `source: pg-tuning.conf` снова уезжала в «bind-маунтов нет» молча и
+зелёно. Compose такую запись ПРИНИМАЕТ и разворачивает в настоящий bind
+<каталог-проекта>/pg-tuning.conf. Теперь по имени классифицируется только
+короткая запись (там так делает и compose), а в длинной решает type — который
+docker и сам требует («type is required»). Проверять формы руками: раздел «формы
+записи тома» в infra/ci/tests/run.sh.
+
 Таски роли обходятся ОТ tasks/main.yml по include_tasks/import_tasks — с
 раскрытием loop и loop_control.loop_var, потому что часть путей роль кладёт
 внутри пер-инстансного include (`{{ bmi.log_dir }}/servers` у агента), а не
@@ -88,13 +98,15 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
-from typing import NamedTuple
+from typing import NamedTuple, NoReturn
 
 import yaml
 
 VAR = re.compile(r"\{\{\s*([a-zA-Z_]\w*(?:\.\w+)*)\s*\}\}")
 # Имя ИМЕНОВАННОГО тома: по compose-спеке в нём не бывает слэша, поэтому любая
 # хостовая сторона со слэшем — путь, а не имя тома (в т.ч. относительный).
+# Применимо ТОЛЬКО к короткой записи: там источник классифицирует по имени сам
+# compose. В длинной форме вид имени не значит ничего — там решает type.
 NAMED_VOLUME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*")
 # Длинные формы, у которых хостовой стороны нет вовсе: проверять нечего.
 HOSTLESS_TYPES = frozenset({"volume", "tmpfs", "npipe", "cluster", "image"})
@@ -292,7 +304,7 @@ def volume_host(vol, where: str, service: str) -> str | None:
     длинным синтаксисом, проезжал мимо сторожа (tracker #1089).
     """
 
-    def unclassifiable(why: str):
+    def unclassifiable(why: str) -> NoReturn:
         raise SystemExit(
             f"{where}:{service}: запись тома {vol!r} — {why}. Сторож не берётся"
             " гадать, bind это или именованный том: молча пропущенный том и есть"
@@ -306,23 +318,41 @@ def volume_host(vol, where: str, service: str) -> str | None:
         # выдумать маунт, которого нет.
         if ":" not in vol:
             return None
+        # Классификация по ИМЕНИ уместна ровно здесь и больше нигде: в короткой
+        # записи compose сам решает по источнику — со слэшем путь, без слэша имя
+        # тома (`- conf:/etc/conf` он трактует как ссылку на именованный том и
+        # ругается «refers to undefined volume conf»).
         source = vol.split(":", 1)[0]
-    elif isinstance(vol, dict):
+        return None if NAMED_VOLUME.fullmatch(source) else source
+    if isinstance(vol, dict):
         # Длинная форма: {type, source, target, ...}. Легальна ровно так же, как
-        # короткая, и первая редакция сторожа выбрасывала её целиком.
+        # короткая, и первая редакция сторожа выбрасывала её целиком. Здесь всё
+        # решает type, а НЕ вид source: угадывать по имени то, что уже сказано
+        # словом, — это и была дыра второго круга (tracker #1089).
         vtype = vol.get("type")
-        if isinstance(vtype, str) and vtype in HOSTLESS_TYPES:
+        if not isinstance(vtype, str) or not vtype:
+            # `type` в длинной форме обязателен, docker и сам такой compose не
+            # берёт («services.db.volumes.0 type is required»), — значит, это не
+            # «форма без type», а запись, которую мы не поняли.
+            unclassifiable("длинная форма без type (docker: «type is required»)")
+        if vtype in HOSTLESS_TYPES:
             return None
-        if vtype is not None and vtype != "bind":
+        if vtype != "bind":
             unclassifiable(f"неизвестный type: {vtype!r}")
         source = vol.get("source")
         if not isinstance(source, str) or not source:
-            # type: bind (или type опущен) без строкового source — bind без
-            # хостовой стороны не бывает, значит форма не понята.
-            unclassifiable("длинная форма без строкового source")
-    else:
-        unclassifiable("не строка и не словарь")
-    return None if NAMED_VOLUME.fullmatch(source) else source
+            # type: bind без строкового source — bind без хостовой стороны не
+            # бывает, значит форма не понята.
+            unclassifiable("type: bind без строкового source")
+        # СКАЗАНО bind — значит источник хостовый, и прогонять его через имя
+        # именованного тома нельзя: `source: pg-tuning.conf` под именованный том
+        # ПОХОЖ, а разворачивает docker его в настоящий bind
+        # <каталог-проекта>/pg-tuning.conf. Именно так конфиг, смонтированный
+        # длинной формой с ОТНОСИТЕЛЬНЫМ source, уезжал в «bind-маунтов нет» —
+        # то же тихое зелёное, ради которого сторож и писался. Относительность
+        # ловит ниже общая громкая ветка, здесь её решать нечем.
+        return source
+    unclassifiable("не строка и не словарь")
 
 
 def compose_mounts(compose: Path) -> tuple[list[Mount], int]:

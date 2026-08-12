@@ -5,11 +5,17 @@
 #
 #   ./infra/ci/tests/run.sh
 #
-# TWO gates live here, both about invariants that belong to no single role:
+# THREE gates live here, all about invariants that belong to no single role:
 #   1. the Needs-Ansible trailer (tracker #1062) — cases 1..15 below;
-#   2. coverage of the mount watchdog (tracker #1089) — the tail of this file:
-#      every compose template of every role must be checked by
-#      infra/ci/mounted_config_access.py from that role's own test suite.
+#   2. coverage of the mount watchdog (tracker #1089): every compose template of
+#      every role must be checked by infra/ci/mounted_config_access.py from that
+#      role's own test suite;
+#   3. the volume FORMS that watchdog understands (tracker #1089) — the tail of
+#      this file. Its parser dropped a legal form silently twice in a row (the
+#      long syntax as a whole, then `type: bind` with a relative `source:`), and
+#      both times the form was pinned by hand at review time and by nothing
+#      afterwards. Hence a standing table: every form is either a mount or a
+#      LOUD refusal, never a quiet skip.
 #
 # Why a gate needs tests of its own: a check that silently passes everything is
 # worse than no check, because the case then LOOKS covered — the same failure
@@ -22,7 +28,14 @@ checker="$(dirname "$here")/needs-ansible-check.py"
 root="$(cd "$here/../../.." && pwd)"
 
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+# Код возврата сохраняется ЯВНО: под bash 3.2 (/bin/bash на macOS) EXIT-trap,
+# который сам ничем не завершается, отдаёт наружу код своей последней команды —
+# успешного `rm`. Прогон, УПАВШИЙ ПОСРЕДИНЕ (например, на `set -u`), выходил из-за
+# этого с нулём: суммарная строка «прошло/упало» до конца не доезжала, а вызвавший
+# видел зелёное. Ровно то «выглядит покрытым», против чего написаны все три гейта
+# ниже, — и обиднее всего в самом их раннере. Честный красный финал (`[ fail -eq 0 ]`)
+# бага не касался, поэтому не проявлялось.
+trap 'st=$?; rm -rf "$work"; exit "$st"' EXIT
 
 fail=0
 pass=0
@@ -276,6 +289,246 @@ else
 		pass=$((pass + 1))
 	done
 fi
+
+# ─── ГЕЙТ 3: формы записи тома, которые сторож обязан понимать (#1089) ───────
+# Гейт 2 следит, что сторожа ЗОВУТ. Этот — что позванный сторож видит маунт.
+# Дважды подряд он терял легальную форму МОЛЧА И ЗЕЛЁНО: сначала длинную запись
+# целиком, потом `type: bind` с относительным `source:` (compose такую запись
+# принимает и разворачивает в bind <каталог-проекта>/pg-tuning.conf, а сторож
+# классифицировал источник по имени и записывал его в именованные тома). Оба
+# раза форму перебирали руками на ревью — то есть список форм был закрыт ровно
+# настолько, насколько его кто-то вспомнил. Здесь он записан.
+#
+# Правило таблицы: у КАЖДОЙ формы исход ровно один из двух — она либо становится
+# маунтом, либо роняет прогон с внятной строкой. Третьего («пропущена как
+# не-bind») удостоены только формы, у которых хостовой стороны нет ПО СПЕКЕ, и
+# они названы поимённо. Docker тут не нужен: uid образа спрашивают только у
+# немирочитаемых путей, а BIRDMAN_SKIP_IMAGE_UID_PROBE=1 закрывает и этот случай.
+echo
+echo "── формы записи тома: маунт или громкий отказ, но не тихий пропуск"
+vol_role="$work/volforms/role"
+mkdir -p "$vol_role/tasks" "$vol_role/defaults"
+cat >"$vol_role/tasks/main.yml" <<-'YML'
+	---
+	- name: каталог конфигов
+	  ansible.builtin.file:
+	    path: /srv/fixture
+	    state: directory
+	    owner: root
+	    mode: "0755"
+	- name: конфиг, который монтируют
+	  ansible.builtin.template:
+	    src: pg.conf.j2
+	    dest: /srv/fixture/pg.conf
+	    owner: root
+	    mode: "0644"
+	- name: конфиг, закрытый ото всех, кроме root
+	  ansible.builtin.template:
+	    src: secret.conf.j2
+	    dest: /srv/fixture/secret.conf
+	    owner: root
+	    mode: "0600"
+YML
+: >"$vol_role/defaults/main.yml"
+
+# vol_case <имя> <ожидаемый код> <текст, который обязан быть в выводе> [флаг]
+# Тело compose приходит с stdin (heredoc у вызова).
+vol_case() {
+	local name="$1" want="$2" expect="$3" flag="${4:-}"
+	local file="$work/volforms/$(echo "$name" | tr -c 'a-zA-Z0-9' '_').yml"
+	cat >"$file"
+	local out rc=0
+	out="$(BIRDMAN_SKIP_IMAGE_UID_PROBE=1 "$root/infra/ci/mounted-config-access.sh" \
+		--role "$vol_role" ${flag:+"$flag"} "$file" 2>&1)" || rc=$?
+	if [ "$rc" != "$want" ] || ! printf '%s' "$out" | grep -qF "$expect"; then
+		# ${expect} в скобках не для красоты: bash 3.2 (/bin/bash macOS) съедает
+		# в имя переменной первый байт следующей за ней «»» и падает с
+		# «expect?: unbound variable» вместо отчёта о непройденном кейсе.
+		echo "FAIL форма: $name — код $rc (ожидался $want), искали «${expect}»"
+		printf '%s\n' "$out" | sed 's/^/      /'
+		fail=$((fail + 1))
+		return
+	fi
+	echo "ok   форма: $name"
+	pass=$((pass + 1))
+}
+
+# — формы, которые ОБЯЗАНЫ стать маунтом —
+vol_case "короткая, абсолютный путь" 0 "проверено маунтов: 1" <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - /srv/fixture/pg.conf:/etc/pg.conf:ro
+YML
+vol_case "длинная, абсолютный путь" 0 "проверено маунтов: 1" <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - type: bind
+	        source: /srv/fixture/pg.conf
+	        target: /etc/pg.conf
+	        read_only: true
+YML
+vol_case "смешанный compose: именованный том не съедает bind" 0 "проверено маунтов: 2" <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - pgdata:/var/lib/postgresql/data
+	      - /srv/fixture/pg.conf:/etc/pg.conf:ro
+	  web:
+	    image: nginx:1.27
+	    volumes:
+	      - type: bind
+	        source: /srv/fixture/pg.conf
+	        target: /etc/nginx/pg.conf
+	volumes:
+	  pgdata: {}
+YML
+# Приёмка не должна быть пустой: маунт на путь, которого роль не кладёт, —
+# главный смысл сторожа, и он обязан быть красным.
+vol_case "маунт на путь, который роль не кладёт" 1 "НИ ОДНА таска роли" <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - /srv/чужое/pg.conf:/etc/pg.conf:ro
+YML
+vol_case "0600 root в контейнер не от root" 1 "не годится контейнеру" <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - /srv/fixture/secret.conf:/etc/pg.conf:ro
+YML
+
+# — ОТНОСИТЕЛЬНЫЙ источник: разбирается, но отвергается ГРОМКО (честная граница).
+#   Первая строка — дефект второго круга: `type: bind` + source без слэша давал
+#   RC=0 и «bind-маунтов нет вовсе».
+vol_case "длинная, source без слэша (дефект #1089)" 1 "ОТНОСИТЕЛЬНЫЙ хостовый путь" --allow-no-mounts <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - type: bind
+	        source: pg-tuning.conf
+	        target: /etc/postgresql/pg-tuning.conf
+YML
+vol_case "длинная, source ./x" 1 "ОТНОСИТЕЛЬНЫЙ хостовый путь" <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - type: bind
+	        source: ./pg.conf
+	        target: /etc/pg.conf
+YML
+vol_case "короткая, ./x" 1 "ОТНОСИТЕЛЬНЫЙ хостовый путь" <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - ./pg.conf:/etc/pg.conf:ro
+YML
+vol_case "короткая, ../x" 1 "ОТНОСИТЕЛЬНЫЙ хостовый путь" <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - ../pg.conf:/etc/pg.conf:ro
+YML
+vol_case "короткая, ~/x" 1 "ОТНОСИТЕЛЬНЫЙ хостовый путь" <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - ~/pg.conf:/etc/pg.conf:ro
+YML
+
+# — формы БЕЗ хостовой стороны по спеке: сознательный пропуск, и он ПОСЧИТАН —
+vol_case "именованный том (короткая)" 0 "без хостовой стороны: 1" --allow-no-mounts <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - pgdata:/var/lib/postgresql/data
+	volumes:
+	  pgdata: {}
+YML
+vol_case "type: volume" 0 "без хостовой стороны: 1" --allow-no-mounts <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - type: volume
+	        source: pgdata
+	        target: /var/lib/postgresql/data
+	volumes:
+	  pgdata: {}
+YML
+vol_case "type: tmpfs" 0 "без хостовой стороны: 1" --allow-no-mounts <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - type: tmpfs
+	        target: /run
+YML
+vol_case "анонимный том (строка без двоеточия)" 0 "без хостовой стороны: 1" --allow-no-mounts <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - /var/lib/postgresql/data
+YML
+
+# — формы, которые понять НЕЛЬЗЯ: прогон падает, а не «маунтов нет» —
+vol_case "длинная без type" 1 "type is required" --allow-no-mounts <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - source: /srv/fixture/pg.conf
+	        target: /etc/pg.conf
+YML
+vol_case "type: bind без source" 1 "не берётся гадать" --allow-no-mounts <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - type: bind
+	        target: /etc/pg.conf
+YML
+vol_case "source не строка" 1 "не берётся гадать" --allow-no-mounts <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - type: bind
+	        source: 1234
+	        target: /etc/pg.conf
+YML
+vol_case "чужой type" 1 "неизвестный type" --allow-no-mounts <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - type: выдумка
+	        source: /srv/fixture/pg.conf
+	        target: /etc/pg.conf
+YML
+vol_case "запись-список" 1 "не строка и не словарь" --allow-no-mounts <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - [/srv/fixture/pg.conf, /etc/pg.conf]
+YML
+vol_case "compose без сервисов" 1 "рендер сломался" --allow-no-mounts <<-'YML'
+	services: {}
+YML
 
 echo
 echo "прошло: $pass, упало: $fail"
