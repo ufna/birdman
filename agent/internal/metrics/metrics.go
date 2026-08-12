@@ -21,6 +21,17 @@ type ServerSample struct {
 	Players int32
 	TickMS  float32
 
+	// Project/Env is the owner pair of this dedik (tracker #1008). It reaches
+	// the agent in StartServer.env (BIRDMAN_PROJECT/BIRDMAN_ENV) and survives
+	// an agent restart in container labels. Both halves set — the per-server
+	// series carry them as labels and a (project, env)-bound API key sees its
+	// own dediks' charts through the master metrics proxy (master.md §6).
+	// Either half empty — the series are emitted exactly as before, with
+	// server_id alone; that dedik was started before the pair was stamped and
+	// stays invisible to a bound key until it is recycled.
+	Project string
+	Env     string
+
 	// cgroups v2 usage; HasUsage is false when the cgroup could not be read
 	// (dead container, non-Linux dev host).
 	HasUsage   bool
@@ -96,23 +107,23 @@ func Render(version string, s Sample) string {
 
 	gauge("birdman_server_players", "Live player count reported by liba, per server.")
 	for _, sv := range servers {
-		fmt.Fprintf(&b, "birdman_server_players{server_id=%q} %d\n", escape(sv.ID), sv.Players)
+		fmt.Fprintf(&b, "birdman_server_players%s %d\n", serverLabels(sv), sv.Players)
 	}
 	gauge("birdman_server_tick_ms", "Last tick duration reported by liba, per server (ms).")
 	for _, sv := range servers {
-		fmt.Fprintf(&b, "birdman_server_tick_ms{server_id=%q} %s\n", escape(sv.ID), formatFloat(float64(sv.TickMS)))
+		fmt.Fprintf(&b, "birdman_server_tick_ms%s %s\n", serverLabels(sv), formatFloat(float64(sv.TickMS)))
 	}
 
 	counter("birdman_container_cpu_seconds_total", "Cumulative CPU time of the server container (cgroups v2).")
 	for _, sv := range servers {
 		if sv.HasUsage {
-			fmt.Fprintf(&b, "birdman_container_cpu_seconds_total{server_id=%q} %s\n", escape(sv.ID), formatFloat(sv.CPUSeconds))
+			fmt.Fprintf(&b, "birdman_container_cpu_seconds_total%s %s\n", serverLabels(sv), formatFloat(sv.CPUSeconds))
 		}
 	}
 	gauge("birdman_container_memory_bytes", "Current memory usage of the server container (cgroups v2).")
 	for _, sv := range servers {
 		if sv.HasUsage {
-			fmt.Fprintf(&b, "birdman_container_memory_bytes{server_id=%q} %d\n", escape(sv.ID), sv.MemBytes)
+			fmt.Fprintf(&b, "birdman_container_memory_bytes%s %d\n", serverLabels(sv), sv.MemBytes)
 		}
 	}
 
@@ -165,6 +176,25 @@ func Serve(ctx context.Context, addr, version string, sample func() Sample, logf
 		}
 		return err
 	}
+}
+
+// serverLabels renders the label set shared by every per-server series
+// (tracker #1008). The owner pair is emitted ONLY as a pair, and that is
+// load-bearing rather than tidy: the TickDegraded rule joins these series with
+// birdman_server_info through `on (server_id) group_left (project)`, so a
+// series carrying `project` WITHOUT `env` collapses onto the same output label
+// set as an unlabelled one and the whole rule dies with `duplicate output
+// timeseries` (measured against VictoriaMetrics v1.102.1, not read off the
+// docs). With both halves the output sets differ by `env` and the rule holds.
+//
+// Label ORDER inside the braces is irrelevant to Prometheus (it parses into a
+// set), but is kept deterministic for the golden test and for a human reading
+// a scrape by eye.
+func serverLabels(sv ServerSample) string {
+	if sv.Project == "" || sv.Env == "" {
+		return fmt.Sprintf("{server_id=%q}", escape(sv.ID))
+	}
+	return fmt.Sprintf("{server_id=%q,project=%q,env=%q}", escape(sv.ID), escape(sv.Project), escape(sv.Env))
 }
 
 // escape renders a label value for %q-quoted output; Go's %q already escapes

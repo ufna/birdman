@@ -57,6 +57,16 @@ const (
 	LabelState = "birdman/state"
 	// LabelMatchID is set when the server is allocated to a match.
 	LabelMatchID = "birdman/match-id"
+	// LabelProject/LabelEnv record the (project, env) pair the dedik was
+	// started for — the pair master puts into StartServer.env
+	// (BIRDMAN_PROJECT/BIRDMAN_ENV, tracker #994). Written at container
+	// CREATE and never rewritten, so an agent restart gets the pair back
+	// through the same Restore that already recovers id/port/image/state
+	// (tracker #1008): the per-server metric series carry it as Prometheus
+	// labels, and master narrows a bound key's query by it (ops.md §1).
+	// Only ever set as a PAIR (both halves valid) — see agent.md §9.
+	LabelProject = "birdman/project"
+	LabelEnv     = "birdman/env"
 
 	// serverOOMScoreAdj > agent's 0: under memory pressure the kernel kills
 	// dediks before the agent (agent.md §3).
@@ -172,6 +182,12 @@ type ServerSpec struct {
 	MemMB      int
 	Env        map[string]string // extra env on top of the BIRDMAN_* contract
 	Args       []string          // override image entrypoint (integration tests); nil = image default
+	// ScopeProject/ScopeEnv is the owner pair recorded in container labels
+	// (LabelProject/LabelEnv, tracker #1008). The caller validates it; empty
+	// means "no pair" and no labels are written — the container then looks
+	// exactly like one created before this change.
+	ScopeProject string
+	ScopeEnv     string
 	// LogPath, when set, makes the containerd shim write stdout/stderr to
 	// this file directly (cio.LogFile) — the log stream survives agent
 	// restarts (agent.md §5, daemon mode). Otherwise the caller-provided
@@ -185,6 +201,44 @@ type Server struct {
 	container containerd.Container
 	task      containerd.Task
 	exitCh    <-chan containerd.ExitStatus
+}
+
+// containerLabels is the label set stamped on a server container at CREATE —
+// the only thing an agent that restarted has left to rebuild its server map
+// from (Restore). Split out of StartServer so the round-trip with
+// scopeFromLabels is unit-testable without a containerd: the pair reaching
+// container labels and coming back is the whole mechanism behind tracker
+// #1008, and it would otherwise be covered only by -tags integration, which CI
+// does not run.
+func containerLabels(sp ServerSpec) map[string]string {
+	labels := map[string]string{
+		LabelServerID: sp.ID,
+		LabelPort:     strconv.Itoa(sp.Port),
+		LabelImage:    sp.ImageRef,
+		LabelState:    "starting",
+	}
+	// The pair is written ONLY as a pair (tracker #1008): a half — project
+	// without env — makes the per-server metric series of this dedik collapse
+	// onto the same output label set as an unlabelled one under the vmalert
+	// join, and the TickDegraded rule then dies whole with `duplicate output
+	// timeseries` (measured on VictoriaMetrics v1.102.1, not read off the
+	// docs). Written at CREATE and never rewritten, so a dedik started before
+	// this build stays unlabelled for its whole life instead of flipping
+	// between two series identities.
+	if sp.ScopeProject != "" && sp.ScopeEnv != "" {
+		labels[LabelProject] = sp.ScopeProject
+		labels[LabelEnv] = sp.ScopeEnv
+	}
+	return labels
+}
+
+// scopeFromLabels reads the owner pair back off a container's labels. Half a
+// pair is no pair — the same all-or-nothing gate as on the writing side.
+func scopeFromLabels(labels map[string]string) (project, env string) {
+	if labels[LabelProject] == "" || labels[LabelEnv] == "" {
+		return "", ""
+	}
+	return labels[LabelProject], labels[LabelEnv]
 }
 
 // StartServer creates and starts a dedicated server container: host network,
@@ -227,17 +281,10 @@ func (c *Client) StartServer(ctx context.Context, sp ServerSpec, logW io.Writer)
 		specOpts = append(specOpts, oci.WithProcessArgs(sp.Args...))
 	}
 
-	labels := map[string]string{
-		LabelServerID: sp.ID,
-		LabelPort:     strconv.Itoa(sp.Port),
-		LabelImage:    sp.ImageRef,
-		LabelState:    "starting",
-	}
-
 	cont, err := c.c.NewContainer(ctx, sp.ID,
 		containerd.WithNewSnapshot(sp.ID+"-snap", sp.Image),
 		containerd.WithNewSpec(specOpts...),
-		containerd.WithContainerLabels(labels),
+		containerd.WithContainerLabels(containerLabels(sp)),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create container %s: %w", sp.ID, err)
@@ -333,6 +380,12 @@ type Restored struct {
 	MatchID  string
 	Running  bool
 	ExitCode uint32 // meaningful only when !Running and the task existed
+	// ScopeProject/ScopeEnv is the owner pair recovered from container labels
+	// (tracker #1008). Empty for a container created before the pair was
+	// stamped — that dedik's metric series stay unlabelled until it is
+	// recycled, exactly as its log lines do (#994).
+	ScopeProject string
+	ScopeEnv     string
 }
 
 // Restore lists containers labeled with a birdman server id and re-attaches
@@ -355,6 +408,7 @@ func (c *Client) Restore(ctx context.Context) ([]Restored, error) {
 			State:    labels[LabelState],
 			MatchID:  labels[LabelMatchID],
 		}
+		r.ScopeProject, r.ScopeEnv = scopeFromLabels(labels)
 		r.Port, _ = strconv.Atoi(labels[LabelPort])
 		srv := &Server{ID: r.ID, container: cont}
 

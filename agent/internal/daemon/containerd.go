@@ -38,6 +38,9 @@ func (r *ContainerdRuntime) Start(ctx context.Context, spec StartSpec) (Handle, 
 		MemMB:      spec.MemMB,
 		Env:        spec.Env,
 		LogPath:    spec.LogPath,
+
+		ScopeProject: spec.ScopeProject,
+		ScopeEnv:     spec.ScopeEnv,
 	}, nil)
 	if err != nil {
 		return nil, err
@@ -87,6 +90,9 @@ func (r *ContainerdRuntime) Restore(ctx context.Context) ([]RestoredServer, erro
 			MatchID:  c.MatchID,
 			Running:  c.Running,
 			ExitCode: c.ExitCode,
+
+			ScopeProject: c.ScopeProject,
+			ScopeEnv:     c.ScopeEnv,
 		})
 	}
 	return out, nil

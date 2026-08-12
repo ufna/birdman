@@ -10,7 +10,7 @@
 
 ## 2. Состояние и рестарт
 
-Агент — stateless поверх containerd. На старте: `containerd list` по namespace `birdman` → восстановить карту server_id→container (labels: `server_id`, `version`, `port`; уточнено в v0: плюс `state` и `match-id` — агент пишет их при переходах, чтобы после рестарта продолжить с ready/allocated, а не гонять readiness-grace заново) → доложить master в Hello. Мёртвые контейнеры (умерли, пока агент не смотрел) — Event `failed` + cleanup. Контейнеры agent-рестарт **переживают** (containerd их держит) — рестарт/апгрейд агента не трогает живые матчи.
+Агент — stateless поверх containerd. На старте: `containerd list` по namespace `birdman` → восстановить карту server_id→container (labels: `server_id`, `version`, `port`; уточнено в v0: плюс `state` и `match-id` — агент пишет их при переходах, чтобы после рестарта продолжить с ready/allocated, а не гонять readiness-grace заново; уточнено tracker #1008: плюс пара владельца `birdman/project`·`birdman/env`, чтобы пер-серверные метрики оставались размеченными и после рестарта агента, §9) → доложить master в Hello. Мёртвые контейнеры (умерли, пока агент не смотрел) — Event `failed` + cleanup. Контейнеры agent-рестарт **переживают** (containerd их держит) — рестарт/апгрейд агента не трогает живые матчи.
 
 (Уточнено в v1, mTLS.) Материал mTLS (`client.key`/`client.crt`/`ca.pem` в `tls_cert_dir`, каталог агента 0700) рестарт агента **переживает**: при действующем по сроку серте агент открывает mTLS-сессию сразу, без повторного `Enroll`. Полностью истёкший серт (нода лежала >90 дней) → mTLS-хендшейк невозможен → агент сам падает обратно в Enroll-by-token (токен на диске) и самовосстанавливается без ansible (`protocol.md` §Auth).
 
@@ -63,6 +63,9 @@ UDP-echo на порту **19999**: отвечает исходным пакет
 ## 9. Метрики
 
 `localhost:9101/metrics` (Prometheus text): `birdman_agent_up`, `birdman_agent_servers{state}`, `birdman_server_players{server_id}`, `birdman_server_tick_ms`, per-container cpu/mem (из cgroups), диск/inode, длина пула портов. Скрейпит vmagent той же тачки (см. `ops.md`).
+
+- (Уточнено, tracker #1008.) **Пер-серверные серии несут пару владельца** — `birdman_server_players`, `birdman_server_tick_ms`, `birdman_container_cpu_seconds_total`, `birdman_container_memory_bytes` эмитятся как `{server_id,project,env}`. Пара приезжает от master'а в `StartServer.env` (`BIRDMAN_PROJECT`/`BIRDMAN_ENV`, та же, что размечает путь лога, §5), валидируется алфавитом слага и чеканится в label'ы контейнера `birdman/project`·`birdman/env` — поэтому рестарт агента она переживает тем же `Restore`, что порт и состояние, а не хранением в памяти. Смысл: master сужает запрос привязанного к паре ключа по `extra_label` (`master.md` §6), и без лейблов на самой серии оператор не видит графиков **своих же** дедиков. Пара ставится **только целиком** — половина (`project` без `env`) под join'ом vmalert схлопывается на беспарную серию того же `server_id` и убивает правило TickDegraded целиком (`duplicate output timeseries`, замерено на VictoriaMetrics v1.102.1), поэтому половина значит «пары нет». Label пишется при СОЗДАНИИ контейнера и не дописывается задним числом: дедик, запущенный до апгрейда, остаётся беспарным до перекрутки (и невидим привязанному ключу, пока не истечёт ретенция VM), а не мигает между двумя идентичностями серии. Флага здесь нет намеренно, в отличие от логов: у метрик нет шиппера, чей конфиг кладёт ansible.
+- Платформенные и нодовые серии (`birdman_agent_*`, диск, пул портов) пары не имеют **по существу** — это данные всего хоста, привязанному ключу их видеть не положено.
 
 ## 10. Конфиг `/etc/birdman/agent.yaml`
 

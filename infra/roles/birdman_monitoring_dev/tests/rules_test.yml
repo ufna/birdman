@@ -181,8 +181,8 @@ tests:
               project: arena
             exp_annotations:
               summary: 'TickDegraded: проект arena, server srv-a tick=80ms'
-              description: 'game-health: server tick has been degraded for longer than the threshold (ops.md §1 TickDegraded). The project label is joined from birdman_server_info; without a match the alert stays platform-scoped.'
-              description_ru: 'game-health: тик деградировал дольше порога (ops.md §1 TickDegraded). Лейбл project доклеивается join''ом с birdman_server_info; без совпадения алерт остаётся платформенным.'
+              description: 'game-health: server tick has been degraded for longer than the threshold (ops.md §1 TickDegraded). The project label is joined from birdman_server_info and the database wins the tie; without a match the alert still fires — carrying the pair the agent stamped on the series, or platform-scoped for a dedik started before that pair existed.'
+              description_ru: 'game-health: тик деградировал дольше порога (ops.md §1 TickDegraded). Лейбл project доклеивается join''ом с birdman_server_info, и спор выигрывает БД; без совпадения алерт всё равно горит — с парой, отчеканенной агентом, а у дедика, запущенного до её появления, платформенным.'
 
   # THE NON-HIDING GUARANTEE. The info series is missing (master down, DB
   # hiccup, a dedik unknown to the database) — a plain `group_left` join would
@@ -206,8 +206,8 @@ tests:
               region: eu
             exp_annotations:
               summary: 'TickDegraded: server srv-a tick=80ms'
-              description: 'game-health: server tick has been degraded for longer than the threshold (ops.md §1 TickDegraded). The project label is joined from birdman_server_info; without a match the alert stays platform-scoped.'
-              description_ru: 'game-health: тик деградировал дольше порога (ops.md §1 TickDegraded). Лейбл project доклеивается join''ом с birdman_server_info; без совпадения алерт остаётся платформенным.'
+              description: 'game-health: server tick has been degraded for longer than the threshold (ops.md §1 TickDegraded). The project label is joined from birdman_server_info and the database wins the tie; without a match the alert still fires — carrying the pair the agent stamped on the series, or platform-scoped for a dedik started before that pair existed.'
+              description_ru: 'game-health: тик деградировал дольше порога (ops.md §1 TickDegraded). Лейбл project доклеивается join''ом с birdman_server_info, и спор выигрывает БД; без совпадения алерт всё равно горит — с парой, отчеканенной агентом, а у дедика, запущенного до её появления, платформенным.'
 
   # Scoping actually SEPARATES the projects: the degraded dedik of project "a"
   # must not be reported as project "b", and the healthy dedik of "b" must not
@@ -235,8 +235,112 @@ tests:
               project: a
             exp_annotations:
               summary: 'TickDegraded: проект a, server srv-a tick=80ms'
-              description: 'game-health: server tick has been degraded for longer than the threshold (ops.md §1 TickDegraded). The project label is joined from birdman_server_info; without a match the alert stays platform-scoped.'
-              description_ru: 'game-health: тик деградировал дольше порога (ops.md §1 TickDegraded). Лейбл project доклеивается join''ом с birdman_server_info; без совпадения алерт остаётся платформенным.'
+              description: 'game-health: server tick has been degraded for longer than the threshold (ops.md §1 TickDegraded). The project label is joined from birdman_server_info and the database wins the tie; without a match the alert still fires — carrying the pair the agent stamped on the series, or platform-scoped for a dedik started before that pair existed.'
+              description_ru: 'game-health: тик деградировал дольше порога (ops.md §1 TickDegraded). Лейбл project доклеивается join''ом с birdman_server_info, и спор выигрывает БД; без совпадения алерт всё равно горит — с парой, отчеканенной агентом, а у дедика, запущенного до её появления, платформенным.'
+
+  # --- the agent stamps the pair on the series itself (tracker #1008) ---
+
+  # Since #1008 the per-server series carry {project, env} of their own (the
+  # agent gets the pair in StartServer.env and stamps it into container
+  # labels). The join stays, and it stays the AUTHORITY: group_left overwrites
+  # the agent's project with the one from birdman_server_info, i.e. the
+  # master's database wins the tie. Measured on VictoriaMetrics v1.102.1 as
+  # well — MetricsQL, not just promtool.
+  - interval: 1m
+    name: 'pair from the agent — birdman_server_info still wins the project'
+    input_series:
+      - series: 'birdman_server_tick_ms{server_id="srv-a",node="node-1",region="eu",project="agentsays",env="prod"}'
+        values: '80+0x10'
+      - series: 'birdman_server_info{server_id="srv-a",project="dbsays",env="prod"}'
+        values: '1+0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: TickDegraded
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              server_id: srv-a
+              node: node-1
+              region: eu
+              project: dbsays
+              env: prod
+            exp_annotations:
+              summary: 'TickDegraded: проект dbsays, server srv-a tick=80ms'
+              description: 'game-health: server tick has been degraded for longer than the threshold (ops.md §1 TickDegraded). The project label is joined from birdman_server_info and the database wins the tie; without a match the alert still fires — carrying the pair the agent stamped on the series, or platform-scoped for a dedik started before that pair existed.'
+              description_ru: 'game-health: тик деградировал дольше порога (ops.md §1 TickDegraded). Лейбл project доклеивается join''ом с birdman_server_info, и спор выигрывает БД; без совпадения алерт всё равно горит — с парой, отчеканенной агентом, а у дедика, запущенного до её появления, платформенным.'
+
+  # THE SECOND BRANCH GOT HONEST. master is down / the DB hiccuped — the info
+  # series is gone and, before #1008, the alert had to be platform-scoped
+  # because there was nowhere to learn the owner from. Now the pair rides on
+  # the series itself, from a source that does not depend on the master at all,
+  # so the degradation is attributed to its real owner exactly when the master
+  # cannot answer. Remove the agent-side labels and this case goes back to a
+  # platform alert — that is the regression this pins.
+  - interval: 1m
+    name: 'master down — the pair from the agent keeps the alert project-scoped'
+    input_series:
+      - series: 'birdman_server_tick_ms{server_id="srv-a",node="node-1",region="eu",project="arena",env="prod"}'
+        values: '80+0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: TickDegraded
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              server_id: srv-a
+              node: node-1
+              region: eu
+              project: arena
+              env: prod
+            exp_annotations:
+              summary: 'TickDegraded: проект arena, server srv-a tick=80ms'
+              description: 'game-health: server tick has been degraded for longer than the threshold (ops.md §1 TickDegraded). The project label is joined from birdman_server_info and the database wins the tie; without a match the alert still fires — carrying the pair the agent stamped on the series, or platform-scoped for a dedik started before that pair existed.'
+              description_ru: 'game-health: тик деградировал дольше порога (ops.md §1 TickDegraded). Лейбл project доклеивается join''ом с birdman_server_info, и спор выигрывает БД; без совпадения алерт всё равно горит — с парой, отчеканенной агентом, а у дедика, запущенного до её появления, платформенным.'
+
+  # WHY THE PAIR IS ALL-OR-NOTHING, pinned as the case that would break.
+  # Two series of ONE dedik — the old unlabelled one and the new one — survive
+  # the join only because the pair is COMPLETE: `env` keeps their output label
+  # sets apart, so two alerts come out. Had the agent stamped HALF a pair
+  # (project without env), group_left would collapse both onto
+  # {node, project, region, server_id} and the whole rule would die with
+  # `duplicate output timeseries` — no alert for ANYONE, not just for this
+  # dedik. That failure is an engine error, so it cannot be written as a green
+  # case here; it was measured on a live VictoriaMetrics v1.102.1 and is what
+  # the all-or-nothing gate in the agent (containerLabels/scopePair) buys.
+  - interval: 1m
+    name: 'complete pair keeps two series of one dedik apart under the join'
+    input_series:
+      - series: 'birdman_server_tick_ms{server_id="srv-a",node="node-1",region="eu"}'
+        values: '80+0x10'
+      - series: 'birdman_server_tick_ms{server_id="srv-a",node="node-1",region="eu",project="agentsays",env="prod"}'
+        values: '81+0x10'
+      - series: 'birdman_server_info{server_id="srv-a",project="dbsays",env="prod"}'
+        values: '1+0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: TickDegraded
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              server_id: srv-a
+              node: node-1
+              region: eu
+              project: dbsays
+            exp_annotations:
+              summary: 'TickDegraded: проект dbsays, server srv-a tick=80ms'
+              description: 'game-health: server tick has been degraded for longer than the threshold (ops.md §1 TickDegraded). The project label is joined from birdman_server_info and the database wins the tie; without a match the alert still fires — carrying the pair the agent stamped on the series, or platform-scoped for a dedik started before that pair existed.'
+              description_ru: 'game-health: тик деградировал дольше порога (ops.md §1 TickDegraded). Лейбл project доклеивается join''ом с birdman_server_info, и спор выигрывает БД; без совпадения алерт всё равно горит — с парой, отчеканенной агентом, а у дедика, запущенного до её появления, платформенным.'
+          - exp_labels:
+              severity: warning
+              server_id: srv-a
+              node: node-1
+              region: eu
+              project: dbsays
+              env: prod
+            exp_annotations:
+              summary: 'TickDegraded: проект dbsays, server srv-a tick=81ms'
+              description: 'game-health: server tick has been degraded for longer than the threshold (ops.md §1 TickDegraded). The project label is joined from birdman_server_info and the database wins the tie; without a match the alert still fires — carrying the pair the agent stamped on the series, or platform-scoped for a dedik started before that pair existed.'
+              description_ru: 'game-health: тик деградировал дольше порога (ops.md §1 TickDegraded). Лейбл project доклеивается join''ом с birdman_server_info, и спор выигрывает БД; без совпадения алерт всё равно горит — с парой, отчеканенной агентом, а у дедика, запущенного до её появления, платформенным.'
 
   # Two info series for ONE server_id (two masters, or one master scraped by two
   # jobs) is a many-to-one duplicate: without `max by (server_id, project)` the
@@ -264,8 +368,8 @@ tests:
               project: arena
             exp_annotations:
               summary: 'TickDegraded: проект arena, server srv-a tick=80ms'
-              description: 'game-health: server tick has been degraded for longer than the threshold (ops.md §1 TickDegraded). The project label is joined from birdman_server_info; without a match the alert stays platform-scoped.'
-              description_ru: 'game-health: тик деградировал дольше порога (ops.md §1 TickDegraded). Лейбл project доклеивается join''ом с birdman_server_info; без совпадения алерт остаётся платформенным.'
+              description: 'game-health: server tick has been degraded for longer than the threshold (ops.md §1 TickDegraded). The project label is joined from birdman_server_info and the database wins the tie; without a match the alert still fires — carrying the pair the agent stamped on the series, or platform-scoped for a dedik started before that pair existed.'
+              description_ru: 'game-health: тик деградировал дольше порога (ops.md §1 TickDegraded). Лейбл project доклеивается join''ом с birdman_server_info, и спор выигрывает БД; без совпадения алерт всё равно горит — с парой, отчеканенной агентом, а у дедика, запущенного до её появления, платформенным.'
 
   # A healthy tick with a matching info series must stay silent — the join must
   # not turn `> threshold` into "anything that has an owner".

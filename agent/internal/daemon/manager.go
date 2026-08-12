@@ -150,6 +150,13 @@ type server struct {
 	// частота строк игрового лога, и резолвить каталог globом на каждый кадр
 	// было бы платой на горячем пути.
 	logPath string
+	// project/env — пара владельца дедика (tracker #1008). Проставляется при
+	// старте из StartServer.env и ВОССТАНАВЛИВАЕТСЯ из label'ов контейнера
+	// после рестарта агента, поэтому пер-серверные серии /metrics несут её и у
+	// пережившего рестарт дедика. Пусты у дедика, запущенного до появления
+	// label'ов, — его серии остаются беспарными до перекрутки.
+	project string
+	env     string
 }
 
 // logFilePath — путь лога дедика, разрешаемый один раз. Для запущенного этим
@@ -261,6 +268,12 @@ func (m *Manager) Restore(ctx context.Context) error {
 		srv.matchID = r.MatchID
 		srv.port = r.Port
 		srv.handle = r.Handle
+		// Пара владельца переживает рестарт агента ТЕМ ЖЕ путём, что порт,
+		// образ и состояние, — она лежит в label'ах контейнера (tracker
+		// #1008). Алфавит проверяется и здесь: label мог быть отредактирован
+		// на ноде руками, а отсюда значение уходит прямо в лейбл серии
+		// Prometheus. Не прошло — дедик просто беспарный, как до апгрейда.
+		srv.project, srv.env, _ = scopePair(r.ScopeProject, r.ScopeEnv)
 		if err := m.pool.AcquireSpecific(r.Port); err != nil {
 			m.logf("[daemon] restore %s: port %d not tracked in pool: %v", r.ID, r.Port, err)
 		}
@@ -392,6 +405,7 @@ func (m *Manager) MetricsSample() metrics.Sample {
 		servers = append(servers, live{
 			sample: metrics.ServerSample{
 				ID: id, State: string(st), Players: srv.players, TickMS: srv.tickMS,
+				Project: srv.project, Env: srv.env,
 			},
 			handle: srv.handle,
 		})
@@ -958,9 +972,14 @@ func (m *Manager) launch(srv *server, cmd *agentlinkv1.StartServer) {
 		}
 	}
 
+	// Пара владельца разбирается ОДИН раз на дедика и расходится в два
+	// потребителя: label'ы контейнера (метрики, #1008) и путь файла лога
+	// (логи, #994). Второй дополнительно гейтится log_scope_dirs.
+	project, envName := m.serverScope(srv.id, cmd.GetEnv())
 	logPath := m.serverLogPath(srv.id, cmd.GetEnv())
 	srv.mu.Lock()
 	srv.logPath = logPath
+	srv.project, srv.env = project, envName
 	srv.mu.Unlock()
 
 	handle, err := m.rt.Start(m.ctx, StartSpec{
@@ -974,6 +993,9 @@ func (m *Manager) launch(srv *server, cmd *agentlinkv1.StartServer) {
 		MemMB:      mem,
 		Env:        cmd.GetEnv(),
 		Lookup:     m.pullLookup(srv.imageRef),
+
+		ScopeProject: project,
+		ScopeEnv:     envName,
 	})
 	if err != nil {
 		sock.Close()
@@ -1168,6 +1190,38 @@ func (m *Manager) storeState(srv *server) {
 // здесь ещё раз: агент не обязан доверять тому, что в паре нет `..` или `/`.
 var scopeLabelRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 
+// scopePair пропускает пару (project, env) ТОЛЬКО целиком: обе половины должны
+// пройти алфавит слага, иначе возвращается ("", "", false) и дедик остаётся
+// беспарным. Всё-или-ничего здесь несущее, а не аккуратность (tracker #1008):
+// половина пары на пер-серверной серии убивает правило TickDegraded целиком
+// (`duplicate output timeseries` — замерено на живом VictoriaMetrics v1.102.1),
+// потому что join `group_left (project)` схлопывает беспарную и полупарную
+// серии одного server_id в один и тот же набор лейблов.
+func scopePair(project, env string) (string, string, bool) {
+	if !scopeLabelRe.MatchString(project) || !scopeLabelRe.MatchString(env) {
+		return "", "", false
+	}
+	return project, env, true
+}
+
+// serverScope достаёт пару владельца из env-мапы StartServer. Это ЕДИНСТВЕННОЕ
+// место, где пара входит в агента: дальше она едет в label'ах контейнера
+// (метрики, tracker #1008) и в пути файла лога (логи, tracker #994). Флага здесь
+// нет намеренно — `log_scope_dirs` гейтит только раскладку логов, у которой есть
+// внешняя зависимость (glob в конфиге vector'а кладёт ansible); у метрик такой
+// зависимости нет, лейблы экспортёра нодовый vmagent прокидывает как есть.
+func (m *Manager) serverScope(id string, env map[string]string) (string, string) {
+	project, envName, ok := scopePair(env["BIRDMAN_PROJECT"], env["BIRDMAN_ENV"])
+	if !ok {
+		if env["BIRDMAN_PROJECT"] != "" || env["BIRDMAN_ENV"] != "" {
+			m.logf("[daemon] server %s: scope (%q, %q) is not a valid label pair — dedik stays unlabelled",
+				id, env["BIRDMAN_PROJECT"], env["BIRDMAN_ENV"])
+		}
+		return "", ""
+	}
+	return project, envName
+}
+
 // serverLogPath — куда шим пишет вывод дедика. С tracker #994 путь несёт пару
 // (project, env), которую master кладёт в env-мапу StartServer
 // (BIRDMAN_PROJECT/BIRDMAN_ENV): vector парсит пару из ПУТИ и лейблует ей стрим
@@ -1187,12 +1241,11 @@ func (m *Manager) serverLogPath(id string, env map[string]string) string {
 		// цена — config.LogScopeDirs.
 		return filepath.Join(m.logDir, id+".log")
 	}
-	project, envName := env["BIRDMAN_PROJECT"], env["BIRDMAN_ENV"]
-	if !scopeLabelRe.MatchString(project) || !scopeLabelRe.MatchString(envName) {
-		if project != "" || envName != "" {
-			m.logf("[daemon] server %s: scope (%q, %q) is not a valid label pair — log stays unlabelled",
-				id, project, envName)
-		}
+	// Тот же гейт всё-или-ничего, что у label'ов контейнера (scopePair). Про
+	// негодную пару предупреждает serverScope — она зовётся из launch раньше и
+	// одна на дедика, чтобы одна и та же пара не логировалась дважды.
+	project, envName, ok := scopePair(env["BIRDMAN_PROJECT"], env["BIRDMAN_ENV"])
+	if !ok {
 		return filepath.Join(m.logDir, id+".log")
 	}
 	dir := filepath.Join(m.logDir, project, envName)

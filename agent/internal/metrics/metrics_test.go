@@ -57,6 +57,73 @@ func TestRender(t *testing.T) {
 	}
 }
 
+// TestRenderServerScopeLabels (tracker #1008): все ЧЕТЫРЕ пер-серверные серии
+// несут пару (project, env) владельца дедика — без неё привязанный к паре ключ
+// получает от `GET /v1/metrics/query` пустые графики, потому что master сужает
+// его запрос по `extra_label=project=…&extra_label=env=…` (master.md §6).
+func TestRenderServerScopeLabels(t *testing.T) {
+	s := Sample{
+		States: map[string]int{"ready": 2},
+		Servers: []ServerSample{
+			{ID: "srv-scoped", State: "ready", Players: 4, TickMS: 16,
+				HasUsage: true, CPUSeconds: 2.5, MemBytes: 2 << 20,
+				Project: "game", Env: "prod"},
+			// Дедик, запущенный до появления label'ов: пары нет, серия
+			// обязана остаться БАЙТ-В-БАЙТ прежней. Иначе беспарная история
+			// поехала бы в новую идентичность серии на ровном месте.
+			{ID: "srv-legacy", State: "ready", Players: 1, TickMS: 17,
+				HasUsage: true, CPUSeconds: 1, MemBytes: 1 << 20},
+		},
+	}
+	out := Render("test", s)
+
+	for _, want := range []string{
+		`birdman_server_players{server_id="srv-scoped",project="game",env="prod"} 4` + "\n",
+		`birdman_server_tick_ms{server_id="srv-scoped",project="game",env="prod"} 16` + "\n",
+		`birdman_container_cpu_seconds_total{server_id="srv-scoped",project="game",env="prod"} 2.5` + "\n",
+		`birdman_container_memory_bytes{server_id="srv-scoped",project="game",env="prod"} 2097152` + "\n",
+
+		`birdman_server_players{server_id="srv-legacy"} 1` + "\n",
+		`birdman_server_tick_ms{server_id="srv-legacy"} 17` + "\n",
+		`birdman_container_cpu_seconds_total{server_id="srv-legacy"} 1` + "\n",
+		`birdman_container_memory_bytes{server_id="srv-legacy"} 1048576` + "\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in output:\n%s", want, out)
+		}
+	}
+
+	// Пара ставится ТОЛЬКО парой. Половина (`project` без `env`) под join'ом
+	// TickDegraded даёт тот же набор выходных лейблов, что и беспарная серия
+	// того же server_id, и правило умирает целиком с `duplicate output
+	// timeseries` — замерено на живом VictoriaMetrics v1.102.1. Поэтому
+	// половина обязана значить «пары нет», а не «половина лейблов».
+	for _, half := range []ServerSample{
+		{ID: "srv-half", State: "ready", HasUsage: true, Project: "game"},
+		{ID: "srv-half", State: "ready", HasUsage: true, Env: "prod"},
+	} {
+		got := Render("test", Sample{States: map[string]int{}, Servers: []ServerSample{half}})
+		if !strings.Contains(got, `birdman_server_players{server_id="srv-half"} 0`+"\n") {
+			t.Fatalf("половина пары (%q, %q) не свелась к беспарной серии:\n%s", half.Project, half.Env, got)
+		}
+		for _, bad := range []string{`project=`, `env=`} {
+			if strings.Contains(got, `{server_id="srv-half",`+bad) {
+				t.Fatalf("половина пары стала лейблом (%q):\n%s", bad, got)
+			}
+		}
+	}
+
+	// Платформенные и нодовые серии пары не имеют ПО СУЩЕСТВУ — это данные
+	// всего хоста, и привязанному ключу их видеть не положено (карточка #1008,
+	// п.4). Появись пара на birdman_agent_disk_*, деления DiskHigh
+	// (`used / total`, one-to-one без on()) сломались бы молча.
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "birdman_agent_") && strings.Contains(line, "project=") {
+			t.Fatalf("нодовая серия получила пару: %q", line)
+		}
+	}
+}
+
 // TestRenderCertExpiry: the client-cert expiry gauge (mTLS agentlink v1,
 // design §4) is emitted only when a cert is loaded (CertExpiryUnix > 0) and is
 // absent otherwise (token/insecure sessions have no client cert).

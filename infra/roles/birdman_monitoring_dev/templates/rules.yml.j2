@@ -228,6 +228,26 @@ groups:
       #      Деградация РАСШИРЯЕТ алерт, а не роняет его. Ровно этот случай
       #      закреплён кейсом в tests/rules_test.yml — молчаливо не сматчиться
       #      join уже не может.
+      #
+      # ПАРА ОТ АГЕНТА (tracker #1008) — правило НЕ меняется, но обе ветки
+      # ведут себя иначе, и это замерено на живом VictoriaMetrics v1.102.1
+      # (promtool — PromQL, а движок формулирует ошибку сам):
+      #   * левая часть теперь сама несёт project/env (агент чеканит пару в
+      #     label'ы контейнера, agent.md §9) — group_left не падает, а
+      #     ПЕРЕЗАПИСЫВАЕТ project значением из birdman_server_info: авторитет
+      #     владения остаётся за БД master'а (замер: agent=agentsays,
+      #     DB=dbsays → в алерте dbsays);
+      #   * ветка 2 (master лежит) для дедиков, запущенных после апгрейда,
+      #     перестала быть платформенной: пара приезжает от агента, из
+      #     источника, не зависящего от master'а вовсе, — деградация
+      #     атрибутируется настоящему владельцу именно тогда, когда master
+      #     ответить не может;
+      #   * пара обязана быть ЦЕЛОЙ. Полупарная серия (project без env) и
+      #     беспарная серия одного server_id схлопываются под join'ом в один
+      #     выходной набор лейблов, и правило умирает ЦЕЛИКОМ:
+      #     `duplicate output timeseries: {node=…, project=…, region=…,
+      #     server_id=…}`. С полной парой те же две серии расходятся по env.
+      #     Отсюда всё-или-ничего на стороне агента; кейс в tests/.
       # $value не портится: info == 1, умножение оставляет tick как есть.
       # `unless on (server_id)` делает ветки непересекающимися → один дедик
       # никогда не даёт двух алертов.
@@ -250,8 +270,8 @@ groups:
         annotations:
           summary: {% raw %}'TickDegraded: {{ if $labels.project }}проект {{ $labels.project }}, {{ end }}server {{ $labels.server_id }} tick={{ $value }}ms'{% endraw %}
 
-          description: 'game-health: server tick has been degraded for longer than the threshold (ops.md §1 TickDegraded). The project label is joined from birdman_server_info; without a match the alert stays platform-scoped.'
-          description_ru: 'game-health: тик деградировал дольше порога (ops.md §1 TickDegraded). Лейбл project доклеивается join''ом с birdman_server_info; без совпадения алерт остаётся платформенным.'
+          description: 'game-health: server tick has been degraded for longer than the threshold (ops.md §1 TickDegraded). The project label is joined from birdman_server_info and the database wins the tie; without a match the alert still fires — carrying the pair the agent stamped on the series, or platform-scoped for a dedik started before that pair existed.'
+          description_ru: 'game-health: тик деградировал дольше порога (ops.md §1 TickDegraded). Лейбл project доклеивается join''ом с birdman_server_info, и спор выигрывает БД; без совпадения алерт всё равно горит — с парой, отчеканенной агентом, а у дедика, запущенного до её появления, платформенным.'
 
       # AgentUpgradeFailed: self-upgrade агента не завершился Hello с новой
       # версией в окне (master пишет событие agent_upgrade_failed, итерация 4).

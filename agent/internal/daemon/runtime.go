@@ -49,6 +49,11 @@ type StartSpec struct {
 	CPUMillis  int
 	MemMB      int
 	Env        map[string]string
+	// ScopeProject/ScopeEnv — пара (project, env) владельца дедика, которая
+	// становится label'ами контейнера (tracker #1008). Валидируется вызывающим
+	// (Manager.serverScope) и ставится ТОЛЬКО парой: пустая половина = пары нет.
+	ScopeProject string
+	ScopeEnv     string
 	// Lookup resolves the registry credential for the image pull, host-first
 	// (registries v1, docs/superpowers/specs/2026-07-09-registries-design.md
 	// §3). May be nil (always anonymous).
@@ -65,6 +70,11 @@ type RestoredServer struct {
 	MatchID  string
 	Running  bool
 	ExitCode uint32 // when !Running
+	// ScopeProject/ScopeEnv — пара владельца, поднятая из label'ов контейнера
+	// (tracker #1008). Пусто у дедика, запущенного до появления этих label'ов:
+	// его серии остаются беспарными до перекрутки.
+	ScopeProject string
+	ScopeEnv     string
 }
 
 // Runtime abstracts containerd for the manager.
