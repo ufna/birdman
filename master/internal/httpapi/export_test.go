@@ -8,6 +8,28 @@ import (
 	"github.com/ufna/birdman/master/internal/store"
 )
 
+// Ожидания реального времени на пути SSE — короткие на ВЕСЬ тестовый бинарь
+// (tracker #1016). init() отрабатывает до TestMain, то есть до старта любого
+// теста и любой горутины стрима, поэтому запись сюда одна и гонки с чтением из
+// handleEventsStream быть не может; менять эти переменные ИЗ теста нельзя по
+// той же причине. Обоснование подмены — у объявления в sse.go.
+//
+// Файл export_test.go компилируется только `go test`, так что в собранный
+// birdman-master короткие значения не попадают ни при каких условиях: там
+// остаются 1с/5с из sse.go.
+func init() {
+	ssePollInterval = 100 * time.Millisecond
+	sseSettle = 2 * time.Second
+}
+
+// SSESettleForTest / SSEPollIntervalForTest отдают действующие значения внешнему
+// пакету httpapi_test. Тест, которому нужно «читать дольше, чем ждёт курсор»,
+// обязан считать свой срок ОТ них: вписанные числом секунды расклеятся при
+// первой же смене подмены — и расклеятся молча, превратив проверку в
+// тавтологию.
+func SSESettleForTest() time.Duration       { return sseSettle }
+func SSEPollIntervalForTest() time.Duration { return ssePollInterval }
+
 func NewSessionStoreForTest(ttl time.Duration) *sessionStore { return newSessionStore(ttl) }
 
 func (ss *sessionStore) CreateForTest(name string, scopes []string) (string, error) {

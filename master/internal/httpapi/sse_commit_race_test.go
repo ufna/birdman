@@ -114,10 +114,14 @@ func TestSSEDoesNotDuplicateWhileCursorLags(t *testing.T) {
 		}
 	}
 
-	// Читаем дольше sseSettle (5с), чтобы окно успело перечитаться несколько
-	// раз, и считаем каждый id.
+	// Читаем ДОЛЬШЕ отсрочки курсора, чтобы окно успело перечитаться много раз
+	// и курсор успел сдвинуться хотя бы однажды, и считаем каждый id. Срок
+	// выведен из самой отсрочки (tracker #1016): вписанный числом, он молча
+	// разъехался бы с ней при первой смене — и тест перестал бы доживать до
+	// повторного чтения окна, то есть до того единственного, ради чего написан.
+	// Перечитываний тут ssePollInterval'ов на sseSettle, то есть их ДЕСЯТКИ.
 	seen := map[int64]int{}
-	deadline := time.Now().Add(9 * time.Second)
+	deadline := time.Now().Add(httpapi.SSESettleForTest() + 5*httpapi.SSEPollIntervalForTest())
 	for time.Now().Before(deadline) {
 		ev, ok := c.nextOrNone(time.Until(deadline))
 		if !ok {

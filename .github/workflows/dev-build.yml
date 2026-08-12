@@ -52,8 +52,13 @@ jobs:
           cache-dependency-path: panel/package-lock.json
 
       # Красная сборка на стенд не уезжает: тесты идут ДО публикации.
+      # -timeout по той же причине, что в master.yml (tracker #1016): дефолт
+      # `go test` — 600с на пакет, и `internal/httpapi` уже упирался в него на
+      # том воркфлоу. Здесь запас больше (нет `-race`, а он и есть главный
+      # множитель на bcrypt'е), но защёлка та же и сработала бы так же тихо —
+      # с той разницей, что тут она остановила бы ВЫКАТ НА СТЕНД.
       - name: Test master
-        run: cd master && go test ./...
+        run: cd master && go test -timeout 20m ./...
 
       - name: Test agent
         run: cd agent && go test ./...
