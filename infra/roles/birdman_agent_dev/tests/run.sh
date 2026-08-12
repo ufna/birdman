@@ -21,14 +21,22 @@
 #      перечислением корней нод, и перечисление обязано остаться перечислением
 #      (каталог-двойник пары не получает); плюс развод путей/портов/юнитов между
 #      нодами и отказ роли на столкновении.
+#   3. #1069 — бинарём агента на стенде владеет pull-деплоер, а не роль: прогон
+#      плейбука по живому боксу обязан бинарь НЕ ТРОГАТЬ (иначе откат агента на
+#      локальную сборку + расхождение строки версии с тем, что мастер запросил
+#      в POST /v1/agent-upgrade, то есть ложные agent_upgrade_failed).
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 role="$(dirname "$here")"
 image="${BIRDMAN_VECTOR_IMAGE:-$(sed -n 's/^birdman_vector_image: *//p' "$role/defaults/main.yml")}"
+# Контейнер-«бокс» для гарда бинаря (#1069): имя от id задачи, за собой убираем.
+box_image="${BIRDMAN_TEST_BOX_IMAGE:-python:3-alpine}"
+box=bm1069-box
 
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+cleanup() { rm -rf "$work"; docker rm -f "$box" >/dev/null 2>&1 || true; }
+trap cleanup EXIT
 
 # Бокс из ДВУХ нод — тот самый случай, ради которого заведён #1065: одна
 # коробка, один айпи, два проекта.
@@ -126,7 +134,87 @@ if render "$work/bad2" '{"birdman_box_instances":[{"qos_echo":false},{"name":"kh
 fi
 echo "ok: столкновения отвергнуты"
 
-# ── 5. VRL-трансформ шиппера — настоящим vector'ом ──────────────────────────
+# ── 5. Гард бинаря агента (#1069): владелец — pull-деплоер ───────────────────
+# Играется настоящий tasks/binary.yml роли против КОНТЕЙНЕРА-«бокса»: copy в
+# роли ставит owner/group root, поэтому в temp-каталоге под обычным
+# пользователем прогон упал бы на chown, а --check показал бы решение движка,
+# но не то, что байты на боксе остались прежними. Содержимое сверяем отдельным
+# каналом (docker exec), а не выводом того же прогона.
+echo "── binary guard: the pull deployer owns /usr/local/bin/birdman-agent"
+ansible-galaxy collection list community.docker >/dev/null 2>&1 \
+  || fail "нужна коллекция community.docker (connection-плагин docker): ansible-galaxy collection install community.docker"
+
+docker rm -f "$box" >/dev/null 2>&1 || true
+docker run -d --name "$box" "$box_image" sleep 900 >/dev/null
+
+mkdir -p "$work/build"
+printf 'LOCAL-BUILD\n' >"$work/build/birdman-agent"
+
+guard() { # guard <лог> [доп. -e ansible'у...]
+  local log="$1"; shift
+  ansible-playbook -i "$box," "$here/binary_guard.yml" \
+    -e "birdman_agent_binary=$work/build/birdman-agent" "$@" >"$log" 2>&1 \
+    || { cat "$log" >&2; fail "прогон гарда упал (см. вывод выше)"; }
+}
+box_bin() { docker exec "$box" cat /usr/local/bin/birdman-agent 2>/dev/null; }
+put_box_bin() { docker exec "$box" sh -c 'printf "DEPLOYED-BY-DEVDEPLOY\n" >/usr/local/bin/birdman-agent && chmod 0755 /usr/local/bin/birdman-agent'; }
+note='Бинарь агента не трогаю'
+
+# (а) Первичный bring-up: деплоер включён, но бинаря на боксе ЕЩЁ НЕТ — роль
+# обязана поставить его, иначе новая нода не поднимется вовсе (деплоер догонит
+# релизной сборкой следующим тиком).
+docker exec "$box" rm -f /usr/local/bin/birdman-agent
+guard "$work/guard-bringup.log" -e birdman_devdeploy_enabled=true
+grep -q 'BINARY_GUARD changed=True skipped=False instances=1' "$work/guard-bringup.log" \
+  || fail "bring-up: бинаря на боксе не было, а роль его не поставила"
+[ "$(box_bin)" = "LOCAL-BUILD" ] || fail "bring-up: на боксе оказался не тот бинарь"
+[ "$(docker exec "$box" stat -c '%a %U' /usr/local/bin/birdman-agent)" = "755 root" ] \
+  || fail "bring-up: бинарь встал с чужими правами/владельцем"
+! grep -q "$note" "$work/guard-bringup.log" || fail "bring-up: заметка «владеет деплоер» напечатана там, где роль сама поставила бинарь"
+
+# (б) Живой бокс: деплоер включён, бинарь на месте — прогон обязан его НЕ
+# ТРОГАТЬ и сказать об этом в выводе.
+put_box_bin
+guard "$work/guard-owned.log" -e birdman_devdeploy_enabled=true
+grep -q 'BINARY_GUARD changed=False skipped=True instances=1' "$work/guard-owned.log" \
+  || fail "прогон при включённом деплоере не пропустил установку бинаря"
+[ "$(box_bin)" = "DEPLOYED-BY-DEVDEPLOY" ] \
+  || fail "прогон затёр бинарь, которым владеет деплоер (откат агента + расхождение версии)"
+grep -q "$note" "$work/guard-owned.log" \
+  || fail "в выводе нет заметки о том, ПОЧЕМУ бинарь пропущен — пропуск неотличим от потери задачи"
+
+# (в) Бокс без деплоера — ставит, как раньше. Проверяются обе формы «нет
+# деплоера»: флаг не задан вовсе (ветка default(false), как в add-node.yml) и
+# явный false.
+guard "$work/guard-nodeploy.log"
+grep -q 'BINARY_GUARD changed=True skipped=False instances=1' "$work/guard-nodeploy.log" \
+  || fail "без флага деплоера роль перестала ставить бинарь"
+[ "$(box_bin)" = "LOCAL-BUILD" ] || fail "без флага деплоера бинарь не обновился"
+put_box_bin
+guard "$work/guard-off.log" -e birdman_devdeploy_enabled=false
+grep -q 'BINARY_GUARD changed=True skipped=False instances=1' "$work/guard-off.log" \
+  || fail "при выключенном деплоере роль перестала ставить бинарь"
+[ "$(box_bin)" = "LOCAL-BUILD" ] || fail "при выключенном деплоере бинарь не обновился"
+! grep -q "$note" "$work/guard-off.log" || fail "заметка «владеет деплоер» напечатана при выключенном деплоере"
+
+# (г) Ради чего всё и затевалось: ВТОРАЯ нода на боксе с живым агентом. Бинарь
+# ОДИН на хост, поэтому прогон обязан пройти, ничего с ним не сделав. Локальной
+# сборки при этом НЕТ ВОВСЕ — до гарда такой прогон падал бы ещё и на src.
+put_box_bin
+rm -f "$work/build/birdman-agent"
+guard "$work/guard-secondnode.log" -e birdman_devdeploy_enabled=true \
+  -e '{"birdman_agent_instances":[{},{"name":"khl","project":"khl-legends","capacity_slots":4,"port_range":[20100,20150],"metrics_port":9111}]}'
+grep -q 'BINARY_GUARD changed=False skipped=True instances=2' "$work/guard-secondnode.log" \
+  || fail "добавление второй ноды не прошло мимо бинаря (см. $work/guard-secondnode.log)"
+[ "$(box_bin)" = "DEPLOYED-BY-DEVDEPLOY" ] \
+  || fail "добавление второй ноды затёрло бинарь живого агента"
+grep -q 'changed определён (False)' "$work/guard-secondnode.log" \
+  || fail "assert про определённость changed не отработал — main.yml упал бы на наборе рестартов"
+echo "ok: bring-up ставит, деплоер владеет — пропуск, вторая нода бинарь не трогает"
+
+docker rm -f "$box" >/dev/null
+
+# ── 6. VRL-трансформ шиппера — настоящим vector'ом ──────────────────────────
 echo "vector: $image"
 cp "$here/vector_test.yaml" "$work/one/"
 docker run --rm -v "$work/one:/w" "$image" test /w/vector.yaml /w/vector_test.yaml

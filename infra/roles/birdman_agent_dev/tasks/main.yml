@@ -66,14 +66,15 @@
     mode: "0644"
   notify: Apply birdman tmpfiles
 
-- name: Install birdman-agent binary
-  ansible.builtin.copy:
-    src: "{{ birdman_agent_binary }}"
-    dest: /usr/local/bin/birdman-agent
-    owner: root
-    group: root
-    mode: "0755"
-  register: birdman_agent_binary_install
+# Бинарь агента — отдельным файлом задач (tracker #1069): у него есть гард «кто
+# им владеет», симметричный мастерскому, и роль обязана уметь доказать этот
+# гард ПРОГОНОМ, а не глазами. Тест играет ровно этот файл
+# (tests/binary_guard.yml) — как tests/render_role.yml играет instances.yml;
+# копия трёх задач в тесте разъехалась бы с ролью.
+# Регистрация birdman_agent_binary_install переживает include и ниже даёт
+# набор рестартов бокса.
+- name: Install the agent binary unless the pull deployer owns it
+  ansible.builtin.include_tasks: binary.yml
 
 # --- доставка публичного CA-серта master'а на ноду (mTLS agentlink v1, §6) ---
 # Тянем на каждом прогоне (идемпотентно): покрывает и новую ноду, и ротацию CA.

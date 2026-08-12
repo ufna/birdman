@@ -1,0 +1,65 @@
+---
+# Гард «бинарём агента владеет pull-деплоер» (tracker #1069) — играется
+# НАСТОЯЩИЙ tasks/binary.yml роли, вместе с настоящим tasks/instances.yml, как
+# tests/render_role.yml играет настоящую нормализацию инстансов. Копия трёх
+# задач в тесте проверяла бы копию, а не роль.
+#
+# Бокс — КОНТЕЙНЕР (connection community.docker.docker), а не check-режим и не
+# temp-каталог: copy в роли ставит owner/group root, поэтому под обычным
+# пользователем прогон упал бы на chown, а --check доказывал бы только решение
+# движка, но не то, что байты бинаря на боксе остались прежними. В контейнере
+# задача выполняется по-настоящему — и содержимое файла после прогона сверяет
+# сам run.sh, отдельным каналом (docker exec), а не выводом этого же прогона.
+#
+# Запуск — tests/run.sh; сюда приезжают birdman_agent_binary (что считать
+# «локальной сборкой»), при необходимости birdman_devdeploy_enabled (флаг
+# деплоера; НЕ задан = ветка default(false), как на боксе без деплоера) и
+# birdman_agent_instances (сколько нод на боксе).
+- name: Play the role's own agent-binary task file against a box
+  hosts: all
+  gather_facts: false
+  vars:
+    ansible_connection: community.docker.docker
+    # Путь интерпретатора в образе python:*-alpine, который поднимает run.sh;
+    # переопределяется -e вместе с BIRDMAN_TEST_BOX_IMAGE.
+    ansible_python_interpreter: /usr/local/bin/python3
+    # Имя ноды по умолчанию instances.yml берёт из фактов хоста; фиксируем,
+    # чтобы тест не зависел от имени контейнера.
+    ansible_facts:
+      hostname: box-1069
+  tasks:
+    - name: Load role defaults
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../defaults/main.yml"
+
+    - name: Resolve the box's node instances (the role's own task file)
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/instances.yml"
+
+    - name: Install the agent binary (the role's own task file)
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/binary.yml"
+
+    # Пропущенная задача обязана ОСТАТЬСЯ зарегистрированной: main.yml выводит
+    # из birdman_agent_binary_install.changed набор нод бокса на рестарт, и гард,
+    # оставляющий переменную неопределённой (например, повешенный на include
+    # целиком), уронил бы прогон на undefined-атрибуте — то есть добавление
+    # второй ноды падало бы вместо того, чтобы просто не трогать бинарь.
+    - name: The guarded task must still register its result
+      ansible.builtin.assert:
+        that:
+          - birdman_agent_binary_install.changed is defined
+        fail_msg: >-
+          birdman_agent_binary_install.changed не определён после гарда —
+          main.yml («Start the restart set with the nodes affected by host-wide
+          changes») упадёт на этом атрибуте.
+        success_msg: >-
+          changed определён
+          ({{ birdman_agent_binary_install.changed | default('НЕТ') }}) —
+          набор рестартов бокса выводится штатно.
+
+    # Строка для run.sh: решение движка + сколько нод бокса было в прогоне.
+    - name: Report the outcome to run.sh
+      ansible.builtin.debug:
+        msg: >-
+          BINARY_GUARD changed={{ birdman_agent_binary_install.changed }}
+          skipped={{ birdman_agent_binary_install.skipped | default(false) }}
+          instances={{ birdman_instances | length }}

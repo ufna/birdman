@@ -1,0 +1,66 @@
+---
+# Кто владеет бинарём агента на боксе (tracker #1069).
+#
+# Без pull-деплоера — эта роль: каждый прогон кладёт локально собранный бинарь.
+# С включённым деплоером владелец ОДИН, и это деплоер: он катит агента сам
+# (POST /v1/agent-upgrade, агент применяет апгрейд без участия ansible) и
+# считает результат метриками birdman_devdeploy_agent_upgrades_total{status} и
+# birdman_devdeploy_agents_behind. Гард — тот же, что у роли мастера
+# (birdman_master_dev/tasks/main.yml, «Install birdman-master binary»): вторая
+# форма для той же развилки разъезжалась бы с первой.
+#
+# Для агента цена отсутствия гарда ВЫШЕ, чем у мастера, и это не про лишний
+# рестарт. Строка версии зашита в бинарь через -X main.version и едет в Hello
+# агента; мастер сверяет её с тем, что запросил в POST /v1/agent-upgrade. В CI
+# она задаётся ЯВНО (dev-build.yml: VERSION="dev-${GITHUB_SHA::7}"), а
+# agent/build.sh на машине разработчика берёт git describe — то есть локальная
+# сборка ТОЙ ЖЕ ревизии несёт ДРУГУЮ строку. Прогон роли поверх живого бокса
+# не только откатывал бы агента на сборку из чужого рабочего дерева, но и
+# рассинхронизировал бы версию с ожиданием мастера — watchdog слал бы ложные
+# agent_upgrade_failed.
+#
+# Bootstrap не ломается: на боксе, где бинаря ещё нет, роль ставит его и при
+# включённом деплоере (первичный bring-up), а деплоер подтянет релизную сборку
+# следующим тиком.
+#
+# ОТКУДА БЕРЁТСЯ ФЛАГ. В dev-node.yml — дефолтом роли birdman_devdeploy: роли
+# одного плея видят дефолты друг друга, поэтому значение доезжает и сюда, хотя
+# роль агента идёт в списке РАНЬШЕ деплоера (проверено прогоном). В add-node.yml
+# роли деплоера нет вовсе, флаг там не определён, и гард выключается — при том
+# что деплоер катает и удалённые ноды (цели GET /v1/nodes?env=dev фильтруются по
+# env, а не по боксу). Закрывать это хардкодом в плее нельзя: у self-host
+# деплоера нет и бинарём владеет роль. Отдельная карточка #109 (1070).
+#
+# Бинарь ОБЩИЙ на хост, даже когда нод на боксе несколько (#1065): добавление
+# ещё одной ноды к живому агенту попадает ровно в эту ветку — файл уже есть,
+# копирование пропускается, и локальная сборка агента для такого прогона не
+# нужна вовсе (сегодня прогон без agent/dist/birdman-agent падал бы на src).
+- name: Check whether the agent binary is already installed
+  ansible.builtin.stat:
+    path: /usr/local/bin/birdman-agent
+  register: birdman_agent_binary_stat
+
+# register остаётся ОПРЕДЕЛЁННЫМ и при пропуске (skipped-результат несёт
+# changed: false) — из него main.yml выводит набор рестартов бокса, поэтому
+# гард сюда, на саму задачу, а не на include этого файла.
+- name: Install birdman-agent binary
+  ansible.builtin.copy:
+    src: "{{ birdman_agent_binary }}"
+    dest: /usr/local/bin/birdman-agent
+    owner: root
+    group: root
+    mode: "0755"
+  register: birdman_agent_binary_install
+  when: not (birdman_devdeploy_enabled | default(false) | bool) or not birdman_agent_binary_stat.stat.exists
+
+- name: Note that the pull deployer owns the agent binary
+  ansible.builtin.debug:
+    msg: >-
+      Бинарь агента не трогаю: им владеет birdman-devdeploy (выкат из main
+      через POST /v1/agent-upgrade). Локальная сборка откатила бы агента и
+      разошлась бы строкой версии с тем, что ждёт мастер (ложные
+      agent_upgrade_failed). Ручная замена — останови таймер или положи
+      /etc/birdman/devdeploy.disabled.
+  when:
+    - birdman_devdeploy_enabled | default(false) | bool
+    - birdman_agent_binary_stat.stat.exists
