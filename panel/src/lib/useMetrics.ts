@@ -38,6 +38,20 @@ function isForbidden(e: unknown): boolean {
 }
 
 /**
+ * Ошибка, которая САМА не пройдёт: 403 (скоуп/привязка) и 401 (кука протухла).
+ * Обе гасят поллинг и обе обязаны быть ВИДНЫ даже на графике, где точки уже
+ * есть, — tracker #1011.
+ *
+ * 401 до этой карточки терминальным не считался, и график долбил его каждые
+ * 15с бесконечно (на «Статистике» — пятью графиками сразу), хотя без нового
+ * логина ответ не изменится никогда. Транзиентные коды (5xx, обрыв сети) сюда
+ * НЕ входят намеренно: их как раз надо перезапрашивать.
+ */
+function isTerminal(e: unknown): boolean {
+  return e instanceof ApiError && (e.status === 403 || e.status === 401);
+}
+
+/**
  * Машинный код жёсткой ошибки графика — `ApiError.code` (`unauthorized`,
  * `bad_response`, `bad_data`/`metrics_error` от VM, `http_500`…), либо `null`,
  * если запрос до master вообще не дошёл (`fetch` отверг: сеть/CORS, ApiError
@@ -140,17 +154,34 @@ export function useQueryRange({ query, windowMs = 30 * 60_000, range, refreshMs 
           if (!active || ctrl?.signal.aborted) return;
           // Останавливаем ВСЕГДА, а не только когда данных ещё не было: уже
           // показанный график остаётся на месте, но добывать новые точки
-          // запрещённым запросом бессмысленно.
+          // запросом, который не пройдёт, бессмысленно.
           const forbidden = isForbidden(e);
-          if (forbidden) stopPolling();
+          const terminal = isTerminal(e);
+          if (terminal) stopPolling();
+          // Только КОД, и только прошедший санитайзер: текст мастера или VM в
+          // состояние графика не попадает (tracker #996). Не-ApiError (fetch
+          // отверг запрос) кода не имеет — это null, у него свой текст.
+          //
+          // Терминальную ошибку поднимаем НЕЗАВИСИМО от наличия точек
+          // (tracker #1011): раньше статус писался внутри `prev === null`, и
+          // на графике, успевшем что-то нарисовать, 401/403 проходил МОЛЧА —
+          // точки оставались, новых не появлялось, пометки не было. Самый
+          // нужный случай (оператор сидит на открытой «Статистике», кука
+          // протухает) был как раз тем, где текста не будет. Точки при этом не
+          // выбрасываем — их показывает MetricChart вместе с пометкой.
+          //
+          // Транзиентную — по-прежнему только на пустом графике: мигать
+          // ошибкой поверх работающих данных из-за одного неудачного дозапроса
+          // не надо, следующий тик её и починит.
+          if (terminal) {
+            setErrorCode(errorCodeOf(e));
+            setStatus(forbidden ? 'forbidden' : 'error');
+            return;
+          }
           setSeries((prev) => {
             if (prev === null) {
-              // Только КОД, и только прошедший санитайзер: текст мастера или VM
-              // в состояние графика не попадает (tracker #996). Не-ApiError
-              // (fetch отверг запрос) кода не имеет — это null, у него свой
-              // текст «master недоступен».
               setErrorCode(errorCodeOf(e));
-              setStatus(forbidden ? 'forbidden' : 'error');
+              setStatus('error');
             }
             return prev;
           });
@@ -197,15 +228,16 @@ interface UseInstantQueryOpts {
 export function useInstantQuery({ query, refetchKey, enabled = true }: UseInstantQueryOpts): InstantState {
   const [status, setStatus] = useState<MetricStatus>('loading');
   const [vector, setVector] = useState<VectorSample[] | null>(null);
-  // Запрос, на котором прилетел 403. Ref, а не state: он не влияет на рендер и
-  // не должен сам вызывать перезапуск эффекта.
-  const forbiddenQuery = useRef<string | null>(null);
+  // Запрос, на котором прилетела ТЕРМИНАЛЬНАЯ ошибка (403 или, с #1011, 401).
+  // Ref, а не state: он не влияет на рендер и не должен сам вызывать
+  // перезапуск эффекта.
+  const refusedQuery = useRef<string | null>(null);
 
   useEffect(() => {
     if (!enabled) return;
-    if (forbiddenQuery.current === query) {
-      // Тот же самый запрос уже получил 403; refetchKey сменился (тик SSE) —
-      // повторять отказ нечего. Статус уже 'forbidden', сообщение на экране.
+    if (refusedQuery.current === query) {
+      // Тот же самый запрос уже отказал терминально; refetchKey сменился (тик
+      // SSE) — повторять отказ нечего. Статус уже стоит, сообщение на экране.
       return;
     }
     let active = true;
@@ -225,7 +257,9 @@ export function useInstantQuery({ query, refetchKey, enabled = true }: UseInstan
       .catch((e: unknown) => {
         if (!active || ctrl.signal.aborted) return;
         const forbidden = isForbidden(e);
-        if (forbidden) forbiddenQuery.current = query;
+        // 401 запоминаем наравне с 403 (tracker #1011): без нового логина он
+        // не пройдёт, а refetchKey тикает от SSE чаще 15с.
+        if (isTerminal(e)) refusedQuery.current = query;
         setStatus(forbidden ? 'forbidden' : 'error');
         setVector(null);
       });

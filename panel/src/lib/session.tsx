@@ -8,6 +8,7 @@ import type { ReactNode } from 'react';
 import { api, ApiError } from './api';
 import type { KeyBinding, Scope, SessionInfo } from './api';
 import { apiErrorMessage } from './apiError';
+import { onSessionExpired } from './sessionExpiry';
 import { useT } from './i18n';
 import type { I18nContextValue } from './i18n';
 
@@ -59,6 +60,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const invalidate = useCallback(() => {
     setSession(null);
   }, []);
+
+  // Мост из модулей без контекста (api.ts, metrics.ts): любой 401 от master
+  // теперь уводит на логин, а не оставляет панель полуразлогиненной
+  // (tracker #1011). До этого invalidate звался только из lib/live.tsx, на 401
+  // SSE-стрима, — а стрим аутентифицируется ОДИН раз на коннекте и держится
+  // вечно, поэтому под живым стримом логаута не происходило вовсе.
+  useEffect(() => onSessionExpired(invalidate), [invalidate]);
 
   const value = useMemo(
     () => ({ session, login, logout, invalidate }),

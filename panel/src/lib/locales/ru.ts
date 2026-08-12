@@ -210,6 +210,7 @@ export const ru: Record<MessageKey, string> = {
   // — графики метрик —
   'metric.aria': 'График метрики',
   'metric.loading': 'Загрузка метрик…',
+  'metric.stale': 'Запрос отклонён — эти точки больше не обновляются. Войдите заново или проверьте ключ.',
   'metric.unconfigured': 'Метрики не настроены на этом master (victoriametrics_url пуст).',
   'metric.unreachable': 'VictoriaMetrics недоступна — данных сейчас нет.',
   'metric.gatewayDown':

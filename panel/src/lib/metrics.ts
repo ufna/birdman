@@ -5,6 +5,7 @@
 // metrics_unconfigured) и «нет данных».
 
 import { ApiError, qs } from './api';
+import { notifySessionExpired } from './sessionExpiry';
 import type { MessageKey } from './i18n';
 
 /** Одна серия matrix: подписи + точки [unix-сек, значение|null (разрыв)]. */
@@ -183,6 +184,9 @@ async function fetchVM(path: string, signal?: AbortSignal): Promise<Unavailable 
     const known = errCode === 'upstream' || errCode === 'bad_gateway';
     return { kind: 'unavailable', reason: known ? 'upstream' : 'gateway' };
   }
+  // 401 — та же протухшая кука, что и на обычном API: уводим на логин, а не
+  // оставляем графики молча сталыми (tracker #1011).
+  if (res.status === 401) notifySessionExpired();
   // Сюда доходят только НЕ-502/504, поэтому неразобранное тело здесь всё ещё
   // жёсткая ошибка — мягкая ветка выше её уже забрала (см. #996).
   if (!parsed) throw new ApiError(res.status, 'bad_response', text.slice(0, 160));

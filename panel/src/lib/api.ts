@@ -2,6 +2,8 @@
 // Панель — обычный клиент API, без приватных лазеек (принцип 1 спеки панели).
 // Auth — сессионная cookie (см. session.tsx); каждый не-GET несёт CSRF-заголовок.
 
+import { notifySessionExpired } from './sessionExpiry';
+
 export type Scope = 'admin' | 'deploy' | 'matchmaking' | 'allocate' | 'readonly';
 
 export interface SessionInfo {
@@ -542,6 +544,10 @@ async function request<T>(method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE', p
     }
   }
   if (!res.ok) {
+    // 401 = кука протухла или отозвана. Сообщаем ДО броска: иначе экран
+    // покажет «сессия истекла» и останется на месте, а панель — в
+    // полуразлогиненном состоянии (tracker #1011).
+    if (res.status === 401) notifySessionExpired();
     const e = data as { error?: string; detail?: string } | undefined;
     throw new ApiError(res.status, e?.error ?? `http_${res.status}`, e?.detail);
   }

@@ -233,6 +233,8 @@ export const en = {
   // — metric charts —
   'metric.aria': 'Metric chart',
   'metric.loading': 'Loading metrics…',
+  // Пометка над графиком, чьи точки больше не обновляются (tracker #1011).
+  'metric.stale': 'Refused — these points are no longer updating. Sign in again or check your key.',
   'metric.unconfigured': "Metrics aren't configured on this master (victoriametrics_url is empty).",
   'metric.unreachable': 'VictoriaMetrics is unavailable — no data right now.',
   // 502/504 со страницей ШЛЮЗА (tracker #1021). Виновника не называем: перед

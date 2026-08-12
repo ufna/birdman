@@ -35,11 +35,16 @@ export function MetricChart({
   height = 150,
   refreshMs = 15_000,
 }: MetricChartProps) {
+  const { t } = useT();
   const { status, series, errorCode } = useQueryRange({ query, windowMs, range, refreshMs });
 
   const aligned = useMemo(() => toAlignedData(series ?? []), [series]);
   const hasData = aligned.x.length > 0;
   const latest = useMemo(() => lastValue(series ?? []), [series]);
+  // Точки есть, но они больше не обновятся: отказ терминальный. `error` сюда
+  // попадает только терминальный — транзиентный статус на непустом графике
+  // хук не поднимает вовсе (useMetrics.ts).
+  const stale = hasData && (status === 'forbidden' || status === 'error');
 
   return (
     <div className="rounded-lg border border-line bg-card">
@@ -52,6 +57,18 @@ export function MetricChart({
       <div className="px-2 py-2" style={{ minHeight: height }}>
         {status === 'ok' && hasData ? (
           <Plot aligned={aligned} unit={unit} height={height} />
+        ) : stale ? (
+          // График, у которого точки ЕСТЬ, а обновляться они больше не будут
+          // (401/403 — поллинг погашен, tracker #1011). Ни подменить график
+          // сообщением, ни промолчать нельзя: первое стирает данные, второе и
+          // было дефектом — оператор смотрел на замершие точки, не зная, что
+          // они замерли. Поэтому и то и другое: пометка НАД графиком.
+          <div className="flex flex-col gap-1.5">
+            <p role="status" className="rounded-md bg-dead-bg px-2 py-1 text-[11px] text-dead">
+              {t('metric.stale')}
+            </p>
+            <Plot aligned={aligned} unit={unit} height={height} />
+          </div>
         ) : (
           <MetricMessage status={status} hasData={hasData} errorCode={errorCode} height={height} />
         )}
