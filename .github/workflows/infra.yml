@@ -72,3 +72,75 @@ jobs:
             exec python3 infra/ci/needs-ansible-check.py "$HEAD_SHA"
           fi
           exec python3 infra/ci/needs-ansible-check.py --range "${base}..${HEAD_SHA}"
+
+  # Юнит-тесты инфра-ролей (tracker #1067). До этого джоба они существовали, но
+  # не гонялись НИГДЕ, кроме памяти того, кто вспомнит про ./run.sh: правка
+  # rules.yml.j2 могла приземлиться с красными тестами правил — то есть ровно
+  # тот отказ «случай выглядит покрытым», против которого сами эти тесты и
+  # написаны (#960: BufferEmptyReady был мёртв, потому что серия исчезает).
+  #
+  # Сьюты ищутся ГЛОБОМ, а не перечнем: список ролей в workflow — это тот же
+  # «тест написан, но в CI не заведён», только отложенный на следующую роль.
+  # Хост не трогается ни одним из них: рендер шаблонов идёт настоящим ansible'ом
+  # во временный каталог, promtool/vector/бокс — контейнерами с пином роли.
+  role-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ansible-core: шаблоны роли рендерятся НАСТОЯЩИМ движком (фильтры,
+      # trim_blocks, деривация джобов скрейпа из tasks/scrape_jobs.yml), поэтому
+      # переписанный рендерер тут не годится. Пин по минорной линии: репозиторий
+      # пинует всё (prom, vector, vmagent), и мажорный прыжок ansible не должен
+      # красить прогон в день, к коммиту отношения не имеющий. jinja2 и PyYAML
+      # приезжают зависимостями ansible-core.
+      - name: Install ansible-core
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet 'ansible-core~=2.21.0'
+          # Проверка PATH здесь, а не в сьюте: если консольные скрипты pip'а не
+          # видны, сьют упадёт где-то в рендере, и причина будет выглядеть как
+          # поломка роли. Пусть отказ приходит от того шага, который виноват.
+          ansible-playbook --version | head -1
+
+      # community.docker — connection-плагин для бокса-КОНТЕЙНЕРА в сценариях
+      # BINARY_GUARD роли агента (#1069): copy в роли ставит owner root, под
+      # обычным пользователем прогон упал бы на chown, а --check показал бы
+      # решение движка вместо байтов на боксе.
+      - name: Install the collections the role tests need
+        run: ansible-galaxy collection install 'community.docker:>=5.0.0,<6.0.0'
+
+      # promtool сознательно НЕ ставится на раннер: run.sh уже умеет закреплённый
+      # контейнер prom/prometheus:v3.10.0, а бинарь на PATH завёл бы ВТОРОЙ пин
+      # версии — в workflow, рядом с пином в run.sh, обречённый с ним разъехаться.
+      # По байтам выигрыша нет (тарбол релиза 141 МБ против образа того же
+      # порядка), зато CI гоняет ровно ту ветку, которую гоняет контрибьютор без
+      # promtool на машине — поломка фоллбэка ловится здесь, а не человеком.
+      - name: Run every infra role test suite
+        run: |
+          set -uo pipefail
+          shopt -s nullglob
+          suites=(infra/roles/*/tests/run.sh)
+          # Прогон, который молча ничего не прогнал, хуже отсутствующего: он
+          # зелёный. Пустой глоб — отказ, а не тихий успех.
+          if [ ${#suites[@]} -eq 0 ]; then
+            echo "не найдено ни одного infra/roles/*/tests/run.sh — глоб перестал совпадать" >&2
+            exit 1
+          fi
+          failed=()
+          for suite in "${suites[@]}"; do
+            printf '\n══════ %s\n' "$suite"
+            # Все сьюты до конца, а не до первого падения: один пуш обязан
+            # показать всю поломку, иначе она чинится в несколько кругов.
+            if "$suite"; then
+              printf '══════ OK %s\n' "$suite"
+            else
+              printf '══════ FAILED %s\n' "$suite"
+              failed+=("$suite")
+            fi
+          done
+          printf '\nпрогнано сьютов: %d, упало: %d\n' "${#suites[@]}" "${#failed[@]}"
+          if [ ${#failed[@]} -ne 0 ]; then
+            printf '  · %s\n' "${failed[@]}" >&2
+            exit 1
+          fi
