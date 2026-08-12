@@ -11,7 +11,7 @@ import * as Tabs from '@radix-ui/react-tabs';
 import { api } from '../lib/api';
 import type { ApiEvent, GameServer } from '../lib/api';
 import { useLive } from '../lib/live';
-import { useProjectList } from '../lib/project';
+import { useProjectList, useFeedScope, scopeProject } from '../lib/project';
 import { useNow } from '../lib/useNow';
 import { serverMetricQueries } from '../lib/metrics';
 import { shortId, summarizePayload } from '../lib/format';
@@ -149,19 +149,23 @@ const TIMELINE_CAP = 100;
  *  (server-side фильтра по server_id в API нет) + live-дополнение из SSE. */
 function ServerTimeline({ serverId }: { serverId: string }) {
   const { subscribe } = useLive();
+  const feedScope = useFeedScope();
   const { t } = useT();
   const fmt = useFormat();
   const [events, setEvents] = useState<ApiEvent[] | null>(null);
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
+    if (feedScope.kind === 'wait') return;
     let cancelled = false;
     setEvents(null);
     setFailed(false);
-    // Тянем широкое окно и фильтруем клиентом — kind/server_id фильтров у
-    // /v1/events нет (TODO: серверные фильтры, panel.md §3).
+    // Тянем широкое окно и фильтруем клиентом по server_id — такого фильтра у
+    // /v1/events нет (TODO: серверные фильтры, panel.md §3). А вот по ПРОЕКТУ
+    // сужаем серверно (tracker #1024): без этого окно 1000 делилось между
+    // проектами и таймлайн своего дедика приезжал обрезанным.
     api
-      .listEvents(1000)
+      .listEvents(1000, scopeProject(feedScope))
       .then((list) => {
         if (!cancelled) setEvents(list.filter((e) => e.server_id === serverId));
       })
@@ -171,7 +175,7 @@ function ServerTimeline({ serverId }: { serverId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [serverId]);
+  }, [serverId, feedScope]);
 
   useEffect(
     () =>

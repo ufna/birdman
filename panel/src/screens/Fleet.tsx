@@ -9,7 +9,7 @@ import { apiErrorMessage } from '../lib/apiError';
 import type { ApiEvent, Environment, GameServer, NodeInfo } from '../lib/api';
 import { useData } from '../lib/live';
 import { useEnv, keepForEnv } from '../lib/env';
-import { useProject, useProjectList } from '../lib/project';
+import { useProject, useProjectList, useFeedScope, scopeProject } from '../lib/project';
 import { canAdmin, useSession } from '../lib/session';
 import { EnvTag } from '../components/EnvTag';
 import { useServerDrawer } from '../lib/drawer';
@@ -32,10 +32,22 @@ export function Fleet() {
   const versions = useProjectList((project) => api.listVersions({ project }), []);
   // Причина карантина — из последнего события node_quarantine ноды
   // (server-side фильтра по node_id у /v1/events нет — фильтруем клиентом).
-  // Проектного сужения тут не нужно: лента используется как lookup
-  // node_id → причина карантина, а сами ноды уже сужены по проекту — событие
-  // чужой ноды просто никогда не будет запрошено.
-  const events = useData(() => api.listEvents(500), []);
+  //
+  // Сужаем по проекту (tracker #1024). Здесь раньше стояло обратное решение
+  // («сужения не нужно: чужое событие просто не сматчится»), и по ПОКАЗУ оно
+  // верно — лента тут lookup по node_id, а ноды уже сужены. Неверно оно по
+  // ОКНУ: лимит 500 делится между всеми проектами, и на установке с
+  // несколькими живыми проектами события соседа выталкивают свои за край —
+  // тогда Флот перестаёт показывать причину карантина СВОЕЙ ноды. Дефект
+  // латентный и растёт с числом проектов, ровно как в #948/#987.
+  const feedScope = useFeedScope();
+  const events = useData(
+    () => (feedScope.kind === 'wait' ? Promise.resolve([]) : api.listEvents(500, scopeProject(feedScope))),
+    // feedScope ссылочно стабилен (useFeedScope мемоизирует) — его и хватает
+    // в deps: смена проекта перезапрашивает окно. Забыть об этом ровно на этом
+    // месте уже стоило дефекта в ревью #987.
+    [feedScope],
+  );
   const { session } = useSession();
   const mayAdmin = session != null && canAdmin(session);
   const { selected, environments } = useEnv();

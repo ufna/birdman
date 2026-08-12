@@ -15,7 +15,7 @@ import type { ApiEvent, Environment, GameServer, NodeInfo, VersionInfo } from '.
 import { apiErrorMessage } from '../lib/apiError';
 import { useLive } from '../lib/live';
 import { useEnv, keepForEnv } from '../lib/env';
-import { useProject, useProjectList } from '../lib/project';
+import { useProject, useProjectList, useFeedScope, scopeProject } from '../lib/project';
 import { canAdmin, canDeploy, useBindingRefusal, useSession } from '../lib/session';
 import { shortId } from '../lib/format';
 import { useT, useFormat } from '../lib/i18n';
@@ -714,10 +714,16 @@ function useDeployProgress(): Map<string, DeployProgress> {
     }
   }, []);
 
+  // Сужаем по проекту (tracker #1024): окно 1000 делилось между проектами, и
+  // прогресс СВОЕЙ версии переставал сидироваться, когда события соседа
+  // выталкивали свои за край. `wait` — не запрашиваем вовсе, иначе в это окно
+  // уедет ровно голый запрос.
+  const feedScope = useFeedScope();
   useEffect(() => {
+    if (feedScope.kind === 'wait') return;
     let cancelled = false;
     api
-      .listEvents(1000)
+      .listEvents(1000, scopeProject(feedScope))
       .then((list) => {
         if (cancelled) return;
         const m = new Map<string, DeployProgress>();
@@ -730,7 +736,7 @@ function useDeployProgress(): Map<string, DeployProgress> {
     return () => {
       cancelled = true;
     };
-  }, [apply]);
+  }, [apply, feedScope]);
 
   useEffect(
     () =>
