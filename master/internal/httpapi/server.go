@@ -144,14 +144,15 @@ func New(st *store.Store, m *metrics.Metrics, mm *matchmaker.Matchmaker, dep *de
 	s.mux.HandleFunc("GET /v1/apikeys", s.requireScope(ScopeAdmin, s.handleListAPIKeys))
 	s.mux.HandleFunc("POST /v1/apikeys", s.requireScope(ScopeAdmin, s.handleCreateAPIKey))
 	s.mux.HandleFunc("DELETE /v1/apikeys/{id}", s.requireScope(ScopeAdmin, s.handleRevokeAPIKey))
-	// Private registry credentials (П4 Admin/Реестры, registries.go) — admin
+	// Private registry credentials (П2 Admin/Реестры, registries.go) — admin
 	// scope on every route, including the list read (secret-adjacent).
 	s.mux.HandleFunc("GET /v1/registries", s.requireScope(ScopeAdmin, s.handleListRegistries))
 	s.mux.HandleFunc("POST /v1/registries", s.requireScope(ScopeAdmin, s.handleCreateRegistry))
 	s.mux.HandleFunc("PATCH /v1/registries/{id}", s.requireScope(ScopeAdmin, s.handlePatchRegistry))
 	s.mux.HandleFunc("DELETE /v1/registries/{id}", s.requireScope(ScopeAdmin, s.handleDeleteRegistry))
-	// Backups v1 (П4 Admin/Backups, backups.go) — policy is secret-adjacent, so
-	// admin scope on every route, including the reads.
+	// Backups v1 (П2 Backups — its own screen, not a section of Admin;
+	// backups.go) — policy is secret-adjacent, so admin scope on every route,
+	// including the reads.
 	s.mux.HandleFunc("GET /v1/backups/settings", s.requireScope(ScopeAdmin, s.handleGetBackupSettings))
 	s.mux.HandleFunc("PATCH /v1/backups/settings", s.requireScope(ScopeAdmin, s.handlePatchBackupSettings))
 	s.mux.HandleFunc("GET /v1/backups/runs", s.requireScope(ScopeAdmin, s.handleListBackupRuns))
