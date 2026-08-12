@@ -1,0 +1,54 @@
+name: proto
+
+# Гейт «сгенерированное совпадает с исходником» (tracker #1110).
+#
+# `proto/agentlink/v1/*.pb.go` закоммичены (потребителям Go-модуля генератор не
+# нужен), но генерировались только руками: до этого workflow НИ ОДИН джоб не
+# запускал генерацию и не диффил её результат, так что разъезд между `.proto` и
+# `.pb.go` заметить было нечем.
+#
+# Тулчейн берётся из `proto/protogen.Dockerfile` — ТОГО ЖЕ, что документирован
+# в `proto/README.md` для человека. Пины (`buf 1.55.1`, `protoc-gen-go@v1.36.6`,
+# `protoc-gen-go-grpc@v1.5.1`) намеренно НЕ дублируются в этом YAML: второй
+# экземпляр пинов сам стал бы генератором ложного красного — бампнули
+# Dockerfile, а CI продолжает требовать вывод старого генератора и краснеет
+# ровно на легитимной регенерации.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'proto/**'
+      - 'infra/ci/proto-generated-check.sh'
+      - '.github/workflows/proto.yml'
+  pull_request:
+    paths:
+      - 'proto/**'
+      - 'infra/ci/proto-generated-check.sh'
+      - '.github/workflows/proto.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  generated-matches-source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build pinned protogen image
+        working-directory: proto
+        run: docker build -t birdman-protogen -f protogen.Dockerfile .
+
+      - name: Drop generated files, then regenerate
+        run: |
+          # Удаление ПЕРЕД генерацией — не уборка, а закрытие дыры «молча
+          # зелёный»: генерация, не произведшая ничего, но вышедшая нулём,
+          # обязана дать УДАЛЕНИЯ (красное), а не чистое дерево.
+          git ls-files -z -- 'proto/**/*.pb.go' | xargs -0 -r rm -f
+          # Ровно команда из proto/README.md, включая рабочий каталог.
+          cd proto
+          docker run --rm -v "$PWD":/workspace birdman-protogen generate
+
+      - name: Generated code must match source
+        run: ./infra/ci/proto-generated-check.sh
