@@ -1,0 +1,37 @@
+---
+# Рендер compose-проекта роли birdman_overlay — локально, без хоста и без
+# плейбука: играются настоящие шаблоны роли в настоящем jinja-окружении
+# ansible. Нужен сторожу маунтов (tracker #1089): пути маунтов собраны в
+# шаблоне из переменных, и разбирать j2 регулярками значило бы завести вторую
+# правду о раскладке.
+#
+# Запуск — tests/run.sh; сюда приезжают birdman_out (куда рендерить) и
+# birdman_overlay_mode (hub | spoke).
+#
+# birdman_overlay_ip дефолта не имеет НАМЕРЕННО (это пер-хостовая переменная
+# инвентаря), поэтому тест задаёт его сам — иначе шаблон не отрендерится вовсе.
+- name: Render birdman_overlay compose project
+  hosts: birdman-overlay-test
+  gather_facts: false
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    birdman_overlay_ip: "10.77.0.2"
+  tasks:
+    - name: Load role defaults
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../defaults/main.yml"
+
+    - name: Apply the instance mode under test
+      ansible.builtin.set_fact:
+        birdman_overlay_mode: "{{ birdman_overlay_test_mode | default('spoke') }}"
+        # У хаба overlay-IP свой: форвардеры healthcheck'а слушают именно его.
+        birdman_overlay_ip: >-
+          {{ '10.77.0.1' if (birdman_overlay_test_mode | default('spoke')) == 'hub'
+             else '10.77.0.2' }}
+
+    - name: Render the compose project
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../templates/compose.yml.j2"
+        dest: "{{ birdman_out }}/compose.yml"
+        mode: "0644"

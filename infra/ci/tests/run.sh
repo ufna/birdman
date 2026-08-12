@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
-# Tests for the Needs-Ansible gate (tracker #1062) — LOCAL only, no host is
-# touched and this repository is never mutated: every case builds a throwaway
-# git repository in a temp dir, commits into it, and runs the checker there.
+# Repo-wide infra gates — LOCAL only, no host is touched and this repository is
+# never mutated: every case builds a throwaway git repository in a temp dir,
+# commits into it, and runs the checker there.
 #
 #   ./infra/ci/tests/run.sh
+#
+# TWO gates live here, both about invariants that belong to no single role:
+#   1. the Needs-Ansible trailer (tracker #1062) — cases 1..15 below;
+#   2. coverage of the mount watchdog (tracker #1089) — the tail of this file:
+#      every compose template of every role must be checked by
+#      infra/ci/mounted_config_access.py from that role's own test suite.
 #
 # Why a gate needs tests of its own: a check that silently passes everything is
 # worse than no check, because the case then LOOKS covered — the same failure
@@ -13,6 +19,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 checker="$(dirname "$here")/needs-ansible-check.py"
+root="$(cd "$here/../../.." && pwd)"
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -214,6 +221,60 @@ else
 	echo "FAIL диапазон: должник в середине пуша проскочил (код $rc)"
 	echo "$out" | sed 's/^/      /'
 	fail=$((fail + 1))
+fi
+
+# ─── ГЕЙТ 2: покрытие сторожем маунтов (tracker #1089) ───────────────────────
+# Сторож «конфиг положен так, что контейнер его не прочитает» родился
+# роле-локальным (#1072) и смотрел ОДИН compose из четырёх; composes агента,
+# оверлея и мастера тем же критерием не проверял никто. Критерий с #1089 общий
+# (infra/ci/mounted_config_access.py), но зовёт его раннер КАЖДОЙ роли — рендер
+# роле-локальный по построению. Значит, новая роль с compose (или новый
+# compose-шаблон в старой) может тихо остаться без сторожа: тесты зелёные,
+# файла никто не смотрит. Это ровно тот отказ «выглядит покрытым», ради
+# которого весь этот ряд карточек, — поэтому здесь он громкий.
+#
+# Честная граница: гейт проверяет СЦЕПКУ (шаблон назван в tests/ роли, раннер
+# зовёт сторожа), а не то, что сторожу скормили именно этот рендер. Обмануть
+# его можно, но не молча — только дописав имя шаблона в tests/ руками.
+echo
+echo "── покрытие: у каждого compose-шаблона роли есть сторож маунтов"
+shopt -s nullglob
+templates=("$root"/infra/roles/*/templates/*compose*.j2)
+# else, а не проверка после цикла: под bash 3.2 (macOS у контрибьютора) `set -u`
+# роняет обход ПУСТОГО массива с «unbound variable», и отказ выглядел бы как
+# поломка теста вместо внятного «глоб перестал совпадать».
+if [ ${#templates[@]} -eq 0 ]; then
+	echo "FAIL покрытие: глоб infra/roles/*/templates/*compose*.j2 не совпал ни с чем — раскладка ролей уехала"
+	fail=$((fail + 1))
+else
+	for tpl in "${templates[@]}"; do
+		rel="${tpl#"$root"/}"
+		role_dir="${tpl%/templates/*}"
+		role_name="$(basename "$role_dir")"
+		base="$(basename "$tpl" .j2)"
+		runner="$role_dir/tests/run.sh"
+		if [ ! -x "$runner" ]; then
+			echo "FAIL покрытие: $rel — у роли $role_name нет исполняемого tests/run.sh"
+			fail=$((fail + 1))
+			continue
+		fi
+		if ! grep -qF 'mounted-config-access.sh' "$runner"; then
+			echo "FAIL покрытие: $rel — раннер роли $role_name не зовёт сторожа маунтов"
+			fail=$((fail + 1))
+			continue
+		fi
+		# Имя шаблона обязано встречаться в tests/ роли — иначе его никто не
+		# рендерит и сторожу нечего показывать. Граница слева не даёт
+		# `compose.yml` совпасть внутри `vmagent-compose.yml`: иначе один
+		# покрытый шаблон «покрывал» бы забытый соседний.
+		if ! grep -rqE "(^|[^-[:alnum:]._])${base//./\\.}" "$role_dir/tests/"; then
+			echo "FAIL покрытие: $rel — ни один файл tests/ роли $role_name его не называет: шаблон не рендерится, значит и не проверяется"
+			fail=$((fail + 1))
+			continue
+		fi
+		echo "ok   покрытие: $rel"
+		pass=$((pass + 1))
+	done
 fi
 
 echo

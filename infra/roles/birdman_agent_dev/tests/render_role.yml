@@ -41,6 +41,10 @@
         - vector.yaml
         - compose.yml
         - vmagent.yaml
+        # Нодовый vmagent (birdman_node_vmagent) — свой compose-проект. Он тут
+        # ради сторожа маунтов (#1089): его конфиг тоже монтируется в
+        # контейнер, а роль его тоже кладёт — значит, тот же критерий.
+        - vmagent-compose.yml
         - tmpfiles-birdman.conf
 
     - name: Render the per-node templates
@@ -58,4 +62,15 @@
       ansible.builtin.copy:
         content: "{{ birdman_instances | to_nice_json }}\n"
         dest: "{{ birdman_out }}/instances.json"
+        mode: "0644"
+
+    # То же самое, но КАК ПЕРЕМЕННЫЕ — для сторожа маунтов (#1089). Часть путей
+    # роль кладёт внутри пер-инстансного include (`{{ bmi.log_dir }}/servers`),
+    # и вывести их из defaults нельзя: их нормализует tasks/instances.yml.
+    # Копия этой нормализации в сторо́же была бы второй правдой о раскладке —
+    # поэтому ответ даёт сам ansible, ровно тот, что играл роль.
+    - name: Dump the derived variables the mount watchdog needs
+      ansible.builtin.copy:
+        content: "{{ {'birdman_instances': birdman_instances} | to_nice_json }}\n"
+        dest: "{{ birdman_out }}/vars.json"
         mode: "0644"

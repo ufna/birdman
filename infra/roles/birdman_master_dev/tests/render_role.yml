@@ -1,0 +1,25 @@
+---
+# Рендер compose-проекта роли birdman_master_dev — локально, без хоста и без
+# плейбука: играется настоящий шаблон роли в настоящем jinja-окружении ansible.
+# Нужен сторожу маунтов (tracker #1089).
+#
+# birdman_pg_password на боксе приезжает из файла, который роль генерирует при
+# первом прогоне (slurp в tasks/main.yml), — здесь он подставляется фиктивным:
+# на раскладку томов он не влияет никак, а без него шаблон не отрендерится.
+- name: Render birdman_master_dev compose project
+  hosts: birdman-master-test
+  gather_facts: false
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    birdman_pg_password: "test-render-only"
+  tasks:
+    - name: Load role defaults
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../defaults/main.yml"
+
+    - name: Render the compose project
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../templates/compose.yml.j2"
+        dest: "{{ birdman_out }}/compose.yml"
+        mode: "0644"

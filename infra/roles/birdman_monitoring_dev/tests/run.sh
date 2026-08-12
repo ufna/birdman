@@ -21,6 +21,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 role="$(dirname "$here")"
+repo="$(cd "$role/../../.." && pwd)"
 image="${BIRDMAN_PROMTOOL_IMAGE:-prom/prometheus:v3.10.0}"
 # Образ sink'а берётся из ПИНА РОЛИ, а не пишется тут ещё раз: второй пин рядом
 # с первым — это будущее расхождение, о котором никто не узнает.
@@ -84,24 +85,11 @@ check_and_test "$work/two" rules_multinode_test.yml
 # nobody: он падал на «permission denied» и стоял в краш-лупе с рождения, а
 # роль отрабатывала зелёно. Проверять это глазами больше не надо.
 #
-# PyYAML: у CI он приезжает вместе с ansible-core в тот же python3, но у
-# контрибьютора ansible может стоять из brew/pipx со своим интерпретатором —
-# тогда берём его. Иначе отказ выглядел бы как поломка теста, а не как
-# отсутствие зависимости.
-pick_python() {
-	local cand
-	for cand in "${BIRDMAN_PYTHON:-}" python3 python; do
-		[ -n "$cand" ] || continue
-		command -v "$cand" >/dev/null 2>&1 || continue
-		"$cand" -c 'import yaml' >/dev/null 2>&1 && { echo "$cand"; return 0; }
-	done
-	cand="$(head -1 "$(command -v ansible-playbook)" | sed 's|^#!||')"
-	[ -x "$cand" ] && "$cand" -c 'import yaml' >/dev/null 2>&1 && { echo "$cand"; return 0; }
-	return 1
-}
+# Сам сторож с #1089 общий (infra/ci/) и зовётся из раннера КАЖДОЙ роли,
+# кладущей монтируемые конфиги: критерий один на репозиторий, а рендер —
+# роле-локальный, настоящим ansible'ом выше по этому же файлу.
 echo "── mounted config access"
-py="$(pick_python)" || fail "не нашёл python с PyYAML (python3 -m pip install pyyaml)"
-"$py" "$here/mounted_config_access.py" "$work/one/compose.yml"
+"$repo/infra/ci/mounted-config-access.sh" --role "$role" "$work/one/compose.yml"
 
 # ── ротация alerts.log настоящим logrotate (tracker #1073) ───────────────────
 # У файла не было потолка вовсе: 498 МБ за два часа. Политику гоняет НАСТОЯЩИЙ
