@@ -392,3 +392,119 @@ func TestTokenErrors(t *testing.T) {
 		t.Fatal("empty token file must fail")
 	}
 }
+
+// --- несколько нод birdman на одном хосте (tracker #1065) ---
+//
+// Три ключа делают агента ужимаемым до ОДНОЙ ноды бокса, на котором их
+// несколько. Тесты держат ровно один инвариант на каждый: отсутствие ключа =
+// прежнее поведение односерверного бокса, присутствие = изоляция от соседа.
+
+// node_name — имя ноды в мастере. Пусто → бинарь берёт хостнейм ОС (это
+// делает main, не config: здесь важно, что пустое поле остаётся пустым и не
+// подменяется чем-то по дороге).
+func TestNodeName(t *testing.T) {
+	def, err := Load(write(t, `
+region: local
+limits_default: { cpu_millis: 1000, mem_mb: 512 }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def.NodeName != "" {
+		t.Fatalf("node_name без ключа = %q, ожидалось пусто (фоллбэк на хостнейм ОС — в main)", def.NodeName)
+	}
+
+	set, err := Load(write(t, `
+region: local
+limits_default: { cpu_millis: 1000, mem_mb: 512 }
+node_name: server-cqp-khl
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if set.NodeName != "server-cqp-khl" {
+		t.Fatalf("node_name = %q", set.NodeName)
+	}
+}
+
+// containerd_namespace — граница, за которой Restore()/image-GC агента видят
+// ТОЛЬКО свои объекты. Пусто = прежний общий namespace (runtime.Connect
+// подставляет DefaultNamespace); значение с разделителем — отказ на загрузке,
+// а не невнятная ошибка containerd на первом вызове.
+func TestContainerdNamespace(t *testing.T) {
+	def, err := Load(write(t, `
+region: local
+limits_default: { cpu_millis: 1000, mem_mb: 512 }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def.ContainerdNamespace != "" {
+		t.Fatalf("containerd_namespace без ключа = %q, ожидалось пусто", def.ContainerdNamespace)
+	}
+
+	set, err := Load(write(t, `
+region: local
+limits_default: { cpu_millis: 1000, mem_mb: 512 }
+containerd_namespace: birdman-khl
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if set.ContainerdNamespace != "birdman-khl" {
+		t.Fatalf("containerd_namespace = %q", set.ContainerdNamespace)
+	}
+
+	for _, bad := range []string{"birdman/khl", "birdman khl", "birdman\tkhl"} {
+		if _, err := Load(write(t, `
+region: local
+limits_default: { cpu_millis: 1000, mem_mb: 512 }
+containerd_namespace: `+"\""+bad+"\""+`
+`)); err == nil {
+			t.Fatalf("containerd_namespace %q принят, ожидался отказ", bad)
+		}
+	}
+}
+
+// qos_echo_addr: off — единственный способ сказать «эхо на этом хосте держит
+// СОСЕД». Отсутствие ключа обязано остаться :19999 (иначе тихо погас бы
+// ping-таргет всех существующих нод), а сентинел не должен зависеть от
+// регистра и пробелов — его пишет шаблон роли, а читают люди.
+func TestQoSEchoOff(t *testing.T) {
+	def, err := Load(write(t, `
+region: local
+limits_default: { cpu_millis: 1000, mem_mb: 512 }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def.QoSEchoAddr != ":19999" || !def.QoSEchoEnabled() {
+		t.Fatalf("дефолт qos_echo_addr = %q enabled=%v, ожидалось :19999/true", def.QoSEchoAddr, def.QoSEchoEnabled())
+	}
+
+	custom, err := Load(write(t, `
+region: local
+limits_default: { cpu_millis: 1000, mem_mb: 512 }
+qos_echo_addr: ":19998"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !custom.QoSEchoEnabled() {
+		t.Fatal("явный адрес эха выключил респондер")
+	}
+
+	for _, off := range []string{"off", "OFF", " off "} {
+		cfg, err := Load(write(t, `
+region: local
+limits_default: { cpu_millis: 1000, mem_mb: 512 }
+qos_echo_addr: `+"\""+off+"\""+`
+`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.QoSEchoEnabled() {
+			t.Fatalf("qos_echo_addr %q не выключил эхо", off)
+		}
+	}
+}

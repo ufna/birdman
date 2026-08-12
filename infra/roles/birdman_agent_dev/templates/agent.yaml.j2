@@ -1,23 +1,55 @@
 # {{ ansible_managed }}
 # Конфиг birdman-agent (docs/specs/agent.md §10, итерация 1).
-region: "{{ birdman_region }}"
-capacity_slots: {{ birdman_capacity_slots }}
-port_range: [{{ birdman_port_range[0] }}, {{ birdman_port_range[1] }}]
-limits_default: { cpu_millis: {{ birdman_limits_default.cpu_millis }}, mem_mb: {{ birdman_limits_default.mem_mb }} }
-log_dir: {{ birdman_log_dir }}
+#
+# tracker #1065: это конфиг ОДНОЙ ноды бокса. Ключи, отличающие ноду от соседа
+# (node_name, containerd_namespace, metrics_addr, qos_echo_addr), рендерятся
+# ТОЛЬКО когда отличаются от встроенного дефолта агента — поэтому у бокса с
+# одной нодой файл остаётся ровно прежним, байт-в-байт, и прогон по живой ноде
+# не даёт ни changed, ни рестарта.
+region: "{{ bmi.region }}"
+capacity_slots: {{ bmi.capacity_slots }}
+port_range: [{{ bmi.port_range[0] }}, {{ bmi.port_range[1] }}]
+limits_default: { cpu_millis: {{ bmi.limits_default.cpu_millis }}, mem_mb: {{ bmi.limits_default.mem_mb }} }
+log_dir: {{ bmi.log_dir }}
 # tracker #994: лог дедика ложится в {log_dir}/servers/{project}/{env}/{id}.log —
 # пару в стрим-лейблы VictoriaLogs берут ИЗ ПУТИ (vector.yaml той же роли),
 # и по ним master сужает запрос привязанного ключа. Включается ЗДЕСЬ, а не
 # дефолтом бинаря: агент апгрейдится сам, конфиг vector'а кладёт ansible —
 # включить раньше шиппера значило бы перестать шипповать логи вовсе.
 log_scope_dirs: {{ birdman_log_scope_dirs | default(true) | bool | lower }}
-data_dir: {{ birdman_data_dir }}
-{% if birdman_agent_containerd_root | default('') %}
+data_dir: {{ bmi.data_dir }}
+{% if bmi.node_name != ansible_facts.hostname %}
+# Имя ЭТОЙ ноды в мастере (колонка nodes.hostname). Пинуется, потому что на
+# боксе нод несколько, а агент по умолчанию отправил бы хостнейм ОС — и обе
+# строки в nodes получили бы одно имя, схлопнув пер-нодовые серии мастера в
+# один лейблсет (после чего /metrics мастера отдаёт ошибку сбора ЦЕЛИКОМ).
+node_name: {{ bmi.node_name }}
+{% endif %}
+{% if bmi.containerd_namespace != 'birdman' %}
+# Namespace containerd ЭТОЙ ноды. Restore() усыновляет любой контейнер
+# namespace'а с лейблом birdman/server-id, а image-GC чистит его образы
+# целиком — в общем namespace агенты забирали бы дедики и сносили образы друг
+# у друга.
+containerd_namespace: {{ bmi.containerd_namespace }}
+{% endif %}
+{% if bmi.metrics_port | int != 9101 %}
+# /metrics ЭТОЙ ноды (loopback; скрейпит vmagent бокса отдельным джобом).
+metrics_addr: "127.0.0.1:{{ bmi.metrics_port }}"
+{% endif %}
+{% if not bmi.qos_echo %}
+# UDP-эхо QoS на этом боксе держит ДРУГАЯ нода: респондер безадресный, RTT —
+# свойство сетевого пути до хоста, и GET /v1/qos всё равно отдаёт один таргет
+# на (регион, ip). Второй респондер на втором порту дал бы клиенту лишний
+# неразличимый по RTT таргет; попытка занять тот же порт просто не забиндилась
+# бы (гонка + вечная ошибка в логе у проигравшего).
+qos_echo_addr: "off"
+{% endif %}
+{% if bmi.containerd_root | default('') %}
 # dual-fs watermark (agent.md §6, environments v1 §6в): ФС образов, если это
 # ОТДЕЛЬНЫЙ маунт от data_dir. Пусто/не задано → строки нет, действует код-дефолт
 # агента /var/lib/containerd (watermark-GC и birdman_agent_containerd_disk_*
 # берут max двух statfs — data_dir и этой ФС).
-containerd_root: {{ birdman_agent_containerd_root }}
+containerd_root: {{ bmi.containerd_root }}
 {% endif %}
 {% if birdman_registry_legacy | default(true) %}
 registry_auth:
@@ -28,9 +60,9 @@ registry_auth:
 
 # master-линк (итерация 1): master на этой же тачке, только localhost.
 master_addr: "{{ birdman_master_addr }}"
-node_token_file: {{ birdman_node_token_file }}    # выдан POST /v1/nodes; файл 0600
+node_token_file: {{ bmi.token_file }}    # выдан POST /v1/nodes; файл 0600
 # mTLS agentlink v1 (дизайн §4): агент верифицирует цепочку master'а до
 # внутренней CA + ServerName birdman-master, обменивает node_token на клиентский
-# серт (Enroll). CA-серт кладёт ansible (GET /v1/ca). tls_cert_dir не задаём —
-# дефолт {data_dir}/tls корректен.
+# серт (Enroll). CA-серт кладёт ansible (GET /v1/ca) — он ОБЩИЙ на бокс.
+# tls_cert_dir не задаём — дефолт {data_dir}/tls корректен и уже пер-нодовый.
 tls_ca_file: {{ birdman_master_ca_file }}

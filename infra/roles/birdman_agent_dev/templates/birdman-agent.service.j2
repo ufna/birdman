@@ -1,13 +1,16 @@
+# {{ ansible_managed }}
 [Unit]
-Description=birdman node agent
-Documentation=file:///etc/birdman/agent.yaml
+Description=birdman node agent ({{ bmi.node_name }})
+Documentation=file://{{ bmi.config_file }}
 After=network-online.target containerd.service birdman-master.service
 Wants=network-online.target
 Requires=containerd.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/birdman-agent run --config /etc/birdman/agent.yaml
+# --socket-dir — каталог per-server liba-сокетов ЭТОЙ ноды: он бинд-маунтится
+# внутрь дедика, поэтому у каждой ноды бокса он свой (tracker #1065).
+ExecStart=/usr/local/bin/birdman-agent run --config {{ bmi.config_file }} --socket-dir {{ bmi.socket_dir }}
 # Restart=always (НЕ on-failure): self-upgrade (agent.md §7) выходит ЧИСТО
 # (exit 0) → systemd поднимает новый бинарь; при on-failure чистый выход не
 # рестартовал бы и агент остался бы лежать (нода в карантин, буфер провис).

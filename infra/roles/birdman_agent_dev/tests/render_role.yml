@@ -1,0 +1,61 @@
+---
+# Рендер роли birdman_agent_dev для БОКСА С НЕСКОЛЬКИМИ НОДАМИ (tracker #1065)
+# — локально, без хоста и без плейбука: играется настоящая нормализация
+# (tasks/instances.yml, вместе с её assert'ами) и настоящие шаблоны роли, в
+# настоящем jinja-окружении ansible. Проверять переписанной на другом языке
+# копией нельзя: половина смысла живёт в фильтрах ansible (regex_escape) и в
+# trim_blocks, то есть ровно в том, чем отличается рендер на боксе.
+#
+# Запуск — tests/run.sh; сюда приезжают birdman_out (куда рендерить) и
+# birdman_agent_instances (какой бокс играем).
+- name: Render birdman_agent_dev templates for a multi-node box
+  hosts: birdman-test-node
+  gather_facts: false
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    # Факты хоста роль берёт из ansible_facts.hostname (имя ноды по умолчанию)
+    # и inventory_hostname (лейбл node у легаси-ноды). Фиксируем оба: тест не
+    # должен зависеть от того, как называется ноутбук разработчика.
+    ansible_facts:
+      hostname: server-cqp
+    birdman_public_ip: "203.0.113.7"
+  tasks:
+    - name: Load role defaults
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../defaults/main.yml"
+
+    - name: Apply the box under test
+      ansible.builtin.set_fact:
+        birdman_agent_instances: "{{ birdman_box_instances }}"
+
+    - name: Resolve and validate the instances (the role's own task file)
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/instances.yml"
+
+    - name: Render the host-wide templates
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../templates/{{ item }}.j2"
+        dest: "{{ birdman_out }}/{{ item }}"
+        mode: "0644"
+      loop:
+        - vector.yaml
+        - compose.yml
+        - vmagent.yaml
+        - tmpfiles-birdman.conf
+
+    - name: Render the per-node templates
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../templates/{{ item.1 }}.j2"
+        dest: "{{ birdman_out }}/{{ item.1 }}--{{ item.0.name | default('default', true) }}"
+        mode: "0644"
+      loop: "{{ birdman_instances | product(['agent.yaml', 'birdman-agent.service']) | list }}"
+      loop_control:
+        label: "{{ item.1 }} ({{ item.0.node_name }})"
+      vars:
+        bmi: "{{ item.0 }}"
+
+    - name: Dump the resolved instances for the assertions of run.sh
+      ansible.builtin.copy:
+        content: "{{ birdman_instances | to_nice_json }}\n"
+        dest: "{{ birdman_out }}/instances.json"
+        mode: "0644"

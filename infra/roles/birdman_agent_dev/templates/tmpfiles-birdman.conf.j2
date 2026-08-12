@@ -1,0 +1,10 @@
+# {{ ansible_managed }}
+# birdman: рантайм-каталог per-server liba-сокетов (docs/specs/agent.md §3).
+# /run — tmpfs, каталог обязан пересоздаваться после ребута.
+#
+# По паре строк на КАЖДУЮ ноду бокса (tracker #1065): каталог сокетов
+# бинд-маунтится внутрь дедика, поэтому он пер-нодовый, а не хостовый.
+{% for i in birdman_instances %}
+d {{ i.run_dir }} 0755 root root -
+d {{ i.socket_dir }} 0755 root root -
+{% endfor %}

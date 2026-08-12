@@ -82,9 +82,15 @@ func runDaemon(args []string) int {
 		logf("config: %v", err)
 		return 1
 	}
-	hostname, err := os.Hostname()
-	if err != nil {
-		hostname = ""
+	// The node's name in master. node_name wins over the OS hostname because a
+	// box can carry several nodes and their master-side rows must not share a
+	// name (config.Config.NodeName); without a config value the behaviour is
+	// what it always was.
+	hostname := cfg.NodeName
+	if hostname == "" {
+		if h, err := os.Hostname(); err == nil {
+			hostname = h
+		}
 	}
 
 	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -94,7 +100,7 @@ func runDaemon(args []string) int {
 	ctx, cancel := context.WithCancel(sigCtx)
 	defer cancel()
 
-	client, err := runtime.Connect(*containerdAddr)
+	client, err := runtime.Connect(*containerdAddr, cfg.ContainerdNamespace)
 	if err != nil {
 		logf("%v", err)
 		return 1
@@ -184,15 +190,21 @@ func runDaemon(args []string) int {
 			logf("metrics: %v", err)
 		}
 	}()
-	go func() {
-		// QoS UDP echo (agent.md §8) — the public ping target of the node.
-		if err := qosecho.Serve(ctx, cfg.QoSEchoAddr, logf); err != nil {
-			logf("qos echo: %v", err)
-		}
-	}()
+	if cfg.QoSEchoEnabled() {
+		go func() {
+			// QoS UDP echo (agent.md §8) — the public ping target of the node.
+			if err := qosecho.Serve(ctx, cfg.QoSEchoAddr, logf); err != nil {
+				logf("qos echo: %v", err)
+			}
+		}()
+	} else {
+		// Said out loud once at boot: a silent absence here looks exactly like
+		// a responder that failed to bind, and the two need different fixes.
+		logf("qos echo: disabled (qos_echo_addr: %s) — another agent on this host owns the port", config.QoSEchoOff)
+	}
 
-	logf("birdman-agent %s: linking to master %s (region %s, %d slots)",
-		version, cfg.MasterAddr, cfg.Region, cfg.CapacitySlots)
+	logf("birdman-agent %s: node %s linking to master %s (region %s, %d slots, containerd ns %s)",
+		version, hostname, cfg.MasterAddr, cfg.Region, cfg.CapacitySlots, client.Namespace())
 	if err := lc.Run(ctx); err != nil {
 		logf("link: %v", err)
 		return 1

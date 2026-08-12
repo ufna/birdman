@@ -1,0 +1,91 @@
+# Правила скрейпа на боксе с НЕСКОЛЬКИМИ нодами birdman (tracker #1065),
+# поверх правил, отрендеренных для двух нод (birdman-agent + birdman-agent-khl).
+#
+# Пара #1061 закрывает две разные дыры, и обе обязаны закрываться ПОНОДОВО:
+# `up == 0` сторожит каждый таргет без перечисления и потому подхватывает
+# вторую ноду сам, а `absent_over_time` перечисляет джобы — и вот его-то и
+# может не хватить, если джоб новой ноды забыли добавить. Именно этот случай —
+# «нода есть, её метрик нет, и никто об этом не говорит» — здесь и проверяется.
+rule_files:
+  - rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  # Первая нода жива, вторая лежит: ScrapeTargetDown называет ИМЕННО её джоб.
+  # Если бы джобы нод не различались именами, оператор не узнал бы, какая из
+  # двух нод бокса замолчала.
+  - interval: 1m
+    name: 'ScrapeTargetDown называет ту ноду бокса, которая легла'
+    input_series:
+      - series: 'up{job="birdman-agent",instance="127.0.0.1:9101"}'
+        values: '1+0x10'
+      - series: 'up{job="birdman-agent-khl",instance="127.0.0.1:9111"}'
+        values: '0+0x10'
+      - series: 'up{job="birdman-master",instance="127.0.0.1:9102"}'
+        values: '1+0x10'
+      - series: 'up{job="node",instance="127.0.0.1:4027"}'
+        values: '1+0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: ScrapeTargetDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: birdman-agent-khl
+              instance: 127.0.0.1:9111
+            exp_annotations:
+              summary: 'ScrapeTargetDown: джоб birdman-agent-khl (127.0.0.1:9111) не скрейпится — алерты на его сериях молчат'
+              description: 'A scrape target has been unreachable (or answering with the wrong status) beyond the threshold, so NOTHING built on its series can fire — silence from those alerts means unknown, not healthy. Check the exporter and the target address in the vmagent scrape config; a code/role contract that moved (a port, a metrics path, a job name) is the usual cause on the dev stand, because the pull deployer ships the binary and does not run ansible (tracker #1061, #1062).'
+              description_ru: 'Скрейп-таргет дольше порога недоступен (или отвечает не тем статусом), поэтому НИ ОДНО правило на его сериях сработать не может — молчание этих алертов означает неизвестность, а не здоровье. Проверь экспортёр и адрес таргета в скрейп-конфиге vmagent; типичная причина на дев-стенде — уехавший контракт между кодом и ролью (порт, путь метрик, имя джоба): pull-деплоер везёт бинарь и ansible не гоняет (tracker #1061, #1062).'
+
+  # ГЛАВНЫЙ случай. Серии второй ноды нет ВОВСЕ — джоб выпилен из скрейпа,
+  # переименован, или её агент так и не поднял листенер метрик на своём порту.
+  # `up == 0` тут слеп по построению; поймать обязан absent_over_time, а он
+  # ловит только перечисленные джобы. Зелёный тест здесь = джоб новой ноды
+  # доехал из birdman_agent_instances до правила.
+  - interval: 1m
+    name: 'ScrapeTargetMissing видит пропажу таргета ВТОРОЙ ноды бокса'
+    input_series:
+      - series: 'up{job="birdman-agent",instance="127.0.0.1:9101"}'
+        values: '1+0x20'
+      - series: 'up{job="birdman-master",instance="127.0.0.1:9102"}'
+        values: '1+0x20'
+      - series: 'up{job="node",instance="127.0.0.1:4027"}'
+        values: '1+0x20'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: ScrapeTargetDown
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: ScrapeTargetMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: birdman-agent-khl
+            exp_annotations:
+              summary: 'ScrapeTargetMissing: серии up джоба birdman-agent-khl нет вовсе — таргет пропал из скрейпа'
+              description: 'A scrape job listed in the role has produced no `up` sample at all within the window — the target is gone rather than failing: the job was renamed or dropped from the vmagent config, or vmagent itself is down (in which case ScrapeTargetDown is dead too, and this rule is the only one left). Note the difference from ScrapeTargetDown: an unreachable target still yields up=0, so this alert means the series stopped existing, not that the scrape failed.'
+              description_ru: 'Джоб из скрейп-конфига роли за всё окно не дал НИ ОДНОГО сэмпла `up` — таргет не сбоит, а пропал: джоб переименован или выпилен из конфига vmagent, либо лёг сам vmagent (и тогда ScrapeTargetDown мёртв вместе с ним, а это правило — единственное, что осталось). Отличие от ScrapeTargetDown: недоступный таргет всё равно даёт up=0, поэтому здесь речь о том, что серия перестала существовать, а не о том, что скрейп упал.'
+
+  # Обе ноды бокса живы вместе с остальными таргетами — группа молчит целиком.
+  # Это тот случай, который покраснел бы, разъедься список джобов в scrape.yml
+  # и в правиле.
+  - interval: 1m
+    name: 'обе ноды бокса живы — группа birdman-scrape молчит целиком'
+    input_series:
+      - series: 'up{job="birdman-agent",instance="127.0.0.1:9101"}'
+        values: '1+0x20'
+      - series: 'up{job="birdman-agent-khl",instance="127.0.0.1:9111"}'
+        values: '1+0x20'
+      - series: 'up{job="birdman-master",instance="127.0.0.1:9102"}'
+        values: '1+0x20'
+      - series: 'up{job="node",instance="127.0.0.1:4027"}'
+        values: '1+0x20'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: ScrapeTargetDown
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: ScrapeTargetMissing
+        exp_alerts: []

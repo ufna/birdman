@@ -1,0 +1,30 @@
+---
+# Джобы агентов выводятся из списка нод бокса (tracker #1065) и КЛАДУТСЯ В
+# НАЧАЛО birdman_scrape_jobs — того самого списка, из которого рендерятся и
+# scrape.yml, и цепочка absent_over_time в ScrapeTargetMissing (#1061).
+# Поэтому новая нода бокса получает и скрейп, и оба сторожевых правила разом,
+# без единой правки мониторинг-роли: разъехаться им нечем.
+#
+# Отдельным файлом — чтобы тесты роли (tests/render_rules.yml) играли ЭТУ
+# деривацию, а не её переписанную копию: копия и есть тот самый дрейф «код
+# уехал, роль осталась», ради которого заведены ScrapeTargetDown/Missing.
+- name: Derive a scrape job per birdman node of this box
+  ansible.builtin.set_fact:
+    birdman_scrape_jobs: "{{ [job] + birdman_scrape_jobs }}"
+  loop: "{{ birdman_agent_instances }}"
+  loop_control:
+    loop_var: inst
+    label: "{{ job.job_name }} → {{ job.targets | join(', ') }}"
+  vars:
+    sfx: "{{ ('-' ~ inst.name) if inst.name | default('') else '' }}"
+    job:
+      job_name: "birdman-agent{{ sfx }}"
+      metrics_path: /metrics
+      targets: ["127.0.0.1:{{ inst.metrics_port | default(birdman_agent_metrics_port) }}"]
+      labels:
+        # Легаси-нода бокса держит исторический лейбл (имя хоста в инвентаре) —
+        # смена лейбла разорвала бы непрерывность рядов и алертов на них.
+        # Именованная нода называется своим именем: `node` в этом стеке значит
+        # ноду birdman, а не бокс.
+        node: "{{ inst.node_name | default(inventory_hostname if not inst.name | default('') else ansible_facts.hostname ~ sfx) }}"
+        region: "{{ inst.region | default(birdman_region) }}"

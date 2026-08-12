@@ -14,6 +14,19 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// QoSEchoOff is the qos_echo_addr sentinel that disables the UDP echo
+// responder of this agent (see Config.QoSEchoAddr). A word rather than an
+// empty string on purpose: "" in a rendered config reads as "nobody filled
+// this in" and would silently mean the opposite of what an operator intends,
+// whereas `qos_echo_addr: off` states the decision and can never be a valid
+// listen address.
+const QoSEchoOff = "off"
+
+// QoSEchoEnabled reports whether this agent should serve the UDP echo.
+func (c *Config) QoSEchoEnabled() bool {
+	return !strings.EqualFold(strings.TrimSpace(c.QoSEchoAddr), QoSEchoOff)
+}
+
 // Limits are per-server cgroup limits.
 type Limits struct {
 	CPUMillis int `yaml:"cpu_millis"`
@@ -62,6 +75,34 @@ type Config struct {
 	LimitsDefault Limits `yaml:"limits_default"`
 	LogDir        string `yaml:"log_dir"`
 	DataDir       string `yaml:"data_dir"`
+	// NodeName is the name this agent reports as its node (Hello.hostname,
+	// which master writes into nodes.hostname). Empty → the OS hostname, which
+	// is what a single-agent box has always sent.
+	//
+	// It exists because a box can carry SEVERAL nodes (tracker #1065: one
+	// powerful dev server hosting a node per project — the nodes differ in
+	// config and share one IP). Their master-side rows must NOT share a name:
+	// master keys its per-node gauges on hostname
+	// (birdman_node_heartbeat_age_seconds{node,region},
+	// birdman_node_cert_expiry_timestamp_seconds{node}), and two rows with the
+	// same value collide into one labelset — the whole /metrics scrape of the
+	// master then fails, not just those series. The registration REST call can
+	// pass a distinct hostname, but HelloSync overwrites the column from this
+	// field on every reconnect, so the name has to live here too.
+	NodeName string `yaml:"node_name"`
+	// ContainerdNamespace scopes EVERYTHING this agent owns inside containerd:
+	// its dedik containers, their snapshots and its image store. Empty →
+	// runtime.DefaultNamespace ("birdman"), the single-agent default.
+	//
+	// Load-bearing for several agents on one box (#1065), because both halves
+	// of the agent's recovery/GC machinery are namespace-wide, not
+	// agent-scoped: Restore() adopts every container carrying the
+	// birdman/server-id label, so a restarting agent would take over its
+	// neighbour's dedics and report them to ITS master node; and the image GC
+	// lists/deletes images of the whole namespace, so one agent's collection
+	// could evict the active image of the other. Distinct namespaces make both
+	// operations see only their own objects.
+	ContainerdNamespace string `yaml:"containerd_namespace"`
 	// ContainerdRoot is the containerd data root where images live (dual-fs
 	// watermark, environments v1 §6в). Defaults to /var/lib/containerd. When it
 	// is a separate mount from data_dir, the image GC watermark and the
@@ -99,6 +140,19 @@ type Config struct {
 	// localhost: the vmagent of the same node is the only consumer.
 	MetricsAddr string `yaml:"metrics_addr"`
 	// QoSEchoAddr is the public UDP echo for client QoS probes (agent.md §8).
+	// Empty → the spec default :19999; the literal QoSEchoOff turns the
+	// responder OFF for this agent.
+	//
+	// Off is not a downgrade, it is how a multi-node box stays correct
+	// (#1065): the echo is an address-less byte mirror — it carries no node
+	// and no project identity, and the round-trip it measures is a property of
+	// the HOST's network path, identical for every node on the box. So exactly
+	// one agent per host owns the port; a second responder on a second port
+	// would hand the client a target indistinguishable by RTT from the first
+	// and break the "one externally-open UDP port per node" invariant
+	// (ops.md §4). Binding it twice is not an option either: the second bind
+	// simply fails, which agent would win is a race, and the loser logs an
+	// error on every boot forever.
 	QoSEchoAddr string `yaml:"qos_echo_addr"`
 	// LogScopeDirs makes the agent write a dedik's log into
 	// {log_dir}/servers/{project}/{env}/{id}.log instead of the flat
@@ -277,6 +331,13 @@ func (c *Config) validate() error {
 	// as the docker.io host reject above (design §4/§Безопасность).
 	if c.TLSInsecure && c.MasterAddr != "" && !masterAddrIsLoopback(c.MasterAddr) {
 		return fmt.Errorf("tls_insecure: true is only allowed with a loopback master_addr (dev); master_addr %q is not loopback — deliver a CA to tls_ca_file and drop tls_insecure for mTLS", c.MasterAddr)
+	}
+	// A containerd namespace is a bare identifier; a value with a separator or
+	// whitespace in it would be rejected by containerd deep inside the first
+	// call, long after the agent reported itself healthy. Fail at load instead
+	// — same fail-closed stance as the two checks above.
+	if ns := c.ContainerdNamespace; ns != "" && strings.ContainsAny(ns, "/\\ \t\n") {
+		return fmt.Errorf("containerd_namespace %q must be a bare identifier (no separators or whitespace)", ns)
 	}
 	if c.LogMaxSizeMB < 0 || c.LogRetentionDays < 0 {
 		return fmt.Errorf("log_max_size_mb and log_retention_days must be positive")

@@ -33,8 +33,15 @@ import (
 const (
 	// DefaultAddress is the containerd socket (docs/specs/agent.md).
 	DefaultAddress = "/run/containerd/containerd.sock"
-	// Namespace is the containerd namespace owned by birdman.
-	Namespace = "birdman"
+	// DefaultNamespace is the containerd namespace of a single-agent box —
+	// and the value every agent used before agent.yaml gained
+	// containerd_namespace (#1065).
+	DefaultNamespace = "birdman"
+	// Namespace is the historical name of DefaultNamespace.
+	//
+	// Deprecated: an agent's namespace is per-agent configuration now; read it
+	// off the Client (Client.Namespace) instead of assuming this constant.
+	Namespace = DefaultNamespace
 	// ContainerSocketDir is the in-container directory that receives the
 	// per-server socket directory bind mount (ro dir, rw socket — agent.md
 	// §3; the directory, not the socket file, is mounted so that an agent
@@ -110,19 +117,34 @@ func HostFromRef(ref string) (host string, ok bool) {
 	return strings.ToLower(reference.Domain(named)), true
 }
 
-// Client is a containerd client bound to the birdman namespace.
+// Client is a containerd client bound to one birdman namespace.
 type Client struct {
-	c *containerd.Client
+	c  *containerd.Client
+	ns string
 }
 
-// Connect dials the containerd socket.
-func Connect(address string) (*Client, error) {
-	c, err := containerd.New(address, containerd.WithDefaultNamespace(Namespace))
-	if err != nil {
-		return nil, fmt.Errorf("connect containerd at %s: %w", address, err)
+// Connect dials the containerd socket and binds the client to namespace ns
+// (empty → DefaultNamespace).
+//
+// The namespace is a per-AGENT parameter, not a per-host constant, because a
+// box can carry several agents (tracker #1065). Everything this package does
+// wholesale — Restore() adopting containers by label, Images()/UsedImageRefs()
+// feeding the image GC — is scoped to the namespace and to nothing finer, so
+// two agents sharing one namespace would adopt and collect each other's
+// objects.
+func Connect(address, ns string) (*Client, error) {
+	if ns == "" {
+		ns = DefaultNamespace
 	}
-	return &Client{c: c}, nil
+	c, err := containerd.New(address, containerd.WithDefaultNamespace(ns))
+	if err != nil {
+		return nil, fmt.Errorf("connect containerd at %s (namespace %s): %w", address, ns, err)
+	}
+	return &Client{c: c, ns: ns}, nil
 }
+
+// Namespace reports the containerd namespace this client is bound to.
+func (c *Client) Namespace() string { return c.ns }
 
 // Close releases the containerd connection.
 func (c *Client) Close() error { return c.c.Close() }

@@ -1,3 +1,5 @@
+{% set log_roots = birdman_instances | map(attribute='log_dir') | map('regex_escape') | list %}
+{% set root_re = log_roots[0] if log_roots | length == 1 else '(?:' ~ (log_roots | join('|')) ~ ')' %}
 # {{ ansible_managed }}
 # Шиппер логов дедиков → VictoriaLogs (централизованные логи; спека docs/specs/ops.md).
 data_dir: /vector-data-dir
@@ -6,21 +8,30 @@ api:
 sources:
   dedik_logs:
     type: file
+    # По паре глобов на КАЖДУЮ ноду бокса (tracker #1065): у каждой свой
+    # log_dir, потому что фоновая уборка агента (logrot) архивирует всё, чего
+    # нет в её списке живых серверов, и общий каталог означал бы порчу живых
+    # логов соседа. Шиппер при этом один — он читает объединение.
+    #
+    # Размеченный путь (tracker #994): агент кладёт вывод дедика в
+    # {project}/{env}/{server_id}.log, и пара едет в стрим-лейблы. Пара
+    # приходит с ДЕДИКОМ (master → StartServer.env), а не с хостом: env ноды
+    # меняется через API без перерендера этого файла, и инвариант I6
+    # запрещает выводить окружение истории из текущей строки ноды.
+    # Плоский путь — дедики, запущенные ДО разметки (и run-once). Их строки
+    # шиппятся по-прежнему (логи флота не теряем), но без project/env, а
+    # значит привязанному ключу master их не отдаёт — они доживают ретенцию.
     include:
-      # Размеченный путь (tracker #994): агент кладёт вывод дедика в
-      # {project}/{env}/{server_id}.log, и пара едет в стрим-лейблы. Пара
-      # приходит с ДЕДИКОМ (master → StartServer.env), а не с хостом: env ноды
-      # меняется через API без перерендера этого файла, и инвариант I6
-      # запрещает выводить окружение истории из текущей строки ноды.
-      - "/var/log/birdman/servers/*/*/*.log"
-      # Плоский путь — дедики, запущенные ДО разметки (и run-once). Их строки
-      # шиппятся по-прежнему (логи флота не теряем), но без project/env, а
-      # значит привязанному ключу master их не отдаёт — они доживают ретенцию.
-      - "/var/log/birdman/servers/*.log"
+{% for i in birdman_instances %}
+      - "{{ i.log_dir }}/servers/*/*/*.log"
+      - "{{ i.log_dir }}/servers/*.log"
+{% endfor %}
     # .log.1 не читаем: его содержимое уже прочитано live до ротации
     exclude:
-      - "/var/log/birdman/servers/*/*/*.log.1"
-      - "/var/log/birdman/servers/*.log.1"
+{% for i in birdman_instances %}
+      - "{{ i.log_dir }}/servers/*/*/*.log.1"
+      - "{{ i.log_dir }}/servers/*.log.1"
+{% endfor %}
     read_from: beginning
     ignore_older_secs: 172800   # при первом старте не заливать древность
 transforms:
@@ -29,10 +40,12 @@ transforms:
     inputs: [dedik_logs]
     source: |
       # Разбор ПОЛНОГО пути, а не хвоста: якорь ^ плюс корень целиком не дают
-      # плоскому /var/log/birdman/servers/{id}.log распасться на пару
+      # плоскому {log_dir}/servers/{id}.log распасться на пару
       # project=birdman, env=servers — оба слова валидные слаги, и такая пара
       # отдала бы нелейблованную историю ключу, привязанному к ней.
-      parsed, err = parse_regex(string!(.file), r'^/var/log/birdman/servers/(?:(?P<project>[^/]+)/(?P<env>[^/]+)/)?(?P<id>[^/]+)\.log$')
+      # Корней столько же, сколько нод у бокса (#1065), и каждый экранирован:
+      # альтернатива перечисляет ИМЕННО их, а не «любой каталог в /var/log».
+      parsed, err = parse_regex(string!(.file), r'^{{ root_re }}/servers/(?:(?P<project>[^/]+)/(?P<env>[^/]+)/)?(?P<id>[^/]+)\.log$')
       .server_id = if err == null { parsed.id } else { "unknown" }
       project = if err == null { string(parsed.project) ?? "" } else { "" }
       env = if err == null { string(parsed.env) ?? "" } else { "" }
@@ -45,6 +58,13 @@ transforms:
       .env = if ok { env } else { "" }
       .node = "{{ inventory_hostname }}"
       .region = "{{ birdman_region }}"
+{% for i in birdman_instances if i.name %}
+      # Строка из log_dir именованной ноды принадлежит ЕЙ, а не боксу: лейбл
+      # node в этом стеке значит ноду birdman, и на многонодовом хосте имя
+      # инвентаря было бы про неё враньём. Регион — оттуда же: он свойство
+      # НОДЫ, и ноды одного бокса вольны стоять в разных регионах флота.
+      if starts_with(string!(.file), "{{ i.log_dir }}/servers/") { .node = "{{ i.node_name }}"; .region = "{{ i.region }}" }
+{% endfor %}
 sinks:
   victorialogs:
     type: loki

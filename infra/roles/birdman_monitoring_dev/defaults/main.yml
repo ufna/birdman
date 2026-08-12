@@ -38,13 +38,15 @@ birdman_eval_interval: 5s
 
 # Цели скрейпа — список job'ов (расширяемо: добавить ноду = добавить target).
 # vmagent идёт в host-network, поэтому это 127.0.0.1 самого бокса.
+#
+# ДЖОБЫ АГЕНТОВ СЮДА НЕ ПИШУТСЯ РУКАМИ (tracker #1065). На боксе может быть
+# несколько нод birdman, у каждой свой порт /metrics, и роль выводит по джобу
+# на ноду из ТОГО ЖЕ birdman_agent_instances, из которого агентская роль
+# раскладывает сами ноды (tasks/monitoring.yml, «Derive a scrape job per
+# birdman node of this box»). Один источник правды: забыть джоб для новой ноды
+# нечем, а забытый джоб — это молчащие DiskHigh/TickDegraded, выглядящие как
+# здоровье. Этот список — всё ОСТАЛЬНОЕ; свои джобы оператор добавляет сюда.
 birdman_scrape_jobs:
-  - job_name: birdman-agent
-    metrics_path: /metrics
-    targets: ["127.0.0.1:9101"]
-    # node/region — единообразие с нодовыми vmagent'ами (5.2): правила и
-    # дашборды различают ноды по одному лейблу.
-    labels: { node: birdman-dev, region: dev }
   # Master отдаёт реестр на СВОЁМ листенере, не на порту API (tracker #1003,
   # birdman_master_metrics_addr роли birdman_master_dev).
   - job_name: birdman-master
@@ -53,6 +55,19 @@ birdman_scrape_jobs:
   - job_name: node
     metrics_path: /metrics
     targets: ["127.0.0.1:4027"]        # ЧУЖОЙ prod node_exporter — read-only
+
+# --- ноды birdman этого бокса (зеркало контракта роли birdman_agent_dev) ---
+# Список тот же, что читает агентская роль; здесь нужны только имя, порт
+# метрик и регион. Дефолты обязаны совпадать с её дефолтами — иначе джоб
+# укажет не на тот порт, а это ровно тот класс расхождения «код уехал, роль
+# осталась», ради которого заведены ScrapeTargetDown/Missing (#1061).
+birdman_agent_instances:
+  - {}
+birdman_agent_metrics_port: 9101
+# node/region — единообразие с нодовыми vmagent'ами (5.2): правила и дашборды
+# различают ноды по одному лейблу. Легаси-нода бокса сохраняет исторический
+# лейбл node=<имя в инвентаре>, чтобы не рвать непрерывность рядов.
+birdman_region: dev
 
 # vmagent host-network → пишет в опубликованный на хосте порт VM.
 birdman_vm_remote_write_url: "http://127.0.0.1:8428/api/v1/write"

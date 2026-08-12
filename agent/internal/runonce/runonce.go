@@ -122,7 +122,7 @@ func Run(ctx context.Context, opts Options) int {
 	ev.printf("server %s image=%s port=%d state=%s log=%s socket=%s",
 		serverID, opts.ImageRef, port, machine.Current(), logPath, sockPath)
 
-	client, err := runtime.Connect(opts.ContainerdAddress)
+	client, err := runtime.Connect(opts.ContainerdAddress, cfg.ContainerdNamespace)
 	if err != nil {
 		transition(lifecycle.StateFailed, "containerd connect failed")
 		diag.Printf("%v", err)

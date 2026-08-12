@@ -1,0 +1,104 @@
+# Юнит-тесты того же VRL-трансформа для БОКСА С НЕСКОЛЬКИМИ НОДАМИ
+# (tracker #1065). Гоняются поверх конфига, отрендеренного для двух нод —
+# /var/log/birdman (легаси) и /var/log/birdman-khl.
+#
+# Зачем отдельный файл: с несколькими нодами корень в регексе перестал быть
+# литералом и стал ПЕРЕЧИСЛЕНИЕМ экранированных корней. Это ровно то место, где
+# правдоподобная правка («да пусть будет /var/log/[^/]+») тихо расширила бы
+# границу доступа: чужой каталог начал бы чеканить пару (project, env), по
+# которой master отдаёт логи привязанному ключу. Все случаи ниже — про то, что
+# перечисление осталось перечислением.
+tests:
+  # 1. Вторая нода бокса: пара разбирается из ЕЁ корня так же, как из первого.
+  - name: "second node's log root — the owner pair reaches the stream labels"
+    inputs:
+      - insert_at: enrich
+        type: log
+        log_fields:
+          file: "/var/log/birdman-khl/servers/khl-legends/dev/srv-k1.log"
+          message: "dedik line"
+    outputs:
+      - extract_from: enrich
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.project, "khl-legends")
+              assert_eq!(.env, "dev")
+              assert_eq!(.server_id, "srv-k1")
+
+  # 2. Первый корень не сломался от появления альтернативы. Порядок ветвей в
+  # регексе — не случайность: /var/log/birdman является ПРЕФИКСОМ
+  # /var/log/birdman-khl, и движок обязан выбрать ту ветвь, за которой реально
+  # идёт /servers/, а не первую подходящую по префиксу.
+  - name: "first node's log root still parses next to a prefix-sharing sibling"
+    inputs:
+      - insert_at: enrich
+        type: log
+        log_fields:
+          file: "/var/log/birdman/servers/game/prod/srv-g1.log"
+          message: "dedik line"
+    outputs:
+      - extract_from: enrich
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.project, "game")
+              assert_eq!(.env, "prod")
+              assert_eq!(.server_id, "srv-g1")
+
+  # 3. ГЛАВНОЕ. Корень, которого у бокса НЕТ, пары не даёт. Это тот же гвоздь,
+  # что якорь `^` в #1014, только теперь с другой стороны: перечисление корней
+  # обязано перечислять именно ноды хоста. Каталог-двойник с валидными слагами
+  # внутри — достижимая пара, и ключ, привязанный к ней, получил бы чужие
+  # строки.
+  - name: "look-alike root that is not a node of this box — no pair"
+    inputs:
+      - insert_at: enrich
+        type: log
+        log_fields:
+          file: "/var/log/birdman-evil/servers/game/prod/srv-x1.log"
+          message: "not ours"
+    outputs:
+      - extract_from: enrich
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.project, "")
+              assert_eq!(.env, "")
+              assert_eq!(.server_id, "unknown")
+
+  # 4. Лейблы ноды берутся из ТОГО ЖЕ корня, из которого пришла строка: на
+  # многонодовом боксе node/region — свойство ноды, а не хоста, иначе
+  # DiskHigh/TickDegraded второй ноды указывали бы на первую.
+  - name: "node/region labels follow the log root, not the box"
+    inputs:
+      - insert_at: enrich
+        type: log
+        log_fields:
+          file: "/var/log/birdman-khl/servers/khl-legends/dev/srv-k2.log"
+          message: "line"
+    outputs:
+      - extract_from: enrich
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.node, "server-cqp-khl")
+              assert_eq!(.region, "dev")
+
+  # 5. Плоский (доразметочный) путь второй ноды ведёт себя как у первой: строки
+  # шиппятся, пары нет.
+  - name: "second node's flat legacy path — shipped, but with no pair"
+    inputs:
+      - insert_at: enrich
+        type: log
+        log_fields:
+          file: "/var/log/birdman-khl/servers/legacy.log"
+          message: "old dedik line"
+    outputs:
+      - extract_from: enrich
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.project, "")
+              assert_eq!(.env, "")
+              assert_eq!(.server_id, "legacy")

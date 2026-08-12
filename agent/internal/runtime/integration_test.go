@@ -36,11 +36,16 @@ func TestServerRoundtrip(t *testing.T) {
 		ref = "docker.io/library/busybox:1.36"
 	}
 
-	client, err := Connect(addr)
+	// Пустой namespace = DefaultNamespace: тест гоняет ОДИН агент, и это тот
+	// же путь, по которому идёт бокс с одной нодой (#1065).
+	client, err := Connect(addr, "")
 	if err != nil {
 		t.Fatalf("containerd daemon required for -tags integration: %v", err)
 	}
 	defer client.Close()
+	if client.Namespace() != DefaultNamespace {
+		t.Fatalf("namespace = %q, want %q", client.Namespace(), DefaultNamespace)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()

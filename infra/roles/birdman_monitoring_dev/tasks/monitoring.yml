@@ -2,6 +2,11 @@
 # Стек наблюдаемости birdman: docker compose (проект birdman-monitoring).
 # Конфиги шаблонятся в /etc/birdman/monitoring и монтируются ro в контейнеры.
 
+# ДО обоих рендеров (scrape.yml и rules.yml ниже) — они читают уже дополненный
+# birdman_scrape_jobs.
+- name: Derive the scrape jobs of this box's birdman nodes
+  ansible.builtin.include_tasks: scrape_jobs.yml
+
 - name: Create monitoring directories
   ansible.builtin.file:
     path: "{{ item }}"

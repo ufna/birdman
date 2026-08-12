@@ -1,0 +1,122 @@
+---
+# Нормализация списка нод бокса (tracker #1065) + проверки, которые обязаны
+# упасть ДО того, как второй агент затрёт первому порт, каталог или юнит.
+#
+# Один инстанс = одна нода birdman. Пустое имя — легаси-инстанс: все пути,
+# порты и имя юнита у него ровно те же, что были до параметризации, поэтому
+# прогон по живой ноде ничего не переименовывает.
+
+# Явный сброс: аккумулирующий set_fact ниже переживает роль, и повторное
+# включение роли в одном прогоне удвоило бы список.
+- name: Reset the resolved instance list
+  ansible.builtin.set_fact:
+    birdman_instances: []
+
+- name: Normalize the box's birdman node instances
+  ansible.builtin.set_fact:
+    birdman_instances: "{{ birdman_instances + [resolved] }}"
+  loop: "{{ birdman_agent_instances }}"
+  loop_control:
+    loop_var: inst
+    index_var: inst_idx
+    label: "{{ inst.name | default('(default)') }}"
+  vars:
+    # Суффикс — единственный источник различий в путях/именах. Пустое имя →
+    # пустой суффикс → сегодняшние имена байт-в-байт.
+    name: "{{ inst.name | default('') }}"
+    sfx: "{{ ('-' ~ inst.name) if inst.name | default('') else '' }}"
+    resolved:
+      name: "{{ name }}"
+      suffix: "{{ sfx }}"
+      # Имя ноды в мастере (колонка nodes.hostname). Уникальность здесь —
+      # НЕ косметика: master строит пер-нодовые gauge'и на этом значении
+      # (birdman_node_heartbeat_age_seconds{node,region},
+      # birdman_node_cert_expiry_timestamp_seconds{node}), и две строки с
+      # одинаковым именем схлопываются в один лейблсет, после чего ВЕСЬ
+      # /metrics мастера отдаёт ошибку сбора, а не только эти серии.
+      node_name: "{{ inst.node_name | default(ansible_facts.hostname ~ sfx) }}"
+      unit: "birdman-agent{{ sfx }}"
+      config_file: "{{ inst.config_file | default(birdman_agent_config_file if not name else '/etc/birdman/agent' ~ sfx ~ '.yaml') }}"
+      token_file: "{{ inst.token_file | default(birdman_node_token_file if not name else '/etc/birdman/node' ~ sfx ~ '.token') }}"
+      data_dir: "{{ inst.data_dir | default(birdman_data_dir ~ sfx) }}"
+      # Свой log_dir у каждой ноды ОБЯЗАТЕЛЕН, а не желателен: фоновая уборка
+      # агента (logrot.SweepOnce) обходит всё дерево {log_dir}/servers и гзипует
+      # любой .log, которого нет в её списке живых серверов. На общем каталоге
+      # это значило бы, что сосед по боксу архивирует ЖИВЫЕ логи чужих дедиков
+      # (шим продолжает писать в удалённый инод — строки исчезают молча).
+      log_dir: "{{ inst.log_dir | default(birdman_log_dir ~ sfx) }}"
+      run_dir: "/run/birdman{{ sfx }}"
+      socket_dir: "/run/birdman{{ sfx }}/servers"
+      # Граница containerd. Тоже обязательна: Restore() усыновляет ЛЮБОЙ
+      # контейнер namespace'а с лейблом birdman/server-id, поэтому в общем
+      # namespace перезапустившийся агент забрал бы дедики соседа и отчитался
+      # бы ими за СВОЮ ноду; а image-GC чистит образы namespace'а целиком и
+      # мог бы снести активный образ соседа.
+      containerd_namespace: "{{ inst.containerd_namespace | default('birdman' ~ sfx) }}"
+      metrics_port: "{{ inst.metrics_port | default(birdman_agent_metrics_port) | int }}"
+      port_range: "{{ inst.port_range | default(birdman_port_range) }}"
+      # Владелец общего на хост UDP-эха — по умолчанию первый инстанс списка.
+      qos_echo: "{{ inst.qos_echo | default(inst_idx == 0) | bool }}"
+      project: "{{ inst.project | default(birdman_project) }}"
+      region: "{{ inst.region | default(birdman_region) }}"
+      capacity_slots: "{{ inst.capacity_slots | default(birdman_capacity_slots) | int }}"
+      limits_default: "{{ inst.limits_default | default(birdman_limits_default) }}"
+      containerd_root: "{{ inst.containerd_root | default(birdman_agent_containerd_root) }}"
+      ufw_comment: "{{ inst.ufw_comment | default(birdman_ufw_comment ~ sfx) }}"
+
+# Проверки — по одному внятному сообщению на вид столкновения. Все они про одно
+# и то же: второй агент на боксе обязан быть ОТДЕЛЬНОЙ нодой, а не тем же самым
+# агентом с другим конфигом. Молчаливое пересечение здесь стоит дороже отказа:
+# общий порт метрик показывает одну ноду дважды, общий диапазон портов дедиков
+# роняет запуск у соседа, общее имя ноды гасит /metrics мастера целиком.
+- name: Assert the box's node instances do not collide
+  ansible.builtin.assert:
+    that:
+      - birdman_instances | length > 0
+      - birdman_instances | map(attribute='name') | list | unique | length == birdman_instances | length
+      - birdman_instances | map(attribute='node_name') | list | unique | length == birdman_instances | length
+      - birdman_instances | map(attribute='metrics_port') | list | unique | length == birdman_instances | length
+      - birdman_instances | map(attribute='data_dir') | list | unique | length == birdman_instances | length
+      - birdman_instances | map(attribute='log_dir') | list | unique | length == birdman_instances | length
+      - birdman_instances | map(attribute='token_file') | list | unique | length == birdman_instances | length
+      - birdman_instances | map(attribute='config_file') | list | unique | length == birdman_instances | length
+      - birdman_instances | map(attribute='containerd_namespace') | list | unique | length == birdman_instances | length
+      - birdman_instances | selectattr('qos_echo') | list | length == 1
+    fail_msg: >-
+      Ноды бокса в birdman_agent_instances пересекаются. Имя, node_name,
+      metrics_port, data_dir, log_dir, config_file, token_file и
+      containerd_namespace обязаны быть РАЗНЫМИ у каждой, а владелец QoS-эха
+      (qos_echo) — ровно один на хост. Сейчас:
+      {{ birdman_instances | map(attribute='name') | list }} /
+      node_name {{ birdman_instances | map(attribute='node_name') | list }} /
+      metrics {{ birdman_instances | map(attribute='metrics_port') | list }} /
+      data {{ birdman_instances | map(attribute='data_dir') | list }} /
+      log {{ birdman_instances | map(attribute='log_dir') | list }} /
+      ns {{ birdman_instances | map(attribute='containerd_namespace') | list }} /
+      qos_echo у {{ birdman_instances | selectattr('qos_echo') | map(attribute='name') | list }}.
+    success_msg: >-
+      Ноды бокса: {{ birdman_instances | map(attribute='node_name') | list | join(', ') }}
+      (QoS-эхо держит
+      «{{ (birdman_instances | selectattr('qos_echo') | list | first).node_name }}»).
+
+# Диапазоны портов дедиков проверяются отдельно: пересечение здесь — не
+# «одинаковое значение», а перекрытие интервалов, и одинаковый диапазон у двух
+# нод — законное следствие того, что пер-инстансный port_range просто не задали.
+# Пул портов агента живёт в его памяти и о соседе не знает, поэтому оба
+# выдадут дедикам один и тот же порт, и второй bind упадёт уже в игре.
+- name: Assert dedicated-server port ranges of the box's nodes are disjoint
+  ansible.builtin.assert:
+    that:
+      - (a.port_range[0] | int) > (b.port_range[1] | int) or (b.port_range[0] | int) > (a.port_range[1] | int)
+    fail_msg: >-
+      Диапазоны портов дедиков пересекаются: «{{ a.node_name }}»
+      {{ a.port_range }} и «{{ b.node_name }}» {{ b.port_range }}. Пулы портов
+      агентов независимы и о соседе не знают — задай непересекающиеся
+      port_range в birdman_agent_instances.
+  loop: "{{ birdman_instances | product(birdman_instances) | list }}"
+  loop_control:
+    label: "{{ item.0.name | default('(default)') }} × {{ item.1.name | default('(default)') }}"
+  vars:
+    a: "{{ item.0 }}"
+    b: "{{ item.1 }}"
+  when: a.name != b.name

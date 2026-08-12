@@ -1,0 +1,125 @@
+---
+# Одна нода birdman на боксе (tracker #1065). Всё, что здесь есть, отделено от
+# соседа по боксу суффиксом инстанса: каталоги, конфиг, токен, юнит, диапазон
+# портов дедиков, порт метрик, namespace containerd, каталог liba-сокетов.
+#
+# Файл идемпотентен ПО СВОЕЙ НОДЕ и не касается чужой: ни один путь и ни одно
+# имя здесь не выводится из чего-либо, кроме `bmi`, поэтому повторный прогон по
+# одной ноде не может тронуть материал другой.
+#
+# Хостовое (бинарь, /etc/birdman, master-CA, ghcr-токен, UDP-эхо, vector,
+# нодовый vmagent) живёт в main.yml и ставится ОДИН раз на прогон.
+
+# Результаты register переживают итерацию include_tasks. Регистрация ноды
+# выполняется НЕ на каждой (только пока нет её token-файла), поэтому без сброса
+# «changed» от регистрации ПРЕДЫДУЩЕЙ ноды дотёк бы до этой и поставил бы ей
+# лишний рестарт — ровно то, чего требование «идемпотентность по каждой ноде»
+# запрещает.
+- name: Reset the per-node registration result
+  ansible.builtin.set_fact:
+    birdman_instance_token: {}
+
+- name: Create directories of node {{ bmi.node_name }}
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ bmi.data_dir }}"
+    - "{{ bmi.log_dir }}"
+    - "{{ bmi.log_dir }}/servers"
+
+- name: Allow dedicated-server port range of node {{ bmi.node_name }} in UFW (additive)
+  community.general.ufw:
+    rule: allow
+    port: "{{ bmi.port_range[0] }}:{{ bmi.port_range[1] }}"
+    proto: "{{ item }}"
+    comment: "{{ bmi.ufw_comment }}"
+  loop: [tcp, udp]
+
+- name: Install agent config {{ bmi.config_file }}
+  ansible.builtin.template:
+    src: agent.yaml.j2
+    dest: "{{ bmi.config_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: birdman_instance_config
+
+# --- регистрация ноды в master (одноразовая, идемпотентная) ---
+# REST — на birdman_master_api_host (delegate_to): для дев-бокса это он сам,
+# для удалённой ноды — master-бокс (admin-ключ его не покидает; спека iter5 §3).
+#
+# Наличие СВОЕГО token-файла и есть признак «эта нода уже заведена»: у второй
+# ноды бокса файл свой, поэтому она регистрируется отдельной строкой в nodes и
+# получает свой node_token — при том же public_ip, что у первой. Уникальности
+# по hostname/public_ip в схеме нет, и это здесь работает на нас: две ноды
+# одного бокса законно делят айпи и различаются именем.
+
+- name: Check for stored node token of {{ bmi.node_name }}
+  ansible.builtin.stat:
+    path: "{{ bmi.token_file }}"
+  register: birdman_node_token_stat
+
+- name: Register node {{ bmi.node_name }} in master (POST /v1/nodes)
+  when: not birdman_node_token_stat.stat.exists
+  block:
+    - name: Read master admin key
+      ansible.builtin.slurp:
+        src: "{{ birdman_master_admin_key_file }}"
+      register: birdman_admin_key_slurp
+      no_log: true
+      delegate_to: "{{ birdman_master_api_host }}"
+
+    - name: Create node (one-time node_token in response)
+      ansible.builtin.uri:
+        url: "{{ birdman_master_api }}/v1/nodes"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ birdman_admin_key_slurp.content | b64decode | trim }}"
+        body_format: json
+        body:
+          project: "{{ bmi.project }}"
+          region: "{{ bmi.region }}"
+          hostname: "{{ bmi.node_name }}"
+          public_ip: "{{ birdman_public_ip }}"
+          capacity_slots: "{{ bmi.capacity_slots | int }}"
+        status_code: 201
+      register: birdman_node_reg
+      no_log: true
+      delegate_to: "{{ birdman_master_api_host }}"
+
+    # Как у CA-серта: в --check на незарегистрированной ноде POST скипнут
+    # движком (uri без check-режима) → у birdman_node_reg нет .json.
+    - name: Store node token (0600, box only)
+      ansible.builtin.copy:
+        content: "{{ birdman_node_reg.json.node_token }}"
+        dest: "{{ bmi.token_file }}"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+      register: birdman_instance_token
+      when: birdman_node_reg is not skipped
+
+- name: Install {{ bmi.unit }}.service unit
+  ansible.builtin.template:
+    src: birdman-agent.service.j2
+    dest: "/etc/systemd/system/{{ bmi.unit }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  register: birdman_instance_unit
+
+# Рестарт этой ноды откладывается до тех пор, пока vector не получит конфиг
+# (порядок несущий, tracker #994) — поэтому здесь только накапливаем список, а
+# сам рестарт делает main.yml после `compose up --wait`.
+- name: Queue {{ bmi.unit }} for restart if its material changed
+  ansible.builtin.set_fact:
+    birdman_agent_restart_pending: "{{ birdman_agent_restart_pending + [bmi.unit] }}"
+  when: >-
+    birdman_instance_config.changed
+    or birdman_instance_unit.changed
+    or (birdman_instance_token is defined and birdman_instance_token.changed | default(false))

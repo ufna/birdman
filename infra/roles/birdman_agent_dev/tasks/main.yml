@@ -3,6 +3,12 @@
 # чужие контейнеры/nginx/UFW-правила не трогаем.
 # Итерация 1: агент — демон под master'ом; роль регистрирует ноду в master
 # (одноразово, node_token остаётся только на тачке) и включает unit.
+#
+# tracker #1065: на боксе может быть НЕСКОЛЬКО нод birdman (одна на проект) —
+# см. birdman_agent_instances в defaults. Этот файл держит ХОСТОВОЕ (бинарь,
+# /etc/birdman, master-CA, ghcr-токен, UDP-эхо QoS, vector, нодовый vmagent),
+# tasks/instance.yml — всё пер-нодовое. Дефолтный список из одного безымянного
+# инстанса даёт ровно прежний результат, поэтому живые ноды прогон не замечают.
 
 - name: Read GHCR token from env BIRDMAN_GHCR_TOKEN
   ansible.builtin.set_fact:
@@ -33,22 +39,27 @@
     - ansible_check_mode
     - birdman_ghcr_token | length == 0
 
-- name: Create birdman directories
+# Ноды бокса разворачиваются и проверяются на столкновения ДО первой записи на
+# диск: пересекающийся порт или общий каталог обязаны отказать прогон, а не
+# проявиться половиной выката.
+- name: Resolve and validate the box's birdman node instances
+  ansible.builtin.include_tasks: instances.yml
+
+- name: Create shared birdman directories
   ansible.builtin.file:
-    path: "{{ item.path }}"
+    path: /etc/birdman
     state: directory
     owner: root
     group: root
-    mode: "{{ item.mode }}"
-  loop:
-    - { path: /etc/birdman, mode: "0755" }
-    - { path: "{{ birdman_data_dir }}", mode: "0755" }
-    - { path: "{{ birdman_log_dir }}", mode: "0755" }
-    - { path: "{{ birdman_log_dir }}/servers", mode: "0755" }
+    mode: "0755"
 
-- name: Install tmpfiles.d config for /run/birdman (survives reboot)
-  ansible.builtin.copy:
-    src: tmpfiles-birdman.conf
+# Каталог liba-сокетов у каждой ноды свой (/run/birdman<sfx>/servers): он
+# бинд-маунтится ВНУТРЬ дедика, поэтому общий каталог означал бы, что дедики
+# соседа видят чужие сокеты. /run — tmpfs, каталоги обязаны пересоздаваться
+# после ребута, отсюда tmpfiles.d.
+- name: Install tmpfiles.d config for the nodes' runtime dirs (survives reboot)
+  ansible.builtin.template:
+    src: tmpfiles-birdman.conf.j2
     dest: /etc/tmpfiles.d/birdman.conf
     owner: root
     group: root
@@ -62,18 +73,19 @@
     owner: root
     group: root
     mode: "0755"
-  notify: Restart birdman-agent
+  register: birdman_agent_binary_install
 
 # --- доставка публичного CA-серта master'а на ноду (mTLS agentlink v1, §6) ---
 # Тянем на каждом прогоне (идемпотентно): покрывает и новую ноду, и ротацию CA.
 # Серт ПУБЛИЧНЫЙ (ключ CA живёт только в PG master'а) → файл 0644. Тот же
 # admin-ключ и механизм, что и у регистрации ноды (POST /v1/nodes ниже);
-# /v1/ca — readonly-скоуп.
-# ВАЖНО (порядок): CA кладём ДО шаблона agent.yaml — тот убирает tls_insecure и
-# включает tls_ca_file, поэтому без master-ca.pem агент не соберёт trust pool.
+# /v1/ca — readonly-скоуп. Серт ОБЩИЙ на бокс: у всех нод хоста один и тот же
+# master.
+# ВАЖНО (порядок): CA кладём ДО шаблонов agent.yaml — те убирают tls_insecure и
+# включают tls_ca_file, поэтому без master-ca.pem агент не соберёт trust pool.
 # Если прогон прервётся здесь (напр. GET /v1/ca 404 против старого master'а),
-# на диске остаётся старый рабочий agent.yaml (ещё с tls_insecure), и нода не
-# уходит в офлайн при следующем рестарте агента. Нужен только /etc/birdman
+# на диске остаются старые рабочие agent.yaml (ещё с tls_insecure), и ноды не
+# уходят в офлайн при следующем рестарте агента. Нужен только /etc/birdman
 # (создан выше), admin-ключ и доступность master API — всё уже есть.
 - name: Deliver master CA cert to node (GET /v1/ca)
   block:
@@ -106,17 +118,8 @@
         owner: root
         group: root
         mode: "0644"
-      notify: Restart birdman-agent
+      register: birdman_master_ca_install
       when: birdman_ca_fetch is not skipped
-
-- name: Install agent config /etc/birdman/agent.yaml
-  ansible.builtin.template:
-    src: agent.yaml.j2
-    dest: /etc/birdman/agent.yaml
-    owner: root
-    group: root
-    mode: "0644"
-  notify: Restart birdman-agent
 
 # Второе условие — только про --check без токена: не рисовать ложный changed
 # «затёр бы боевой ghcr.token пустым». В боевом прогоне пустой токен сюда не
@@ -129,18 +132,13 @@
     group: root
     mode: "0600"
   no_log: true
+  register: birdman_ghcr_token_install
   when:
     - birdman_registry_legacy
     - birdman_ghcr_token | length > 0 or not ansible_check_mode
 
-- name: Allow birdman dedicated-server port range in UFW (additive)
-  community.general.ufw:
-    rule: allow
-    port: "{{ birdman_port_range[0] }}:{{ birdman_port_range[1] }}"
-    proto: "{{ item }}"
-    comment: "{{ birdman_ufw_comment }}"
-  loop: [tcp, udp]
-
+# UDP-эхо QoS открыто ОДИН раз на бокс: порт общий для всех нод хоста, держит
+# его ровно один агент (обоснование — birdman_qos_echo_port в defaults).
 - name: Allow QoS echo port in UFW (additive, единственный внешне-открытый порт)
   community.general.ufw:
     rule: allow
@@ -148,66 +146,29 @@
     proto: udp
     comment: "{{ birdman_ufw_comment }}"
 
-# --- регистрация ноды в master (одноразовая, идемпотентная) ---
-# REST — на birdman_master_api_host (delegate_to): для дев-бокса это он сам,
-# для удалённой ноды — master-бокс (admin-ключ его не покидает; спека iter5 §3).
+# --- ноды бокса ---
+# Хостовые изменения (бинарь, CA, ghcr-токен) касаются ВСЕХ агентов, поэтому
+# рестартуют весь бокс; пер-нодовые (конфиг, юнит, токен) — только свою ноду.
+- name: Start the restart set with the nodes affected by host-wide changes
+  ansible.builtin.set_fact:
+    birdman_agent_restart_pending: >-
+      {{ (birdman_instances | map(attribute='unit') | list)
+         if (birdman_agent_binary_install.changed
+             or (birdman_master_ca_install.changed | default(false))
+             or (birdman_ghcr_token_install.changed | default(false)))
+         else [] }}
 
-- name: Check for stored node token
-  ansible.builtin.stat:
-    path: "{{ birdman_node_token_file }}"
-  register: birdman_node_token_stat
-
-- name: Register node in master (POST /v1/nodes)
-  when: not birdman_node_token_stat.stat.exists
-  block:
-    - name: Read master admin key
-      ansible.builtin.slurp:
-        src: "{{ birdman_master_admin_key_file }}"
-      register: birdman_admin_key_slurp
-      no_log: true
-      delegate_to: "{{ birdman_master_api_host }}"
-
-    - name: Create node (one-time node_token in response)
-      ansible.builtin.uri:
-        url: "{{ birdman_master_api }}/v1/nodes"
-        method: POST
-        headers:
-          Authorization: "Bearer {{ birdman_admin_key_slurp.content | b64decode | trim }}"
-        body_format: json
-        body:
-          project: "{{ birdman_project }}"
-          region: "{{ birdman_region }}"
-          hostname: "{{ ansible_facts.hostname }}"
-          public_ip: "{{ birdman_public_ip }}"
-          capacity_slots: "{{ birdman_capacity_slots | int }}"
-        status_code: 201
-      register: birdman_node_reg
-      no_log: true
-      delegate_to: "{{ birdman_master_api_host }}"
-
-    # Как у CA-серта: в --check на незарегистрированной ноде POST скипнут
-    # движком (uri без check-режима) → у birdman_node_reg нет .json.
-    - name: Store node token (0600, box only)
-      ansible.builtin.copy:
-        content: "{{ birdman_node_reg.json.node_token }}"
-        dest: "{{ birdman_node_token_file }}"
-        owner: root
-        group: root
-        mode: "0600"
-      no_log: true
-      notify: Restart birdman-agent
-      when: birdman_node_reg is not skipped
-
-- name: Install birdman-agent.service unit
-  ansible.builtin.copy:
-    src: birdman-agent.service
-    dest: /etc/systemd/system/birdman-agent.service
-    owner: root
-    group: root
-    mode: "0644"
-  notify: Restart birdman-agent
+- name: Install each birdman node of this box
+  ansible.builtin.include_tasks: instance.yml
+  loop: "{{ birdman_instances }}"
+  loop_control:
+    loop_var: bmi
+    label: "{{ bmi.node_name }} (unit {{ bmi.unit }})"
 
 # --- vector: шиппер логов дедиков в VictoriaLogs (спека логи v1) ---
+# ОДИН на бокс, а не на ноду: шиппер — хостовая сущность, и пара {project}/{env}
+# едет к нему ИЗ ПУТИ файла (tracker #994), а не из того, чей это агент. Он
+# просто читает объединение log-каталогов всех нод бокса.
 
 - name: Create vector directories
   ansible.builtin.file:
@@ -241,29 +202,42 @@
   ansible.builtin.command:
     cmd: docker compose -f {{ birdman_vector_dir }}/compose.yml up -d --wait
   register: birdman_vector_compose_up
-  changed_when: "'Started' in birdman_vector_compose_up.stderr or 'Created' in birdman_vector_compose_up.stderr"
+  changed_when: "'Started' in birdman_vector_compose_up.stderr or 'Created' in birdman_vector_compose_up.stderr or 'Recreated' in birdman_vector_compose_up.stderr"
 
-# Агент стартует/рестартует ПОСЛЕ того, как vector получил свой конфиг
+# Агенты стартуют/рестартуют ПОСЛЕ того, как vector получил свой конфиг
 # (tracker #994). Порядок несущий: `log_scope_dirs` в agent.yaml переводит
 # дедики на путь {project}/{env}, а старый `include` шиппера этот путь не видит
 # — рестарт агента раньше конфига vector'а оставлял бы ноду в окне «агент
 # размечает, шиппер не видит», и, оборвись прогон в этом окне (таймаут
-# `--wait`, отказ pull), окно жило бы до следующего ручного прогона. Оба
-# хендлера сбрасываются здесь, одним flush, уже после `compose up --wait`, так
-# что контейнер vector'а к этому моменту существует (первый прогон роли тоже).
-- name: Enable and start birdman-agent
+# `--wait`, отказ pull), окно жило бы до следующего ручного прогона. Тот же
+# аргумент теперь и про НОВУЮ ноду бокса: её log_dir появляется в конфиге
+# шиппера здесь, и только после этого её агенту разрешено писать.
+- name: Apply tmpfiles and the vector restart (агенты — после конфига vector'а)
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start each birdman node's agent
   ansible.builtin.systemd_service:
-    name: birdman-agent.service
+    name: "{{ item }}.service"
     enabled: true
     state: started
     daemon_reload: true
+  loop: "{{ birdman_instances | map(attribute='unit') | list }}"
 
-- name: Apply tmpfiles and pending restarts (агент — после конфига vector'а)
-  ansible.builtin.meta: flush_handlers
+# Рестарт — ТОЛЬКО тем нодам, у которых что-то изменилось. Соседняя нода
+# бокса при повторном прогоне по одной не перезапускается вовсе: это отдельное
+# требование приёмки #1065 («идемпотентность по каждой ноде»), и общий хендлер
+# «перезапусти все агенты» его бы не выполнял.
+- name: Restart the birdman nodes whose material changed
+  ansible.builtin.systemd_service:
+    name: "{{ item }}.service"
+    state: restarted
+    daemon_reload: true
+  loop: "{{ birdman_agent_restart_pending | unique }}"
 
-# --- нодовый vmagent: метрики агента в центральный VM через оверлей (5.2).
-# Гейт birdman_node_vmagent: на дев-боксе false (центральный vmagent уже
-# скрейпит его агента — сайдкар дал бы дубли серий). ---
+# --- нодовый vmagent: метрики агентов в центральный VM через оверлей (5.2).
+# Тоже ОДИН на бокс: скрейпит по джобу на каждую ноду хоста (свой порт метрик,
+# свои лейблы node/region). Гейт birdman_node_vmagent: на дев-боксе false
+# (центральный vmagent уже скрейпит его агентов — сайдкар дал бы дубли серий). ---
 
 - name: Create node vmagent directories
   ansible.builtin.file:
