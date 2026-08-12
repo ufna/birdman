@@ -60,7 +60,15 @@ type DeleteProjectResult struct {
 	Matches        int      `json:"matches"`
 	Servers        int      `json:"servers"`
 	APIKeysRevoked int      `json:"api_keys_revoked"`
+	AlertMutes     int      `json:"alert_mutes"`
 	RevokedKeyIDs  []string `json:"revoked_key_ids,omitempty"`
+
+	// RemovedMutes — снятые мьюты целиком, и в JSON их нет намеренно: панели
+	// нужен счётчик выше, а вызывающему в httpapi нужен их silence_id, чтобы
+	// снять ЗЕРКАЛЬНЫЙ silence в alertmanager (handleDeleteProject, симметрично
+	// handleDeleteAlertMute). Сам стор в AM не ходит: зеркало best-effort и
+	// живёт в internal/amsilence, а не в транзакции БД.
+	RemovedMutes []AlertMute `json:"-"`
 }
 
 // CreateProject заводит проект ЯВНО (POST /v1/projects) — в отличие от
@@ -263,6 +271,58 @@ func (s *Store) DeleteProject(ctx context.Context, slug, confirm string) (Delete
 		return res, err
 	}
 
+	// Мьюты алертов — третья и последняя таблица, которая держит проект СЛАГОМ,
+	// а не project_id (колонка `project`, миграция 000018). Без этой уборки
+	// мьют переживает свой проект, а бессрочным он бывает штатно (expires_at
+	// nullable с самой 000004) — и новый проект, созданный с ТЕМ ЖЕ слагом,
+	// молча получает заглушку от мёртвого: AlertMute.Matches сравнивает слаг
+	// СТРОГИМ равенством, так что старая строка ложится точно на алерты нового
+	// арендатора. Пересоздание слага не край: переименования слага нет by
+	// design.
+	//
+	// Строки БЕЗ проекта защищены самой формой запроса, и защищены иначе, чем в
+	// двух таблицах выше. Там «ничьё» — это `''`, и его приходится обходить
+	// условием; здесь «все проекты» хранится как NULL (000018 прямо запрещает
+	// `''` в этой роли: у алерта пустой project значит «платформенный», и
+	// хранить `''` означало бы сделать «глушить всё» неотличимым от «глушить
+	// только платформенное»; normalizeMuteTarget схлопывает пустое в nil на
+	// входе). `project = $1` строк с NULL не берёт по правилам SQL — то есть
+	// платформенный/глобальный мьют переживает удаление любого проекта, и
+	// должен: он не принадлежит удаляемому арендатору.
+	//
+	// Каскаду ОКРУЖЕНИЯ уборка не нужна: у мьюта нет измерения env — цель это
+	// тройка (alertname, region, project).
+	muteRows, err := tx.Query(ctx,
+		`delete from alert_mutes where project = $1 returning `+alertMuteCols, slug)
+	if err != nil {
+		return res, err
+	}
+	for muteRows.Next() {
+		var m AlertMute
+		if err := muteRows.Scan(m.scanTargets()...); err != nil {
+			muteRows.Close()
+			return res, err
+		}
+		res.RemovedMutes = append(res.RemovedMutes, m)
+	}
+	muteRows.Close()
+	if err := muteRows.Err(); err != nil {
+		return res, err
+	}
+	res.AlertMutes = len(res.RemovedMutes)
+	// Снятие мьюта — событие аудита на РУЧНОМ пути (alert_unmuted из
+	// DELETE /v1/alerts/mutes/{id}); каскад не имеет права быть тише, иначе
+	// подавление снимется молча. Формат тот же, что у ключей ниже: своё событие
+	// на строку + reason, по которому видно, что это не рука оператора.
+	for _, m := range res.RemovedMutes {
+		if err := insertEvent(ctx, tx, EventAlertUnmuted, EventRef{}, map[string]any{
+			"mute_id": m.ID, "alertname": m.Alertname, "region": m.Region,
+			"project": m.Project, "reason": EventProjectDeleted,
+		}); err != nil {
+			return res, err
+		}
+	}
+
 	rows, err := tx.Query(ctx, `
 		update api_keys set revoked_at = now()
 		where project_id = $1::uuid and revoked_at is null
@@ -315,7 +375,7 @@ func (s *Store) DeleteProject(ctx context.Context, slug, confirm string) (Delete
 	if err := insertEvent(ctx, tx, EventProjectDeleted, EventRef{}, map[string]any{
 		"project": slug, "environments": res.Environments, "versions": res.Versions,
 		"fleets": res.Fleets, "matches": res.Matches, "servers": res.Servers,
-		"api_keys_revoked": res.APIKeysRevoked,
+		"api_keys_revoked": res.APIKeysRevoked, "alert_mutes": res.AlertMutes,
 	}); err != nil {
 		return res, err
 	}

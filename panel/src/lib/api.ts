@@ -151,6 +151,8 @@ export interface ProjectDeleted {
   matches: number;
   servers: number;
   api_keys_revoked: number;
+  /** Снятые мьюты алертов этого проекта (мьюты «все проекты» не трогаются). */
+  alert_mutes: number;
 }
 
 /** Тело ответа 200 у DELETE непустого окружения — что именно снёс каскад. */

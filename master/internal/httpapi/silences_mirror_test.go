@@ -126,6 +126,56 @@ func TestMuteSilenceMirrorLive(t *testing.T) {
 	}
 }
 
+// TestDeleteProjectRemovesMirroredSilence (tracker #117): удаление проекта
+// снимает не только строку мьюта, но и её зеркальный silence. Строка в БД —
+// это лишь аннотация master'а; ПОДАВЛЯЕТ sink/Discord именно silence, и
+// оставленный он продолжал бы глушить (alertname, region, project) — то есть
+// слаг, который вот-вот займёт новый арендатор (переименования слага нет by
+// design, пересоздание — штатный путь).
+//
+// Мьют БЕЗ проекта тут не декорация: он проверяет, что каскад одного арендатора
+// не снимает платформенное подавление — из двух silence'ов уехать обязан ровно
+// один.
+func TestDeleteProjectRemovesMirroredSilence(t *testing.T) {
+	fam := newFakeAM(t)
+	_, admin := mirrorServer(t, fam.url)
+
+	if code, body := admin.do("POST", "/v1/projects", map[string]any{"slug": "doomed", "match_size": 2}); code != 201 {
+		t.Fatalf("create project: %d %v", code, body)
+	}
+	if code, body := admin.do("POST", "/v1/alerts/mutes",
+		map[string]any{"alertname": "NodeDown", "region": "eu", "project": "doomed"}); code != 201 {
+		t.Fatalf("create project mute: %d %v", code, body)
+	}
+	if code, body := admin.do("POST", "/v1/alerts/mutes",
+		map[string]any{"alertname": "MasterDown", "region": "eu"}); code != 201 {
+		t.Fatalf("create platform mute: %d %v", code, body)
+	}
+	if fam.count() != 2 {
+		t.Fatalf("контроль: зеркало должно было создать 2 silence, got %d", fam.count())
+	}
+
+	if code, body := admin.do("DELETE", "/v1/projects/doomed", map[string]any{"confirm": "doomed"}); code != 204 && code != 200 {
+		t.Fatalf("delete project: %d %v", code, body)
+	}
+	if fam.count() != 1 {
+		t.Fatalf("после удаления проекта обязан остаться ровно один silence (платформенный), got %d", fam.count())
+	}
+
+	// И он платформенный: мьют без проекта в списке цел.
+	code, body := admin.do("GET", "/v1/alerts/mutes", nil)
+	if code != 200 {
+		t.Fatalf("list mutes: %d %v", code, body)
+	}
+	mutes := body["mutes"].([]any)
+	if len(mutes) != 1 {
+		t.Fatalf("остаться должен ровно один мьют (платформенный), got %d: %v", len(mutes), mutes)
+	}
+	if got := mutes[0].(map[string]any)["alertname"]; got != "MasterDown" {
+		t.Fatalf("уцелел не тот мьют: %v", mutes[0])
+	}
+}
+
 // TestMuteSilenceMirrorDeadAM: an unreachable AM never breaks mute/unmute — the
 // same 201/204, and silence_id stays null (pure v0 semantics).
 func TestMuteSilenceMirrorDeadAM(t *testing.T) {

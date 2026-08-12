@@ -302,6 +302,19 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 	for _, id := range res.RevokedKeyIDs {
 		s.auth.invalidateKey(id)
 	}
+	// Мьюты проекта каскад уже снял в своей транзакции, но ПОДАВЛЯЕТ на самом
+	// деле не строка в БД, а зазеркаленный alertmanager-silence: без этого
+	// вызова он продолжал бы глушить sink/Discord по (alertname, region,
+	// project) — то есть по слагу, который вот-вот может занять новый арендатор.
+	// Дословно то же, что делает handleDeleteAlertMute: best-effort, nil-safe,
+	// ответ от AM не зависит — отказ подберёт orphan sweep из amsilence
+	// (он решает по id silence'а, а не по матчерам, поэтому нового каскада ему
+	// знать не нужно).
+	if s.silences != nil {
+		for _, mute := range res.RemovedMutes {
+			s.silences.MuteDeleted(r.Context(), mute)
+		}
+	}
 	if res.WasEmpty {
 		w.WriteHeader(http.StatusNoContent)
 		return
