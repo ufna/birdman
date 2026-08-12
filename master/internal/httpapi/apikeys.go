@@ -79,11 +79,8 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Audit event — no secret in the payload; binding recorded when present.
-	payload := map[string]any{"key_id": key.ID, "name": key.Name, "scopes": key.Scopes}
-	if key.Project != nil {
-		payload["project"] = *key.Project
-		payload["env"] = *key.Env
-	}
+	payload := apiKeyEventPayload(key)
+	payload["scopes"] = key.Scopes
 	if err := s.st.InsertEvent(r.Context(), store.EventAPIKeyCreated, store.EventRef{}, payload); err != nil {
 		s.log.Error("apikey: create event write failed", "key_id", key.ID, "err", err)
 	}
@@ -127,7 +124,7 @@ func (s *Server) handleRevokeAPIKey(w http.ResponseWriter, r *http.Request) {
 	if changed {
 		s.auth.invalidateKey(id)
 		if err := s.st.InsertEvent(r.Context(), store.EventAPIKeyRevoked, store.EventRef{},
-			map[string]any{"key_id": key.ID, "name": key.Name}); err != nil {
+			apiKeyEventPayload(key)); err != nil {
 			s.log.Error("apikey: revoke event write failed", "key_id", key.ID, "err", err)
 		}
 	}
@@ -160,8 +157,39 @@ func (s *Server) purgeAPIKey(w http.ResponseWriter, r *http.Request, id string) 
 	// for it anyway.
 	s.auth.invalidateKey(id)
 	if err := s.st.InsertEvent(r.Context(), store.EventAPIKeyPurged, store.EventRef{},
-		map[string]any{"name": key.Name}); err != nil {
+		apiKeyEventPayload(key)); err != nil {
 		s.log.Error("apikey: purge event write failed", "key_id", key.ID, "err", err)
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// apiKeyEventPayload — ЕДИНОЕ тело аудит-события жизненного цикла ключа
+// (`apikey_created`, `apikey_revoked`, `apikey_purged`). Секрета в нём нет
+// никогда; привязка кладётся, КОГДА ОНА ЕСТЬ, и это не украшение, а
+// АТРИБУЦИЯ (tracker #1017).
+//
+// `store.insertEvent` выводит `project_id` из ссылок события, а у событий без
+// ссылок — из слага `project` в payload'е (эпик #968 шаг 2). У ключа ссылки
+// нет вовсе (колонки `api_key_id` в `events` не существует), поэтому слаг в
+// payload'е — ЕДИНСТВЕННЫЙ источник атрибуции: нет поля → `project_id is
+// null` → событие платформенное → его видит КАЖДЫЙ арендатор, потому что
+// фильтр ленты не скрывающий ПО ЗАМЫСЛУ (#955/#968/#993). Так имя чужого
+// ключа (`ci-game-prod-deployer` — операционная строка, часто называющая
+// проект и окружение прямо в себе) приезжало соседу и через `GET /v1/events`,
+// и через SSE.
+//
+// Поэтому payload у всех трёх видов собирается ЗДЕСЬ, а не по месту: три
+// вызывающих расходились ровно так, как расходятся руками собранные мапы —
+// `created` привязку клал, `revoked` не клал, `purged` не клал даже `key_id`.
+// Каскадные отзывы в сторе (`projects.go`, `environments.go`) кладут `project`
+// давно; расхождение было ВНУТРИ одного вида события.
+func apiKeyEventPayload(key store.APIKey) map[string]any {
+	payload := map[string]any{"key_id": key.ID, "name": key.Name}
+	if key.Project != nil {
+		payload["project"] = *key.Project
+	}
+	if key.Env != nil {
+		payload["env"] = *key.Env
+	}
+	return payload
 }

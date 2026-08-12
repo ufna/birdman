@@ -171,11 +171,17 @@ func (s *Store) RevokeAPIKey(ctx context.Context, id string) (APIKey, bool, erro
 	}
 	defer tx.Rollback(ctx)
 
+	// ПРИВЯЗКА ЧИТАЕТСЯ ЗДЕСЬ (tracker #1017). Раньше выборка её не брала, и
+	// вызывающий физически не мог атрибутировать событие отзыва: `apikey_revoked`
+	// уезжал с `project_id is null`, то есть ПЛАТФОРМЕННЫМ, и имя чужого ключа
+	// приезжало в ленту каждому арендатору (фильтр ленты не скрывающий ПО
+	// ЗАМЫСЛУ — виновата была атрибуция на записи, а не лента).
 	var k APIKey
 	err = tx.QueryRow(ctx, `
-		select id::text, name, scopes, created_at, revoked_at
-		from api_keys where id = $1::uuid for update`, id).
-		Scan(&k.ID, &k.Name, &k.Scopes, &k.CreatedAt, &k.RevokedAt)
+		select k.id::text, k.name, k.scopes, p.slug, k.project_id::text, k.env, k.created_at, k.revoked_at
+		from api_keys k left join projects p on p.id = k.project_id
+		where k.id = $1::uuid for update of k`, id).
+		Scan(&k.ID, &k.Name, &k.Scopes, &k.Project, &k.ProjectID, &k.Env, &k.CreatedAt, &k.RevokedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return APIKey{}, false, fmt.Errorf("api key %s: %w", id, ErrNotFound)
 	}
@@ -228,11 +234,14 @@ func (s *Store) PurgeAPIKey(ctx context.Context, id string) (APIKey, bool, bool,
 	}
 	defer tx.Rollback(ctx)
 
+	// Привязка — как в RevokeAPIKey (tracker #1017): без неё событие `apikey_purged`
+	// оставалось платформенным и несло имя чужого ключа всем арендаторам.
 	var k APIKey
 	err = tx.QueryRow(ctx, `
-		select id::text, name, scopes, created_at, revoked_at
-		from api_keys where id = $1::uuid for update`, id).
-		Scan(&k.ID, &k.Name, &k.Scopes, &k.CreatedAt, &k.RevokedAt)
+		select k.id::text, k.name, k.scopes, p.slug, k.project_id::text, k.env, k.created_at, k.revoked_at
+		from api_keys k left join projects p on p.id = k.project_id
+		where k.id = $1::uuid for update of k`, id).
+		Scan(&k.ID, &k.Name, &k.Scopes, &k.Project, &k.ProjectID, &k.Env, &k.CreatedAt, &k.RevokedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return APIKey{}, false, false, nil // no such key
 	}
