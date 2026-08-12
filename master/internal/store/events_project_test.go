@@ -5,10 +5,18 @@ package store_test
 // Проверяем не «колонка появилась», а СЕМАНТИКУ атрибуции, потому что ошибиться
 // тут можно молча в обе стороны: недоатрибутировать (алерт останется
 // платформенным) и переатрибутировать (событие уедет чужому проекту).
+//
+// Гоняем при этом САМ файл миграции, а не его копию в тесте: копия ловит только
+// собственную мутацию, а шиппится другой файл. Идиома та же, что у соседних
+// 000017/000018 (stepDownToV16/stepDownToV17): свежая БД на head → шаг схемы
+// вниз → исторические строки сырым SQL → шаг вверх → ассерты.
 
 import (
 	"context"
+	"errors"
 	"testing"
+
+	"github.com/golang-migrate/migrate/v4"
 
 	"github.com/ufna/birdman/master/internal/store"
 	"github.com/ufna/birdman/master/internal/testdb"
@@ -41,36 +49,89 @@ func projectID(t *testing.T, st *store.Store, slug string) string {
 // TestEventsBackfillAttributesByRefs: строки, у которых есть ссылка на сущность,
 // получают проект ЭТОЙ сущности. Ссылка — факт, а не догадка.
 func TestEventsBackfillAttributesByRefs(t *testing.T) {
-	st := testdb.New(t)
-	f := testdb.Seed(t, st, "eu", 8)
+	var f *testdb.Fixture
+	var otherNode, otherVersion string
+	st, m := stepDownToV18(t, func(st *store.Store) {
+		f = testdb.Seed(t, st, "eu", 8)
+		// Второй проект — чтобы было чем проверить ПОРЯДОК источников: у
+		// строки со ссылками на разные проекты победитель обязан быть один и
+		// определённый, а не «какой попадётся».
+		other, _, err := st.CreateNode(context.Background(), store.CreateNodeParams{
+			Project: "arena", Region: "eu", Hostname: "arena-1", PublicIP: "203.0.113.20", CapacitySlots: 4,
+		})
+		if err != nil {
+			t.Fatalf("seed other project node: %v", err)
+		}
+		otherNode = other.ID
+		v, err := st.CreateVersion(context.Background(), store.CreateVersionParams{
+			Project: "arena", Semver: "1.0.0", ImageRef: "ghcr.io/example/arena:1.0.0", Env: "dev",
+		})
+		if err != nil {
+			t.Fatalf("seed other project version: %v", err)
+		}
+		otherVersion = v.ID
+		// Ревокнутая нода: строка ЖИВА (state='dead'), а значит её события
+		// обязаны атрибутироваться — «нода выведена» не то же самое, что
+		// «владельца не восстановить».
+		if _, err := st.RevokeNode(context.Background(), f.NodeID); err != nil {
+			t.Fatalf("revoke node: %v", err)
+		}
+	})
 	ctx := context.Background()
 	want := projectID(t, st, f.Project)
+	otherWant := projectID(t, st, "arena")
 
-	// Сеем событие "как до миграции": со ссылкой, но без project_id.
-	if _, err := st.Pool.Exec(ctx,
-		`insert into events (kind, node_id) values ('legacy_node_event', $1::uuid)`, f.NodeID); err != nil {
-		t.Fatalf("seed: %v", err)
+	// Сеем события «как до миграции»: со ссылкой, но без project_id (на схеме
+	// 18 этой колонки нет вовсе).
+	seedLegacy := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := st.Pool.Exec(ctx, sql, args...); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
 	}
-	if _, err := st.Pool.Exec(ctx,
-		`insert into events (kind, version_id) values ('legacy_version_event', $1::uuid)`, f.VersionID); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	// Повторяем сам бэкфилл миграции (она уже отработала на пустой базе).
-	backfill(t, st)
+	seedLegacy(`insert into events (kind, node_id) values ('legacy_node_event', $1::uuid)`, f.NodeID)
+	seedLegacy(`insert into events (kind, version_id) values ('legacy_version_event', $1::uuid)`, f.VersionID)
+	// Несколько ссылок ОДНОГО проекта — согласованный случай, ответ один.
+	seedLegacy(`insert into events (kind, node_id, version_id) values ('legacy_multiref_event', $1::uuid, $2::uuid)`,
+		f.NodeID, f.VersionID)
+	// Несколько ссылок РАЗНЫХ проектов: coalesce перечисляет источники по
+	// убыванию достоверности, нода стоит первой — она и побеждает. Без этого
+	// кейса перестановка веток внутри coalesce прошла бы незамеченной.
+	seedLegacy(`insert into events (kind, node_id, version_id) values ('legacy_crossref_event', $1::uuid, $2::uuid)`,
+		f.NodeID, otherVersion)
+	seedLegacy(`insert into events (kind, node_id, version_id) values ('legacy_crossref_other_event', $1::uuid, $2::uuid)`,
+		otherNode, f.VersionID)
+
+	applyEventsMigration(t, m)
 
 	if got := eventProject(t, st, "legacy_node_event"); got != want {
-		t.Fatalf("событие с node_id не атрибутировано: got %q, want %q", got, want)
+		t.Errorf("событие с node_id не атрибутировано: got %q, want %q", got, want)
 	}
 	if got := eventProject(t, st, "legacy_version_event"); got != want {
-		t.Fatalf("событие с version_id не атрибутировано: got %q, want %q", got, want)
+		t.Errorf("событие с version_id не атрибутировано: got %q, want %q", got, want)
+	}
+	if got := eventProject(t, st, "legacy_multiref_event"); got != want {
+		t.Errorf("событие с двумя ссылками одного проекта не атрибутировано: got %q, want %q", got, want)
+	}
+	if got := eventProject(t, st, "legacy_crossref_event"); got != want {
+		t.Errorf("при ссылках на разные проекты обязана победить нода: got %q, want %q", got, want)
+	}
+	if got := eventProject(t, st, "legacy_crossref_other_event"); got != otherWant {
+		t.Errorf("при ссылках на разные проекты обязана победить нода: got %q, want %q", got, otherWant)
+	}
+	// Событие, которое написал сам store ДО шага вниз: шаг вниз снял с него
+	// project_id, шаг вверх обязан вернуть — ссылка на мёртвую, но живую в
+	// таблице ноду разрешается.
+	if got := eventProject(t, st, store.EventNodeRevoked); got != want {
+		t.Errorf("событие ревокнутой ноды (state=dead, строка жива) не атрибутировано: got %q, want %q", got, want)
 	}
 }
 
 // TestEventsBackfillAttributesByPayloadSlug: у части событий ссылок нет вовсе
 // (project_created, environment_deleted, deploy_*) — их проект живёт в payload.
 func TestEventsBackfillAttributesByPayloadSlug(t *testing.T) {
-	st := testdb.New(t)
-	f := testdb.Seed(t, st, "eu", 8)
+	var f *testdb.Fixture
+	st, m := stepDownToV18(t, func(st *store.Store) { f = testdb.Seed(t, st, "eu", 8) })
 	ctx := context.Background()
 
 	if _, err := st.Pool.Exec(ctx,
@@ -78,7 +139,7 @@ func TestEventsBackfillAttributesByPayloadSlug(t *testing.T) {
 		f.Project); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	backfill(t, st)
+	applyEventsMigration(t, m)
 
 	if got := eventProject(t, st, "legacy_payload_event"); got != projectID(t, st, f.Project) {
 		t.Fatalf("событие со слагом в payload не атрибутировано: got %q", got)
@@ -89,8 +150,7 @@ func TestEventsBackfillAttributesByPayloadSlug(t *testing.T) {
 // сессия) проекта не имеет — приписать его первому попавшемуся значило бы
 // соврать в аудите. Тот же смысл, что у project='' в match_stats_daily.
 func TestEventsBackfillLeavesPlatformEventsNull(t *testing.T) {
-	st := testdb.New(t)
-	testdb.Seed(t, st, "eu", 8)
+	st, m := stepDownToV18(t, func(st *store.Store) { testdb.Seed(t, st, "eu", 8) })
 	ctx := context.Background()
 
 	if _, err := st.Pool.Exec(ctx,
@@ -102,13 +162,22 @@ func TestEventsBackfillLeavesPlatformEventsNull(t *testing.T) {
 		`insert into events (kind, node_id) values ('legacy_dangling_event', gen_random_uuid())`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	backfill(t, st)
+	// Слаг в payload, которого нет среди проектов: подстановка «похожего»
+	// увела бы аудит чужому арендатору.
+	if _, err := st.Pool.Exec(ctx,
+		`insert into events (kind, payload) values ('legacy_unknown_slug_event', jsonb_build_object('project', 'nope'))`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	applyEventsMigration(t, m)
 
 	if got := eventProject(t, st, "legacy_platform_event"); got != "" {
 		t.Fatalf("платформенному событию приписан проект %q", got)
 	}
 	if got := eventProject(t, st, "legacy_dangling_event"); got != "" {
 		t.Fatalf("событию с висячей ссылкой приписан проект %q", got)
+	}
+	if got := eventProject(t, st, "legacy_unknown_slug_event"); got != "" {
+		t.Fatalf("событию с несуществующим слагом приписан проект %q", got)
 	}
 }
 
@@ -145,21 +214,44 @@ func TestDeleteProjectKeepsEventsAsPlatform(t *testing.T) {
 	}
 }
 
-// backfill повторяет UPDATE из миграции 000019 — она отрабатывает на пустой
-// базе, поэтому исторические строки тесты сеют сами.
-func backfill(t *testing.T, st *store.Store) {
+// stepDownToV18 поднимает свежую БД (мигрированную на head), даёт вызывающему
+// засеять граф сущностей ЧЕРЕЗ STORE, пока схема ещё head, и только потом
+// шагает схему ВНИЗ до v18 — форма до проектного измерения событий.
+//
+// Колбэк, а не «сначала шаг вниз, потом сидинг» — это вынужденное отличие от
+// соседних stepDownToV16/stepDownToV17: на схеме 18 колонки events.project_id
+// нет, а insertEvent её пишет, поэтому ЛЮБОЙ store-вызов там падает.
+// Исторические строки после шага вниз сеются сырым SQL.
+//
+// Шаг вниз попутно снимает project_id и с событий, которые store написал на
+// head, — значит настоящий бэкфилл прогоняется и по ним тоже.
+func stepDownToV18(t *testing.T, seed func(*store.Store)) (*store.Store, *migrate.Migrate) {
 	t.Helper()
-	_, err := st.Pool.Exec(context.Background(), `
-		update events e
-		   set project_id = coalesce(
-		         (select n.project_id from nodes    n where n.id = e.node_id),
-		         (select s.project_id from servers  s where s.id = e.server_id),
-		         (select v.project_id from versions v where v.id = e.version_id),
-		         (select m.project_id from matches  m where m.id = e.match_id),
-		         (select p.id from projects p where p.slug = e.payload->>'project')
-		       )
-		 where e.project_id is null`)
-	if err != nil {
-		t.Fatalf("backfill: %v", err)
+	st, dsn := testdb.NewWithCodec(t, codecFilled(t, 0x19))
+	if seed != nil {
+		seed(st)
+	}
+	m := newMigrateHandle(t, stripPoolParams(t, dsn))
+	if err := m.Migrate(18); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("step down to v18: %v", err)
+	}
+	var hasColumn int
+	if err := st.Pool.QueryRow(context.Background(),
+		`select count(*) from information_schema.columns
+		  where table_name = 'events' and column_name = 'project_id'`).Scan(&hasColumn); err != nil {
+		t.Fatalf("column check: %v", err)
+	}
+	if hasColumn != 0 {
+		t.Fatal("после шага вниз колонки events.project_id быть не должно — иначе тест сеял бы уже мигрированные строки")
+	}
+	return st, m
+}
+
+// applyEventsMigration прогоняет НАСТОЯЩИЙ 000019_events_project.up.sql
+// (включая его бэкфилл) — то, что и шиппится, а не копию SQL в тесте.
+func applyEventsMigration(t *testing.T, m *migrate.Migrate) {
+	t.Helper()
+	if err := m.Migrate(19); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("apply 000019: %v", err)
 	}
 }
