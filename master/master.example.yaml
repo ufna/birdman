@@ -6,7 +6,12 @@
 
 dsn: "postgres://postgres:birdman@localhost:5432/birdman?sslmode=disable"
 
-listen_api: ":8100"   # REST API (+ /metrics, /healthz)
+listen_api: ":8100"   # REST API (+ /healthz); /metrics здесь НЕТ — см. ниже
+# Прометеевская экспозиция — отдельный адрес (tracker #1003): реестр не
+# пер-тенантный и не аутентифицирован (скрейперу нечем носить ключ), поэтому его
+# границей служит адрес. Ключ отсутствует → дефолт 127.0.0.1:9102; ЯВНЫЙ пустой
+# → экспозиции нет вовсе. Env-override BIRDMAN_LISTEN_METRICS.
+listen_metrics: "127.0.0.1:9102"
 listen_grpc: ":8444"  # gRPC AgentLink (всегда TLS)
 
 # Ключ шифрования обратимых секретов at-rest (registries.token,

@@ -4,7 +4,7 @@
 
 ## 1. Наблюдаемость
 
-Стек: **VictoriaMetrics** (single-node, на тачке master) + **vmagent** на каждой тачке (скрейпит localhost: agent :9101, node_exporter :9100, master :443/metrics) + **Grafana** (внутренний ops-инструмент; продуктовое лицо — панель) + **vmalert** → Discord webhook.
+Стек: **VictoriaMetrics** (single-node, на тачке master) + **vmagent** на каждой тачке (скрейпит localhost: agent :9101, node_exporter :9100, master :9102/metrics — с tracker #1003 у экспозиции master'а СВОЙ листенер `listen_metrics`, на порту API её нет) + **Grafana** (внутренний ops-инструмент; продуктовое лицо — панель) + **vmalert** → Discord webhook.
 
 ### Канонические метрики
 

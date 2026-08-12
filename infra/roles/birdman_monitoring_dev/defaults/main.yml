@@ -45,9 +45,11 @@ birdman_scrape_jobs:
     # node/region — единообразие с нодовыми vmagent'ами (5.2): правила и
     # дашборды различают ноды по одному лейблу.
     labels: { node: birdman-dev, region: dev }
+  # Master отдаёт реестр на СВОЁМ листенере, не на порту API (tracker #1003,
+  # birdman_master_metrics_addr роли birdman_master_dev).
   - job_name: birdman-master
     metrics_path: /metrics
-    targets: ["127.0.0.1:8100"]
+    targets: ["127.0.0.1:9102"]
   - job_name: node
     metrics_path: /metrics
     targets: ["127.0.0.1:4027"]        # ЧУЖОЙ prod node_exporter — read-only

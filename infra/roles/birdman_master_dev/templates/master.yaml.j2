@@ -13,6 +13,12 @@ secrets_key_file: "{{ birdman_master_secrets_key_file }}"
 listen_api: "{{ birdman_master_api_addr }}"
 listen_grpc: "{{ birdman_master_grpc_addr }}"
 
+# Прометеевский реестр — ОТДЕЛЬНЫЙ адрес (tracker #1003). Он не пер-тенантный и
+# отдаётся без ключа (скрейперу ключ носить нечем), поэтому его границей служит
+# адрес, а не скоуп: на listen_api ручки /metrics нет. Пустое значение выключило
+# бы экспозицию совсем — тогда умерли бы и алерты.
+listen_metrics: "{{ birdman_master_metrics_addr }}"
+
 tls:
   # Пусто → master выпускает себе server-лист от внутренней CA (в PG) при
   # каждом старте (mTLS agentlink v1, дизайн §1). auto_cert_dir оставлен

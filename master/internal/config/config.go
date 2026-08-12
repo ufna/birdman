@@ -106,7 +106,19 @@ type Config struct {
 	DSN        string `yaml:"dsn"`
 	ListenAPI  string `yaml:"listen_api"`
 	ListenGRPC string `yaml:"listen_grpc"`
-	TLS        TLS    `yaml:"tls"`
+	// ListenMetrics — ОТДЕЛЬНЫЙ адрес прометеевской экспозиции `/metrics`
+	// (tracker #1003). На `listen_api` этой ручки нет: реестр не пер-тенантный
+	// и отдаётся без аутентификации, поэтому единственная работающая граница —
+	// АДРЕС. Дефолт `127.0.0.1:9102` (9101 занят агентом на том же боксе).
+	//
+	// Семантика пустого значения отличается от `listen_api` СОЗНАТЕЛЬНО:
+	// отсутствующий ключ в конфиге — это дефолт (апгрейд со старым файлом не
+	// теряет метрики молча, они лишь переезжают с API-порта на loopback), а
+	// ЯВНЫЙ `listen_metrics: ""` выключает экспозицию совсем — оператору, у
+	// которого скрейпера нет, не за что платить открытым портом. Env-override
+	// BIRDMAN_LISTEN_METRICS.
+	ListenMetrics string `yaml:"listen_metrics"`
+	TLS           TLS    `yaml:"tls"`
 	// AgentlinkAuth selects how the gRPC AgentLink listener authenticates
 	// agents (mTLS agentlink v1, design §3): "token" (client certs ignored —
 	// pre-mTLS behaviour, byte-identical; emergency rollback), "mixed"
@@ -150,7 +162,10 @@ func defaults() Config {
 	return Config{
 		ListenAPI:  ":8100",
 		ListenGRPC: ":8444",
-		TLS:        TLS{AutoCertDir: "certs"},
+		// Loopback — не «рекомендация развёртывания», а дефолт кода: реестр
+		// перечисляет проекты, окружения и живые server_id (tracker #1003).
+		ListenMetrics: "127.0.0.1:9102",
+		TLS:           TLS{AutoCertDir: "certs"},
 		// Post-release default (design §3): accept both cert-auth and
 		// token-auth during the transition to strict mTLS.
 		AgentlinkAuth: "mixed",
@@ -199,6 +214,9 @@ func Load(path string) (Config, error) {
 	}
 	if v := os.Getenv("BIRDMAN_LISTEN_GRPC"); v != "" {
 		cfg.ListenGRPC = v
+	}
+	if v := os.Getenv("BIRDMAN_LISTEN_METRICS"); v != "" {
+		cfg.ListenMetrics = v
 	}
 	if v := os.Getenv("BIRDMAN_MM_JOIN_SECRET"); v != "" {
 		cfg.Matchmaking.JoinToken.Secret = v

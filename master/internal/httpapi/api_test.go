@@ -116,19 +116,10 @@ func TestRESTFlow(t *testing.T) {
 	alloc := &client{t: t, base: ts.URL, key: allocKey}
 	anon := &client{t: t, base: ts.URL}
 
-	// healthz and metrics are public.
+	// healthz is public; `/metrics` НА ЭТОМ ЛИСТЕНЕРЕ БОЛЬШЕ НЕТ (tracker #1003)
+	// — экспозиция уехала на свой адрес, см. metrics_listener_test.go.
 	if code, body := anon.do("GET", "/healthz", nil); code != 200 || body["status"] != "ok" {
 		t.Fatalf("healthz: %d %v", code, body)
-	}
-	resp, err := http.Get(ts.URL + "/metrics")
-	if err != nil || resp.StatusCode != 200 {
-		t.Fatalf("metrics: %v %d", err, resp.StatusCode)
-	}
-	raw, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if !strings.Contains(string(raw), "birdman_allocation_failures_total") &&
-		!strings.Contains(string(raw), "go_goroutines") {
-		t.Fatalf("metrics output looks empty: %.200s", raw)
 	}
 
 	// Auth matrix.

@@ -264,6 +264,69 @@ func TestLoadAlertmanagerURLExplicitEmptyDisables(t *testing.T) {
 	}
 }
 
+// listen_metrics (tracker #1003): прометеевская экспозиция уехала с API-порта
+// на свой адрес. Дефолт — loopback, и это ДЕФОЛТ КОДА, а не рекомендация
+// развёртывания: реестр перечисляет проекты, окружения и живые server_id.
+func TestLoadListenMetricsDefaultsToLoopback(t *testing.T) {
+	withDSN(t)
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ListenMetrics != "127.0.0.1:9102" {
+		t.Fatalf("listen_metrics = %q, want 127.0.0.1:9102", cfg.ListenMetrics)
+	}
+	// 9101 занят агентом на том же боксе — совпадение сделало бы дефолт
+	// неработающим ровно в рекомендованной раскладке.
+	if cfg.ListenMetrics == "127.0.0.1:9101" {
+		t.Fatal("дефолт метрик совпал с портом агента")
+	}
+}
+
+func TestLoadListenMetricsFromFileAndEnv(t *testing.T) {
+	withDSN(t)
+	path := writeConfig(t, "listen_metrics: \"127.0.0.1:9999\"\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ListenMetrics != "127.0.0.1:9999" {
+		t.Fatalf("listen_metrics из файла = %q, want 127.0.0.1:9999", cfg.ListenMetrics)
+	}
+	t.Setenv("BIRDMAN_LISTEN_METRICS", "127.0.0.1:9998")
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ListenMetrics != "127.0.0.1:9998" {
+		t.Fatalf("env-override listen_metrics = %q, want 127.0.0.1:9998", cfg.ListenMetrics)
+	}
+}
+
+// ЯВНЫЙ пустой listen_metrics выключает экспозицию совсем (у оператора нет
+// скрейпера — незачем держать порт). Отсутствие ключа при этом даёт ДЕФОЛТ, а
+// не выключение: апгрейд со старым конфигом не имеет права молча остаться без
+// метрик, иначе вместе с ними молча умрут алерты.
+func TestLoadListenMetricsExplicitEmptyDisables(t *testing.T) {
+	withDSN(t)
+	path := writeConfig(t, "listen_metrics: \"\"\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ListenMetrics != "" {
+		t.Fatalf("явный пустой listen_metrics = %q, want \"\" (экспозиция выключена)", cfg.ListenMetrics)
+	}
+	old := writeConfig(t, "listen_grpc: \":8444\"\n")
+	cfg, err = Load(old)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ListenMetrics != "127.0.0.1:9102" {
+		t.Fatalf("конфиг без ключа: listen_metrics = %q, want дефолт 127.0.0.1:9102", cfg.ListenMetrics)
+	}
+}
+
 func writeKeyFile(t *testing.T, key []byte) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "secrets.key")

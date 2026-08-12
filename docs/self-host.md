@@ -96,9 +96,10 @@ What the generated vhost does:
 - terminates TLS, redirects `:80` → `:443`, proxies everything to
   `127.0.0.1:8100` and passes `X-Forwarded-Proto` — that is what makes the
   master mark the session cookie `Secure`;
-- returns **403 on `/metrics`**: the master serves Prometheus metrics without
-  authentication (they are meant for a loopback scrape), so they must not reach
-  the internet — a local vmagent scraping `127.0.0.1:8100` is unaffected;
+- returns **403 on `/metrics`** — belt and braces only. Since tracker #1003 the
+  master does not serve the Prometheus registry on the API port at all: it lives
+  on its own listener (`listen_metrics`, default `127.0.0.1:9102`), and the API
+  port answers 404 there. Point your vmagent at `127.0.0.1:9102`;
 - rate-limits **`POST /v1/session`** (login) to 10/min per IP plus a 30 r/s
   overall cap, answering `429`; `GET`/`DELETE` on the same path are not counted,
   so the panel's session check is never throttled;
@@ -334,8 +335,13 @@ to a global key and NOT returned to a bound one. That is the same trap as
 What binding does not close at all: `GET /metrics` is unauthenticated and
 carries `{project, env, server_id}` (project slugs, environment names and the
 shape of the fleet, with no key at all), and `GET /v1/qos` is public by design
-and returns the addresses of active nodes. If you expose the panel through
-nginx (section 1), do not proxy `/metrics`.
+and returns the addresses of active nodes. The registry is no longer reachable
+from the API port, though: since tracker #1003 it is served on a separate
+listener, `listen_metrics`, defaulting to `127.0.0.1:9102` — so whoever reaches
+the API port does not get it, and the guarantee no longer depends on your proxy
+configuration. Keep that listener on loopback (or set `listen_metrics: ""` to
+turn the endpoint off entirely if you do not scrape it), and do not proxy
+`/metrics` outward.
 
 Two things are worth knowing BEFORE you hand bound keys out:
 

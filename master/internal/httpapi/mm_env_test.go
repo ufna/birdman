@@ -3,12 +3,14 @@ package httpapi_test
 import (
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 
 	"github.com/ufna/birdman/master/internal/httpapi"
+	"github.com/ufna/birdman/master/internal/metrics"
 	"github.com/ufna/birdman/master/internal/store"
 	"github.com/ufna/birdman/master/internal/testdb"
 )
@@ -258,7 +260,7 @@ func TestAllocateEnvResolution(t *testing.T) {
 	prodNode := prodNodeID(t, st, prodNodeIP)
 	prodV := versionID(t, st, "game", "prod", "2.0.0")
 	prodSrv := f.InsertServer(t, prodNode, prodV, "ready", 20002, 0)
-	ts, _, _ := deployServer(t, st)
+	ts, _, _, reg := deployServerWithMetrics(t, st)
 	ctx := t.Context()
 
 	mkKey := func(project, env *string) string {
@@ -306,7 +308,7 @@ func TestAllocateEnvResolution(t *testing.T) {
 	// The project label (tracker #955) rides along on the same series — this is
 	// also the proof that the allocation's project reaches the metric, and hence
 	// the BufferEmptyAllocFail/AllocationFailures alerts, without an expr change.
-	if scrape := metricsText(t, ts.URL); !strings.Contains(scrape,
+	if scrape := metricsText(t, reg); !strings.Contains(scrape,
 		`birdman_allocation_failures_total{project="game",reason="env_required"} `) {
 		t.Fatal("409-ambiguous allocate must increment AllocationFailures{reason=env_required,project=game}")
 	}
@@ -498,10 +500,15 @@ func versionID(t *testing.T, st *store.Store, project, env, semver string) strin
 	return id
 }
 
-// metricsText scrapes the public /metrics endpoint and returns the raw text.
-func metricsText(t *testing.T, baseURL string) string {
+// metricsText поднимает экспозицию реестра на СВОЁМ листенере и возвращает
+// текст скрейпа. С tracker #1003 `/metrics` на API-листенере нет вовсе (реестр
+// не пер-тенантный и не аутентифицирован — его границей служит адрес), поэтому
+// тест обязан смонтировать httpapi.MetricsHandler сам.
+func metricsText(t *testing.T, m *metrics.Metrics) string {
 	t.Helper()
-	resp, err := http.Get(baseURL + "/metrics")
+	ts := httptest.NewServer(httpapi.MetricsHandler(m))
+	defer ts.Close()
+	resp, err := http.Get(ts.URL + "/metrics")
 	if err != nil {
 		t.Fatalf("scrape /metrics: %v", err)
 	}

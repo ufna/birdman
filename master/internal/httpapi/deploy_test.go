@@ -19,6 +19,16 @@ import (
 // deployServer wires the REST API with a live deploy manager + recorder.
 func deployServer(t *testing.T, st *store.Store) (*httptest.Server, *deploy.Manager, *testdb.CommandRecorder) {
 	t.Helper()
+	ts, dep, rec, _ := deployServerWithMetrics(t, st)
+	return ts, dep, rec
+}
+
+// deployServerWithMetrics — тот же стенд, но отдаёт ещё и реестр метрик. Нужен
+// с tracker #1003: прометеевская экспозиция больше не висит на API-листенере,
+// поэтому тест, читающий счётчик, обязан поднять её отдельно (metricsText) —
+// того самого объекта, который держит хендлер API.
+func deployServerWithMetrics(t *testing.T, st *store.Store) (*httptest.Server, *deploy.Manager, *testdb.CommandRecorder, *metrics.Metrics) {
+	t.Helper()
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	m := metrics.New(st, log)
 	mm := matchmaker.New(st, m, matchmaker.Config{}, log)
@@ -26,7 +36,7 @@ func deployServer(t *testing.T, st *store.Store) (*httptest.Server, *deploy.Mana
 	dep := deploy.New(deploy.Options{Store: st, Sender: rec, Log: log})
 	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", "", log))
 	t.Cleanup(ts.Close)
-	return ts, dep, rec
+	return ts, dep, rec, m
 }
 
 // POST /v1/deploy + /v1/rollback over HTTP: scopes, status codes and the full

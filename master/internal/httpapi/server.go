@@ -79,7 +79,16 @@ func New(st *store.Store, m *metrics.Metrics, mm *matchmaker.Matchmaker, dep *de
 	}
 
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz) // no auth by design
-	s.mux.Handle("GET /metrics", promhttp.HandlerFor(m.Registry, promhttp.HandlerOpts{}))
+	// Прометеевской экспозиции на API-листенере БОЛЬШЕ НЕТ (tracker #1003) —
+	// она уехала на свой адрес, см. MetricsHandler ниже. Явный 404 вместо
+	// «просто не регистрировать»: последним зарегистрирован катч-олл панели
+	// («/»), и без этой строки скрейпер получал бы на `/metrics` HTML-страницу
+	// с кодом 200 — то есть переезд выглядел бы как испорченная экспозиция, а
+	// не как переезд. Тело называет новый адрес и не несёт ничего тенантного.
+	s.mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, http.StatusNotFound, "not_found",
+			"metrics moved to the dedicated metrics listener (config listen_metrics, default 127.0.0.1:9102)")
+	})
 
 	s.mux.HandleFunc("POST /v1/nodes", s.requireScope(ScopeAdmin, s.handleCreateNode))
 	s.mux.HandleFunc("GET /v1/nodes", s.requireScope(ScopeReadonly, s.handleListNodes))
@@ -288,6 +297,35 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		panelState = "embedded"
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "panel": panelState})
+}
+
+// MetricsHandler — прометеевская экспозиция реестра master'а, ОТДЕЛЬНЫМ
+// хендлером, который вызывающий вешает на ОТДЕЛЬНЫЙ листенер
+// (`config.ListenMetrics`, деф. `127.0.0.1:9102`); на API-мультиплексоре
+// маршрута `/metrics` больше НЕТ (tracker #1003).
+//
+// Аутентификации здесь нет и не будет: скрейперу (vmagent/Prometheus) носить
+// ключ нечем, а `requireScope` не решал бы задачу вовсе — реестр НЕ пер-тенантный,
+// и readonly-ключ ЛЮБОГО арендатора увидел бы в нём всю платформу. Границей
+// служит АДРЕС: реестр несёт `birdman_servers{project,env,…}`,
+// `birdman_server_info{server_id,project,env}`, `birdman_events_total{kind,project}`
+// — то есть все слаги проектов, все имена окружений, состав флота по регионам и
+// версиям и все живые `server_id`. Ровно эти данные #993/#989/#988/#974 закрыли
+// на `/v1/*` для привязанного ключа, а здесь они доставались БЕЗ КЛЮЧА тому, кто
+// дотянулся до порта API.
+//
+// ПОЧЕМУ ЛИСТЕНЕР, А НЕ ПРАВИЛО В ПРОКСИ. Гейт существовал — но в чужом файле:
+// `location = /metrics { return 403; }` в `infra/roles/birdman_master_dev`. Он не
+// проверяется ни одним тестом мастера (снести строку — всё зелёное), не
+// существует для оператора, поднявшего OSS-бинарь без нашей ansible-роли или со
+// своим прокси, и не закрывает периметр ИЗНУТРИ: соседний контейнер,
+// ssh-туннель или другой сервис на хосте ходили на `listen_api` напрямую. Своим
+// листенером граница переезжает в код и в тесты этого пакета
+// (`metrics_listener_test.go`).
+func MetricsHandler(m *metrics.Metrics) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", promhttp.HandlerFor(m.Registry, promhttp.HandlerOpts{}))
+	return mux
 }
 
 // tenantScope — ЕДИНЫЙ вход всех ЛИСТИНГОВ и агрегатов (tracker #993): он и

@@ -279,6 +279,18 @@ func run() error {
 		Handler:           apiHandler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	// Прометеевская экспозиция — СВОЙ листенер (tracker #1003): реестр не
+	// пер-тенантный и отдаётся без ключа, поэтому его границей служит адрес, а
+	// не скоуп. Пустой `listen_metrics` — осознанное выключение ручки; nil-сервер
+	// ниже просто не запускается и не гасится.
+	var metricsSrv *http.Server
+	if cfg.ListenMetrics != "" {
+		metricsSrv = &http.Server{
+			Addr:              cfg.ListenMetrics,
+			Handler:           httpapi.MetricsHandler(m),
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+	}
 
 	// Background loops: reconcile (1s), lease checker (1s), matchmaker (500ms),
 	// stats rollup (backfill once + tail recompute every StatsRollupInterval).
@@ -318,7 +330,7 @@ func run() error {
 	// не имеет права зависеть от того, поднялась ли уже наблюдаемость.
 	go apiHandler.WarmNarrowProbes(loopCtx)
 
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 3)
 	go func() {
 		log.Info("gRPC AgentLink listening", "addr", cfg.ListenGRPC)
 		errCh <- grpcServer.Serve(grpcLis)
@@ -331,6 +343,22 @@ func run() error {
 			errCh <- nil
 		}
 	}()
+	if metricsSrv == nil {
+		log.Warn("Prometheus /metrics is disabled (listen_metrics is empty)")
+	} else {
+		go func() {
+			log.Info("Prometheus /metrics listening", "addr", metricsSrv.Addr)
+			// Занятый порт метрик роняет master так же, как занятый порт API:
+			// молча остаться без экспозиции значит остаться без алертов, а
+			// «наблюдаемость отвалилась» — ровно тот отказ, который обязан быть
+			// громким (ops.md §1).
+			if err := metricsSrv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+				errCh <- err
+			} else {
+				errCh <- nil
+			}
+		}()
+	}
 
 	select {
 	case <-ctx.Done():
@@ -346,6 +374,9 @@ func run() error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = api.Shutdown(shutdownCtx)
+	if metricsSrv != nil {
+		_ = metricsSrv.Shutdown(shutdownCtx)
+	}
 	stopped := make(chan struct{})
 	go func() {
 		grpcServer.GracefulStop()
