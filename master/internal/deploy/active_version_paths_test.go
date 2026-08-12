@@ -24,14 +24,28 @@ import (
 // переключали fleet_configs.active_version при нуле живых нод так же вхолостую
 // и так же молча.
 //
-// Поведенческий пин на все три ручки живёт в httpapi
-// (TestActiveVersionFlipsWithoutNodesAreAnnounced). Но перечисление ПУТЕЙ по
+// Поведенческие пины: два новых обхода — в httpapi
+// (TestActiveVersionFlipsWithoutNodesAreAnnounced), исходный путь startJob —
+// там же, в TestDeployWithoutNodesIsAnnounced (#1071). Но перечисление ПУТЕЙ по
 // определению не ловит ТРЕТИЙ обход — тот, которого ещё нет. Поэтому здесь
-// пины СТРУКТУРНЫЕ: они читают исходники и требуют, чтобы множество мест,
-// способных переставить активную версию, совпадало с реестром. Новый писатель
-// → тест красный, и автор обязан либо подключить пробу нулевой ёмкости
-// (deploy.Manager.NoNodesWarning + recordNoNodes), либо вписать себя сюда с
-// причиной. Без этого следующий обход снова обнаружится только на живом стенде.
+// пины СТРУКТУРНЫЕ: они читают исходники и требуют совпадения с реестром.
+//
+// ЧТО ИМЕННО ОНИ ЛОВЯТ — и это уже, чем «любое место, способное переставить
+// активную версию»; читать их шире значит на них не проверять:
+//   - новый SQL, пишущий НЕ-null fleet_configs.active_version, в НЕтестовом
+//     .go-файле каталога ../store — как внутри функции, так и в объявлении
+//     уровня пакета (в этом пакете есть и такие: claimSQL, matchSelect);
+//   - новый вызывающий store.ActivateVersion в САМОМ пакете deploy (сравнение
+//     по имени селектора).
+// ЧЕГО НЕ ЛОВЯТ (и это честная граница, а не недоделка): нового вызывающего
+// УЖЕ зарегистрированных store.UpsertFleet / store.ActivateVersion из другого
+// пакета — например ещё одну HTTP-ручку; SQL, собранный конкатенацией или
+// fmt.Sprintf; и они НЕ проверяют, что кто-то реально зовёт NoNodesWarning —
+// строки реестра говорят, КТО обязан, но исполняет это поведенческий пин.
+// Красный тест здесь = «появилось новое место смены активной версии»: подключи
+// пробу нулевой ёмкости (deploy.Manager.NoNodesWarning + recordNoNodes) и
+// впиши себя в реестр с причиной. Иначе следующий обход снова обнаружится
+// только на живом стенде.
 
 // storeActiveVersionWriters — функции пакета store, чей SQL ставит НЕ-null
 // fleet_configs.active_version, то есть реально включает версию.
@@ -50,8 +64,11 @@ var deployActivateCallers = map[string]string{
 
 func TestActiveVersionWritersAreRegistered(t *testing.T) {
 	got := map[string]bool{}
-	forEachFunc(t, "../store", func(name string, fn *ast.FuncDecl) {
-		ast.Inspect(fn, func(n ast.Node) bool {
+	// Обходятся и функции, и объявления уровня пакета: в этом пакете SQL живёт
+	// в обеих формах (claimSQL, matchSelect — константы), и пин, смотрящий
+	// только в тела функций, пропустил бы ровно ту, что вынесена в константу.
+	forEachDecl(t, "../store", func(name string, decl ast.Node) {
+		ast.Inspect(decl, func(n ast.Node) bool {
 			lit, ok := n.(*ast.BasicLit)
 			if !ok || lit.Kind != token.STRING {
 				return true
@@ -76,8 +93,8 @@ func TestActiveVersionWritersAreRegistered(t *testing.T) {
 
 func TestActivateVersionCallersAreRegistered(t *testing.T) {
 	got := map[string]bool{}
-	forEachFunc(t, ".", func(name string, fn *ast.FuncDecl) {
-		ast.Inspect(fn, func(n ast.Node) bool {
+	forEachDecl(t, ".", func(name string, decl ast.Node) {
+		ast.Inspect(decl, func(n ast.Node) bool {
 			sel, ok := n.(*ast.SelectorExpr)
 			if ok && sel.Sel.Name == "ActivateVersion" {
 				got[name] = true
@@ -107,15 +124,19 @@ func writesActiveVersion(sql string) bool {
 		strings.Contains(s, "active_version = coalesce")
 }
 
-// forEachFunc walks the non-test .go files of a package directory, calling back
-// with the (possibly method) name of every function declaration.
-func forEachFunc(t *testing.T, dir string, visit func(name string, fn *ast.FuncDecl)) {
+// forEachDecl walks the non-test .go files of a package directory, calling back
+// for every TOP-LEVEL declaration with a name to attribute it to: functions and
+// methods by their own name, package-level const/var specs by the identifier
+// they bind. Both forms are needed — SQL in this codebase lives in function
+// bodies AND in package-level constants (store.claimSQL, store.matchSelect) —
+// and a scanner that saw only FuncDecls would be silently blind to the second.
+func forEachDecl(t *testing.T, dir string, visit func(name string, decl ast.Node)) {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("read %s: %v", dir, err)
 	}
-	seen := 0
+	funcs, specs := 0, 0
 	fset := token.NewFileSet()
 	for _, e := range entries {
 		name := e.Name()
@@ -127,17 +148,32 @@ func forEachFunc(t *testing.T, dir string, visit func(name string, fn *ast.FuncD
 			t.Fatalf("parse %s: %v", name, err)
 		}
 		for _, d := range f.Decls {
-			fn, ok := d.(*ast.FuncDecl)
-			if !ok {
-				continue
+			switch decl := d.(type) {
+			case *ast.FuncDecl:
+				funcs++
+				visit(decl.Name.Name, decl)
+			case *ast.GenDecl:
+				if decl.Tok != token.CONST && decl.Tok != token.VAR {
+					continue
+				}
+				for _, s := range decl.Specs {
+					vs, ok := s.(*ast.ValueSpec)
+					if !ok || len(vs.Names) == 0 {
+						continue
+					}
+					specs++
+					visit(vs.Names[0].Name, vs)
+				}
 			}
-			seen++
-			visit(fn.Name.Name, fn)
 		}
 	}
 	// Контроль самого сканера: пустой обход прошёл бы как «реестр совпал».
-	if seen == 0 {
+	// Обе половины проверяются отдельно — иначе поломка одной маскируется другой.
+	if funcs == 0 {
 		t.Fatalf("scanner read no function declarations in %s — the pin would be vacuously green", dir)
+	}
+	if specs == 0 {
+		t.Fatalf("scanner read no package-level const/var specs in %s — the second half of the pin is blind", dir)
 	}
 }
 

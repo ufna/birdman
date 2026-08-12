@@ -247,12 +247,18 @@ func (m *Manager) noNodesWarning(ctx context.Context, v store.Version) string {
 //
 // It is exported ON PURPOSE, and that is the whole point of #1088: the zero-
 // capacity signal must not live inside ONE funnel. Its first home was startJob,
-// through which five paths run (manual deploy, promote, auto-deploy from
-// POST /v1/versions, Resume, SweepOrphans) — but startJob was never the
-// STRUCTURAL sole writer of the active version, only today's most travelled
-// one, and two paths already went around it (Rollback and the fleet override).
-// Any NEW path that repoints fleet_configs.active_version is expected to call
-// this; TestActiveVersionWritersAreRegistered goes red until it does.
+// which the manual deploy, promote, auto-deploy, Resume and SweepOrphans all
+// reach — but startJob was never the STRUCTURAL sole writer of the active
+// version, only today's most travelled one, and two paths already went around
+// it (Rollback and the fleet override). Any NEW path that repoints
+// fleet_configs.active_version is expected to call this.
+//
+// Обязанность держится тестом ЧАСТИЧНО, и знать границу важнее, чем верить в
+// автоматику: active_version_paths_test.go краснеет на новом SQL-писателе в
+// пакете store и на новом вызывающем ActivateVersion внутри пакета deploy, но
+// НЕ видит ещё одну HTTP-ручку, зовущую уже зарегистрированный
+// store.UpsertFleet, и не проверяет, что пробу кто-то реально позвал (это
+// работа поведенческих пинов). Разбор границы — в шапке того файла.
 func (m *Manager) NoNodesWarning(ctx context.Context, projectID, env, versionID string) string {
 	targets, err := m.st.PrePullTargets(ctx, projectID, env)
 	if err != nil {
