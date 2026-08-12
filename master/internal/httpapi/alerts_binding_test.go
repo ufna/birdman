@@ -71,7 +71,14 @@ type alertsTenantFixture struct {
 	adminKey  string // admin (привязать его нельзя — CreateAPIKey отвергает)
 }
 
-func newAlertsTenantFixture(t *testing.T) *alertsTenantFixture {
+// newAlertsTenantFixture поднимает фикстуру на batch-форме лога — той, что
+// пишет сегодняшний sink. extraLogLines дописываются в ТОТ ЖЕ файл: у
+// `/var/log/birdman/alerts.log` долгая жизнь (он дописывается, а не
+// пересоздаётся), поэтому «старые строки одной формы вперемешку с новыми
+// другой» — это не искусственный кейс, а то, как файл и выглядит после
+// перестройки канала (#244). Существующие тесты передают ноль строк и
+// считают ровно те же алерты, что и раньше.
+func newAlertsTenantFixture(t *testing.T, extraLogLines ...string) *alertsTenantFixture {
 	t.Helper()
 	st := testdb.New(t)
 	log := opsLog()
@@ -90,7 +97,11 @@ func newAlertsTenantFixture(t *testing.T) *alertsTenantFixture {
 	}
 
 	logPath := filepath.Join(t.TempDir(), "alerts.log")
-	if err := os.WriteFile(logPath, []byte(alertsTenantLog), 0o644); err != nil {
+	logBody := alertsTenantLog
+	for _, ln := range extraLogLines {
+		logBody += ln + "\n"
+	}
+	if err := os.WriteFile(logPath, []byte(logBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	// Свой фейк vmalert, а не общий fakeVmalertWith: этой фикстуре нужен ещё и
