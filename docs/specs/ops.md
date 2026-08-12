@@ -31,7 +31,7 @@
 | CrashLoop | событие crash_loop (см. master §2). **Проектный с #986** — `birdman_events_total` несёт лейбл `project`, а `project_id` события выводится при записи из его же ссылок/payload (#984/#985) | critical |
 | DiskHigh | disk > 85% (critical: > 92%) | warning |
 | MasterDown | внешний probe (healthchecks.io/UptimeRobot на `GET /healthz`) | critical |
-| TickDegraded | p95 tick_ms > порога игры 5м (**проектный** — `project` доклеивается join'ом с `birdman_server_info`, #958). Join не сматчился → лейбл берётся с самой серии, если он там есть (#1008), иначе алерт горит ПЛАТФОРМЕННЫМ — и тогда его видит любой привязанный ключ вместе с `server_id` и тиком чужого дедика (цена названа в `master.md` §6, tracker #1020) | warning |
+| TickDegraded | p95 tick_ms > порога игры 5м (**проектный** — `project` доклеивается join'ом с `birdman_server_info`, #958). Join не сматчился → лейбл берётся с самой серии, если он там есть (#1008), иначе алерт горит ПЛАТФОРМЕННЫМ — и тогда его видит любой привязанный ключ: `server_id` и текст `summary` нормализация мастера наружу не переносит, но hostname узла и (на `/v1/alerts/active`) числовое значение тика уезжают (цена замерена и названа в `master.md` §6, tracker #1020) | warning |
 | AgentlinkPendingStuck | unacked-команды master→agent висят дольше `birdman_pending_stuck_for` (деф. 10м) | warning |
 | CertExpiry | mTLS/TLS серты < 14 дней | warning |
 | AgentUpgradeFailed | событие agent_upgrade_failed. **Проектный с #986** (тот же лейбл; проект берётся из ноды события). Событие, которому проект приписать не из чего, остаётся платформенным и горит без лейбла — как и задумано | critical |
