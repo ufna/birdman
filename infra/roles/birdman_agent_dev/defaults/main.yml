@@ -124,6 +124,17 @@ birdman_vector_data_dir: /var/lib/birdman/vector   # checkpoint + disk-буфе�
 # ноды = хост master-бокса: admin-ключ НЕ покидает master-бокс, REST не
 # покидает его localhost.
 birdman_master_api_host: "{{ inventory_hostname }}"
+
+# --- кто владеет бинарём агента (tracker #1069, #1070) ----------------------
+# По этим двум путям НА МАСТЕР-БОКСЕ ФЛОТА (birdman_master_api_host) tasks/
+# binary.yml выясняет, катает ли агентов pull-деплоер: скрипт — «деплоер тут
+# есть», disabled — kill-switch. Оба ставит роль birdman_devdeploy
+# (tasks/main.yml: dest скрипта и файл, который она держит absent/touch по
+# birdman_devdeploy_enabled) — она и есть источник правды, а совпадение путей
+# закреплено тестом роли, чтобы гард не начал однажды сторожить файл, которого
+# больше никто не кладёт, и не выключился молча.
+birdman_devdeploy_script_path: /usr/local/bin/birdman-devdeploy
+birdman_devdeploy_disabled_path: /etc/birdman/devdeploy.disabled
 # Legacy-путь кредов реестра (env BIRDMAN_GHCR_TOKEN → ghcr.token →
 # registry_auth в agent.yaml). Основной путь — Админка → Реестры
 # (SetRegistries по mTLS-линку). false = на диске ноды нет ghcr-токена

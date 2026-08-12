@@ -29,19 +29,30 @@
 #      плейбука по живому боксу обязан бинарь НЕ ТРОГАТЬ (иначе откат агента на
 #      локальную сборку + расхождение строки версии с тем, что мастер запросил
 #      в POST /v1/agent-upgrade, то есть ложные agent_upgrade_failed).
+#   4. #1070 — тот же гард БЕЗ ФЛАГА, как в add-node.yml: владение выводится из
+#      состояния МАСТЕР-БОКСА ФЛОТА, поэтому в харнессе два контейнера (нода и
+#      мастер) — один не отличил бы «спросили мастера» от «спросили хоть
+#      кого-нибудь», а деплоер живёт не на ноде.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 role="$(dirname "$here")"
 image="${BIRDMAN_VECTOR_IMAGE:-$(sed -n 's/^birdman_vector_image: *//p' "$role/defaults/main.yml")}"
-# Контейнер-«бокс» для гарда бинаря (#1069): имя от id задачи, за собой убираем.
+# Контейнеры-«боксы» для гарда бинаря (#1069, #1070): имена от id задач, за
+# собой убираем. Их ДВА, и это несущее: у удалённой ноды деплоер живёт не на
+# ней, а на master-боксе флота, поэтому один контейнер не отличил бы «проба
+# спросила мастера» от «проба спросила хоть кого-нибудь» (#1070).
 box_image="${BIRDMAN_TEST_BOX_IMAGE:-python:3-alpine}"
-# Имя переопределяемо: в дереве работают несколько сессий разом, а `docker rm -f`
+# Имена переопределяемы: в дереве работают несколько сессий разом, а `docker rm -f`
 # на фиксированном имени убил бы контейнер чужого прогона на середине.
 box="${BIRDMAN_TEST_BOX_NAME:-bm1069-box}"
+master="${BIRDMAN_TEST_MASTER_NAME:-bm1070-master}"
 
 work="$(mktemp -d)"
-cleanup() { rm -rf "$work"; docker rm -f "$box" >/dev/null 2>&1 || true; }
+cleanup() {
+  rm -rf "$work"
+  docker rm -f "$box" "$master" >/dev/null 2>&1 || true
+}
 trap cleanup EXIT
 
 # Бокс из ДВУХ нод — тот самый случай, ради которого заведён #1065: одна
@@ -167,20 +178,58 @@ echo "── binary guard: the pull deployer owns /usr/local/bin/birdman-agent"
 ansible-galaxy collection list community.docker >/dev/null 2>&1 \
   || fail "нужна коллекция community.docker (connection-плагин docker): ansible-galaxy collection install community.docker"
 
-docker rm -f "$box" >/dev/null 2>&1 || true
-docker run -d --name "$box" "$box_image" sleep 900 >/dev/null
+# Пути, по которым роль спрашивает мастер-бокс, обязаны быть теми, которые роль
+# деплоера реально СТАВИТ. Расхождение здесь не падало бы ни на одном прогоне:
+# гард просто перестал бы находить деплоер и тихо выключился — то есть вернулся
+# бы ровно к дефекту #1070, но уже необнаружимо. Поэтому сверка, а не доверие.
+dd_script="$(sed -n 's/^birdman_devdeploy_script_path: *//p' "$role/defaults/main.yml")"
+dd_disabled="$(sed -n 's/^birdman_devdeploy_disabled_path: *//p' "$role/defaults/main.yml")"
+dd_tasks="$(dirname "$role")/birdman_devdeploy/tasks/main.yml"
+[ -n "$dd_script" ] && [ -n "$dd_disabled" ] \
+  || fail "в defaults роли агента нет путей пробы деплоера"
+grep -q "dest: $dd_script\$" "$dd_tasks" \
+  || fail "роль агента пробует $dd_script, а роль деплоера ставит скрипт не туда — гард молча выключится"
+grep -q "path: $dd_disabled\$" "$dd_tasks" \
+  || fail "роль агента пробует kill-switch $dd_disabled, а роль деплоера держит его не там"
+echo "ok: пути пробы совпадают с тем, что ставит роль деплоера"
+
+for c in "$box" "$master"; do
+  docker rm -f "$c" >/dev/null 2>&1 || true
+  docker run -d --name "$c" "$box_image" sleep 900 >/dev/null
+done
+
+# Инвентарь ФАЙЛОМ, а не «-i host,»: делегированная задача берёт connection из
+# hostvars ЦЕЛИ делегирования, а у хоста из inline-списка их задать негде.
+cat >"$work/guard-inventory.yml" <<INV
+all:
+  hosts:
+    $box:
+      ansible_connection: community.docker.docker
+      ansible_python_interpreter: /usr/local/bin/python3
+    $master:
+      ansible_connection: community.docker.docker
+      ansible_python_interpreter: /usr/local/bin/python3
+INV
 
 mkdir -p "$work/build"
 printf 'LOCAL-BUILD\n' >"$work/build/birdman-agent"
 
+# Мастер флота — ОТДЕЛЬНЫЙ хост, как у настоящей удалённой ноды в add-node.yml:
+# -l оставляет в плее только ноду, мастер остаётся целью delegate_to.
 guard() { # guard <лог> [доп. -e ansible'у...]
   local log="$1"; shift
-  ansible-playbook -i "$box," "$here/binary_guard.yml" \
-    -e "birdman_agent_binary=$work/build/birdman-agent" "$@" >"$log" 2>&1 \
+  ansible-playbook -i "$work/guard-inventory.yml" -l "$box" "$here/binary_guard.yml" \
+    -e "birdman_agent_binary=$work/build/birdman-agent" \
+    -e "birdman_master_api_host=$master" "$@" >"$log" 2>&1 \
     || { cat "$log" >&2; fail "прогон гарда упал (см. вывод выше)"; }
 }
 box_bin() { docker exec "$box" cat /usr/local/bin/birdman-agent 2>/dev/null; }
 put_box_bin() { docker exec "$box" sh -c 'printf "DEPLOYED-BY-DEVDEPLOY\n" >/usr/local/bin/birdman-agent && chmod 0755 /usr/local/bin/birdman-agent'; }
+# Деплоер «стоит» на боксе = там лежит его скрипт (ровно то, что ставит роль).
+put_deployer() { docker exec "$1" sh -c "mkdir -p \$(dirname $dd_script) && printf '#!/bin/sh\n' >$dd_script && chmod 0755 $dd_script"; }
+rm_deployer() { docker exec "$1" rm -f "$dd_script"; }
+kill_switch() { docker exec "$1" sh -c "mkdir -p \$(dirname $dd_disabled) && touch $dd_disabled"; }
+rm_kill_switch() { docker exec "$1" rm -f "$dd_disabled"; }
 note='Бинарь агента не трогаю'
 
 # (а) Первичный bring-up: деплоер включён, но бинаря на боксе ЕЩЁ НЕТ — роль
@@ -207,8 +256,8 @@ grep -q "$note" "$work/guard-owned.log" \
   || fail "в выводе нет заметки о том, ПОЧЕМУ бинарь пропущен — пропуск неотличим от потери задачи"
 
 # (в) Бокс без деплоера — ставит, как раньше. Проверяются обе формы «нет
-# деплоера»: флаг не задан вовсе (ветка default(false), как в add-node.yml) и
-# явный false.
+# деплоера»: флаг не задан вовсе (тогда роль спрашивает мастер-бокс флота, а на
+# нём деплоера нет — случай self-host в add-node.yml) и явный false.
 guard "$work/guard-nodeploy.log"
 grep -q 'BINARY_GUARD changed=True skipped=False instances=1' "$work/guard-nodeploy.log" \
   || fail "без флага деплоера роль перестала ставить бинарь"
@@ -235,7 +284,52 @@ grep -q 'changed определён (False)' "$work/guard-secondnode.log" \
   || fail "assert про определённость changed не отработал — main.yml упал бы на наборе рестартов"
 echo "ok: bring-up ставит, деплоер владеет — пропуск, вторая нода бинарь не трогает"
 
-docker rm -f "$box" >/dev/null
+# ── 5b. Тот же гард БЕЗ ФЛАГА: add-node.yml по удалённой ноде (#1070) ────────
+# В add-node.yml роли деплоера в плее нет, флаг не определён — и до #1070 гард
+# в этом плее был инертен: прогон по удалённой ноде откатывал её агента на
+# локальную сборку, хотя деплоер её катает (цели GET /v1/nodes?env=dev
+# фильтруются по env, а не по боксу). Ниже флага НЕТ НИ В ОДНОМ прогоне —
+# решение выводится из состояния мастер-бокса флота.
+echo "── binary guard without the flag: add-node.yml against a remote node"
+printf 'LOCAL-BUILD\n' >"$work/build/birdman-agent"
+
+# (д) Деплоер стоит на МАСТЕРЕ флота, нода удалённая — бинарь ноды не трогаем.
+# Это и есть дефект карточки: сегодня здесь была бы локальная сборка.
+put_deployer "$master"
+put_box_bin
+guard "$work/guard-remote-owned.log"
+grep -q 'BINARY_GUARD changed=False skipped=True instances=1' "$work/guard-remote-owned.log" \
+  || fail "без флага гард не увидел деплоера на мастер-боксе — прогон по удалённой ноде откатил бы её агента"
+[ "$(box_bin)" = "DEPLOYED-BY-DEVDEPLOY" ] \
+  || fail "прогон по удалённой ноде затёр бинарь, которым владеет деплоер (#1070)"
+grep -q "$note" "$work/guard-remote-owned.log" \
+  || fail "в выводе нет заметки о владельце — пропуск неотличим от потери задачи"
+grep -q "$master" "$work/guard-remote-owned.log" \
+  || fail "заметка не называет бокс, у которого спросили — оператору негде смотреть"
+
+# (е) Kill-switch на мастере: деплоер стоит, но выключен — владелец снова
+# ansible. Отмычка из заметки гарда обязана РАБОТАТЬ, а не быть присказкой.
+kill_switch "$master"
+guard "$work/guard-killswitch.log"
+grep -q 'BINARY_GUARD changed=True skipped=False instances=1' "$work/guard-killswitch.log" \
+  || fail "kill-switch на мастере не вернул владение ansible — документированная отмычка не работает"
+[ "$(box_bin)" = "LOCAL-BUILD" ] || fail "kill-switch: бинарь не обновился"
+rm_kill_switch "$master"
+
+# (ж) Деплоер стоит на САМОЙ НОДЕ, а мастер флота чист. Проба обязана спрашивать
+# мастера, а не «хоть кого-нибудь»: иначе тест (д) проходил бы и на неверной
+# реализации, которая смотрит под ноги.
+rm_deployer "$master"
+put_deployer "$box"
+put_box_bin
+guard "$work/guard-wrongbox.log"
+grep -q 'BINARY_GUARD changed=True skipped=False instances=1' "$work/guard-wrongbox.log" \
+  || fail "проба приняла деплоер НА НОДЕ за владельца — она обязана спрашивать мастер-бокс флота"
+[ "$(box_bin)" = "LOCAL-BUILD" ] || fail "деплоер на неверном боксе остановил установку бинаря"
+rm_deployer "$box"
+echo "ok: без флага владение выводится из мастер-бокса флота (есть/kill-switch/не тот бокс)"
+
+docker rm -f "$box" "$master" >/dev/null
 
 # ── 6. VRL-трансформ шиппера — настоящим vector'ом ──────────────────────────
 echo "vector: $image"

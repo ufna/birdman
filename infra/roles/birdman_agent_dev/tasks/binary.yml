@@ -23,13 +23,37 @@
 # включённом деплоере (первичный bring-up), а деплоер подтянет релизную сборку
 # следующим тиком.
 #
-# ОТКУДА БЕРЁТСЯ ФЛАГ. В dev-node.yml — дефолтом роли birdman_devdeploy: роли
-# одного плея видят дефолты друг друга, поэтому значение доезжает и сюда, хотя
-# роль агента идёт в списке РАНЬШЕ деплоера (проверено прогоном). В add-node.yml
-# роли деплоера нет вовсе, флаг там не определён, и гард выключается — при том
-# что деплоер катает и удалённые ноды (цели GET /v1/nodes?env=dev фильтруются по
-# env, а не по боксу). Закрывать это хардкодом в плее нельзя: у self-host
-# деплоера нет и бинарём владеет роль. Отдельная карточка #109 (1070).
+# ОТКУДА БЕРЁТСЯ ОТВЕТ (tracker #1070). Владение — свойство не ноды и не плея, а
+# ОКРУЖЕНИЯ: деплоер живёт на master-боксе, а цели берёт из GET /v1/nodes?env=dev,
+# фильтруя по env и state, а не по тому, на каком боксе нода. Поэтому вопрос
+# задаётся мастеру ЭТОГО флота (birdman_master_api_host — тот самый хост, у
+# которого роль уже берёт admin-ключ и CA через delegate_to), а не переменной,
+# которую кто-то должен не забыть проставить в инвентаре.
+#
+# До #1070 ответ приезжал флагом, и приезжал он только в dev-node.yml — дефолтом
+# роли birdman_devdeploy (роли одного плея видят дефолты друг друга, поэтому
+# значение доходило и сюда, хотя роль агента идёт РАНЬШЕ деплоера). В add-node.yml
+# роли деплоера в плее нет вовсе, флаг оставался неопределённым, гард выключался —
+# и прогон по УДАЛЁННОЙ ноде откатывал её агента на локальную сборку ровно так же,
+# как это делал бы прогон по master-боксу до #1069. Хардкодом в плее это не
+# чинится: у self-host деплоера нет и бинарём владеет роль.
+#
+# Проба спрашивает два файла, и оба ставит САМА роль деплоера
+# (birdman_devdeploy/tasks/main.yml): скрипт — «деплоер тут вообще есть»,
+# devdeploy.disabled — kill-switch (роль держит его absent при включённом
+# деплоере и touch при выключенном, и его же кладёт рукой оператор, чтобы
+# пережить прогон ansible). Владелец-деплоер ⟺ скрипт есть И kill-switch нет.
+# Отсюда честны все четыре состояния: self-host (скрипта нет — роль ставит
+# бинарь, как раньше), дев-стенд (гард работает и для удалённой ноды),
+# дев-стенд с положенным kill-switch (владелец снова ansible — отмычка из
+# заметки ниже начинает работать по-настоящему) и прогон деплоерской роли с
+# birdman_devdeploy_enabled: false (она сама кладёт disabled-файл, две правды
+# не спорят). Пути сверяются с ролью деплоера тестом (tests/run.sh), чтобы
+# гард однажды не начал сторожить несуществующий файл и молча выключиться.
+#
+# ЯВНЫЙ ФЛАГ ВЫИГРЫВАЕТ У ПРОБЫ. В dev-node.yml он определён дефолтом роли
+# деплоера, поэтому на master-боксе поведение остаётся ровно прежним (пробы там
+# не будет вовсе), а у оператора есть точная отмычка -e birdman_devdeploy_enabled=false.
 #
 # Бинарь ОБЩИЙ на хост, даже когда нод на боксе несколько (#1065): добавление
 # ещё одной ноды к живому агенту попадает ровно в эту ветку — файл уже есть,
@@ -39,6 +63,32 @@
   ansible.builtin.stat:
     path: /usr/local/bin/birdman-agent
   register: birdman_agent_binary_stat
+
+# Обе пробы — read-only stat по УЖЕ существующему каналу delegate_to; новой
+# связности они не заводят (роль ходит на этот же хост за admin-ключом и CA
+# несколькими задачами ниже). when на явный флаг — чтобы прогон, которому
+# ответ уже сказали, не спрашивал ничего.
+- name: Ask this fleet's master whether the pull deployer is installed there
+  ansible.builtin.stat:
+    path: "{{ birdman_devdeploy_script_path }}"
+  register: birdman_devdeploy_script_stat
+  delegate_to: "{{ birdman_master_api_host }}"
+  when: birdman_devdeploy_enabled is not defined
+
+- name: Ask this fleet's master whether the deployer is kill-switched
+  ansible.builtin.stat:
+    path: "{{ birdman_devdeploy_disabled_path }}"
+  register: birdman_devdeploy_disabled_stat
+  delegate_to: "{{ birdman_master_api_host }}"
+  when: birdman_devdeploy_enabled is not defined
+
+- name: Resolve who owns the agent binary on this box
+  ansible.builtin.set_fact:
+    birdman_agent_binary_owned_by_deployer: >-
+      {{ birdman_devdeploy_enabled | default(
+           (birdman_devdeploy_script_stat.stat.exists | default(false))
+           and not (birdman_devdeploy_disabled_stat.stat.exists | default(false))
+         ) | bool }}
 
 # register остаётся ОПРЕДЕЛЁННЫМ и при пропуске (skipped-результат несёт
 # changed: false) — из него main.yml выводит набор рестартов бокса, поэтому
@@ -51,16 +101,17 @@
     group: root
     mode: "0755"
   register: birdman_agent_binary_install
-  when: not (birdman_devdeploy_enabled | default(false) | bool) or not birdman_agent_binary_stat.stat.exists
+  when: not birdman_agent_binary_owned_by_deployer or not birdman_agent_binary_stat.stat.exists
 
 - name: Note that the pull deployer owns the agent binary
   ansible.builtin.debug:
     msg: >-
-      Бинарь агента не трогаю: им владеет birdman-devdeploy (выкат из main
-      через POST /v1/agent-upgrade). Локальная сборка откатила бы агента и
-      разошлась бы строкой версии с тем, что ждёт мастер (ложные
-      agent_upgrade_failed). Ручная замена — останови таймер или положи
-      /etc/birdman/devdeploy.disabled.
+      Бинарь агента не трогаю: им владеет birdman-devdeploy на
+      {{ birdman_master_api_host }} (выкат из main через POST /v1/agent-upgrade).
+      Локальная сборка откатила бы агента и разошлась бы строкой версии с тем,
+      что ждёт мастер (ложные agent_upgrade_failed). Ручная замена — положи на
+      мастер-боксе {{ birdman_devdeploy_disabled_path }} (переживает прогон
+      ansible) либо прогони этот плейбук с -e birdman_devdeploy_enabled=false.
   when:
-    - birdman_devdeploy_enabled | default(false) | bool
+    - birdman_agent_binary_owned_by_deployer
     - birdman_agent_binary_stat.stat.exists
