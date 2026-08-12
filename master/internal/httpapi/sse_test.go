@@ -275,9 +275,10 @@ func newStreamFixture(t *testing.T) *streamFixture {
 	}
 }
 
-// event пишет одно событие ленты и возвращает его id. project=="" —
-// платформенное событие (`project_id is null`): правило не скрывающее, и это
-// обязано остаться верным и для привязанного ключа.
+// event пишет одно событие ленты и возвращает его id. project=="" — слага в
+// payload'е нет, значит insertEvent не выведет ни `project_id`, ни снимка
+// слага, и событие платформенное ПО РОЖДЕНИЮ (tracker #1083): правило не
+// скрывающее, и это обязано остаться верным и для привязанного ключа.
 func (f *streamFixture) event(t *testing.T, project, hostname string) int64 {
 	t.Helper()
 	payload := map[string]any{"hostname": hostname}

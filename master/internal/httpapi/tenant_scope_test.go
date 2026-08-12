@@ -137,8 +137,9 @@ func newTenantFixture(t *testing.T) *tenantFixture {
 		t.Fatalf("create neighbour/stage: %v", err)
 	}
 
-	// Платформенное событие (project_id is null): лента не скрывающая, и это
-	// должно остаться верным и для привязанного ключа.
+	// Платформенное ПО РОЖДЕНИЮ событие (ни project_id, ни снимка слага — эта
+	// строка не называет проекта вовсе, tracker #1083): лента не скрывающая, и
+	// это должно остаться верным и для привязанного ключа.
 	if _, err := st.Pool.Exec(ctx,
 		`insert into events (kind, payload) values ('backup_completed', '{}'::jsonb)`); err != nil {
 		t.Fatalf("insert platform event: %v", err)
@@ -277,8 +278,9 @@ func TestListingsNarrowToBindingWithoutParam(t *testing.T) {
 		t.Fatalf("/v1/projects привязанным ключом: want ровно [neighbour], got %v", projects)
 	}
 
-	// Лента: ни одного события проекта game; платформенные (project_id is null)
-	// остаются видимыми — фильтр не скрывающий (эпик #968).
+	// Лента: ни одного события проекта game; платформенные ПО РОЖДЕНИЮ (ни
+	// project_id, ни снимка слага) остаются видимыми — фильтр не скрывающий
+	// (эпик #968, tracker #1083).
 	_, body = bound.do("GET", "/v1/events?limit=1000", nil)
 	events := body["events"].([]any)
 	var ownSeen, platformSeen bool
