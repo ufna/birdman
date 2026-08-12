@@ -143,16 +143,19 @@ type Config struct {
 	// Empty → the spec default :19999; the literal QoSEchoOff turns the
 	// responder OFF for this agent.
 	//
-	// Off is not a downgrade, it is how a multi-node box stays correct
-	// (#1065): the echo is an address-less byte mirror — it carries no node
-	// and no project identity, and the round-trip it measures is a property of
-	// the HOST's network path, identical for every node on the box. So exactly
-	// one agent per host owns the port; a second responder on a second port
-	// would hand the client a target indistinguishable by RTT from the first
-	// and break the "one externally-open UDP port per node" invariant
-	// (ops.md §4). Binding it twice is not an option either: the second bind
-	// simply fails, which agent would win is a race, and the loser logs an
-	// error on every boot forever.
+	// On a multi-node box every agent gets the SAME address here and they
+	// contend for it (#1065 + #1068): the echo is an address-less byte mirror —
+	// it carries no node and no project identity, and the round-trip it
+	// measures is a property of the HOST's network path, identical for every
+	// node on the box. So the port stays a host singleton (a second responder
+	// on a second port would hand the client a target indistinguishable by RTT
+	// from the first and break the "one externally-open UDP port per node"
+	// invariant, ops.md §4), but WHICH agent holds it is decided by the bind,
+	// not by config: the loser re-contends until the port frees, so the box
+	// answers probes while any of its agents is up. `off` therefore no longer
+	// means "the neighbour owns it" — it means "this agent must not answer QoS
+	// probes at all", the deliberate opt-out for a box whose port belongs to
+	// something else entirely.
 	QoSEchoAddr string `yaml:"qos_echo_addr"`
 	// LogScopeDirs makes the agent write a dedik's log into
 	// {log_dir}/servers/{project}/{env}/{id}.log instead of the flat

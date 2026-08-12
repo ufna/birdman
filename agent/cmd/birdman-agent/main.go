@@ -192,7 +192,9 @@ func runDaemon(args []string) int {
 	}()
 	if cfg.QoSEchoEnabled() {
 		go func() {
-			// QoS UDP echo (agent.md §8) — the public ping target of the node.
+			// QoS UDP echo (agent.md §8) — the public ping target of the BOX,
+			// not of this node: agents of a multi-node box contend for the
+			// port and whoever is up holds it (tracker #1068).
 			if err := qosecho.Serve(ctx, cfg.QoSEchoAddr, logf); err != nil {
 				logf("qos echo: %v", err)
 			}
@@ -200,7 +202,7 @@ func runDaemon(args []string) int {
 	} else {
 		// Said out loud once at boot: a silent absence here looks exactly like
 		// a responder that failed to bind, and the two need different fixes.
-		logf("qos echo: disabled (qos_echo_addr: %s) — another agent on this host owns the port", config.QoSEchoOff)
+		logf("qos echo: disabled (qos_echo_addr: %s) — this agent never answers QoS probes", config.QoSEchoOff)
 	}
 
 	logf("birdman-agent %s: node %s linking to master %s (region %s, %d slots, containerd ns %s)",

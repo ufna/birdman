@@ -21,7 +21,11 @@
 #      перечислением корней нод, и перечисление обязано остаться перечислением
 #      (каталог-двойник пары не получает); плюс развод путей/портов/юнитов между
 #      нодами и отказ роли на столкновении.
-#   3. #1069 — бинарём агента на стенде владеет pull-деплоер, а не роль: прогон
+#   3. #1068 — UDP-эхо QoS общее на хост, но ВЛАДЕЛЬЦА У НЕГО НЕ НАЗНАЧАЮТ:
+#      претендуют все ноды бокса, порт достаётся живому. Назначенный конфигом
+#      владелец уносил бы ping-таргет бокса с собой — в том числе у соседнего
+#      проекта, чью ноду мастер продолжает отдавать в GET /v1/qos.
+#   4. #1069 — бинарём агента на стенде владеет pull-деплоер, а не роль: прогон
 #      плейбука по живому боксу обязан бинарь НЕ ТРОГАТЬ (иначе откат агента на
 #      локальную сборку + расхождение строки версии с тем, что мастер запросил
 #      в POST /v1/agent-upgrade, то есть ложные agent_upgrade_failed).
@@ -32,7 +36,9 @@ role="$(dirname "$here")"
 image="${BIRDMAN_VECTOR_IMAGE:-$(sed -n 's/^birdman_vector_image: *//p' "$role/defaults/main.yml")}"
 # Контейнер-«бокс» для гарда бинаря (#1069): имя от id задачи, за собой убираем.
 box_image="${BIRDMAN_TEST_BOX_IMAGE:-python:3-alpine}"
-box=bm1069-box
+# Имя переопределяемо: в дереве работают несколько сессий разом, а `docker rm -f`
+# на фиксированном имени убил бы контейнер чужого прогона на середине.
+box="${BIRDMAN_TEST_BOX_NAME:-bm1069-box}"
 
 work="$(mktemp -d)"
 cleanup() { rm -rf "$work"; docker rm -f "$box" >/dev/null 2>&1 || true; }
@@ -86,15 +92,21 @@ for field in ("node_name", "unit", "config_file", "token_file", "data_dir",
 a, b = (tuple(int(x) for x in i["port_range"]) for i in inst)
 if not (a[1] < b[0] or b[1] < a[0]):
     sys.exit("FAIL: диапазоны портов дедиков пересекаются: %r и %r" % (a, b))
-# Эхо QoS — наоборот, ОБЩЕЕ на хост, и владелец у него ровно один.
-owners = [i["node_name"] for i in inst if i["qos_echo"]]
-if len(owners) != 1:
-    sys.exit("FAIL: владельцев QoS-эха %d, ожидался ровно один: %r" % (len(owners), owners))
-print("ok: две ноды не делят ни одного из %d ресурсов; эхо держит %s" % (10, owners[0]))
+# Эхо QoS — наоборот, ОБЩЕЕ на хост, и претендуют на него ВСЕ ноды бокса
+# (#1068): владелец, назначенный конфигом, уносил бы ping-таргет бокса с собой.
+claimers = [i["node_name"] for i in inst if i["qos_echo"]]
+if len(claimers) != len(inst):
+    sys.exit("FAIL: за QoS-эхо состязаются %d нод из %d: %r" % (len(claimers), len(inst), claimers))
+print("ok: две ноды не делят ни одного из %d ресурсов; за эхо состязаются %s" % (10, claimers))
 PY
 
-grep -q 'qos_echo_addr: "off"' "$work/two/agent.yaml--khl" \
-  || fail "вторая нода не отключила UDP-эхо — два респондера на одном хосте гоняются за одним портом"
+# Ни одна нода бокса не отключает эхо по умолчанию: `off` у соседа означал бы,
+# что смерть агента-владельца гасит ping-таргет и для ЖИВОЙ ноды этого соседа
+# (мастер продолжает отдавать её в GET /v1/qos — один таргет на (регион, ip)).
+for cfg in "$work/two/agent.yaml--default" "$work/two/agent.yaml--khl"; do
+  ! grep -q '^qos_echo_addr' "$cfg" \
+    || fail "$cfg пинует qos_echo_addr — обе ноды обязаны состязаться за общий порт бокса на код-дефолте :19999"
+done
 grep -q '"127.0.0.1:9111"' "$work/two/vmagent.yaml" \
   || fail "нодовый vmagent не скрейпит вторую ноду — её DiskHigh/TickDegraded молчали бы, выглядя как здоровье"
 grep -q 'job_name: birdman-agent-khl' "$work/two/vmagent.yaml" \
@@ -133,6 +145,17 @@ if render "$work/bad2" '{"birdman_box_instances":[{"qos_echo":false},{"name":"kh
   fail "роль приняла бокс, на котором UDP-эхо QoS не держит никто"
 fi
 echo "ok: столкновения отвергнуты"
+
+# ── 4a. Нестандартный порт эха обязан доехать до agent.yaml (#1068) ──────────
+# UFW роль открывает birdman_qos_echo_port, а респондер без этой строки слушал
+# бы код-дефолт агента :19999 — открытый порт и слушающий разошлись бы молча.
+echo "── render: custom QoS echo port must reach every agent.yaml"
+render "$work/port" '{"birdman_box_instances":[{},{"name":"khl","port_range":[20100,20150],"metrics_port":9111}],"birdman_qos_echo_port":19998}'
+for cfg in "$work/port/agent.yaml--default" "$work/port/agent.yaml--khl"; do
+  grep -q '^qos_echo_addr: ":19998"' "$cfg" \
+    || fail "$cfg не получил нестандартный порт эха — UFW открыл бы один порт, а агент слушал бы другой"
+done
+echo "ok: порт эха доехал до обеих нод"
 
 # ── 5. Гард бинаря агента (#1069): владелец — pull-деплоер ───────────────────
 # Играется настоящий tasks/binary.yml роли против КОНТЕЙНЕРА-«бокса»: copy в

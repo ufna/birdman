@@ -70,6 +70,14 @@ func (s *Store) ActiveRegionVersions(ctx context.Context, project, env string) (
 
 // QoSUDPPort is the UDP echo port of the agent on every node
 // (docs/specs/master.md §7; the echo responder itself ships in iteration 4).
+//
+// One constant for the whole fleet is safe because the echo is a resource of
+// the BOX, not of a node (docs/specs/agent.md §8): on a box carrying several
+// birdman nodes the agents contend for this very port and whoever is up holds
+// it (tracker #1068). That is what makes the "one target per (region, ip)"
+// row below answerable: a target is handed out only while the asking project
+// has a node with a fresh heartbeat there — i.e. while an agent of that box is
+// alive — and any live agent of the box answers on 19999.
 const QoSUDPPort = 19999
 
 type QoSEndpoint struct {

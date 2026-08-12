@@ -139,7 +139,8 @@
     - birdman_ghcr_token | length > 0 or not ansible_check_mode
 
 # UDP-эхо QoS открыто ОДИН раз на бокс: порт общий для всех нод хоста, держит
-# его ровно один агент (обоснование — birdman_qos_echo_port в defaults).
+# его тот агент бокса, кто жив — за порт состязаются все (#1068, обоснование
+# целиком — birdman_qos_echo_port в defaults).
 - name: Allow QoS echo port in UFW (additive, единственный внешне-открытый порт)
   community.general.ufw:
     rule: allow

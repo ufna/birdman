@@ -55,8 +55,10 @@
       containerd_namespace: "{{ inst.containerd_namespace | default('birdman' ~ sfx) }}"
       metrics_port: "{{ inst.metrics_port | default(birdman_agent_metrics_port) | int }}"
       port_range: "{{ inst.port_range | default(birdman_port_range) }}"
-      # Владелец общего на хост UDP-эха — по умолчанию первый инстанс списка.
-      qos_echo: "{{ inst.qos_echo | default(inst_idx == 0) | bool }}"
+      # Общее на хост UDP-эхо держит тот агент бокса, кто ЖИВ: претендуют все
+      # (bind решает, кто именно), проигравший ждёт освобождения порта — #1068.
+      # false = этот агент не отвечает на QoS-пробы вовсе (явный отказ).
+      qos_echo: "{{ inst.qos_echo | default(true) | bool }}"
       project: "{{ inst.project | default(birdman_project) }}"
       region: "{{ inst.region | default(birdman_region) }}"
       capacity_slots: "{{ inst.capacity_slots | default(birdman_capacity_slots) | int }}"
@@ -81,12 +83,13 @@
       - birdman_instances | map(attribute='token_file') | list | unique | length == birdman_instances | length
       - birdman_instances | map(attribute='config_file') | list | unique | length == birdman_instances | length
       - birdman_instances | map(attribute='containerd_namespace') | list | unique | length == birdman_instances | length
-      - birdman_instances | selectattr('qos_echo') | list | length == 1
+      - birdman_instances | selectattr('qos_echo') | list | length >= 1
     fail_msg: >-
       Ноды бокса в birdman_agent_instances пересекаются. Имя, node_name,
       metrics_port, data_dir, log_dir, config_file, token_file и
-      containerd_namespace обязаны быть РАЗНЫМИ у каждой, а владелец QoS-эха
-      (qos_echo) — ровно один на хост. Сейчас:
+      containerd_namespace обязаны быть РАЗНЫМИ у каждой, а QoS-эхо (qos_echo)
+      обязан держать ХОТЯ БЫ ОДИН агент бокса — иначе у бокса нет ping-таргета
+      вовсе, притом что мастер его ноды в GET /v1/qos отдаёт. Сейчас:
       {{ birdman_instances | map(attribute='name') | list }} /
       node_name {{ birdman_instances | map(attribute='node_name') | list }} /
       metrics {{ birdman_instances | map(attribute='metrics_port') | list }} /
@@ -96,8 +99,9 @@
       qos_echo у {{ birdman_instances | selectattr('qos_echo') | map(attribute='name') | list }}.
     success_msg: >-
       Ноды бокса: {{ birdman_instances | map(attribute='node_name') | list | join(', ') }}
-      (QoS-эхо держит
-      «{{ (birdman_instances | selectattr('qos_echo') | list | first).node_name }}»).
+      (за QoS-эхо состязаются
+      {{ birdman_instances | selectattr('qos_echo') | map(attribute='node_name') | list | join(', ') }}
+      — порт держит тот, кто жив).
 
 # Диапазоны портов дедиков проверяются отдельно: пересечение здесь — не
 # «одинаковое значение», а перекрытие интервалов, и одинаковый диапазон у двух
