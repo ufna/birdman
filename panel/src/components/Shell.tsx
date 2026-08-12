@@ -52,8 +52,32 @@ export function navItemsFor(session: SessionInfo | null | undefined): NavItem[] 
   return NAV_ITEMS.filter((it) => it.adminOnly !== true || (session != null && canAdmin(session)));
 }
 
+/** Корни разделов — из самого NAV_ITEMS, чтобы источник разделов был один. */
+const SECTION_ROOTS = NAV_ITEMS.map((it) => it.path).filter((p) => p !== '/');
+
+/**
+ * Раздел, которому принадлежит путь: `/logs/x` → `/logs`, `/` и всё
+ * неизвестное → `/` (Обзор). ЕДИНСТВЕННОЕ место в панели, где путь
+ * сопоставляется с разделом, — её спрашивают все трое потребителей пути:
+ * роутер (App.tsx), подсветка пункта нава и классификация скоупа ниже.
+ * Пока их было трое независимых, они разъезжались: роутер и подсветка
+ * матчили префиксно, а множества скоупа — точным `has(path)`, и на под-пути
+ * вроде `/logs/x` рендерился экран Логов, но чипы окружения, спрятанные там
+ * намеренно, возвращались вхолостую (tracker #1109).
+ *
+ * Режем по ГРАНИЦЕ СЕГМЕНТА, а не голым `startsWith`: иначе `/logsomething`
+ * попадал бы в Логи (так и было до этой правки), а `/backupsx` — в Бекапы.
+ * Посторонний путь — это Обзор, как и любой неизвестный.
+ *
+ * Опираемся на то, что ни один корень не префикс другого (иначе порядок
+ * перебора начал бы что-то значить) — это держит отдельный тест.
+ */
+export function sectionOf(path: string): string {
+  return SECTION_ROOTS.find((root) => path === root || path.startsWith(`${root}/`)) ?? '/';
+}
+
 function isActive(item: string, path: string): boolean {
-  return item === '/' ? path === '/' : path.startsWith(item);
+  return sectionOf(path) === item;
 }
 
 /** Бейдж активных critical-алертов на пункте «Алерты». Пульс на росте
@@ -319,18 +343,23 @@ export function EnvChips({ stacked = false }: { stacked?: boolean } = {}) {
  * Инвариант, который держит отдельный тест: PROJECTLESS ⊆ ENVLESS — окружения
  * принадлежат проекту, поэтому экран, слепой к проекту, слеп и к его
  * окружениям. Бекапы — по-прежнему единственный, где не рендерится ничего.
+ *
+ * Множества перечисляют КОРНИ разделов, и спрашиваются они не о сыром пути, а
+ * о `sectionOf(path)` — той же функции, которой роутер выбирает экран, а нав
+ * подсвечивает пункт. Иначе под-путь получал бы экран одного раздела и скоуп
+ * другого (tracker #1109).
  */
 const PROJECTLESS_PATHS = new Set(['/backups']);
 const ENVLESS_PATHS = new Set(['/backups', '/alerts', '/logs', '/access']);
 
 /** Влияет ли ВЫБОР ПРОЕКТА на то, что показывает экран этого пути. */
 export function pathUsesProject(path: string): boolean {
-  return !PROJECTLESS_PATHS.has(path);
+  return !PROJECTLESS_PATHS.has(sectionOf(path));
 }
 
 /** Влияет ли ВЫБОР ОКРУЖЕНИЯ на то, что показывает экран этого пути. */
 export function pathUsesEnv(path: string): boolean {
-  return !ENVLESS_PATHS.has(path);
+  return !ENVLESS_PATHS.has(sectionOf(path));
 }
 
 /** Есть ли на этом пути хоть одна живая ось — то есть рисовать ли блок вообще. */

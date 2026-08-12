@@ -7,7 +7,7 @@ import { ProjectProvider } from './lib/project';
 import { DrawerProvider } from './lib/drawer';
 import { ToastProvider } from './components/Toast';
 import { usePath } from './lib/usePath';
-import { Shell } from './components/Shell';
+import { Shell, sectionOf } from './components/Shell';
 import { Brand, Card } from './components/ui';
 import { Login } from './screens/Login';
 import { Overview } from './screens/Overview';
@@ -82,35 +82,56 @@ function Root() {
   );
 }
 
-function Routed() {
+/**
+ * Экспортируется для тестов (как LiveContext в lib/live.tsx): роутер — это
+ * место, где путь превращается в экран, и пин «под-путь получает экран и
+ * скоуп ОДНОГО раздела» иначе не написать. В приложении рендерится только
+ * из Root.
+ */
+export function Routed() {
   const [path, navigate] = usePath();
   const { session } = useSession();
   const mayAdmin = session != null && canAdmin(session);
-  const screen = path.startsWith('/fleet') ? (
-    <Fleet />
-  ) : path.startsWith('/matches') ? (
-    <Matches />
-  ) : path.startsWith('/deploys') ? (
-    <Deploys navigate={navigate} />
-  ) : path.startsWith('/events') ? (
-    <Events />
-  ) : path.startsWith('/stats') ? (
-    <Stats />
-  ) : path.startsWith('/cost') ? (
-    <Cost />
-  ) : path.startsWith('/alerts') ? (
-    <Alerts />
-  ) : path.startsWith('/logs') ? (
-    <Logs />
-  ) : path.startsWith('/backups') ? (
-    // Бекапы — admin-only: не-admin по прямому URL уводим на Обзор (в нав его нет).
-    mayAdmin ? <Backups /> : <Overview />
-  ) : path.startsWith('/access') ? (
-    // Доступ — admin-only: не-admin по прямому URL уводим на Обзор (в нав его нет).
-    mayAdmin ? <Access /> : <Overview />
-  ) : (
-    <Overview />
-  );
+  // Экран выбирает РАЗДЕЛ пути, а не сырой путь: sectionOf режет по границе
+  // сегмента, поэтому под-путь `/logs/x` — те же Логи, а посторонний
+  // `/logsomething` — Обзор (голый startsWith отдавал его Логам). Ту же
+  // функцию спрашивают подсветка нава и классификация скоупа, так что
+  // разъехаться им теперь негде (tracker #1109).
+  const section = sectionOf(path);
+  const screen =
+    section === '/fleet' ? (
+      <Fleet />
+    ) : section === '/matches' ? (
+      <Matches />
+    ) : section === '/deploys' ? (
+      <Deploys navigate={navigate} />
+    ) : section === '/events' ? (
+      <Events />
+    ) : section === '/stats' ? (
+      <Stats />
+    ) : section === '/cost' ? (
+      <Cost />
+    ) : section === '/alerts' ? (
+      <Alerts />
+    ) : section === '/logs' ? (
+      <Logs />
+    ) : section === '/backups' ? (
+      // Бекапы — admin-only: не-admin по прямому URL уводим на Обзор (в нав его нет).
+      mayAdmin ? (
+        <Backups />
+      ) : (
+        <Overview />
+      )
+    ) : section === '/access' ? (
+      // Доступ — admin-only: не-admin по прямому URL уводим на Обзор (в нав его нет).
+      mayAdmin ? (
+        <Access />
+      ) : (
+        <Overview />
+      )
+    ) : (
+      <Overview />
+    );
   return (
     <Shell path={path} navigate={navigate}>
       {screen}

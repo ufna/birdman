@@ -14,11 +14,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import type { ReactNode } from 'react';
-import type { Environment, ProjectInfo } from '../lib/api';
+import type { Environment, ProjectInfo, SessionInfo } from '../lib/api';
 import { I18nProvider } from '../lib/i18n';
 import { EnvContext } from '../lib/env';
 import { ProjectContext } from '../lib/project';
+import { SessionContext } from '../lib/session';
+import { ThemeProvider } from '../lib/theme';
 import { DrawerProvider } from '../lib/drawer';
+import { Routed } from '../App';
 import {
   EnvChips,
   ScopeIndicator,
@@ -27,6 +30,7 @@ import {
   pathUsesEnv,
   pathUsesProject,
   pathUsesScope,
+  sectionOf,
 } from '../components/Shell';
 import { Access } from '../screens/Access';
 import { Alerts } from '../screens/Alerts';
@@ -126,6 +130,57 @@ describe('скоуп панели: классификация путей по о
   });
 });
 
+// --- одно правило сопоставления пути на всю панель (tracker #1109) ---
+
+/**
+ * Классификация выше отвечает про КОРНИ разделов. Про произвольный путь её
+ * спрашивают через `sectionOf` — ту же функцию, которой роутер выбирает экран,
+ * а нав подсвечивает пункт. Пока правил было два (роутер префиксно, множества
+ * скоупа точным `has`), на под-пути `/logs/x` экран был Логов, а классификация
+ * — «неизвестный путь», и спрятанные чипы окружения возвращались вхолостую.
+ */
+describe('раздел пути: роутер, нав и скоуп сопоставляют путь одним правилом', () => {
+  it('корень раздела — сам себе раздел', () => {
+    for (const path of Object.keys(CLASSIFICATION)) expect(sectionOf(path)).toBe(path);
+  });
+
+  it('под-путь принадлежит своему разделу', () => {
+    expect(sectionOf('/logs/x')).toBe('/logs');
+    expect(sectionOf('/logs/x/y')).toBe('/logs');
+    expect(sectionOf('/logs/')).toBe('/logs');
+    expect(sectionOf('/backups/2026-08-01')).toBe('/backups');
+    expect(sectionOf('/fleet/node-1')).toBe('/fleet');
+  });
+
+  it('режем по ГРАНИЦЕ СЕГМЕНТА: посторонний путь — Обзор, а не соседний раздел', () => {
+    // Голый startsWith отдавал бы эти пути Логам/Бекапам/Админке.
+    expect(sectionOf('/logsomething')).toBe('/');
+    expect(sectionOf('/backupsx')).toBe('/');
+    expect(sectionOf('/accesskey')).toBe('/');
+    expect(sectionOf('/nope')).toBe('/');
+  });
+
+  it('ни один корень раздела не префикс другого — порядок перебора ничего не решает', () => {
+    const roots = Object.keys(CLASSIFICATION).filter((p) => p !== '/');
+    for (const a of roots) {
+      for (const b of roots) {
+        if (a !== b) expect({ a, b, nested: b.startsWith(`${a}/`) }).toEqual({ a, b, nested: false });
+      }
+    }
+  });
+
+  it('предикаты скоупа спрашивают РАЗДЕЛ, а не сырой путь', () => {
+    expect(pathUsesEnv('/logs/x')).toBe(false);
+    expect(pathUsesEnv('/alerts/rule-1')).toBe(false);
+    expect(pathUsesEnv('/access/keys/1')).toBe(false);
+    expect(pathUsesProject('/backups/2026-08-01')).toBe(false);
+    expect(pathUsesScope('/backups/2026-08-01')).toBe(false);
+    // А посторонний путь — это Обзор, где живы обе оси.
+    expect(pathUsesEnv('/logsomething')).toBe(true);
+    expect(pathUsesProject('/backupsx')).toBe(true);
+  });
+});
+
 // --- что реально рендерится ---
 
 const projectGroup = () => screen.queryByRole('group', { name: /project/i });
@@ -169,6 +224,21 @@ describe('скоуп панели: место и видимость', () => {
   it('мобильного индикатора нет на экране без скоупа', () => {
     const { container } = withScope(<ScopeIndicator path="/backups" />);
     expect(container.textContent).toBe('');
+  });
+
+  it.each(['/logs/x', '/access/keys/1', '/alerts/rule-1'])(
+    'на ПОД-ПУТИ %s чипы окружения остаются спрятанными',
+    (path) => {
+      withScope(<ScopePicker path={path} />);
+      expect(projectGroup()).toBeTruthy();
+      expect(envGroup()).toBeNull();
+    },
+  );
+
+  it('на под-пути Бекапов блока по-прежнему нет вовсе', () => {
+    withScope(<ScopePicker path="/backups/2026-08-01" />);
+    expect(projectGroup()).toBeNull();
+    expect(envGroup()).toBeNull();
   });
 });
 
@@ -230,6 +300,7 @@ async function envReadsOf(node: ReactNode, marker: string): Promise<Set<string>>
 afterEach(() => {
   vi.unstubAllGlobals();
   localStorage.clear();
+  window.history.pushState(null, '', '/');
 });
 
 describe('классификация не врёт: env-слепые экраны не читают выбранное окружение', () => {
@@ -262,5 +333,79 @@ describe('классификация не врёт: env-слепые экран�
     // проект Админке нужны — их берут привязка ключа и секция «Окружения».
     expect(reads.has('environments')).toBe(true);
     expect(reads.has('project')).toBe(true);
+  });
+});
+
+// --- пин на ДВА места сразу: экран и скоуп приходят из одного правила ---
+
+/**
+ * Проверки выше по отдельности спрашивают ЛИБО роутер, ЛИБО классификацию — а
+ * дефект #1109 был именно в РАСХОЖДЕНИИ двух половин, и такой дефект виден
+ * только когда обе половины отвечают про один и тот же путь в одном рендере.
+ * Поэтому монтируем НАСТОЯЩИЙ роутер вместе с оболочкой и спрашиваем разом:
+ * какой экран показан, какой пункт нава подсвечен и какие половины скоупа
+ * нарисованы. Откат правки предикатов красит кейс `/logs/x` (чипы вернутся),
+ * откат правки роутера — кейс `/logsomething` (посторонний путь уедет в Логи).
+ */
+const adminSession: SessionInfo = { name: 'k', scopes: ['admin'] };
+
+function renderRouted(path: string) {
+  window.history.pushState(null, '', path);
+  stubFetch();
+  return render(
+    <ThemeProvider>
+      <I18nProvider initialLang="en">
+        <SessionContext.Provider
+          value={{
+            session: adminSession,
+            login: async () => {},
+            logout: async () => {},
+            invalidate: () => {},
+          }}
+        >
+          <ProjectContext.Provider value={projectValue}>
+            <EnvContext.Provider value={envValue('dev')}>
+              <DrawerProvider>
+                <Routed />
+              </DrawerProvider>
+            </EnvContext.Provider>
+          </ProjectContext.Provider>
+        </SessionContext.Provider>
+      </I18nProvider>
+    </ThemeProvider>,
+  );
+}
+
+/** href пункта навигации с aria-current="page" — «где панель считает, что мы». */
+const currentNavHref = () => screen.getByRole('link', { current: 'page' }).getAttribute('href');
+
+const LOGS_MARKER = 'Enter a search above and run it to see matching log lines.';
+const OVERVIEW_MARKER = 'Live matches';
+
+describe('роутер и скоуп сопоставляют путь одинаково', () => {
+  it('под-путь /logs/x: экран Логов, подсвечены Логи — и НИ ОДНОГО чипа окружения', async () => {
+    renderRouted('/logs/x');
+    await screen.findByText(LOGS_MARKER);
+    expect(currentNavHref()).toBe('/logs');
+    // Ровно то, ради чего #1106 их прятал: на под-пути они не возвращаются.
+    expect(envGroup()).toBeNull();
+    expect(projectGroup()).toBeTruthy();
+  });
+
+  it('корень /logs даёт ТО ЖЕ, что его под-путь (иначе правило снова двойное)', async () => {
+    renderRouted('/logs');
+    await screen.findByText(LOGS_MARKER);
+    expect(currentNavHref()).toBe('/logs');
+    expect(envGroup()).toBeNull();
+    expect(projectGroup()).toBeTruthy();
+  });
+
+  it('посторонний /logsomething — Обзор с обеими осями, а не Логи без чипов', async () => {
+    renderRouted('/logsomething');
+    await screen.findByText(OVERVIEW_MARKER);
+    expect(screen.queryByText(LOGS_MARKER)).toBeNull();
+    expect(currentNavHref()).toBe('/');
+    expect(envGroup()).toBeTruthy();
+    expect(projectGroup()).toBeTruthy();
   });
 });
