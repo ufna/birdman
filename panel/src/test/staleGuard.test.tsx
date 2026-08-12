@@ -13,8 +13,16 @@ import { describe, expect, it } from 'vitest';
 import { act, render, screen } from '@testing-library/react';
 import { useAsync } from '../lib/useAsync';
 
+// Стрелка ИНЛАЙНОМ, а не голый проп `fetcher` (tracker #1018). Плагин
+// react-hooks не выводит зависимости у функции, пришедшей извне, и валит
+// `npm run lint` — а Lint в `.github/workflows/panel.yml` стоит ПЕРЕД Test,
+// так что одна эта строка отменяла прогон всего панельного сьюта в CI.
+// Так же написаны все восемь боевых вызовов useAsync: инлайн + честные deps.
+// `fetcher` в deps не даёт лишнего запроса — проп стабилен между рендерами
+// (создаётся один раз в теле it()), и это стережёт expect ниже про длину
+// resolvers.
 function Probe({ fetcher }: { fetcher: () => Promise<string> }) {
-  const { data, reload } = useAsync(fetcher, []);
+  const { data, reload } = useAsync(() => fetcher(), [fetcher]);
   return (
     <div>
       <span data-testid="value">{data ?? '—'}</span>
