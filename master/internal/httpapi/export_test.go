@@ -30,6 +30,12 @@ func init() {
 func SSESettleForTest() time.Duration       { return sseSettle }
 func SSEPollIntervalForTest() time.Duration { return ssePollInterval }
 
+// SSEBatchLimitForTest — ширина окна опроса. Тест догона обязан строить свою
+// сцену ИЗ неё (tracker #1059): вписанные числом «2500 событий» перестали бы
+// быть пятью окнами при первой же смене лимита, и проверка «отсрочка одна на
+// соединение, а не одна на окно» тихо выродилась бы в проверку одного окна.
+func SSEBatchLimitForTest() int { return sseBatchLimit }
+
 func NewSessionStoreForTest(ttl time.Duration) *sessionStore { return newSessionStore(ttl) }
 
 func (ss *sessionStore) CreateForTest(name string, scopes []string) (string, error) {

@@ -471,6 +471,59 @@ func TestEventsStreamLosesNothingOnOversizedBatch(t *testing.T) {
 	}
 }
 
+// ДОГОН ПОСЛЕ РЕКОННЕКТА СТОИТ ОДНУ ОТСРОЧКУ НА СОЕДИНЕНИЕ, А НЕ ПО ОДНОЙ НА
+// ОКНО (tracker #1059).
+//
+// Сцена — ровно та, что в §6 спеки: своё событие, за ним НЕСКОЛЬКО ОКОН чужих
+// id, за ними своё. Клиент переоткрывается с `Last-Event-ID` первого своего,
+// значит курсор заведомо глубоко позади головы и весь путь до второго своего
+// события проходится догоном.
+//
+// Что именно ловится. Отсрочка курсора (#1013) откладывает шаг за границу, пока
+// НАБЛЮДЕНИЕ id не ниже этой границы не созреет. Пока наблюдением служила
+// граница СВОЕГО окна, каждое окно догона зарабатывало отсрочку заново, и
+// пропускная способность падала с sseBatchLimit id за ТИК до sseBatchLimit id за
+// ОТСРОЧКУ — впятеро на прод-значениях. Теперь наблюдается ГОЛОВА ленты, она не
+// ниже любой границы догона, и созревает один раз.
+//
+// Потолок выведен из механизма, а не из секундомера, и тем отделён от скорости
+// машины: плата за окно дала бы windows*sseSettle, то есть кратно больше
+// потолка, а плата за соединение — одну отсрочку плюс по тику на окно.
+func TestEventsStreamCatchUpPaysSettleOncePerConnection(t *testing.T) {
+	f := newStreamFixture(t)
+
+	const windows = 5
+	foreign := windows * httpapi.SSEBatchLimitForTest()
+	start := f.event(t, "neighbour", "nb-catchup-start")
+	if _, err := f.st.Pool.Exec(t.Context(), `
+		insert into events (kind, payload, project_id)
+		select 'node_created', jsonb_build_object('hostname', 'secret-catchup-' || g),
+		       (select id from projects where slug = 'game')
+		from generate_series(1, $1::int) g`, foreign); err != nil {
+		t.Fatalf("bulk insert: %v", err)
+	}
+	f.event(t, "neighbour", "nb-catchup-end")
+
+	c := openSSEWith(t, f.base+"/v1/events/stream", func(req *http.Request) {
+		req.Header.Set("Authorization", "Bearer "+f.nbKey)
+		req.Header.Set("Last-Event-ID", strconv.FormatInt(start, 10))
+	})
+	began := time.Now()
+	got := readUntil(t, c, "nb-catchup-end")
+	silence := time.Since(began)
+	assertNoForeign(t, "догон после реконнекта", got)
+
+	settle, tick := httpapi.SSESettleForTest(), httpapi.SSEPollIntervalForTest()
+	budget := 2*settle + time.Duration(2*windows+10)*tick
+	t.Logf("тишина после реконнекта: %v на %d чужих id (%d окон), отсрочка %v, тик %v",
+		silence.Round(time.Millisecond), foreign, windows, settle, tick)
+	if silence >= budget {
+		t.Fatalf("догон %d чужих id (%d окон по %d) занял %v при потолке %v: отсрочка платится ЗА ОКНО (это ~%v), а не одна за соединение",
+			foreign, windows, httpapi.SSEBatchLimitForTest(), silence, budget,
+			time.Duration(windows)*settle)
+	}
+}
+
 // СПЕЦИФИКА СТРИМА: курсор — позиция, а не токен доступа. Ни `after_id=0` (вся
 // история), ни произвольный курсор прямо перед чужим событием, ни реконнект
 // EventSource по `Last-Event-ID` не отдают чужое задним числом.
