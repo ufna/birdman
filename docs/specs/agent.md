@@ -88,6 +88,12 @@ capacity_slots: 24          # обычно = физические ядра - р�
 port_range: [20000, 29999]
 limits_default: { cpu_millis: 3500, mem_mb: 4096 }
 log_dir: /var/log/birdman
+log_scope_dirs: false       # (#994) true — писать лог дедика в подкаталог пары,
+                            # {log_dir}/servers/{project}/{env}/{server_id}.log, чтобы
+                            # vector разметил стрим парой (§5). Здесь стоит дефолт
+                            # БИНАРЯ; ansible-роль birdman_agent_dev рендерит true
+                            # (`birdman_log_scope_dirs`) — она же кладёт vector.yaml,
+                            # который новый путь читает, и эти двое обязаны ехать ВМЕСТЕ
 data_dir: /var/lib/birdman
 containerd_root: ""         # (environments v1) ФС образов, если ОТДЕЛЬНЫЙ маунт от
                             # data_dir; пусто → /var/lib/containerd (§6, dual-fs

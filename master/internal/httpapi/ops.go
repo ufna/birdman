@@ -314,8 +314,11 @@ func (s *Server) watchAgentUpgrade(nodeID, version string) {
 
 // handleMetricsQuery and handleMetricsQueryRange are thin read-only proxies to
 // VictoriaMetrics: the panel reads graphs through master, never touching the
-// TSDB directly. The query string (query, time / start, end, step) is
-// forwarded verbatim.
+// TSDB directly. Verbatim forwarding of the query string (query, time / start,
+// end, step) holds for an UNBOUND key only. A key bound to (project, env) gets
+// a query string REBUILT from the metricsPassthroughParams whitelist plus the
+// pair as two extra_label values — the narrowing of tracker #994; see
+// proxyVictoria and narrowedMetricsQuery below.
 func (s *Server) handleMetricsQuery(w http.ResponseWriter, r *http.Request) {
 	s.proxyVictoria(w, r, "/api/v1/query")
 }
