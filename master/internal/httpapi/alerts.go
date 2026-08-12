@@ -307,9 +307,11 @@ func alertScope(project string) string {
 
 // keepAlertForProject is the ?project= filter, and it is deliberately NOT
 // hiding: an alert drops out only when it EXPLICITLY belongs to another
-// project. An alert with no `project` label (MasterDown, NodeDown, DiskHigh,
+// project. An alert with no `project` label (ScrapeTargetDown, DiskHigh,
 // CertExpiry, BackupFailed — platform by nature, I6) stays visible under every
-// selection.
+// selection. NodeDown is NOT on that list any more: since tracker #1064 its
+// series carries `project` (see keepForBinding below), so it is an ordinary
+// project alert here.
 //
 // Strict "keep only what matches" was rejected: a project has no "All" mode in
 // the panel (unlike env), so a strict filter would hide every platform alert
@@ -337,21 +339,34 @@ func keepAlertForProject(alertProject, want string) bool {
 
 // keepForBinding — СКРЫВАЮЩЕЕ правило привязки, решение владельца по #995:
 // привязанный ключ видит объект, только если тот принадлежит ЕГО проекту или не
-// принадлежит никакому. Вторая половина обязательна: платформенные MasterDown /
-// NodeDown лейбла `project` не несут, и спрятать их значило бы не сказать
-// арендатору, что лежит мастер, — гейт стал бы вреден. Правило одно на алерты
+// принадлежит никакому. Вторая половина обязательна: у платформенных правил
+// лейбла `project` нет по построению — на сегодняшнем rules.yml.j2 это
+// ScrapeTargetDown/ScrapeTargetMissing (в скрейпе есть джоб birdman-master,
+// так что молчащий мастер приходит именно ими), DiskHigh*, CertExpiry,
+// AgentlinkPendingStuck, Backup*, DevDeploy*, — и спрятать их значило бы не
+// сказать арендатору, что лежит платформа, гейт стал бы вреден. MasterDown в
+// этом ряду не назван намеренно: правилом на самом боксе он не заведён вовсе,
+// нужен внешний probe (ops.md §1). Правило одно на алерты
 // (alertVisibility) и на mute'ы (handleListAlertMutes), потому что mute — это
 // аннотация НАД алертом: разъехавшись, они показали бы арендатору mute на алерт,
 // которого он не видит, или скрыли бы причину `muted:true` на своём.
 //
 // ЦЕНА второй половины, названная вслух (найдено вторым проходом): платформенный
 // алерт несёт `node`/`instance` (см. alertNode), а это hostname КОНКРЕТНОЙ ноды,
-// которая может принадлежать соседнему тенанту — `NodeDown`, `DiskHigh*`,
-// `CertExpiry`, `AgentlinkPendingStuck` все без `project` и все с адресом узла.
-// То есть после #995 привязанный ключ по-прежнему узнаёт hostname'ы чужих нод —
-// не через листинги (#993 их закрыл), а через платформенные алерты. Спрятать
-// нельзя: правило владельца требует показывать платформенные алерты, а алерт без
-// адреса узла бесполезен. Записано в docs/specs/master.md §6.
+// которая может принадлежать соседнему тенанту — `DiskHigh*`, `CertExpiry`,
+// `AgentlinkPendingStuck`, `ScrapeTargetDown` все без `project` и все с адресом
+// узла. То есть после #995 привязанный ключ по-прежнему узнаёт hostname'ы чужих
+// нод — не через листинги (#993 их закрыл), а через платформенные алерты.
+// Спрятать нельзя: правило владельца требует показывать платформенные алерты, а
+// алерт без адреса узла бесполезен. Записано в docs/specs/master.md §6.
+//
+// `NodeDown` из этого перечня ВЫБЫЛ с #1064, и канал на этом сузился:
+// birdman_node_heartbeat_age_seconds несёт `project` (nodes.project_id — not
+// null с FK на projects, join тривиален), поэтому чужой NodeDown эта функция
+// привязанному ключу уже НЕ отдаёт. Безлейбловым он остаётся только у мастера
+// СТАРОЙ сборки, и такая серия обязана гореть платформенным — обратная половина
+// закреплена тестом правила в
+// infra/roles/birdman_monitoring_dev/tests/rules_test.yml.
 //
 // И перечень выше НЕ исчерпывает цену (tracker #1020): «платформенный» здесь —
 // это ОТСУТСТВИЕ лейбла `project`, а не «алерт ничьего тенанта», и отсутствие
