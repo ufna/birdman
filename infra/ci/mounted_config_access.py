@@ -30,12 +30,23 @@ bind-маунты «хостовый путь → сервис → образ»,
   · путь мирочитаем (o+r, каталог — o+rx) → uid образа не нужен вовсе;
   · иначе владелец файла обязан совпасть с НАСТОЯЩИМ uid образа.
 
+Тома читаются в ОБЕИХ легальных формах записи — короткой строкой
+(`/etc/x:/etc/x:ro`) и длинной (`type: bind` / `source:` / `target:`), — а
+запись, которую классифицировать нельзя, роняет прогон вместо тихого пропуска
+(tracker #1089). Первая редакция сторожа брала только короткую форму и только
+абсолютный путь, а всё остальное молча выбрасывала: конфиг 0600 root:root,
+смонтированный длинным синтаксисом, проезжал мимо проверки, и compose мастера
+при этом рапортовал «bind-маунтов нет вовсе, проверять нечего». Отказ был
+ТИХИЙ И ЗЕЛЁНЫЙ — тот самый класс «выглядит покрытым», ради которого сторож и
+писался.
+
 Таски роли обходятся ОТ tasks/main.yml по include_tasks/import_tasks — с
 раскрытием loop и loop_control.loop_var, потому что часть путей роль кладёт
 внутри пер-инстансного include (`{{ bmi.log_dir }}/servers` у агента), а не
-плоским списком. Переменные — defaults/main.yml роли плюс `--vars` (json,
-который выплёвывает сам ansible-рендер: там лежат факты, выведенные тасками
-роли, — их подстановка из шаблона по-другому не берётся).
+плоским списком; внутрь block/rescue/always обход заходит (в роли агента там
+живут и node_token 0600, и master-ca.pem). Переменные — defaults/main.yml роли
+плюс `--vars` (json, который выплёвывает сам ansible-рендер: там лежат факты,
+выведенные тасками роли, — их подстановка из шаблона по-другому не берётся).
 
 uid добывается у самого образа (`docker run --rm --entrypoint id <образ> -u`),
 а НЕ берётся из таблицы в тесте: таблица разъехалась бы с образом при первом же
@@ -52,7 +63,12 @@ uid добывается у самого образа (`docker run --rm --entryp
     хоть 0000 — здесь это НЕ моделируется намеренно. «Сегодня образ бежит от
     root» — не свойство, на которое можно опереться: ровно его смена и есть
     второй способ наступить на грабли #1072, а отказ на строгом критерии
-    чинится одной правкой mode/owner.
+    чинится одной правкой mode/owner;
+  · ОТНОСИТЕЛЬНАЯ хостовая сторона маунта (`./conf:/etc/conf`) отвергается, а
+    не разрешается. Она считается от каталога compose-файла НА БОКСЕ, а этот
+    каталог отсюда не виден: угадывать его значило бы завести вторую правду о
+    раскладке — ровно то, ради чего рендер оставлен роле-локальным. Пишите в
+    compose абсолютный путь, тот же, что кладёт таска роли.
 
 Ни одну из границ сторож не проходит молча: раскладка, которая в них попала,
 будет отвергнута — и тогда сначала правится этот файл.
@@ -72,10 +88,16 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 import yaml
 
 VAR = re.compile(r"\{\{\s*([a-zA-Z_]\w*(?:\.\w+)*)\s*\}\}")
+# Имя ИМЕНОВАННОГО тома: по compose-спеке в нём не бывает слэша, поэтому любая
+# хостовая сторона со слэшем — путь, а не имя тома (в т.ч. относительный).
+NAMED_VOLUME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*")
+# Длинные формы, у которых хостовой стороны нет вовсе: проверять нечего.
+HOSTLESS_TYPES = frozenset({"volume", "tmpfs", "npipe", "cluster", "image"})
 LAYING = {
     "ansible.builtin.template": "file",
     "ansible.builtin.copy": "file",
@@ -181,8 +203,25 @@ def laid_paths(role: Path, variables: dict) -> dict[str, Laid]:
         doc = yaml.safe_load(tf.read_text()) or []
         if not isinstance(doc, list):
             return
-        for task in doc:
+        walk_tasks(doc, scope, tf, stack)
+
+    def walk_tasks(tasks: list, scope: dict, tf: Path, stack: tuple[str, ...]) -> None:
+        for task in tasks:
             if not isinstance(task, dict):
+                continue
+            # block/rescue/always — обычный вложенный список тасок, и кладущие
+            # таски внутри него роль исполняет наравне с плоскими: в роли агента
+            # там лежат и node_token 0600, и master-ca.pem. Не заходить внутрь
+            # значит объявить их «никем не положенными». Loop на самом block'е
+            # ansible не поддерживает, раскрывать тут нечего.
+            if "block" in task:
+                inner = dict(scope)
+                for k, v in (task.get("vars") or {}).items():
+                    inner[k] = substitute(v, inner)
+                for section in ("block", "rescue", "always"):
+                    body = task.get(section)
+                    if isinstance(body, list):
+                        walk_tasks(body, inner, tf, stack)
                 continue
             module = next(
                 (m for m in (*LAYING, *INCLUDING) if m in task), None
@@ -233,8 +272,61 @@ def laid_paths(role: Path, variables: dict) -> dict[str, Laid]:
     return laid
 
 
-def compose_mounts(compose: Path) -> list[tuple[str, str, str, str]]:
-    """[(файл, сервис, образ, хостовый путь)] — bind-маунты, именованные тома мимо."""
+class Mount(NamedTuple):
+    """Один bind-маунт: где записан, чем смонтирован, что монтирует."""
+
+    where: str  # имя compose-файла
+    service: str
+    image: str
+    host: str  # хостовая сторона, КАК ЗАПИСАНА в compose
+    absolute: bool  # False — относительный путь: сопоставлять не с чем, см. main()
+
+
+def volume_host(vol, where: str, service: str) -> str | None:
+    """Хостовая сторона тома, или None — если тома на хосте нет вовсе.
+
+    None означает СОЗНАТЕЛЬНЫЙ пропуск (именованный том, анонимный том, tmpfs):
+    хостового пути у такой записи не существует, проверять нечего. А вот
+    запись, которую классифицировать НЕЛЬЗЯ, роняет прогон: молча выброшенный
+    том — это ровно та дыра, из-за которой конфиг 0600 root:root, записанный
+    длинным синтаксисом, проезжал мимо сторожа (tracker #1089).
+    """
+
+    def unclassifiable(why: str):
+        raise SystemExit(
+            f"{where}:{service}: запись тома {vol!r} — {why}. Сторож не берётся"
+            " гадать, bind это или именованный том: молча пропущенный том и есть"
+            " та самая дыра «выглядит покрытым», ради которой он написан. Научите"
+            " разбирать эту форму — infra/ci/mounted_config_access.py."
+        )
+
+    if isinstance(vol, str):
+        # Короткая форма. Одна только строка без двоеточия — АНОНИМНЫЙ том, и
+        # путь в ней контейнерный, а не хостовый: принять его за хостовый значит
+        # выдумать маунт, которого нет.
+        if ":" not in vol:
+            return None
+        source = vol.split(":", 1)[0]
+    elif isinstance(vol, dict):
+        # Длинная форма: {type, source, target, ...}. Легальна ровно так же, как
+        # короткая, и первая редакция сторожа выбрасывала её целиком.
+        vtype = vol.get("type")
+        if isinstance(vtype, str) and vtype in HOSTLESS_TYPES:
+            return None
+        if vtype is not None and vtype != "bind":
+            unclassifiable(f"неизвестный type: {vtype!r}")
+        source = vol.get("source")
+        if not isinstance(source, str) or not source:
+            # type: bind (или type опущен) без строкового source — bind без
+            # хостовой стороны не бывает, значит форма не понята.
+            unclassifiable("длинная форма без строкового source")
+    else:
+        unclassifiable("не строка и не словарь")
+    return None if NAMED_VOLUME.fullmatch(source) else source
+
+
+def compose_mounts(compose: Path) -> tuple[list[Mount], int]:
+    """(bind-маунты, сколько записей сознательно пропущено как не-bind)."""
     doc = yaml.safe_load(compose.read_text())
     if not isinstance(doc, dict) or not isinstance(doc.get("services"), dict) or not doc["services"]:
         raise SystemExit(
@@ -242,17 +334,19 @@ def compose_mounts(compose: Path) -> list[tuple[str, str, str, str]]:
             " или файл не тот. Проверять тут нечего, и молчаливый успех здесь был бы"
             " ровно тем «выглядит покрытым», против которого этот сторож и написан."
         )
-    out = []
+    out: list[Mount] = []
+    hostless = 0
     for name, svc in doc["services"].items():
         image = (svc or {}).get("image", "")
         for vol in (svc or {}).get("volumes") or []:
-            if not isinstance(vol, str):
+            host = volume_host(vol, compose.name, name)
+            if host is None:
+                hostless += 1
                 continue
-            host = vol.split(":", 1)[0]
-            if not host.startswith("/"):  # named volume
-                continue
-            out.append((compose.name, name, image, host.rstrip("/")))
-    return out
+            out.append(
+                Mount(compose.name, name, image, host.rstrip("/") or "/", host.startswith("/"))
+            )
+    return out, hostless
 
 
 def owner_uid(owner) -> int | None:
@@ -353,7 +447,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--vars", type=Path, help="json с фактами, выведенными рендером роли")
     ap.add_argument(
         "--allow-no-mounts", action="store_true",
-        help="у роли compose без bind-маунтов — законно (compose мастера: только именованный том)",
+        help="у роли compose без bind-маунтов — законно (compose мастера: только именованный"
+             " том). НЕ отмычка от непонятой записи: её сторож роняет до этой проверки",
     )
     ap.add_argument("compose", nargs="+", type=Path, help="отрендеренные compose-файлы")
     args = ap.parse_args(argv[1:])
@@ -369,11 +464,14 @@ def main(argv: list[str]) -> int:
         variables.update(extra)
     laid = laid_paths(role, variables)
 
-    mounts: list[tuple[str, str, str, str]] = []
+    mounts: list[Mount] = []
+    hostless = 0
     for compose in args.compose:
         if not compose.is_file():
             raise SystemExit(f"{compose}: файла нет — рендер до него не дошёл?")
-        mounts += compose_mounts(compose)
+        found, ignored = compose_mounts(compose)
+        mounts += found
+        hostless += ignored
     if not mounts and not args.allow_no_mounts:
         print(
             f"{role.name}: ни в одном из {len(args.compose)} compose нет bind-маунтов —"
@@ -388,8 +486,21 @@ def main(argv: list[str]) -> int:
     problems: list[str] = []
     checked = 0
 
-    for where, service, image, host in sorted(mounts):
+    for where, service, image, host, absolute in sorted(mounts):
         tag = f"{where}:{service}"
+        if not absolute:
+            # Разобрать разобрали, а вот СОПОСТАВИТЬ не с чем: относительный путь
+            # считается от каталога compose-файла на боксе, и знать его отсюда
+            # неоткуда. Отказ громкий — тихо пропустить значит вернуть дыру.
+            problems.append(
+                f"{tag}: монтирует «{host}» — ОТНОСИТЕЛЬНЫЙ хостовый путь. Он"
+                " разрешается от каталога compose-проекта НА БОКСЕ, а сторож"
+                " сопоставляет маунты с тасками роли по абсолютному пути и этого"
+                " каталога не знает; угадывать его — заводить вторую правду о"
+                " раскладке.\n    Чинится в compose: пишите абсолютный путь, тот"
+                " же, что кладёт таска роли."
+            )
+            continue
         entry = laid.get(host)
         if entry is None:
             problems.append(
@@ -460,9 +571,14 @@ def main(argv: list[str]) -> int:
 
     print()
     if not mounts:
+        # «Маунтов нет» ≠ «не разобрал»: неклассифицируемая запись сюда не
+        # доезжает вовсе — volume_host() роняет прогон раньше. Поэтому число
+        # разобранных не-bind записей печатается: ноль при непустом compose —
+        # повод смотреть на рендер, а не радоваться зелёному.
         print(
-            f"{role.name}: bind-маунтов нет вовсе (--allow-no-mounts), проверять нечего"
-            f" — compose: {', '.join(c.name for c in args.compose)}"
+            f"{role.name}: bind-маунтов нет (--allow-no-mounts); разобрано записей"
+            f" томов без хостовой стороны: {hostless} (именованные тома, tmpfs,"
+            f" анонимные) — compose: {', '.join(c.name for c in args.compose)}"
         )
         return 0
     if problems:
