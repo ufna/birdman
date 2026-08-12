@@ -295,23 +295,55 @@ export function EnvChips({ stacked = false }: { stacked?: boolean } = {}) {
  * не над контентом: это верхнее измерение ВСЕГО, что показывают экраны, и
  * читаться должно сверху вниз — система → на что смотрю → раздел.
  *
- * Экраны без скоупа перечислены явно: Бекапы — единственный, кто не смотрит ни
- * на проект, ни на окружение (настройки и история бекапов у мастера одни).
- * Показывать там селектор, который ни на что не влияет, — врать пользователю.
- * В Доступе скоуп НУЖЕН: к проекту и окружению привязываются API-ключи.
+ * Показывать селектор, который ни на что не влияет, — врать пользователю.
+ * Но «влияет» спрашивается ПО КАЖДОЙ ОСИ ОТДЕЛЬНО, а не про скоуп целиком:
+ * одномерное множество путей (прежнее SCOPELESS_PATHS) этого не выражало, и
+ * потому принцип исполнялся только наполовину — чипы окружения рендерились
+ * вхолостую сразу на трёх экранах (tracker #1106). Замерено по коду:
+ *
+ * ПРОЕКТ жив везде, кроме Бекапов (настройки и история бекапов у мастера одни,
+ * ручки не принимают ?project= — master.md §6). В Админке он НУЖЕН, и не ради
+ * одного диалога: им кормятся привязка создаваемого ключа, отметка текущего
+ * проекта в «Проектах» и вся секция «Окружения» (её таблица — окружения
+ * ВЫБРАННОГО проекта, add/edit/delete гейтятся project !== null). На «Логах»
+ * сам поиск проект не несёт (LogsQL строится без него, сужает сервер по
+ * привязке ключа), но клик по строке результата открывает дровер дедика, а тот
+ * резолвит дедик и его таймлайн в ПРОЕКТЕ — выбор решает, увидит оператор мету
+ * дедика или «нет в списке».
+ *
+ * ОКРУЖЕНИЕ мертво на Бекапах, Алертах, Логах и в Админке. Алерты живут в осях
+ * проект×регион (mute — тоже), Логи не читают env вовсе, а в Админке оба
+ * потребителя env берут СПИСОК окружений и проект, но никогда выбранное
+ * значение: диалог привязки ключа выбирает окружение своим дропдауном.
+ *
+ * Инвариант, который держит отдельный тест: PROJECTLESS ⊆ ENVLESS — окружения
+ * принадлежат проекту, поэтому экран, слепой к проекту, слеп и к его
+ * окружениям. Бекапы — по-прежнему единственный, где не рендерится ничего.
  */
-const SCOPELESS_PATHS = new Set(['/backups']);
+const PROJECTLESS_PATHS = new Set(['/backups']);
+const ENVLESS_PATHS = new Set(['/backups', '/alerts', '/logs', '/access']);
 
+/** Влияет ли ВЫБОР ПРОЕКТА на то, что показывает экран этого пути. */
+export function pathUsesProject(path: string): boolean {
+  return !PROJECTLESS_PATHS.has(path);
+}
+
+/** Влияет ли ВЫБОР ОКРУЖЕНИЯ на то, что показывает экран этого пути. */
+export function pathUsesEnv(path: string): boolean {
+  return !ENVLESS_PATHS.has(path);
+}
+
+/** Есть ли на этом пути хоть одна живая ось — то есть рисовать ли блок вообще. */
 export function pathUsesScope(path: string): boolean {
-  return !SCOPELESS_PATHS.has(path);
+  return pathUsesProject(path) || pathUsesEnv(path);
 }
 
 export function ScopePicker({ path }: { path: string }) {
   if (!pathUsesScope(path)) return null;
   return (
     <div className="flex flex-col gap-3">
-      <ProjectSelector stacked />
-      <EnvChips stacked />
+      {pathUsesProject(path) && <ProjectSelector stacked />}
+      {pathUsesEnv(path) && <EnvChips stacked />}
     </div>
   );
 }
@@ -321,19 +353,28 @@ export function ScopePicker({ path }: { path: string }) {
  * переключатель уезжает в выдвижное меню — без этой подписи пропал бы ответ на
  * вопрос «в каком я проекте», который до переезда всегда был на экране.
  * Не интерактивен намеренно: переключение — в меню, здесь только факт.
+ *
+ * Половинки те же, что у ScopePicker: подпись не называет окружение там, где
+ * его выбор ни на что не влияет, — иначе индикатор врал бы ровно тем же
+ * способом, что и спрятанные чипы. Проект — первая половина: пока его нет,
+ * называть нечего вовсе (а без проекта нет и окружений — см. инвариант выше).
  */
 export function ScopeIndicator({ path }: { path: string }) {
   const { selected: project } = useProject();
   const { selected: env } = useEnv();
   const { t } = useT();
-  if (!pathUsesScope(path) || project === null) return null;
+  if (!pathUsesProject(path) || project === null) return null;
   return (
     <span className="truncate font-mono text-xs text-muted" title={t('scope.current')}>
       {project}
-      <span aria-hidden className="px-1 text-line">
-        /
-      </span>
-      {env ?? t('env.all')}
+      {pathUsesEnv(path) && (
+        <>
+          <span aria-hidden className="px-1 text-line">
+            /
+          </span>
+          {env ?? t('env.all')}
+        </>
+      )}
     </span>
   );
 }
