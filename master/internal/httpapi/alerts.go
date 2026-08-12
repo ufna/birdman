@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"sort"
@@ -513,7 +514,7 @@ func (s *Server) handleAlertHistory(w http.ResponseWriter, r *http.Request) {
 	if limit > 1000 {
 		limit = 1000
 	}
-	data, err := os.ReadFile(s.alertsLogPath)
+	events, _, err := readAlertsTail(s.alertsLogPath, time.Now(), limit, vis)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) || s.alertsLogPath == "" {
 			// No sink yet is a normal state, not an error.
@@ -523,7 +524,6 @@ func (s *Server) handleAlertHistory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	events := parseAlertsLog(data, time.Now(), limit, vis)
 	mutes, err := s.st.ListAlertMutes(r.Context(), false)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
@@ -533,6 +533,138 @@ func (s *Server) handleAlertHistory(w http.ResponseWriter, r *http.Request) {
 		events[i].Muted = anyMuteMatches(mutes, events[i].Name, events[i].Region, events[i].Project)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"alerts": events})
+}
+
+// alertsTailInitialWindow — стартовое окно чтения хвоста alerts.log. Число
+// ВЫБРАНО, а не выведено из замера боевого файла: размер боевой доставки не
+// мерился (alertmanager группирует, в строке лежит пакет алертов со всеми их
+// лейблами), и ошибка тут не страшна — недобор компенсируется удвоением окна.
+const alertsTailInitialWindow = 64 * 1024
+
+// readAlertsTail читает ХВОСТ лога алертов РАСТУЩИМ окном и разбирает его тем
+// же parseAlertsLog. Возвращает события (newest-first, не длиннее limit) и
+// СКОЛЬКО БАЙТ фактически прочитано — второе нужно тестам и замеру, ручке оно
+// не интересно.
+//
+// Зачем вообще хвост (tracker #1087). Раньше ручка делала os.ReadFile на каждый
+// запрос, то есть работа была линейна по размеру файла, а файл на боксе дорос
+// до 498 МБ (замер #1073). Замер на своём файле размером с порог ротации
+// (32 МБ, 90 718 синтетических доставок): прежний путь — 33 554 550 прочитанных
+// байт, 90 718 разобранных строк, 295 мс, 214.8 МБ аллокаций; хвостовой —
+// 65 537 байт, 177 строк, 0.65 мс, 0.5 МБ. Панель при этом просит 20/50/100
+// записей (HISTORY_LIMITS), потолок ручки — 1000.
+//
+// Зачем окно РАСТУЩЕЕ, а не фиксированное. Фиксированное дешевле, и платит оно
+// не байтами, а КОРРЕКТНОСТЬЮ: оно ломает обещание из docstring parseAlertsLog
+// («a noisy neighbour must not be able to push the tenant's own history out of
+// the window», #995 — там речь про окно ЛИМИТА, здесь ровно то же переносится
+// на окно БАЙТОВОЕ). Шумный сосед, наливший последние N байт своими алертами,
+// оставил бы привязанный ключ с пустой историей при непустой. Поэтому окно
+// расширяется, пока не набрано limit ВИДИМЫХ (уже суженных правилом vis)
+// событий или пока не прочитан весь файл: сосед может лишь заставить читать
+// больше, но не может ничего скрыть.
+//
+// ЦЕНА, честно. Файл целиком читается ВСЯКИЙ раз, когда видимых событий в нём
+// меньше limit, — по любой причине, не только из-за сужения (короткая история,
+// высокий ?limit=). ЧТЕНИЕ в этом случае ровно как раньше, один раз по файлу:
+// окно накапливается, а не перечитывается (см. tail/have ниже) — это заперто
+// в TestReadAlertsTailGrowsPastNoisyNeighbour сверкой read == размер файла. А
+// вот РАЗБОР повторяется на каждом удвоении, суммарно до ~2 размеров файла:
+// parseAlertsLog каждый раз запускается на всём накопленном буфере. В обычном
+// случае удвоений нет вовсе — один проход по 64 КиБ.
+//
+// ЧЕСТНАЯ ГРАНИЦА. Приём опирается на то, что порядок строк в файле — порядок
+// ЗАПИСИ: sink дописывает свой received_at, поэтому хвост файла и есть самые
+// свежие доставки, и «набрали limit в окне» действительно значит «дальше в
+// начало файла лежит только более старое». Голые строки (fallback-форма без
+// received_at) сортируются по startsAt и теоретически могут лежать не в
+// порядке — для них монотонность не гарантирована ничем, кроме того, что их
+// пишет тот же дописывающий канал.
+func readAlertsTail(path string, now time.Time, limit int, vis alertVisibility) ([]alertEvent, int64, error) {
+	return readAlertsTailWindow(path, now, limit, vis, alertsTailInitialWindow)
+}
+
+// readAlertsTailWindow — ядро readAlertsTail с ЯВНЫМ стартовым окном: тесты
+// строят точное попадание окна на границу строки на маленьком initial, не
+// собирая мегабайтных фикстур.
+func readAlertsTailWindow(path string, now time.Time, limit int, vis alertVisibility, initial int64) ([]alertEvent, int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, 0, err
+	}
+	size := fi.Size()
+	if initial < 1 {
+		initial = 1
+	}
+	var read int64
+	// Окно НАКАПЛИВАЕТСЯ, а не перечитывается: tail — это ровно file[have:size],
+	// и удвоение дочитывает только НОВЫЙ кусок слева. Иначе каждый проход читал
+	// бы всё окно заново, и худший случай стоил бы уже не «как раньше», а суммой
+	// всех окон — на фикстуре шумного соседа это 2.74 размера файла, то есть
+	// лечение оказалось бы дороже болезни ровно в том случае, ради которого
+	// растущее окно и заведено.
+	var tail []byte
+	have := size
+	for window := initial; ; window *= 2 {
+		whole := window >= size
+		if whole {
+			window = size
+		}
+		off := size - window
+		// Окно читается на ОДИН БАЙТ ЛЕВЕЕ: этот байт и есть ответ на вопрос,
+		// обрезана ли первая строка. Если окно легло ровно по границе строк, то
+		// buf[0] == '\n' — первый перевод строки найдётся на индексе 0, и
+		// отбрасывание «до первого \n включительно» не съест валидную строку.
+		// Иначе первая строка обрезана посередине и её надо выбросить, а не
+		// пытаться разобрать.
+		start := off
+		if start > 0 {
+			start--
+		}
+		if start < have {
+			chunk := make([]byte, have-start)
+			n, err := f.ReadAt(chunk, start)
+			if err != nil && !errors.Is(err, io.EOF) {
+				return nil, read, err
+			}
+			read += int64(n)
+			if int64(n) < have-start {
+				// Файл усох между Stat и чтением: size устарел, и всё, что мы
+				// держали правее, доверия больше не заслуживает — берём только
+				// что прочитанный кусок и не растём дальше. Ротация #1073 сюда
+				// НЕ приводит (она rename+create без copytruncate, а наш fd
+				// держит прежний inode целиком) — это защита от любого другого
+				// усечения файла под нами, а не описание известного сценария.
+				return parseAlertsLog(dropPartialFirstLine(chunk[:n], off > 0), now, limit, vis), read, nil
+			}
+			tail = append(chunk, tail...)
+			have = start
+		}
+		events := parseAlertsLog(dropPartialFirstLine(tail, off > 0), now, limit, vis)
+		if whole || len(events) >= limit {
+			return events, read, nil
+		}
+	}
+}
+
+// dropPartialFirstLine отбрасывает обрезанную первую строку окна — всё до
+// первого '\n' включительно. cut=false значит «окно начинается с начала файла»,
+// там резать нечего. Нет '\n' вовсе — окно целиком лежит внутри одной строки,
+// разбирать нечего.
+func dropPartialFirstLine(buf []byte, cut bool) []byte {
+	if !cut {
+		return buf
+	}
+	i := bytes.IndexByte(buf, '\n')
+	if i < 0 {
+		return nil
+	}
+	return buf[i+1:]
 }
 
 // parseAlertsLog parses newline-delimited JSON deliveries into a normalized,
@@ -547,6 +679,11 @@ func (s *Server) handleAlertHistory(w http.ResponseWriter, r *http.Request) {
 // budget. For a bound key the order matters for the same reason AND for
 // correctness of the boundary's promise: a noisy neighbour must not be able to
 // push the tenant's own history out of the window.
+//
+// data — НЕ обязательно файл целиком: с #1087 ручка передаёт сюда ХВОСТ лога
+// (readAlertsTail), то есть у окна лимита появилось второе, БАЙТОВОЕ окно. То
+// же обещание перенесено и на него, и держит его именно РАСТУЩЕЕ окно: сосед
+// может заставить прочитать больше байт, но не может сузить выдачу арендатора.
 func parseAlertsLog(data []byte, now time.Time, limit int, vis alertVisibility) []alertEvent {
 	out := []alertEvent{}
 	keep := func(a amAlert) bool { return vis.keep(a.Labels["project"]) }
