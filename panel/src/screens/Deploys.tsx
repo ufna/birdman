@@ -10,7 +10,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ColumnDef } from '@tanstack/react-table';
 import * as Dialog from '@radix-ui/react-dialog';
-import { api } from '../lib/api';
+import { api, WARN_NO_LIVE_NODES } from '../lib/api';
 import type { ApiEvent, Environment, GameServer, NodeInfo, VersionInfo } from '../lib/api';
 import { apiErrorMessage } from '../lib/apiError';
 import { useLive } from '../lib/live';
@@ -62,6 +62,12 @@ export function Deploys({ navigate }: { navigate: (path: string) => void }) {
 
   // Клиентский фильтр по выбранному env (environments v1 §8); «All» → всё.
   const shownVersions = keepForEnv(versions.data, selected, (v) => v.env);
+  // Ёмкость проекта в этом срезе (tracker #1071). `dead` не считаем: это тачки,
+  // выведенные из флота руками оператора, — бокса за ними уже нет. `undefined`
+  // (список не приехал/отвалился) — НЕ ноль: иначе сбой запроса рисовал бы
+  // баннер «нод нет» проекту с полным флотом.
+  const liveNodes =
+    nodes.data === undefined ? undefined : keepForEnv(nodes.data, selected, (n) => n.env).filter((n) => n.state !== 'dead').length;
   const projects = groupByProject(shownVersions);
   const isEmpty = projects.length === 0;
   const howtoCtx = buildHowtoCtx(window.location.origin, groupByProject(versions.data));
@@ -100,6 +106,8 @@ export function Deploys({ navigate }: { navigate: (path: string) => void }) {
           versionById={versionById}
           hideDisabled={hideDisabled}
           setHideDisabled={setHideDisabled}
+          liveNodes={liveNodes}
+          navigate={navigate}
           reload={reload}
         />
       ))}
@@ -121,6 +129,8 @@ function ProjectDeploys({
   versionById,
   hideDisabled,
   setHideDisabled,
+  liveNodes,
+  navigate,
   reload,
 }: {
   project: string;
@@ -136,6 +146,10 @@ function ProjectDeploys({
   versionById: Map<string, VersionInfo>;
   hideDisabled: boolean;
   setHideDisabled: (v: boolean) => void;
+  /** Сколько не-`dead` тачек у проекта в текущем срезе окружения; `undefined` —
+   *  список нод ещё не приехал (см. NoNodesBanner). */
+  liveNodes: number | undefined;
+  navigate: (path: string) => void;
   reload: () => void;
 }) {
   const { t, tp } = useT();
@@ -254,6 +268,10 @@ function ProjectDeploys({
         }
       />
 
+      {active !== undefined && liveNodes === 0 && (
+        <NoNodesBanner project={project} semver={active.semver} navigate={navigate} />
+      )}
+
       <div className="grid gap-4 border-b border-line p-4 md:grid-cols-2">
         <WindowCard active={active} deprecated={deprecated} liveByVersion={liveByVersion} />
         <RegionActiveCard regionActive={regionActive} activeSemver={active?.semver} />
@@ -331,8 +349,15 @@ function VersionActions({
           description={t('deploys.deploy.desc')}
           confirmLabel={t('deploys.deploy')}
           onConfirm={async () => {
-            await api.deploy(version.id);
-            toast.success(t('deploys.toast.deployed', { semver: version.semver }));
+            const st = await api.deploy(version.id);
+            // Мастер сказал, что катить было не на что (tracker #1071) — зелёный
+            // «успех» здесь и был той самой ложью: флип состоялся, дедиков не
+            // будет. Говорим это в момент действия, а не оставляем догадываться.
+            if (st.warning === WARN_NO_LIVE_NODES) {
+              toast.info(t('deploys.toast.deployedNoNodes', { semver: version.semver }));
+            } else {
+              toast.success(t('deploys.toast.deployed', { semver: version.semver }));
+            }
             onDone();
           }}
         />
@@ -560,6 +585,50 @@ function EnvSettingsCard({ env, onSaved }: { env: Environment; onSaved: () => vo
         </div>
       </div>
     </Card>
+  );
+}
+
+/**
+ * Недостающая ёмкость проекта (tracker #1071): версия активна, а живых тачек у
+ * проекта ноль — дедиков не будет. Раньше система об этом молчала везде, и
+ * причину («нода принадлежит РОВНО одному проекту», #1064/#1065) приходилось
+ * искать запросом `GET /v1/nodes?project=…`.
+ *
+ * Почему баннер здесь, а не только на Флоте (там пустое состояние уже есть):
+ * вопрос «а где дедики?» рождается на ЭТОМ экране — соседние карточки под
+ * баннером рисуют «active {semver} · 0 дедиков» и «Живых дедиков нет», то есть
+ * верный факт без причины. Алерт заменить это не может (проверено по
+ * `infra/roles/birdman_monitoring_dev/templates/rules.yml.j2`): `NodeDown` висит
+ * на heartbeat СУЩЕСТВУЮЩЕЙ ноды, `BufferEmptyAllocFail` — на попытках
+ * аллокации, которых при нуле нод никто не делает, а `BufferEmptyReady*` здесь
+ * как раз загорится (мастер эмитит явный нулевой ready по флиту с
+ * `buffer_ready > 0`, #960) — но скажет «регион без ready-серверов» в
+ * алерт-канал, то есть назовёт симптом и не тому, кто сейчас смотрит на экран.
+ */
+function NoNodesBanner({
+  project,
+  semver,
+  navigate,
+}: {
+  project: string;
+  semver: string;
+  navigate: (path: string) => void;
+}) {
+  const { t } = useT();
+  return (
+    <div role="status" className="border-b border-line bg-warn-bg/60 px-4 py-3">
+      <p className="text-sm font-medium text-warn">{t('deploys.noNodes.title')}</p>
+      <p className="mt-1 text-xs text-muted">{t('deploys.noNodes.body', { semver, project })}</p>
+      <button
+        type="button"
+        onClick={() => {
+          navigate('/fleet');
+        }}
+        className="mt-2 rounded-lg border border-line bg-card px-2.5 py-1 text-xs font-medium text-ink transition-colors hover:text-accent-ink"
+      >
+        {t('deploys.noNodes.cta')}
+      </button>
+    </div>
   );
 }
 

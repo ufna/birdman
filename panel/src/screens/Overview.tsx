@@ -109,7 +109,13 @@ function OverviewBody({
             </>
           }
           detail={
-            stats.nodesQuarantine > 0 || stats.nodesDown > 0 ? (
+            // Ноль живых тачек проверяем ПЕРВЫМ (tracker #1071): при пустом
+            // флоте quarantine и down тоже нули, и ветка ниже честно печатала
+            // «все активны» — то есть первый же экран нового проекта успокаивал
+            // оператора ровно там, где запускать дедики физически не на чем.
+            stats.nodesLive === 0 ? (
+              <span className="font-medium text-dead">{t('ov.noNodes')}</span>
+            ) : stats.nodesQuarantine > 0 || stats.nodesDown > 0 ? (
               // Два отдельных красных чипа: карантин и down живут одновременно
               // (часть тачек молчит дольше node_down_after_min и уже деградировала).
               <>
@@ -189,6 +195,9 @@ interface Stats {
   readyByRegion: Map<string, number>;
   nodesActive: number;
   nodesTotal: number;
+  /** Тачки, которые ещё числятся во флоте (всё, кроме `dead` — выведенных
+   *  оператором вручную). Ноль означает «ставить дедики не на что». */
+  nodesLive: number;
   nodesQuarantine: number;
   nodesDown: number;
   fleetVersions: { region: string; semver: string; extra: number }[];
@@ -235,6 +244,7 @@ function computeStats(nodes: NodeInfo[], servers: GameServer[], versions: Versio
     readyByRegion,
     nodesActive: nodes.filter((n) => n.state === 'active').length,
     nodesTotal: nodes.length,
+    nodesLive: nodes.filter((n) => n.state !== 'dead').length,
     nodesQuarantine: nodes.filter((n) => n.state === 'quarantine').length,
     // Карантин дольше node_down_after_min → мастер деградирует ноду в `down`;
     // считаем отдельно, чтобы красная сводка не гасла, когда стало хуже.

@@ -55,6 +55,10 @@ export const EVENT_KINDS = [
   'server_failed', 'server_recovered', 'server_drain', 'crash_loop', 'allocation_failed',
   'version_registered', 'version_disabled', 'fleet_updated', 'deploy_started',
   'deploy_node_pulled', 'deploy_activated', 'deploy_failed', 'deploy_rolled_back',
+  // deploy_no_nodes (tracker #1071): деплой активировался вхолостую — у проекта
+  // в этом окружении ноль живых нод, дедиков не будет. Раньше факт жил только в
+  // логе мастера, и «деплой прошёл, дедиков нет» не оставляло следа в ленте.
+  'deploy_no_nodes',
   'agent_upgrade', 'agent_upgrade_succeeded', 'agent_upgrade_failed',
   // registries v1 (docs/superpowers/specs/2026-07-09-registries-design.md
   // §4/§6): apikey_created/apikey_revoked existed in master before this set
@@ -177,6 +181,9 @@ export function toneOfEventKind(kind: string): Tone {
     case 'node_drain':
     case 'version_disabled':
     case 'server_drain':
+    // deploy_no_nodes — не отказ (флип состоялся), но и не успех: катить было
+    // не на что. Тон warn, как у allocation_failed, — «сделано, но пусто».
+    case 'deploy_no_nodes':
       return 'warn';
     case 'node_recovered':
     case 'server_recovered':

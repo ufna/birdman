@@ -163,6 +163,7 @@ export const en = {
   'event.deploy_activated': 'Deploy activated',
   'event.deploy_failed': 'Deploy failed',
   'event.deploy_rolled_back': 'Rolled back',
+  'event.deploy_no_nodes': 'Deploy without nodes',
   'event.agent_upgrade': 'Agent upgrade',
   'event.agent_upgrade_succeeded': 'Agent upgraded',
   'event.agent_upgrade_failed': 'Agent upgrade failed',
@@ -349,6 +350,10 @@ export const en = {
   'ov.inQuarantine': '{count} in quarantine',
   'ov.down': '{count} down',
   'ov.allActive': 'all active',
+  // Ноль тачек — не «все активны» (tracker #1071): при пустом флоте quarantine и
+  // down тоже нули, и карточка успокаивала оператора нового проекта ровно там,
+  // где запускать дедики физически не на чем.
+  'ov.noNodes': 'no nodes in this project',
   'ov.fleetVersion': 'Fleet version',
   'ov.noLiveDedics': 'no live dedics',
   'ov.matchesHour': 'Matches this hour',
@@ -409,6 +414,13 @@ export const en = {
   'deploys.dedicsCount.few': '{count} dedics',
   'deploys.dedicsCount.many': '{count} dedics',
   'deploys.dedicsCount.other': '{count} dedics',
+  // Недостающая ёмкость проекта (tracker #1071). Соседние карточки рисуют
+  // «active 1.0.0 · 0 дедиков» и «Живых дедиков нет» — верно, но без причины;
+  // баннер называет её ровно там, где вопрос и возникает.
+  'deploys.noNodes.title': 'No nodes in this project — no dedic will start',
+  'deploys.noNodes.body':
+    'Version {semver} is active and the fleet is configured, but project {project} has no node of its own. A node belongs to exactly one project, so the scheduler has nowhere to place dedics. Register a node — on an existing box it comes up as another agent instance.',
+  'deploys.noNodes.cta': 'Go to Fleet',
   'deploys.regionActive': 'Active by region',
   'deploys.noLiveDedics': 'No live dedics.',
   'deploys.emptyProject': 'No versions in this project.',
@@ -417,6 +429,10 @@ export const en = {
   'deploys.prepull.nodes': '{pulled} / {total} nodes',
   'deploys.prepull.waiting': 'Waiting for per-node pull reports (deploy_node_pulled events)…',
   'deploys.toast.deployed': 'Deploy of {semver} started',
+  // Мастер отдал warning no_live_nodes (tracker #1071): флип состоялся, но
+  // катить было не на что — тост обязан сказать это в момент действия, а не
+  // отрапортовать успех.
+  'deploys.toast.deployedNoNodes': '{semver} is active, but the project has no nodes — no dedic will start',
   'deploys.toast.rolledBack': 'Rolled back to {semver}',
 
   // — Deploys screen: «How to deploy a build» card —

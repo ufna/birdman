@@ -171,7 +171,15 @@ export interface DeployStatus {
   state: string;
   /** Сколько тачек ещё греется (0, когда флип уже произошёл). */
   pending_nodes: number;
+  /** Непроходная оговорка про ЭТОТ деплой; сегодня единственное значение —
+   *  `no_live_nodes`: катить было не на что, у (проект, окружение) ноль живых
+   *  тачек, дедиков не появится (deploy.WarnNoLiveNodes, tracker #1071).
+   *  Поля нет в ответе, когда оговорки нет (omitempty). */
+  warning?: string;
 }
+
+/** Значение DeployStatus.warning: деплой активировался вхолостую. */
+export const WARN_NO_LIVE_NODES = 'no_live_nodes';
 
 /** Ответ POST /v1/rollback: {rollback: {...}}. */
 export interface RollbackResult {

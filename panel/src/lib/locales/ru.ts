@@ -140,6 +140,7 @@ export const ru: Record<MessageKey, string> = {
   'event.deploy_activated': 'Деплой активирован',
   'event.deploy_failed': 'Деплой не удался',
   'event.deploy_rolled_back': 'Откат выполнен',
+  'event.deploy_no_nodes': 'Деплой без тачек',
   'event.agent_upgrade': 'Обновление агента',
   'event.agent_upgrade_succeeded': 'Агент обновлён',
   'event.agent_upgrade_failed': 'Обновление агента не удалось',
@@ -316,6 +317,10 @@ export const ru: Record<MessageKey, string> = {
   'ov.inQuarantine': '{count} в карантине',
   'ov.down': '{count} недоступн.',
   'ov.allActive': 'все активны',
+  // Ноль тачек — не «все активны» (tracker #1071): при пустом флоте quarantine и
+  // down тоже нули, и карточка успокаивала оператора нового проекта ровно там,
+  // где запускать дедики физически не на чем.
+  'ov.noNodes': 'в проекте нет тачек',
   'ov.fleetVersion': 'Версия флита',
   'ov.noLiveDedics': 'нет живых дедиков',
   'ov.matchesHour': 'Матчи за час',
@@ -376,6 +381,13 @@ export const ru: Record<MessageKey, string> = {
   'deploys.dedicsCount.few': '{count} дедика',
   'deploys.dedicsCount.many': '{count} дедиков',
   'deploys.dedicsCount.other': '{count} дедика',
+  // Недостающая ёмкость проекта (tracker #1071). Соседние карточки рисуют
+  // «active 1.0.0 · 0 дедиков» и «Живых дедиков нет» — верно, но без причины;
+  // баннер называет её ровно там, где вопрос и возникает.
+  'deploys.noNodes.title': 'В проекте нет ни одной тачки — дедики не запустятся',
+  'deploys.noNodes.body':
+    'Версия {semver} активна и флот настроен, но у проекта {project} нет своей тачки. Тачка принадлежит ровно одному проекту, поэтому планировщику некуда ставить дедики. Заведите тачку — на существующем боксе она поднимается вторым инстансом агента.',
+  'deploys.noNodes.cta': 'Перейти во Флот',
   'deploys.regionActive': 'Активно по регионам',
   'deploys.noLiveDedics': 'Живых дедиков нет.',
   'deploys.emptyProject': 'Версий проекта нет.',
@@ -384,6 +396,10 @@ export const ru: Record<MessageKey, string> = {
   'deploys.prepull.nodes': '{pulled} / {total} тачек',
   'deploys.prepull.waiting': 'Ждём отчёты о прогреве по тачкам (события deploy_node_pulled)…',
   'deploys.toast.deployed': 'Деплой {semver} запущен',
+  // Мастер отдал warning no_live_nodes (tracker #1071): флип состоялся, но
+  // катить было не на что — тост обязан сказать это в момент действия, а не
+  // отрапортовать успех.
+  'deploys.toast.deployedNoNodes': '{semver} активна, но у проекта нет тачек — ни один дедик не запустится',
   'deploys.toast.rolledBack': 'Откат до {semver} выполнен',
 
   // — экран «Деплои»: карточка «Как залить билд» —

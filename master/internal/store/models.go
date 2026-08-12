@@ -162,8 +162,19 @@ const (
 	EventDeployActivated  = "deploy_activated"   // atomic flip done
 	EventDeployFailed     = "deploy_failed"      // prepull timeout/failure → abort
 	EventDeployRolledBack = "deploy_rolled_back" // deprecated ↔ active flip back
-	EventVersionDisabled  = "version_disabled"   // deprecated → disabled (TTL/flip)
-	EventServerDrain      = "server_drain"       // per-server drain sent (reap TTL)
+	// EventDeployNoNodes — деплой активировался, а греть и запускать было НЕ НА ЧЕМ:
+	// у (project, env) ноль живых нод (tracker #1071). Пишется в единственной
+	// воронке deploy.startJob, поэтому покрывает все пути сразу — ручной
+	// POST /v1/deploy, промоут, авто-деплой из POST /v1/versions, Resume и
+	// SweepOrphans. Раньше этот факт жил только в логе мастера, куда оператор
+	// нового проекта не ходит: снаружи «деплой прошёл», а дедиков ноль, и причину
+	// («нода принадлежит РОВНО одному проекту», #1064) приходилось искать руками.
+	// Payload {project, env, semver, image_ref} + ref version_id — та же форма, что
+	// у deploy_started, поэтому проектное сужение /v1/events и env-фильтр панели
+	// работают без отдельного правила.
+	EventDeployNoNodes   = "deploy_no_nodes"
+	EventVersionDisabled = "version_disabled" // deprecated → disabled (TTL/flip)
+	EventServerDrain     = "server_drain"     // per-server drain sent (reap TTL)
 	// EventVersionRetired — версия ушла registered → disabled ретеншном
 	// (environments v1 §6а, RetireVersions): env.retention_keep>0, версия сверх keep
 	// по created_at desc, старше 1ч. Единственный путь registered→disabled.

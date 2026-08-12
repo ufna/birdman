@@ -126,6 +126,13 @@ func New(o Options) *Manager {
 	}
 }
 
+// WarnNoLiveNodes marks a deploy that had NOTHING to roll onto: the version's
+// (project, env) has no live node at all, so the flip happened vacuously and no
+// dedic will ever appear (tracker #1071). Machine-readable on purpose — a CI that
+// calls POST /v1/deploy can branch on it; before this the same call answered a
+// bare `{"state":"active","pending_nodes":0}`, i.e. plain success.
+const WarnNoLiveNodes = "no_live_nodes"
+
 // Status is the POST /v1/deploy outcome.
 type Status struct {
 	Version store.Version `json:"version"`
@@ -133,6 +140,9 @@ type Status struct {
 	State string `json:"state"`
 	// Nodes still being warmed (0 when the flip already happened).
 	PendingNodes int `json:"pending_nodes"`
+	// Warning is a non-fatal caveat about THIS deploy — today only
+	// WarnNoLiveNodes. Empty (and absent from the JSON) when there is none.
+	Warning string `json:"warning,omitempty"`
 }
 
 // Deploy runs steps 1–2 of the deploy (see the package comment). It returns
@@ -152,7 +162,11 @@ func (m *Manager) Deploy(ctx context.Context, versionID string) (Status, error) 
 	// version never drags the marker backwards.
 	m.recordAttempt(res.Version)
 	if res.AlreadyActive {
-		return Status{Version: res.Version, State: "active"}, nil
+		// Идемпотентный повтор — ровно тот путь, на который встаёт недоумевающий
+		// оператор («деплой прошёл, дедиков нет — накачу ещё раз»), поэтому
+		// предупреждение обязано быть и здесь (tracker #1071). Событие НЕ пишем:
+		// нового деплоя не случилось, и повторы засорили бы ленту.
+		return Status{Version: res.Version, State: "active", Warning: m.noNodesWarning(ctx, res.Version)}, nil
 	}
 	if res.AlreadyPrepulling {
 		m.mu.Lock()
@@ -182,11 +196,22 @@ func (m *Manager) startJob(ctx context.Context, v store.Version) (Status, error)
 	if len(targets) == 0 {
 		m.log.Warn("deploy: no live fleet nodes to prepull — activating immediately",
 			"version_id", v.ID, "semver", v.Semver)
+		// Тот же факт, но НАБЛЮДАЕМЫЙ (tracker #1071): лог мастера оператору
+		// недоступен, и раньше «деплой прошёл, дедиков ноль» не оставляло следа
+		// нигде — ни в ленте, ни в ответе. Пишем ДО активации, чтобы в ленте
+		// (id desc) причина стояла под своим deploy_activated, а не над ним.
+		// Best-effort: провал записи события не валит деплой — он и так уже
+		// разрешён стором, а сигнал дублирован полем Warning ниже.
+		vid := v.ID
+		if err := m.st.InsertEvent(ctx, store.EventDeployNoNodes, store.EventRef{VersionID: &vid},
+			map[string]any{"project": v.Project, "env": v.Env, "semver": v.Semver, "image_ref": v.ImageRef}); err != nil {
+			m.log.Error("deploy: no-nodes event write failed", "version_id", v.ID, "err", err)
+		}
 		if err := m.activate(ctx, v, time.Now()); err != nil {
 			return Status{}, err
 		}
 		v.State = "active"
-		return Status{Version: v, State: "active"}, nil
+		return Status{Version: v, State: "active", Warning: WarnNoLiveNodes}, nil
 	}
 
 	j := &job{version: v, started: time.Now(), pending: map[string]bool{}}
@@ -213,6 +238,22 @@ func (m *Manager) startJob(ctx context.Context, v store.Version) (Status, error)
 			"version_id", v.ID, "semver", v.Semver, "node_id", n.ID, "region", n.Region, "cmd_id", cmdID)
 	}
 	return Status{Version: v, State: "prepulling", PendingNodes: len(targets)}, nil
+}
+
+// noNodesWarning reports WarnNoLiveNodes when the version's (project, env) has
+// no live node to run on, and "" otherwise. A read-only probe over the same
+// PrePullTargets query startJob uses, so both answers mean the same thing. A
+// query error yields "" — a missing warning is better than a wrong one.
+func (m *Manager) noNodesWarning(ctx context.Context, v store.Version) string {
+	targets, err := m.st.PrePullTargets(ctx, v.ProjectID, v.Env)
+	if err != nil {
+		m.log.Error("deploy: no-nodes probe failed", "version_id", v.ID, "err", err)
+		return ""
+	}
+	if len(targets) == 0 {
+		return WarnNoLiveNodes
+	}
+	return ""
 }
 
 // Resume recovers deploy state after a master restart. Call once at startup
