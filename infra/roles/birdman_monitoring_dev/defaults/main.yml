@@ -35,6 +35,18 @@ birdman_monitoring_conf_dir: /etc/birdman/monitoring   # шаблонные ко
 birdman_log_dir: /var/log/birdman
 birdman_alerts_log: /var/log/birdman/alerts.log        # сюда logger-sink пишет алерты
 
+# --- ротация alerts.log (tracker #1073) ---
+# Потолка у файла не было вовсе: 498 МБ за два часа, пока vmalert постил в sink
+# напрямую каждые 5с. Ротация ПО РАЗМЕРУ, а не daily, потому что история панели
+# ограничена текущим файлом (master читает один путь, master.md §6) — daily
+# обнуляла бы её каждые сутки. При штатном темпе (alertmanager группирует,
+# repeat_interval 1h) 32M не набираются практически никогда, так что порог
+# работает страховкой от повтора того темпа, а не ежедневной стрижкой истории.
+# Потолок на диске: живой файл в размер порога плюс столько сжатых архивов,
+# сколько задано ниже (JSON жмётся в разы).
+birdman_alerts_log_rotate_size: 32M
+birdman_alerts_log_rotate_keep: 4
+
 # --- bind (ТОЛЬКО localhost) ---
 birdman_bind_addr: "127.0.0.1"
 birdman_vm_port: 8428

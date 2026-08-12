@@ -147,6 +147,45 @@
     mode: "0644"
   notify: Restart birdman-alert-sink
 
+# --- ротация alerts.log (tracker #1073) ---
+# Потолка у файла не было вовсе: 498 МБ за два часа доальтертменеджерного
+# темпа. Пакет logrotate роль НЕ ставит (общий дев-бокс, кладём только
+# birdman-объекты) — но и молчать о его отсутствии нельзя: конфиг, который
+# некому исполнить, это ровно та же тишина, из-за которой карточка и заведена.
+- name: Probe that something will actually run logrotate
+  ansible.builtin.shell: |
+    set -u
+    command -v logrotate >/dev/null 2>&1 || { echo no-binary; exit 0; }
+    if [ -x /etc/cron.daily/logrotate ] \
+      || systemctl is-enabled logrotate.timer >/dev/null 2>&1; then
+      echo ok
+    else
+      echo no-schedule
+    fi
+  register: birdman_logrotate_probe
+  changed_when: false
+  check_mode: false
+
+- name: Refuse to pretend the rotation is configured when nothing will run it
+  ansible.builtin.assert:
+    that: birdman_logrotate_probe.stdout | trim == "ok"
+    fail_msg: >-
+      проба вернула «{{ birdman_logrotate_probe.stdout | trim }}»:
+      no-binary — logrotate на боксе нет (apt-get install logrotate);
+      no-schedule — logrotate есть, но его никто не запускает (нет
+      /etc/cron.daily/logrotate и выключен logrotate.timer). И в том, и в другом
+      случае /etc/logrotate.d/birdman-alerts лёг бы мёртвым грузом, а
+      {{ birdman_alerts_log }} рос бы без потолка — молча, ровно как до
+      tracker #1073.
+
+- name: Install logrotate policy for the alerts log
+  ansible.builtin.template:
+    src: logrotate-alerts.j2
+    dest: /etc/logrotate.d/birdman-alerts
+    owner: root
+    group: root
+    mode: "0644"
+
 # --- alertmanager: безусловное звено доставки (tracker #238); конфиг всегда
 #     0600+no_log — при заданном birdman_alert_discord_webhook содержит секрет ---
 - name: Ensure alertmanager config dir

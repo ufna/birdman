@@ -22,6 +22,10 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 role="$(dirname "$here")"
 image="${BIRDMAN_PROMTOOL_IMAGE:-prom/prometheus:v3.10.0}"
+# Образ sink'а берётся из ПИНА РОЛИ, а не пишется тут ещё раз: второй пин рядом
+# с первым — это будущее расхождение, о котором никто не узнает.
+sink_image="$(sed -n 's/^birdman_alert_sink_image:[[:space:]]*//p' "$role/defaults/main.yml")"
+[ -n "$sink_image" ] || { echo "не нашёл birdman_alert_sink_image в defaults" >&2; exit 1; }
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -98,5 +102,17 @@ pick_python() {
 echo "── mounted config access"
 py="$(pick_python)" || fail "не нашёл python с PyYAML (python3 -m pip install pyyaml)"
 "$py" "$here/mounted_config_access.py" "$work/one/compose.yml"
+
+# ── ротация alerts.log настоящим logrotate (tracker #1073) ───────────────────
+# У файла не было потолка вовсе: 498 МБ за два часа. Политику гоняет НАСТОЯЩИЙ
+# logrotate — конфиг с опечаткой не ротирует молча. Всё внутри одноразового
+# контейнера: хост не трогается, портов наружу нет (sink слушает только внутри),
+# имя контейнеру не даётся вовсе — конфликтовать нечему.
+echo "── alerts.log rotation"
+docker run --rm \
+	-v "$work/one/logrotate-alerts:/conf/logrotate-alerts:ro" \
+	-v "$role/files/alert-logger.py:/conf/alert-logger.py:ro" \
+	-v "$here/rotation_in_container.sh:/conf/rotation.sh:ro" \
+	--entrypoint /bin/sh "$sink_image" /conf/rotation.sh
 
 echo "ALL OK"

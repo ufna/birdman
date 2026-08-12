@@ -43,3 +43,7 @@
         - rules.yml
         - scrape.yml
         - compose.yml
+        # logrotate-политика alerts.log (tracker #1073): её гоняет НАСТОЯЩИЙ
+        # logrotate в одноразовом контейнере — конфиг с опечаткой не ротирует
+        # молча, а «проверено глазами» здесь стоило бы 498 МБ.
+        - logrotate-alerts
