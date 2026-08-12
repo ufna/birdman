@@ -92,7 +92,7 @@ func (s *Store) CreateNode(ctx context.Context, p CreateNodeParams) (Node, strin
 	if err != nil {
 		return Node{}, "", err
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(secret), bcrypt.DefaultCost)
+	hash, err := s.hashSecret(secret)
 	if err != nil {
 		return Node{}, "", err
 	}
@@ -129,7 +129,7 @@ func (s *Store) CreateNode(ctx context.Context, p CreateNodeParams) (Node, strin
 		values ($1::uuid, $2, $3, $4::inet, $5, $6::jsonb, $7, $8)
 		returning id::text, project_id::text, region, env, hostname, host(public_ip),
 		          capacity_slots, agent_version, state, created_at`,
-		projectID, p.Region, p.Hostname, p.PublicIP, p.CapacitySlots, string(labels), string(hash), env).
+		projectID, p.Region, p.Hostname, p.PublicIP, p.CapacitySlots, string(labels), hash, env).
 		Scan(&n.ID, &n.ProjectID, &n.Region, &n.Env, &n.Hostname, &n.PublicIP,
 			&n.CapacitySlots, &n.AgentVersion, &n.State, &n.CreatedAt)
 	// Гонка с DELETE env между in-tx пре-чеком и insert'ом: nodes_env_fk (23503) →

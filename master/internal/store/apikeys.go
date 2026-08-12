@@ -108,7 +108,7 @@ func (s *Store) CreateAPIKey(ctx context.Context, p CreateAPIKeyParams) (APIKey,
 	if err != nil {
 		return APIKey{}, "", err
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(secret), bcrypt.DefaultCost)
+	hash, err := s.hashSecret(secret)
 	if err != nil {
 		return APIKey{}, "", err
 	}
@@ -117,7 +117,7 @@ func (s *Store) CreateAPIKey(ctx context.Context, p CreateAPIKeyParams) (APIKey,
 		insert into api_keys (name, hash, scopes, project_id, env)
 		values ($1, $2, $3, $4::uuid, $5)
 		returning id::text, name, scopes, project_id::text, env, created_at, revoked_at`,
-		p.Name, string(hash), p.Scopes, projectID, p.Env).
+		p.Name, hash, p.Scopes, projectID, p.Env).
 		Scan(&k.ID, &k.Name, &k.Scopes, &k.ProjectID, &k.Env, &k.CreatedAt, &k.RevokedAt)
 	// Гонка с DELETE env между пре-чеком и insert'ом (только для bound-ключа —
 	// у глобального project_id/env суть NULL, api_keys_env_fk на них молчит):

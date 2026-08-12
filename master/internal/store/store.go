@@ -42,6 +42,12 @@ type Store struct {
 	// paths that touch those two columns go through it; nothing else does.
 	codec  *secrets.Codec
 	sender CommandSender // nil until SetCommandSender (some tests)
+
+	// bcryptCost — рабочий фактор хеширования секретов (api_keys.hash,
+	// nodes.token_hash). Ноль (прод-путь: Open без опций) означает
+	// bcrypt.DefaultCost; выставляет его только тестовый бутстрап через
+	// WithHashCostForTests. Подробности и обоснование формы — hashcost.go.
+	bcryptCost int
 }
 
 // SetCommandSender wires the agent command dispatcher. Call once at startup,
@@ -55,7 +61,11 @@ func (s *Store) SetCommandSender(sender CommandSender) { s.sender = sender }
 // secrets. Callers must run EncryptExistingSecrets before the first secret read
 // (main does, immediately after Open) so legacy plaintext rows are upgraded
 // under the strict-read invariant.
-func Open(ctx context.Context, dsn string, codec *secrets.Codec) (*Store, error) {
+//
+// opts — точка, где тестовый бутстрап задаёт рабочий фактор bcrypt
+// (WithHashCostForTests); прод-вызов не передаёт ни одной опции и получает
+// bcrypt.DefaultCost. См. hashcost.go.
+func Open(ctx context.Context, dsn string, codec *secrets.Codec, opts ...Option) (*Store, error) {
 	if codec == nil {
 		// Fail loud here rather than let a nil codec nil-deref at the first
 		// Encrypt/Decrypt on a secret read/write path. Both real callers pass a
@@ -77,7 +87,11 @@ func Open(ctx context.Context, dsn string, codec *secrets.Codec) (*Store, error)
 		pool.Close()
 		return nil, fmt.Errorf("ping: %w", err)
 	}
-	return &Store{Pool: pool, codec: codec}, nil
+	s := &Store{Pool: pool, codec: codec}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s, nil
 }
 
 func (s *Store) Close() { s.Pool.Close() }

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/ufna/birdman/master/internal/secrets"
 	"github.com/ufna/birdman/master/internal/store"
@@ -150,7 +151,15 @@ func NewWithCodec(t *testing.T, codec *secrets.Codec) (*store.Store, string) {
 		t.Fatalf("migrate: %v", err)
 	}
 	dsn := withParam(t, withDatabase(t, adminDSN, name), "pool_max_conns", "20")
-	st, err := store.Open(ctx, dsn, codec)
+	// Рабочий фактор bcrypt на минимум — ЕДИНСТВЕННОЕ место во всём дереве,
+	// которое его понижает, и понижает ровно у тестовых сторов (tracker #1060).
+	// При bcrypt.DefaultCost один хеш под `-race` стоит ~0.7с, а сьют заводит
+	// сотни ключей и нод — это было около 40% времени пакета httpapi. Проверки
+	// от этого не слабеют: путь «хеш → БД → сверка» проходится целиком (сверка
+	// читает стоимость из самого хеша), отказ на неверном секрете остаётся
+	// отказом, ни один тест ничего не утверждает о стоимости. Прод-дефолт
+	// (bcrypt.DefaultCost) закреплён тестами в пакете store — см. hashcost.go.
+	st, err := store.Open(ctx, dsn, codec, store.WithHashCostForTests(bcrypt.MinCost))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
