@@ -127,11 +127,13 @@ describe('Fleet — перевод ноды в другое окружение (
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Move' }));
 
     const alert = await screen.findByRole('alert');
-    expect(alert.textContent).toMatch(/drain it first/i);
+    // Текст СВОЙ у поверхности (fleet.moveEnv.err.conflict), а не проза мастера.
+    expect(alert.textContent).toMatch(/drain/i);
+    expect(document.body.textContent).not.toContain('node n1 has live servers');
     expect(screen.getByRole('dialog')).toBeTruthy(); // диалог не закрылся — ошибку видно
   });
 
-  it('400 → detail мастера как есть', async () => {
+  it('400 → «проверьте поля», а НЕ detail мастера (tracker #1005)', async () => {
     const calls: Recorded[] = [];
     vi.stubGlobal(
       'fetch',
@@ -145,7 +147,8 @@ describe('Fleet — перевод ноды в другое окружение (
     fireEvent.click(await moveButton());
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Move' }));
 
-    expect((await screen.findByRole('alert')).textContent).toContain('env is required');
+    expect((await screen.findByRole('alert')).textContent).toContain('rejected these values');
+    expect(document.body.textContent).not.toContain('env is required');
   });
 
   // Выведенная нода скрыта по умолчанию (иначе «убрать её» из панели по-прежнему

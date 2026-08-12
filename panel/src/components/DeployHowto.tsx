@@ -15,7 +15,8 @@
 
 import { useId, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import { api, ApiError } from '../lib/api';
+import { api } from '../lib/api';
+import { apiErrorMessage } from '../lib/apiError';
 import type { ApiKey } from '../lib/api';
 import {
   defaultDeployKeyName,
@@ -107,7 +108,7 @@ export function DeployHowto({
       })
       .catch((e: unknown) => {
         setCreating(false);
-        setCreateErr(e instanceof ApiError ? (e.detail ?? e.code) : t('deploys.howto.key.createErr'));
+        setCreateErr(apiErrorMessage(e, t, { forbidden: 'confirm.err.forbidden', generic: 'deploys.howto.key.createErr', byStatus: { 400: 'ui.err.badRequest' } }));
       });
   };
 

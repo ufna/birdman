@@ -119,7 +119,7 @@ describe('Fleet — вывод ноды из флота (POST /v1/nodes/{id}/rev
     });
   });
 
-  it('409 «есть живые дедики» показывается, а не глотается', async () => {
+  it('409 показывается локализованным, а прозы мастера в DOM нет (tracker #1005)', async () => {
     vi.stubGlobal(
       'fetch',
       fleetFetch([mkNode({ state: 'draining', hostname: 'box-drain' })], [], {
@@ -133,6 +133,9 @@ describe('Fleet — вывод ноды из флота (POST /v1/nodes/{id}/rev
     const dialog = await screen.findByRole('alertdialog');
     fireEvent.click(within(dialog).getByRole('button', { name: 'Retire' }));
 
-    expect((await screen.findByRole('alert')).textContent).toContain('live servers');
+    // До #1005 сюда печатался `e.detail` — английская строка мастера в русском
+    // интерфейсе. Теперь это текст каталога, а сама проза структурно не доезжает.
+    expect((await screen.findByRole('alert')).textContent).toContain('State conflict');
+    expect(document.body.textContent).not.toContain('live servers');
   });
 });

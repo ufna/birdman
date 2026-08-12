@@ -10,12 +10,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ColumnDef } from '@tanstack/react-table';
 import * as Dialog from '@radix-ui/react-dialog';
-import { api, ApiError } from '../lib/api';
+import { api } from '../lib/api';
 import type { ApiEvent, Environment, GameServer, NodeInfo, VersionInfo } from '../lib/api';
+import { apiErrorMessage } from '../lib/apiError';
 import { useLive } from '../lib/live';
 import { useEnv, keepForEnv } from '../lib/env';
 import { useProject, useProjectList } from '../lib/project';
-import { canAdmin, canDeploy, useSession } from '../lib/session';
+import { canAdmin, canDeploy, useBindingRefusal, useSession } from '../lib/session';
 import { shortId } from '../lib/format';
 import { useT, useFormat } from '../lib/i18n';
 import { buildHowtoCtx } from '../lib/deployHowto';
@@ -352,6 +353,9 @@ function PromoteDialog({
 }) {
   const { t } = useT();
   const toast = useToast();
+  // Промоут привязанного ключа отказывает ВСЕГДА (master deploy.go:164 —
+  // requireBinding на целевой env), поэтому 403 тут штатный путь, а не край.
+  const bound = useBindingRefusal();
   const [open, setOpen] = useState(false);
   const [target, setTarget] = useState(prodEnvs[0]?.name ?? '');
   const [pending, setPending] = useState(false);
@@ -372,7 +376,14 @@ function PromoteDialog({
       })
       .catch((e: unknown) => {
         setPending(false);
-        setError(e instanceof ApiError ? (e.detail ?? e.code) : t('access.environments.create.err'));
+        setError(
+          apiErrorMessage(e, t, {
+            refusal: bound,
+            forbidden: 'confirm.err.forbidden',
+            generic: 'access.environments.create.err',
+            byStatus: { 400: 'ui.err.badRequest' },
+          }),
+        );
       });
   };
 
@@ -455,6 +466,10 @@ function PromoteDialog({
 function EnvSettingsCard({ env, onSaved }: { env: Environment; onSaved: () => void }) {
   const { t } = useT();
   const toast = useToast();
+  // PATCH окружения гейтится admin'ом, а admin с привязкой несовместим
+  // (store/apikeys.go:78) — bound здесь всегда undefined. Передаём его всё
+  // равно: поверхность не должна знать про сегодняшнюю форму гейта мастера.
+  const bound = useBindingRefusal();
   const [autoDeploy, setAutoDeploy] = useState(env.auto_deploy);
   const [retention, setRetention] = useState(String(env.retention_keep));
   const [pending, setPending] = useState(false);
@@ -485,7 +500,14 @@ function EnvSettingsCard({ env, onSaved }: { env: Environment; onSaved: () => vo
       })
       .catch((e: unknown) => {
         setPending(false);
-        setError(e instanceof ApiError ? (e.detail ?? e.code) : t('access.environments.create.err'));
+        setError(
+          apiErrorMessage(e, t, {
+            refusal: bound,
+            forbidden: 'confirm.err.forbidden',
+            generic: 'access.environments.create.err',
+            byStatus: { 400: 'ui.err.badRequest' },
+          }),
+        );
       });
   };
 

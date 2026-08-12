@@ -18,6 +18,7 @@ import { useLiveAsync } from '../lib/live';
 import { useEnv } from '../lib/env';
 import { useProject } from '../lib/project';
 import { useT, useFormat } from '../lib/i18n';
+import { useBindingRefusal } from '../lib/session';
 import type { MessageKey } from '../lib/i18n';
 import { toSimpleColumns, toStackModel, versionShareModel } from '../lib/stats';
 import {
@@ -348,6 +349,7 @@ function StatsBody({
 function FillRateCard({ ttm, days, refetchKey }: { ttm: TimeToMatch | undefined; days: number; refetchKey: string }) {
   const { t } = useT();
   const fmt = useFormat();
+  const bound = useBindingRefusal();
   const dur = (sec: number | null | undefined) => (sec == null ? '—' : fmt.age(sec * 1000));
   const trueTtm = useTrueTimeToMatch(days, refetchKey);
 
@@ -358,6 +360,12 @@ function FillRateCard({ ttm, days, refetchKey }: { ttm: TimeToMatch | undefined;
         <TtmSource label={t('stats.ttm.srcQueue')} note={t('stats.ttm.srcQueueNote')}>
           {trueTtm.status === 'loading' ? (
             <SourceNote>{t('stats.ttm.trueLoading')}</SourceNote>
+          ) : trueTtm.status === 'forbidden' ? (
+            // tracker #1005: любой не-ok называл виновником ПРОКСИ, в том числе
+            // на 403 — то есть привязанному ключу говорил «metrics proxy
+            // недоступен», хотя проксия жива и причина в ключе. Статус
+            // `forbidden` есть отдельным с #1000, различить было по чему.
+            <SourceNote>{bound ?? t('ui.err.forbidden')}</SourceNote>
           ) : trueTtm.status !== 'ok' ? (
             <SourceNote>{t('stats.ttm.trueUnavailable')}</SourceNote>
           ) : trueTtm.p50 === null && trueTtm.p95 === null ? (

@@ -68,7 +68,7 @@ describe('Админка → Проекты', () => {
     expect(screen.getByText(/match size 2/)).toBeTruthy();
   });
 
-  it('занятый слаг: 409 мастера показывается в форме', async () => {
+  it('занятый слаг: 409 назван своими словами, проза мастера не показана (tracker #1005)', async () => {
     vi.stubGlobal(
       'fetch',
       stubFetch(emptyUsage, { status: 409, body: { error: 'conflict', detail: 'project "game" already exists' } }),
@@ -80,7 +80,8 @@ describe('Админка → Проекты', () => {
     fireEvent.change(within(dialog).getByPlaceholderText('my-game'), { target: { value: 'game' } });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
 
-    expect((await screen.findByRole('alert')).textContent).toContain('already exists');
+    expect((await screen.findByRole('alert')).textContent).toContain('slug is already taken');
+    expect(document.body.textContent).not.toContain('project "game" already exists');
   });
 
   it('живые ноды блокируют удаление, ввод слага не предлагается', async () => {

@@ -89,9 +89,11 @@ describe('ErrorNote: 403 объясняется по сессии, а не до�
     expect(screen.getByText(new RegExp(FORBIDDEN_EN.slice(0, 30)))).toBeTruthy();
   });
 
-  it('не-403 у привязанной сессии → сообщение ошибки как раньше (подмена не растеклась)', () => {
+  it('не-403 у привязанной сессии → общий текст с КОДОМ, подмена не растеклась (tracker #1005)', () => {
     renderAs(<ErrorNote error={new ApiError(500, 'internal', 'boom')} />, BOUND);
-    expect(screen.getByText(/internal: boom/)).toBeTruthy();
+    // Машинный код остаётся (за него цепляется баг-репорт), detail — нет.
+    expect(screen.getByText(/error internal/)).toBeTruthy();
+    expect(document.body.textContent).not.toContain('boom');
     expect(document.body.textContent).not.toContain('is bound to game/dev');
   });
 });

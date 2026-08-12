@@ -17,6 +17,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { ColumnDef } from '@tanstack/react-table';
 import { api, ApiError } from '../lib/api';
+import { apiErrorMessage } from '../lib/apiError';
 import type { BackupSettings, BackupSettingsPatch, BackupRun } from '../lib/api';
 import { useAsync } from '../lib/useAsync';
 import { useT, useFormat } from '../lib/i18n';
@@ -145,8 +146,8 @@ export function Backups() {
         setSecret('');
         toast.success(t('backups.toast.saved'));
       })
-      .catch((e: ApiError) => {
-        setError(e.detail ?? e.code);
+      .catch((e: unknown) => {
+        setError(apiErrorMessage(e, t, { forbidden: 'confirm.err.forbidden', generic: 'backups.err.save', byStatus: { 400: 'ui.err.badRequest' } }));
       });
   }
 
@@ -165,9 +166,14 @@ export function Backups() {
     api
       .runBackupNow()
       .then(runNowSucceeded)
-      .catch((e: ApiError) => {
-        if (e.status === 409) toast.error(t('backups.toast.runBusy'));
-        else toast.error(e.detail ?? e.code);
+      .catch((e: unknown) => {
+        toast.error(
+          apiErrorMessage(e, t, {
+            forbidden: 'confirm.err.forbidden',
+            generic: 'backups.err.run',
+            byStatus: { 409: 'backups.toast.runBusy' },
+          }),
+        );
       });
   }
 
@@ -188,8 +194,8 @@ export function Backups() {
       .then(() => {
         toast.success(t('backups.toast.s3ok'));
       })
-      .catch((e: ApiError) => {
-        toast.error(e.detail ?? e.code);
+      .catch((e: unknown) => {
+        toast.error(apiErrorMessage(e, t, { forbidden: 'confirm.err.forbidden', generic: 'backups.err.s3' }));
       });
   }
 

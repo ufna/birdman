@@ -7,6 +7,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState } 
 import type { ReactNode } from 'react';
 import { api, ApiError } from './api';
 import type { KeyBinding, SessionInfo } from './api';
+import { apiErrorMessage } from './apiError';
 import { useT } from './i18n';
 import type { I18nContextValue } from './i18n';
 
@@ -137,11 +138,15 @@ export function useBindingRefusal(): string | undefined {
     : t('ui.err.boundKey', { project: binding.project, env: binding.env });
 }
 
-/** Человеческое сообщение об ошибке логина (локализуется через переданный t). */
+/**
+ * Человеческое сообщение об ошибке логина (локализуется через переданный t).
+ *
+ * 401 тут значит НЕ «сессия истекла», а «ключ не подошёл» — сессии ещё нет,
+ * поэтому общий текст `ui.err.expired` был бы ложью, и ветка остаётся своей.
+ * Всё остальное с #1005 идёт общим путём: раньше хвост печатал
+ * `${code}: ${detail}` — сырую прозу мастера прямо на экране логина.
+ */
 export function loginErrorMessage(e: unknown, t: I18nContextValue['t']): string {
-  if (e instanceof ApiError) {
-    if (e.status === 401) return t('login.err.badKey');
-    return e.detail !== undefined ? `${e.code}: ${e.detail}` : e.code;
-  }
-  return t('login.err.unreachable');
+  if (e instanceof ApiError && e.status === 401) return t('login.err.badKey');
+  return apiErrorMessage(e, t, { generic: 'login.err.unreachable' });
 }

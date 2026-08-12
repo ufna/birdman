@@ -15,7 +15,8 @@ import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import * as AlertDialog from '@radix-ui/react-alert-dialog';
 import * as Dialog from '@radix-ui/react-dialog';
-import { api, ApiError } from '../lib/api';
+import { api } from '../lib/api';
+import { apiErrorMessage } from '../lib/apiError';
 import type { ProjectInfo, ProjectUsage } from '../lib/api';
 import { useProject } from '../lib/project';
 import { useT } from '../lib/i18n';
@@ -131,7 +132,7 @@ function ProjectFormDialog({
     };
     const fail = (e: unknown) => {
       setPending(false);
-      setError(e instanceof ApiError ? (e.detail ?? e.code) : t('access.projects.err.save'));
+      setError(apiErrorMessage(e, t, { forbidden: 'confirm.err.forbidden', generic: 'access.projects.err.save', byStatus: { 400: 'ui.err.badRequest', 409: 'access.projects.err.slugTaken' } }));
     };
     if (mode === 'add') {
       api.createProject(slug.trim(), size).then((p) => {
@@ -254,7 +255,7 @@ function DeleteProjectAction({ project, onDone }: { project: ProjectInfo; onDone
         setUsage(u);
       },
       (e: unknown) => {
-        setLoadError(e instanceof ApiError ? (e.detail ?? e.code) : t('access.projects.delete.err'));
+        setLoadError(apiErrorMessage(e, t, { forbidden: 'confirm.err.forbidden', generic: 'access.projects.delete.err', byStatus: { 400: 'ui.err.badRequest' } }));
       },
     );
   }, [open, project.slug, t]);
@@ -293,7 +294,7 @@ function DeleteProjectAction({ project, onDone }: { project: ProjectInfo; onDone
       },
       (e: unknown) => {
         setPending(false);
-        setError(e instanceof ApiError ? (e.detail ?? e.code) : t('access.projects.delete.err'));
+        setError(apiErrorMessage(e, t, { forbidden: 'confirm.err.forbidden', generic: 'access.projects.delete.err', byStatus: { 400: 'ui.err.badRequest' } }));
       },
     );
   };

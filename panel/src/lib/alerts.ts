@@ -7,6 +7,7 @@
 // (alertDescription). Обвязку UI переводим через каталог как обычно.
 
 import { ApiError } from './api';
+import { apiErrorMessage } from './apiError';
 import type { ActiveAlert, AlertScope } from './api';
 import type { I18nContextValue, Lang } from './i18n';
 
@@ -133,9 +134,8 @@ export function muteErrorMessage(e: unknown, t: I18nContextValue['t']): string {
     if (e.status === 404) return t('alerts.mute.err.gone');
     if (e.status === 409) return t('alerts.mute.err.conflict');
     if (e.status === 403) return t('confirm.err.forbidden');
-    return e.detail ?? e.code;
   }
-  return t('confirm.err.generic');
+  return apiErrorMessage(e, t, { forbidden: 'confirm.err.forbidden', generic: 'confirm.err.generic' });
 }
 
 // --- флажок звука нового critical (по умолчанию выкл) ---

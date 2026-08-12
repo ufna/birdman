@@ -4,7 +4,8 @@
 import { useCallback, useMemo, useState } from 'react';
 import type { ColumnDef } from '@tanstack/react-table';
 import * as Dialog from '@radix-ui/react-dialog';
-import { api, ApiError } from '../lib/api';
+import { api } from '../lib/api';
+import { apiErrorMessage } from '../lib/apiError';
 import type { ApiEvent, Environment, GameServer, NodeInfo } from '../lib/api';
 import { useData } from '../lib/live';
 import { useEnv, keepForEnv } from '../lib/env';
@@ -415,13 +416,14 @@ function MoveEnvDialog({ node, targets, onDone }: { node: NodeInfo; targets: Env
 }
 
 /** Текст ошибки перевода: 409 (живые дедики / dead-нода) → подсказка про drain;
- *  400 и прочее API — detail мастера как есть; не-API — общий текст. */
+ *  прочее API — общий словарь (#1005: раньше хвост печатал detail мастера как
+ *  есть); не-API — общий текст. */
 function moveErrorText(e: unknown, t: I18nContextValue['t']): string {
-  if (e instanceof ApiError) {
-    if (e.status === 409) return t('fleet.moveEnv.err.conflict');
-    return e.detail ?? e.code;
-  }
-  return t('fleet.moveEnv.err.generic');
+  return apiErrorMessage(e, t, {
+    forbidden: 'confirm.err.forbidden',
+    generic: 'fleet.moveEnv.err.generic',
+    byStatus: { 400: 'ui.err.badRequest', 409: 'fleet.moveEnv.err.conflict' },
+  });
 }
 
 /** Индикация опустошения draining-ноды: сколько allocated ещё доигрывает. */

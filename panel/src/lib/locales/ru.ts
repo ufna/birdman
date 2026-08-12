@@ -68,6 +68,10 @@ export const ru: Record<MessageKey, string> = {
   'ui.err.forbidden': 'Не хватает прав: нужен ключ со скоупом readonly или admin.',
   'ui.err.boundKey': 'Запрос отклонён: ключ привязан к {project}/{env} и не имеет доступа к этим данным.',
   'ui.err.loadFailed': 'Не удалось загрузить данные: {detail}',
+  'ui.err.expired': 'Сессия истекла — войдите заново.',
+  'ui.err.offline': 'Не удалось связаться с master — проверьте соединение.',
+  'ui.err.code': 'Платформа отклонила запрос (ошибка {code}).',
+  'ui.err.badRequest': 'Мастер отклонил эти значения — проверьте поля и повторите.',
 
   // — заголовки колонок (общие) —
   'col.match': 'Матч',
@@ -677,6 +681,9 @@ export const ru: Record<MessageKey, string> = {
   'backups.toast.runBusy': 'Прогон бекапа уже идёт',
   'backups.toast.saved': 'Настройки бекапов сохранены',
   'backups.toast.s3ok': 'S3-соединение в порядке — бакет доступен',
+  'backups.err.save': 'Не удалось сохранить настройки бекапов.',
+  'backups.err.run': 'Не удалось запустить прогон бекапа.',
+  'backups.err.s3': 'Не удалось достучаться до S3-бакета с сохранёнными настройками.',
   'backups.form.title': 'Настройки',
   'backups.form.enabled': 'Бекапы по расписанию',
   'backups.form.interval': 'Интервал (часы)',
@@ -788,6 +795,7 @@ export const ru: Record<MessageKey, string> = {
   'access.projects.matchSize.label': 'Игроков в матче',
   'access.projects.err.matchSize': 'Игроков в матче — целое число, не меньше 1.',
   'access.projects.err.save': 'Не удалось сохранить проект.',
+  'access.projects.err.slugTaken': 'Такой слаг уже занят — выберите другой.',
   'access.projects.toast.created': 'Проект {slug} создан',
   'access.projects.toast.saved': 'Проект {slug} сохранён',
   'access.projects.toast.deleted': 'Проект {slug} удалён',

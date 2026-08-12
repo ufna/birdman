@@ -12,7 +12,8 @@ import { useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { ColumnDef } from '@tanstack/react-table';
 import * as Dialog from '@radix-ui/react-dialog';
-import { api, ApiError } from '../lib/api';
+import { api } from '../lib/api';
+import { apiErrorMessage } from '../lib/apiError';
 import type { RegistryInfo, RegistryInput, RegistryPatch, RegistryType } from '../lib/api';
 import { useAsync } from '../lib/useAsync';
 import { useT, useFormat } from '../lib/i18n';
@@ -231,7 +232,7 @@ function RegistryFormDialog({
 
   const fail = (e: unknown) => {
     setPending(false);
-    setError(e instanceof ApiError ? (e.detail ?? e.code) : t('access.registries.create.err'));
+    setError(apiErrorMessage(e, t, { forbidden: 'confirm.err.forbidden', generic: 'access.registries.create.err', byStatus: { 400: 'ui.err.badRequest' } }));
   };
 
   const submit = () => {

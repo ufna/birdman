@@ -87,6 +87,14 @@ export const en = {
   // привязанному оператору его собственные данные.
   'ui.err.boundKey': 'Request refused: your key is bound to {project}/{env} and has no access to this data.',
   'ui.err.loadFailed': "Couldn't load data: {detail}",
+  // Общий словарь отказов REST-API (tracker #1005, lib/apiError.ts). Тело
+  // ответа мастера сюда не попадает — только машинный код.
+  'ui.err.expired': 'The session has expired — sign in again.',
+  'ui.err.offline': "Couldn't reach master — check the connection.",
+  'ui.err.code': 'The platform refused the request (error {code}).',
+  // 400 на ФОРМЕ: мастер отверг значения. Общий ключ, а не свой у каждой
+  // формы — действие оператора всюду одно: посмотреть на поля.
+  'ui.err.badRequest': 'The master rejected these values — check the fields and try again.',
 
   // — table column headers (shared) —
   'col.match': 'Match',
@@ -701,6 +709,10 @@ export const en = {
   'backups.toast.runBusy': 'A backup run is already in progress',
   'backups.toast.saved': 'Backup settings saved',
   'backups.toast.s3ok': 'S3 connection OK — bucket is accessible',
+  // Ошибки бекапов, попадавшие в тост сырым detail мастера (tracker #1005).
+  'backups.err.save': "Couldn't save the backup settings.",
+  'backups.err.run': "Couldn't start the backup run.",
+  'backups.err.s3': "Couldn't reach the S3 bucket with the saved settings.",
   'backups.form.title': 'Settings',
   'backups.form.enabled': 'Scheduled backups',
   'backups.form.interval': 'Interval (hours)',
@@ -812,6 +824,7 @@ export const en = {
   'access.projects.matchSize.label': 'Players per match',
   'access.projects.err.matchSize': 'Players per match must be a whole number, 1 or more.',
   'access.projects.err.save': 'Could not save the project.',
+  'access.projects.err.slugTaken': 'That slug is already taken — pick another one.',
   'access.projects.toast.created': 'Project {slug} created',
   'access.projects.toast.saved': 'Project {slug} saved',
   'access.projects.toast.deleted': 'Project {slug} deleted',

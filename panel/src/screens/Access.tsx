@@ -14,6 +14,7 @@ import { useMemo, useState } from 'react';
 import type { ColumnDef } from '@tanstack/react-table';
 import * as Dialog from '@radix-ui/react-dialog';
 import { api, ApiError } from '../lib/api';
+import { apiErrorMessage } from '../lib/apiError';
 import type { ApiKey, CreatedApiKey, KeyBinding, Scope } from '../lib/api';
 import { useAsync } from '../lib/useAsync';
 import { useEnv } from '../lib/env';
@@ -241,7 +242,7 @@ function CreateKeyDialog({ onCreated }: { onCreated: () => void }) {
       })
       .catch((e: unknown) => {
         setPending(false);
-        setError(e instanceof ApiError ? (e.detail ?? e.code) : t('access.create.err'));
+        setError(apiErrorMessage(e, t, { forbidden: 'confirm.err.forbidden', generic: 'access.create.err', byStatus: { 400: 'ui.err.badRequest' } }));
       });
   };
 

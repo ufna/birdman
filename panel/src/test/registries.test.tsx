@@ -252,7 +252,7 @@ describe('Реестры — добавление (upsert по типу)', () =>
     expect(body).not.toHaveProperty('username');
   });
 
-  it('400 (кривой GAR JSON) — detail из ответа API показан в форме', async () => {
+  it('400 (кривой GAR JSON) — «проверьте поля», detail мастера не показан (tracker #1005)', async () => {
     vi.stubGlobal(
       'fetch',
       registriesMock([], {
@@ -270,7 +270,8 @@ describe('Реестры — добавление (upsert по типу)', () =>
     fireEvent.change(within(dialog).getByLabelText('Token'), { target: { value: 'not-json' } });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
 
-    expect(await screen.findByText(/service-account JSON key/)).toBeTruthy();
+    expect(await screen.findByText(/rejected these values/)).toBeTruthy();
+    expect(document.body.textContent).not.toContain('service-account JSON key');
     // Диалог остался открытым (ошибка рядом с формой, не потеряна).
     expect(within(dialog).getByRole('button', { name: 'Save' })).toBeTruthy();
   });

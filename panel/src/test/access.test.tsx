@@ -224,7 +224,8 @@ describe('Access — purge отозванных ключей (Task 6, DELETE ?pu
     const dialog = await screen.findByRole('alertdialog');
     fireEvent.click(within(dialog).getByRole('button', { name: 'Delete forever' }));
 
-    expect(await screen.findByText(/key is still active; revoke it before purging/)).toBeTruthy();
+    expect(await screen.findByText(/State conflict/)).toBeTruthy();
+    expect(document.body.textContent).not.toContain('revoke it before purging');
     expect(screen.getByText('old-ci')).toBeTruthy();
   });
 });

@@ -3,7 +3,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
-import { ApiError } from '../lib/api';
+import { apiErrorMessage } from '../lib/apiError';
 import { useT } from '../lib/i18n';
 import { useBindingRefusal } from '../lib/session';
 
@@ -71,11 +71,11 @@ export function ErrorNote({ error, retry }: { error: Error; retry?: () => void }
   const { t } = useT();
   // 403 объясняем по СЕССИИ, а не догадкой: привязан ключ — причина привязка,
   // иначе прежний текст про скоуп (tracker #1000, lib/session.tsx).
+  // Остальные коды с #1005 идут через общий apiErrorMessage: до него сюда
+  // подставлялся `error.message` = `${code}: ${detail}`, то есть проза мастера
+  // на 27 экранах сразу — самая широкая поверхность класса.
   const bound = useBindingRefusal();
-  const detail =
-    error instanceof ApiError && error.status === 403
-      ? (bound ?? t('ui.err.forbidden'))
-      : error.message;
+  const detail = apiErrorMessage(error, t, { refusal: bound });
   return (
     <div className="flex items-center justify-between gap-3 rounded-lg bg-dead-bg px-4 py-2.5 text-sm text-dead">
       <span>{t('ui.err.loadFailed', { detail })}</span>

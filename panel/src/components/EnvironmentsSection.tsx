@@ -17,6 +17,7 @@ import type { ColumnDef } from '@tanstack/react-table';
 import * as AlertDialog from '@radix-ui/react-alert-dialog';
 import * as Dialog from '@radix-ui/react-dialog';
 import { api, ApiError } from '../lib/api';
+import { apiErrorMessage } from '../lib/apiError';
 import type { Environment, EnvironmentUsage } from '../lib/api';
 import { useEnv } from '../lib/env';
 import { useT, useFormat } from '../lib/i18n';
@@ -219,7 +220,7 @@ function DeleteEnvironmentAction({
         if (!stale) setUsage(u);
       },
       (e: unknown) => {
-        if (!stale) setLoadError(e instanceof ApiError ? (e.detail ?? e.code) : t('access.environments.delete.usageErr'));
+        if (!stale) setLoadError(apiErrorMessage(e, t, { forbidden: 'confirm.err.forbidden', generic: 'access.environments.delete.usageErr', byStatus: { 400: 'ui.err.badRequest' } }));
       },
     );
     return () => {
@@ -269,7 +270,7 @@ function DeleteEnvironmentAction({
         setPending(false);
         // 409 — ноды появились (или уехали) между usage и удалением: показываем
         // detail сервера прямо в диалоге и обновляем состав.
-        setError(e instanceof ApiError ? (e.detail ?? e.code) : t('access.environments.delete.err'));
+        setError(apiErrorMessage(e, t, { forbidden: 'confirm.err.forbidden', generic: 'access.environments.delete.err', byStatus: { 400: 'ui.err.badRequest' } }));
         if (e instanceof ApiError && e.status === 409) {
           api.environmentUsage(project, environment.name).then(
             (u) => {
@@ -453,7 +454,7 @@ function EnvironmentFormDialog({
 
   const fail = (e: unknown) => {
     setPending(false);
-    setError(e instanceof ApiError ? (e.detail ?? e.code) : t('access.environments.create.err'));
+    setError(apiErrorMessage(e, t, { forbidden: 'confirm.err.forbidden', generic: 'access.environments.create.err', byStatus: { 400: 'ui.err.badRequest' } }));
   };
 
   const submit = () => {

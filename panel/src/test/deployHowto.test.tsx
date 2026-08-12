@@ -397,7 +397,8 @@ describe('DeployHowto — inline-создание deploy-ключа (Task 7 §5)
     render(withSession(sess('admin'), <DeployHowto ctx={ctx} navigate={() => {}} defaultExpanded />));
 
     fireEvent.click(screen.getByRole('button', { name: 'Create a deploy key & fill in' }));
-    expect(await screen.findByText(/name is required/)).toBeTruthy();
+    expect(await screen.findByText(/rejected these values/)).toBeTruthy();
+    expect(document.body.textContent).not.toContain('name is required');
     expect(screen.getByTestId('howto-register-cmd').textContent).toContain('$BIRDMAN_DEPLOY_KEY');
   });
 });
