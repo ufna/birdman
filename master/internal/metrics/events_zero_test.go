@@ -57,7 +57,7 @@ func TestEventsZeroBaselineNotFabricatedOnQueryFailure(t *testing.T) {
 	}
 	// Остальной скрейп обязан выжить: коллектор логирует-и-продолжает, как соседи.
 	if !gaugeSeriesPresent(t, m.Registry, "birdman_node_heartbeat_age_seconds", map[string]string{
-		"node": "node-1", "region": "eu",
+		"node": "node-1", "region": "eu", "project": "game",
 	}) {
 		t.Fatal("сбой одного запроса обнулил весь скрейп")
 	}

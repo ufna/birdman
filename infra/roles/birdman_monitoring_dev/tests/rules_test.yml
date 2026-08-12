@@ -827,3 +827,59 @@ tests:
               summary: 'CrashLoop: проект , событий crash_loop за 5м: 1'
               description: 'A bad release is likely — roll back (ops.md §6 runbook 3).'
               description_ru: 'Вероятен плохой релиз — rollback (ops.md §6 runbook 3).'
+
+  # --- NodeDown: проектное измерение приезжает СЕРИЕЙ (tracker #1064) ---
+  #
+  # Лейбл вешает master на birdman_node_heartbeat_age_seconds, `expr` про проект
+  # не знает ничего — тот же приём, что у birdman_allocation_failures_total
+  # (#955) и birdman_events_total (#986). Кейс ниже сторожит сквозной путь:
+  # серия несёт project → его несёт и алерт → панель может сузить его по
+  # выбранному проекту (непрячущий фильтр ?project=, master.md §6).
+  #
+  # Зачем это стало нужно: с #1065 на ОДНОМ боксе живут ноды разных проектов,
+  # поэтому смерть тачки даёт NodeDown по каждой ноде, и без лейбла оператор
+  # проекта видел бы N−1 чужих алертов «нода лежит», на которые не может
+  # повлиять. Последняя причина держать правило платформенным (лёг сосед →
+  # темнеет ping-таргет бокса у всех) снята #1068: эхо держит любой живой агент.
+  - interval: 1m
+    name: 'NodeDown несёт проект ноды — алерт сужается по проекту'
+    input_series:
+      - series: 'birdman_node_heartbeat_age_seconds{node="server-cqp-khl",region="dev",project="khl-legends"}'
+        values: '0 45 45'
+    alert_rule_test:
+      # for: 0s — порог 30s перейдён на первом же сэмпле после нуля.
+      - eval_time: 1m
+        alertname: NodeDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              node: server-cqp-khl
+              region: dev
+              project: khl-legends
+            exp_annotations:
+              summary: 'NodeDown server-cqp-khl (dev): heartbeat_age=45s'
+              description: 'Node has been silent beyond the threshold; quarantine engaged (ops.md §1 NodeDown).'
+              description_ru: 'Нода молчит > порога; сработал карантин (ops.md §1 NodeDown).'
+
+  # Обратная половина, и она НЕСУЩАЯ: серия БЕЗ лейбла (мастер старой сборки,
+  # self-host до обновления) обязана будить по-прежнему, платформенным алертом.
+  # Кейс запрещает «дотянуть» проектность до `expr` — матчер project!="" или
+  # group_left молча погасили бы NodeDown ровно там, где мастер ещё не умеет
+  # вешать лейбл, то есть на первом же боксе, который отстал по версии.
+  - interval: 1m
+    name: 'NodeDown без лейбла проекта горит платформенным'
+    input_series:
+      - series: 'birdman_node_heartbeat_age_seconds{node="node-1",region="eu"}'
+        values: '0 45 45'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: NodeDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              node: node-1
+              region: eu
+            exp_annotations:
+              summary: 'NodeDown node-1 (eu): heartbeat_age=45s'
+              description: 'Node has been silent beyond the threshold; quarantine engaged (ops.md §1 NodeDown).'
+              description_ru: 'Нода молчит > порога; сработал карантин (ops.md §1 NodeDown).'

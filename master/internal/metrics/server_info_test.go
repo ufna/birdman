@@ -119,7 +119,7 @@ func TestServerInfoNotFabricatedOnQueryFailure(t *testing.T) {
 	// The rest of /metrics must survive: the collector logs-and-continues like
 	// its neighbours, so a scrape is never blanked by this one query.
 	if !gaugeSeriesPresent(t, m.Registry, "birdman_node_heartbeat_age_seconds", map[string]string{
-		"node": "node-1", "region": "eu",
+		"node": "node-1", "region": "eu", "project": "game",
 	}) {
 		t.Fatal("a failed server-info query blanked the rest of the scrape")
 	}

@@ -193,10 +193,21 @@ var (
 		"birdman_server_info",
 		"Reference series (always 1) mapping a live server_id to its project and env, for joining agent-emitted per-server metrics (tick/players/cpu/mem) to their owner.",
 		[]string{"server_id", "project", "env"}, nil)
+	// The `project` label is what makes NodeDown a PROJECT alert (tracker
+	// #1064). A node belongs to exactly one project — nodes.project_id is NOT
+	// NULL with an FK to projects — so the label is true, not a guess, and the
+	// scheduler picks candidates only among the nodes of the server's own
+	// project (store/reconcile.go). It earns its keep since #1065 put several
+	// nodes on ONE host: a dead machine now raises one NodeDown per node, and
+	// without the label the non-hiding ?project= filter (master.md §6) shows
+	// every project's operator the alerts of their neighbours — noise they
+	// cannot act on. The last reason to keep it platform-wide (a dead neighbour
+	// darkened the box's QoS echo for everyone) died with #1068, where any live
+	// agent of the box claims the port.
 	heartbeatAgeDesc = prometheus.NewDesc(
 		"birdman_node_heartbeat_age_seconds",
-		"Seconds since the last agent heartbeat, per node.",
-		[]string{"node", "region"}, nil)
+		"Seconds since the last agent heartbeat, per node and owning project.",
+		[]string{"node", "region", "project"}, nil)
 	versionsDesc = prometheus.NewDesc(
 		"birdman_versions",
 		"Registered version counts by project, env and state (registered, prepulling, active, deprecated, disabled).",
@@ -759,23 +770,28 @@ func (c *dbCollector) Collect(ch chan<- prometheus.Metric) {
 	// отсутствующего алерта, потому что маскирует НАСТОЯЩИЙ NodeDown. Убираем
 	// серию — staleness гасит алерт сам. Поймано на дев-стенде 11.08.2026: две
 	// ревокнутые ноды держали NodeDown в firing 24 дня.
+	// join projects, а не left join: nodes.project_id — not null с FK на
+	// projects (000001_init.up.sql), поэтому строки потерять не на чем, а
+	// left join прятал бы нарушение целостности за пустым лейблом.
 	rows, err = c.st.Pool.Query(ctx, `
-		select hostname, region, greatest(extract(epoch from (now() - last_heartbeat_at)), 0)
-		from nodes where last_heartbeat_at is not null and state <> 'dead'`)
+		select n.hostname, n.region, p.slug,
+		       greatest(extract(epoch from (now() - n.last_heartbeat_at)), 0)
+		from nodes n join projects p on p.id = n.project_id
+		where n.last_heartbeat_at is not null and n.state <> 'dead'`)
 	if err != nil {
 		c.log.Error("metrics: heartbeat query failed", "err", err)
 		return
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var hostname, region string
+		var hostname, region, project string
 		var age float64
-		if err := rows.Scan(&hostname, &region, &age); err != nil {
+		if err := rows.Scan(&hostname, &region, &project, &age); err != nil {
 			c.log.Error("metrics: heartbeat scan failed", "err", err)
 			return
 		}
 		ch <- prometheus.MustNewConstMetric(heartbeatAgeDesc, prometheus.GaugeValue,
-			age, hostname, region)
+			age, hostname, region, project)
 	}
 
 	counts, err := c.st.VersionStateCounts(ctx)

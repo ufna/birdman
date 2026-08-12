@@ -282,6 +282,48 @@ func labelsMatch(pairs []*dto.LabelPair, want map[string]string) bool {
 	return true
 }
 
+// TestHeartbeatAgeCarriesOwningProject: NodeDown is a PROJECT alert, and the
+// label comes from the series, not from the rule (tracker #1064 — same shape as
+// birdman_allocation_failures_total in #955: the expr never mentions project).
+//
+// The case that makes it matter is one BOX carrying nodes of different projects
+// (#1065): the machine dies, one NodeDown fires per node, and without the label
+// the non-hiding ?project= filter (master.md §6) shows every operator their
+// neighbours' alerts — noise they cannot act on. So the two nodes below share a
+// public_ip on purpose: that is exactly the multi-node box, and each series must
+// name its OWN project.
+func TestHeartbeatAgeCarriesOwningProject(t *testing.T) {
+	st := testdb.New(t)
+	ctx := context.Background()
+	f := testdb.Seed(t, st, "eu", 8)
+
+	// Вторая нода того же ЖЕЛЕЗА (тот же public_ip), но чужого проекта:
+	// CreateNode заводит проект сам (ensureProject внутри его транзакции).
+	node, _, err := st.CreateNode(ctx, store.CreateNodeParams{
+		Project:       "khl-legends",
+		Region:        "eu",
+		Hostname:      "node-1-khl",
+		PublicIP:      "203.0.113.10",
+		CapacitySlots: 4,
+	})
+	if err != nil {
+		t.Fatalf("create neighbour node: %v", err)
+	}
+	f.SetHeartbeatAge(t, node.ID, 0)
+
+	m := metrics.New(st, testLog())
+	if !gaugeSeriesPresent(t, m.Registry, "birdman_node_heartbeat_age_seconds", map[string]string{
+		"node": "node-1", "region": "eu", "project": "game",
+	}) {
+		t.Error("серия ноды game не несёт свой проект — NodeDown остался бы платформенным")
+	}
+	if !gaugeSeriesPresent(t, m.Registry, "birdman_node_heartbeat_age_seconds", map[string]string{
+		"node": "node-1-khl", "region": "eu", "project": "khl-legends",
+	}) {
+		t.Error("нода соседнего проекта на том же железе не получила СВОЙ проект — оператор увидел бы чужой алерт как свой")
+	}
+}
+
 // TestRevokedNodeEmitsNoAlertableSeries: `dead` is set ONLY by explicit manual
 // revocation — the operator saying "this box is gone, stop caring". Its
 // heartbeat age grows forever and its cert eventually expires, so as long as
@@ -304,7 +346,7 @@ func TestRevokedNodeEmitsNoAlertableSeries(t *testing.T) {
 	}
 
 	live := metrics.New(st, testLog())
-	if !gaugeSeriesPresent(t, live.Registry, "birdman_node_heartbeat_age_seconds", map[string]string{"node": "node-1", "region": "eu"}) {
+	if !gaugeSeriesPresent(t, live.Registry, "birdman_node_heartbeat_age_seconds", map[string]string{"node": "node-1", "region": "eu", "project": "game"}) {
 		t.Fatal("a live node must emit heartbeat age")
 	}
 	if !gaugeSeriesPresent(t, live.Registry, "birdman_node_cert_expiry_timestamp_seconds", map[string]string{"node": "node-1"}) {
@@ -317,7 +359,7 @@ func TestRevokedNodeEmitsNoAlertableSeries(t *testing.T) {
 	}
 
 	revoked := metrics.New(st, testLog())
-	if gaugeSeriesPresent(t, revoked.Registry, "birdman_node_heartbeat_age_seconds", map[string]string{"node": "node-1", "region": "eu"}) {
+	if gaugeSeriesPresent(t, revoked.Registry, "birdman_node_heartbeat_age_seconds", map[string]string{"node": "node-1", "region": "eu", "project": "game"}) {
 		t.Error("revoked node still emits heartbeat age — NodeDown would fire forever")
 	}
 	if gaugeSeriesPresent(t, revoked.Registry, "birdman_node_cert_expiry_timestamp_seconds", map[string]string{"node": "node-1"}) {
