@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
+	dto "github.com/prometheus/client_model/go"
 
 	"github.com/ufna/birdman/master/internal/store"
 )
@@ -401,13 +402,32 @@ var allocFailureReasons = []string{"no_capacity", "bad_request", "env_required",
 // заново. Явный ноль даёт increase() от чего расти.
 //
 // Источник проектов — БД на каждом скрейпе, а не хук на создание проекта:
-// коллектор и так ходит в базу, новый проект подхватывается сам, а мёртвая
-// серия исчезает вместе с рестартом. Кардинальность — причины × проекты,
-// то есть единицы серий, а не открытое множество.
+// коллектор и так ходит в базу, а новый проект подхватывается сам.
 //
-// При сбое запроса не делаем НИЧЕГО (та же дисциплина, что у нулевой базы
-// событий и collectReadyZeros): выдуманный ноль после икоты базы для
-// increase() выглядит как сброс счётчика.
+// Список ведёт desired state в ОБЕ стороны (tracker #1066): серии проектов,
+// которых в БД уже нет, снимаются тем же скрейпом. Раньше он работал только на
+// добавление, и счётчик in-process держал призрак до рестарта процесса —
+// на дев-стенде жил `{project="khl"}` при слаге `khl-legends`. Это не про
+// алерты (гейт свежести скрейпа #1063 такую серию уже сделал инертной: расти
+// ей нечем), а про две вещи: в панели и Grafana виден проект, которого нет, и
+// кардинальность вектора растёт монотонно — с каждым удалённым проектом,
+// переименованием и КАЖДЫМ запросом на несуществующий слаг (`bad_request`
+// заводит серию по лейблу из запроса). Хука на удаление проекта хватило бы
+// только для первого случая.
+//
+// Живые серии удаление не задевает: снимаются ровно те, чей `project` не
+// найден в БД, а накопленные значения соседей остаются как были — иначе для
+// increase() уборка выглядела бы сбросом счётчика у выживших.
+//
+// Отставание на один скрейп у уборки то же, что у заведения, и по той же
+// причине: вектор зарегистрирован отдельным коллектором и мог отдать свою
+// половину выдачи до того, как дошли сюда. Для призрака это безобидно — расти
+// ему нечем (счётчик удалённого проекта никто не инкрементит).
+//
+// При сбое запроса не делаем НИЧЕГО — ни заводим, ни удаляем (та же дисциплина,
+// что у нулевой базы событий и collectReadyZeros): выдуманный ноль после икоты
+// базы для increase() выглядит как сброс счётчика, а уборка «по пустому списку
+// живых» стёрла бы разом весь вектор.
 // projectSlugs — desired state проектного измерения: кто есть в БД, тот и
 // получает нулевые серии. Общий источник для нулевых баз отказов аллокации
 // (#966) и событий (#986): оба обязаны существовать ДО первого факта, иначе
@@ -438,11 +458,50 @@ func (c *dbCollector) preinitAllocFailures(ctx context.Context) {
 		c.log.Error("metrics: projects query failed", "err", err)
 		return
 	}
+	live := make(map[string]struct{}, len(slugs))
 	for _, slug := range slugs {
+		live[slug] = struct{}{}
 		for _, reason := range allocFailureReasons {
 			c.allocFailures.WithLabelValues(reason, slug)
 		}
 	}
+	// Вторая половина desired state: у кого лейбла в БД больше нет — того нет и
+	// в векторе. Частичное совпадение по одному лейблу снимает все причины
+	// разом и не зависит от того, какие ещё лейблы у метрики появятся.
+	for project := range c.allocFailureProjects() {
+		if _, ok := live[project]; ok {
+			continue
+		}
+		c.allocFailures.DeletePartialMatch(prometheus.Labels{"project": project})
+	}
+}
+
+// allocFailureProjects — значения лейбла `project`, которые есть у вектора
+// СЕЙЧАС. CounterVec их не отдаёт (карта серий приватная), поэтому спрашиваем
+// его тем же способом, каким это делает реестр — Collect'ом. Канал
+// буферизован и вычитывается до конца: Collect вектора пишет синхронно, и на
+// небуферизованном канале без читателя он бы встал.
+func (c *dbCollector) allocFailureProjects() map[string]struct{} {
+	ch := make(chan prometheus.Metric, 64)
+	go func() {
+		c.allocFailures.Collect(ch)
+		close(ch)
+	}()
+	seen := map[string]struct{}{}
+	var pb dto.Metric
+	for m := range ch {
+		pb.Reset()
+		if err := m.Write(&pb); err != nil {
+			c.log.Error("metrics: alloc failures series read failed", "err", err)
+			continue
+		}
+		for _, lp := range pb.GetLabel() {
+			if lp.GetName() == "project" {
+				seen[lp.GetValue()] = struct{}{}
+			}
+		}
+	}
+	return seen
 }
 
 func (c *dbCollector) Describe(ch chan<- *prometheus.Desc) {
