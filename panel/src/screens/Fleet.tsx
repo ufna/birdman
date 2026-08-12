@@ -210,7 +210,7 @@ export function Fleet() {
           empty={
             <>
               {project !== null ? t('fleet.emptyInProject', { project }) : t('fleet.emptyPre')}{' '}
-              <span className="font-mono">POST /v1/nodes</span>
+              <span className="font-mono">POST /v1/nodes</span> {/* i18n-allow: API-токен, не проза — panel.md §1 п.6 выводит их из-под перевода наравне с semver/id */}
             </>
           }
           expandedId={expandedId}
