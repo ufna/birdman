@@ -29,7 +29,20 @@ sink_image="$(sed -n 's/^birdman_alert_sink_image:[[:space:]]*//p' "$role/defaul
 [ -n "$sink_image" ] || { echo "не нашёл birdman_alert_sink_image в defaults" >&2; exit 1; }
 
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+# ЧАСОВОЙ, А НЕ ЧТЕНИЕ `$?` (tracker #1098). Прогон, упавший ПОСРЕДИНЕ,
+# выходил НУЛЁМ: до `ALL OK` он не доезжал, а вызвавший видел зелёное.
+# Условие замерено (/bin/bash 3.2.57) и уже, чем «виноват `set -u`»: ноль даёт
+# ТРОЙКА — `-e` и `-u` ВМЕСТЕ (то есть `set -euo pipefail` выше), EXIT-trap и
+# ошибка РАСКРЫТИЯ. Ноль вносит сам факт trap'а, а не чтение `$?` в нём:
+# замерено на трёх формах, включая `trap ':' EXIT`, который `$?` не читает, —
+# все три дают наружу 0, а БЕЗ trap'а тот же `set -ue` отдаёт 1. Поэтому
+# никакой trap, читающий `$?`, этот режим не восстанавливает. Ненулевой код
+# часовой не трогает никогда: поднимается ТОЛЬКО ноль и ТОЛЬКО при
+# недостигнутом финале. Полный замер — в `infra/ci/tests/run.sh`, там же тот
+# же часовой пришпилен кейсами; здесь он проверен мутацией руками (матрица
+# режимов по каждому раннеру, RC до и после — в карточке #1098).
+reached_end=0
+trap 'st=$?; rm -rf "$work"; if [ "$reached_end" != 1 ] && [ "$st" -eq 0 ]; then st=1; fi; exit "$st"' EXIT
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
@@ -103,4 +116,6 @@ docker run --rm \
 	-v "$here/rotation_in_container.sh:/conf/rotation.sh:ro" \
 	--entrypoint /bin/sh "$sink_image" /conf/rotation.sh
 
+# Часовой снимается ровно здесь: всё, что ниже, — это и есть финал.
+reached_end=1
 echo "ALL OK"

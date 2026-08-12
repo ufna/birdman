@@ -54,9 +54,27 @@ box="${BIRDMAN_TEST_BOX_NAME:-bm1069-box}"
 master="${BIRDMAN_TEST_MASTER_NAME:-bm1070-master}"
 
 work="$(mktemp -d)"
+# ЧАСОВОЙ, А НЕ ЧТЕНИЕ `$?` (tracker #1098). Прогон, упавший ПОСРЕДИНЕ,
+# выходил НУЛЁМ: до `ALL OK` он не доезжал, а вызвавший видел зелёное.
+# Условие замерено (/bin/bash 3.2.57) и уже, чем «виноват `set -u`»: ноль даёт
+# ТРОЙКА — `-e` и `-u` ВМЕСТЕ (то есть `set -euo pipefail` выше), EXIT-trap и
+# ошибка РАСКРЫТИЯ. Ноль вносит сам факт trap'а, а не чтение `$?` в нём:
+# замерено на трёх формах, включая `trap ':' EXIT`, который `$?` не читает, —
+# все три дают наружу 0, а БЕЗ trap'а тот же `set -ue` отдаёт 1. Поэтому
+# никакой trap, читающий `$?`, этот режим не восстанавливает. Ненулевой код
+# часовой не трогает никогда: поднимается ТОЛЬКО ноль и ТОЛЬКО при
+# недостигнутом финале. Полный замер — в `infra/ci/tests/run.sh`, там же тот
+# же часовой пришпилен кейсами; здесь он проверен мутацией руками (матрица
+# режимов по каждому раннеру, RC до и после — в карточке #1098).
+reached_end=0
 cleanup() {
+  # `st=$?` обязан быть ПЕРВОЙ строкой: `docker rm -f … || true` ниже — тоже
+  # команда, и она затрёт `$?` прогона своим нулём.
+  st=$?
   rm -rf "$work"
   docker rm -f "$box" "$master" >/dev/null 2>&1 || true
+  if [ "$reached_end" != 1 ] && [ "$st" -eq 0 ]; then st=1; fi
+  exit "$st"
 }
 trap cleanup EXIT
 
@@ -363,4 +381,6 @@ cp "$here/vector_test.yaml" "$here/vector_multinode_test.yaml" "$work/two/"
 docker run --rm -v "$work/two:/w" "$image" \
   test /w/vector.yaml /w/vector_test.yaml /w/vector_multinode_test.yaml
 
+# Часовой снимается ровно здесь: всё, что ниже, — это и есть финал.
+reached_end=1
 echo "ALL OK"
