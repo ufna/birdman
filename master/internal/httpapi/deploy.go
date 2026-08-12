@@ -138,11 +138,20 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
 		deployError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"rollback": map[string]any{
+	rollback := map[string]any{
 		"version":    res.Version,
 		"regions":    res.Regions,
 		"old_semver": res.PrevSemver,
-	}})
+	}
+	// Симметрично `{"deploy":{"warning":…}}` (tracker #1071/#1088): откат при
+	// нуле живых нод переключает активную версию так же вхолостую, и тому, кто
+	// катит его курлом в панике, знать об этом надо В МОМЕНТ ДЕЙСТВИЯ. Ключ
+	// добавляется только непустым — как omitempty у деплоя, чтобы обычный ответ
+	// не менялся ни на байт.
+	if res.Warning != "" {
+		rollback["warning"] = res.Warning
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"rollback": rollback})
 }
 
 type promoteRequest struct {

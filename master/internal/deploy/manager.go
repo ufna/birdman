@@ -196,17 +196,10 @@ func (m *Manager) startJob(ctx context.Context, v store.Version) (Status, error)
 	if len(targets) == 0 {
 		m.log.Warn("deploy: no live fleet nodes to prepull — activating immediately",
 			"version_id", v.ID, "semver", v.Semver)
-		// Тот же факт, но НАБЛЮДАЕМЫЙ (tracker #1071): лог мастера оператору
-		// недоступен, и раньше «деплой прошёл, дедиков ноль» не оставляло следа
-		// нигде — ни в ленте, ни в ответе. Пишем ДО активации, чтобы в ленте
-		// (id desc) причина стояла под своим deploy_activated, а не над ним.
-		// Best-effort: провал записи события не валит деплой — он и так уже
-		// разрешён стором, а сигнал дублирован полем Warning ниже.
-		vid := v.ID
-		if err := m.st.InsertEvent(ctx, store.EventDeployNoNodes, store.EventRef{VersionID: &vid},
-			map[string]any{"project": v.Project, "env": v.Env, "semver": v.Semver, "image_ref": v.ImageRef}); err != nil {
-			m.log.Error("deploy: no-nodes event write failed", "version_id", v.ID, "err", err)
-		}
+		// Тот же факт, но НАБЛЮДАЕМЫЙ (tracker #1071). Пишем ДО активации, чтобы
+		// в ленте (id desc) причина стояла под своим deploy_activated, а не над
+		// ним; подробности — в recordNoNodes.
+		m.recordNoNodes(ctx, v)
 		if err := m.activate(ctx, v, time.Now()); err != nil {
 			return Status{}, err
 		}
@@ -245,15 +238,50 @@ func (m *Manager) startJob(ctx context.Context, v store.Version) (Status, error)
 // PrePullTargets query startJob uses, so both answers mean the same thing. A
 // query error yields "" — a missing warning is better than a wrong one.
 func (m *Manager) noNodesWarning(ctx context.Context, v store.Version) string {
-	targets, err := m.st.PrePullTargets(ctx, v.ProjectID, v.Env)
+	return m.NoNodesWarning(ctx, v.ProjectID, v.Env, v.ID)
+}
+
+// NoNodesWarning is the same probe addressed by (project, env) instead of by a
+// version — the shape a caller holding a fleet_configs row has (PUT /v1/fleets,
+// tracker #1088). versionID is used for the log line only; "" is fine.
+//
+// It is exported ON PURPOSE, and that is the whole point of #1088: the zero-
+// capacity signal must not live inside ONE funnel. Its first home was startJob,
+// through which five paths run (manual deploy, promote, auto-deploy from
+// POST /v1/versions, Resume, SweepOrphans) — but startJob was never the
+// STRUCTURAL sole writer of the active version, only today's most travelled
+// one, and two paths already went around it (Rollback and the fleet override).
+// Any NEW path that repoints fleet_configs.active_version is expected to call
+// this; TestActiveVersionWritersAreRegistered goes red until it does.
+func (m *Manager) NoNodesWarning(ctx context.Context, projectID, env, versionID string) string {
+	targets, err := m.st.PrePullTargets(ctx, projectID, env)
 	if err != nil {
-		m.log.Error("deploy: no-nodes probe failed", "version_id", v.ID, "err", err)
+		m.log.Error("deploy: no-nodes probe failed", "version_id", versionID, "err", err)
 		return ""
 	}
 	if len(targets) == 0 {
 		return WarnNoLiveNodes
 	}
 	return ""
+}
+
+// recordNoNodes writes the deploy_no_nodes event for a flip that had nothing to
+// roll onto. Best-effort BY DESIGN: a failed event write must not fail the
+// operation — it is already permitted by the store, and the same fact also
+// reaches the caller as the Warning field.
+//
+// WHEN to call it relative to the flip is the caller's choice, and the two
+// callers choose differently ON PURPOSE. The feed is read id-desc, so writing
+// BEFORE puts the cause under its own deploy_activated — that is what startJob
+// does, and it is safe there because BeginDeploy has already permitted the
+// flip. Rollback writes AFTER, because the flip itself can still refuse; the
+// reasoning is spelled out at the call site.
+func (m *Manager) recordNoNodes(ctx context.Context, v store.Version) {
+	vid := v.ID
+	if err := m.st.InsertEvent(ctx, store.EventDeployNoNodes, store.EventRef{VersionID: &vid},
+		map[string]any{"project": v.Project, "env": v.Env, "semver": v.Semver, "image_ref": v.ImageRef}); err != nil {
+		m.log.Error("deploy: no-nodes event write failed", "version_id", v.ID, "err", err)
+	}
 }
 
 // Resume recovers deploy state after a master restart. Call once at startup
@@ -476,26 +504,61 @@ func (m *Manager) abort(v store.Version, reason string) {
 	m.onDeployFinished(v.Project, v.Env)
 }
 
+// RollbackStatus is the Rollback outcome: the store's flip result plus the same
+// non-fatal caveat POST /v1/deploy carries (tracker #1088). ActivateResult is
+// embedded, so res.Version / res.PrevSemver read exactly as before.
+type RollbackStatus struct {
+	store.ActivateResult
+	// Warning — today only WarnNoLiveNodes. Empty when there is none.
+	Warning string
+}
+
 // Rollback flips an environment's deprecated version back to active
 // (POST /v1/rollback): images are already on the nodes — no prepull, the
 // whole operation is one transaction. regions empty → all of that env's fleets;
 // otherwise only those regions' fleet_configs are repointed. env-скоуп
 // (environments v1 §3): откат живёт строго внутри (project, env).
-func (m *Manager) Rollback(ctx context.Context, project, env string, regions []string) (store.ActivateResult, error) {
+//
+// Отсутствие прогрева — ровно причина, по которой откат не проходит через
+// startJob и потому МОЛЧАЛ при нуле живых нод (tracker #1088): переключение
+// fleet_configs.active_version случалось так же вхолостую, ответ был те же
+// 200 `{"rollback":{…}}`, а оператор попадает сюда как раз в панике — «дедиков
+// нет, откачу». Состояние достижимо честно: единственную ноду ревокнули
+// (POST /v1/nodes/{id}/revoke → dead) или она замолчала. Теперь след тот же,
+// что у деплоя, и обе половины намеренно совпадают с #1071: событие
+// deploy_no_nodes в ленте (CI/панель) и поле warning в ответе (curl).
+func (m *Manager) Rollback(ctx context.Context, project, env string, regions []string) (RollbackStatus, error) {
 	target, err := m.st.RollbackTarget(ctx, project, env)
 	if err != nil {
-		return store.ActivateResult{}, err
+		return RollbackStatus{}, err
 	}
+	// Проба — до флипа (она read-only и от него не зависит: ноды считаются по
+	// (project, env), а откат живёт внутри той же пары и её не меняет).
+	warning := m.NoNodesWarning(ctx, target.ProjectID, target.Env, target.ID)
 	res, err := m.st.ActivateVersion(ctx, target.ID, "deprecated", store.EventDeployRolledBack, regions)
 	if err != nil {
-		return store.ActivateResult{}, err
+		return RollbackStatus{}, err
 	}
 	m.log.Info("deploy: rolled back",
 		"version_id", res.Version.ID, "semver", res.Version.Semver,
 		"demoted_semver", res.PrevSemver, "regions", res.Regions)
+	if warning != "" {
+		m.log.Warn("deploy: rolled back onto a fleet with no live nodes",
+			"version_id", res.Version.ID, "semver", res.Version.Semver, "project", project, "env", env)
+		// ПОРЯДОК ЗДЕСЬ ОБРАТНЫЙ startJob'у, и это осознанно. Там событие
+		// пишется ДО активации ради ленты (она читается id-desc, причина должна
+		// лечь ПОД своё deploy_activated), и это безопасно: BeginDeploy уже
+		// разрешил флип. Здесь же отказать может ровно ActivateVersion —
+		// неизвестный регион (ErrNotFound), проигранная гонка состояний
+		// (ErrVersionState), — и deploy_no_nodes, записанный до неё, был бы
+		// событием об откате, которого НЕ БЫЛО. Врать о случившемся хуже, чем
+		// поставить причину строкой выше следствия: факт наблюдаем в обоих
+		// случаях, соседней строкой.
+		m.recordNoNodes(ctx, res.Version)
+	}
 	// Откат тоже флип: старшие deprecated вне окна → disabled, снимаем их образы.
 	m.cleanupDisabledImages(ctx, res.Disabled)
-	return res, nil
+	return RollbackStatus{ActivateResult: res, Warning: warning}, nil
 }
 
 // PendingNodes reports the in-flight prepull size for a version (tests).

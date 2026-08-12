@@ -256,7 +256,28 @@ func (s *Server) handleUpsertFleet(w http.ResponseWriter, r *http.Request) {
 	// исчерпанной цепочке. Результат в ответ PUT /v1/fleets не выносим (админ-роут,
 	// не CI-регистрация) — состояние видно в Deploys/событиях.
 	s.dep.TryAutoDeploy(r.Context(), project, req.Env)
-	writeJSON(w, http.StatusOK, map[string]any{"fleet": f})
+	resp := map[string]any{"fleet": f}
+	// Третий (и на сегодня последний) путь смены активной версии — этот
+	// bootstrap/ops-override (tracker #1088). Он идёт мимо deploy-менеджера
+	// прямым UPSERT'ом, поэтому сигнал «катить некуда» приходится звать здесь.
+	// Предупреждаем ТОЛЬКО когда версию действительно переставляли: PUT без
+	// active_version НИКАКОЙ версии не включает — на апдейте `coalesce`
+	// оставляет текущую, на вставке нового флота колонка получает NULL
+	// (store.UpsertFleet), — и предупреждать ему не о чем.
+	//
+	// СОБЫТИЯ здесь НЕТ, и это асимметрия по решению, а не пропуск. Во-первых,
+	// вид события — deploy_no_nodes, а PUT флота деплоем не является. Во-вторых
+	// и главное: bootstrap ПО ПОРЯДКУ идёт раньше регистрации нод, так что ноль
+	// живых нод — штатное состояние этого вызова, и событие горело бы на
+	// НОРМАЛЬНОМ пути, обучая оператора его игнорировать. Предупреждение в
+	// ответе этой цены не несёт: оно адресовано ровно тому, кто здесь бывает
+	// (curl/ops — панель этот путь не выставляет), и молчит, когда ноды есть.
+	if req.ActiveVersion != nil {
+		if warn := s.dep.NoNodesWarning(r.Context(), f.ProjectID, f.Env, *req.ActiveVersion); warn != "" {
+			resp["warning"] = warn
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // --- events ---
