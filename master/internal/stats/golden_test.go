@@ -76,8 +76,11 @@ func TestRollupPathEqualsOnTheFly(t *testing.T) {
 		t.Fatalf("overview rollup path diverged:\n got=%+v\nwant=%+v", gotOv, wantOv)
 	}
 
-	gotCost := BuildCostFromDaily(dims, util, axis, 7, now)
-	wantCost := BuildCost(m, util, axis, 7, now)
+	// Оба пути получают ОДИН И ТОТ ЖЕ фильтр — иначе разошлись бы подписи
+	// (utilization_note зависит от него с tracker #1009), и golden поймал бы
+	// это как расхождение путей, хотя расхождения нет.
+	gotCost := BuildCostFromDaily(dims, util, store.RegionUtilFilter{}, axis, 7, now)
+	wantCost := BuildCost(m, util, store.RegionUtilFilter{}, axis, 7, now)
 	if !reflect.DeepEqual(gotCost, wantCost) {
 		t.Fatalf("cost rollup path diverged:\n got=%+v\nwant=%+v", gotCost, wantCost)
 	}

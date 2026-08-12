@@ -148,7 +148,7 @@ func TestBuildCostDaySplit(t *testing.T) {
 		{Region: "eu", Semver: "1.0.0", PlayersPeak: 2,
 			CreatedAt: ts("2026-07-07T23:39:00Z"), StartedAt: ts("2026-07-07T23:40:00Z"), EndedAt: tp("2026-07-08T00:20:00Z")},
 	}
-	cost := BuildCost(matches, nil, axis, 3, now)
+	cost := BuildCost(matches, nil, store.RegionUtilFilter{}, axis, 3, now)
 	d7 := stackPoint(t, cost.SlotHoursPerDayByRegion, "2026-07-07")
 	d8 := stackPoint(t, cost.SlotHoursPerDayByRegion, "2026-07-08")
 	if d7.Values["eu"] != 0.33 || d8.Values["eu"] != 0.33 {

@@ -40,10 +40,54 @@ const (
 	unitSeconds       = "seconds"
 	unitPeakCCU       = "players (peak concurrent)"
 
+	// utilizationNoteOverTime — общий хвост обеих подписей: он про ИСТОЧНИК
+	// динамики, а не про охват снимка, поэтому от сужения не зависит и
+	// определён ОДИН раз (у обеих подписей он обязан совпадать; байт-в-байт
+	// прежнюю строку глобального ключа держит пин в utilization_note_test.go).
+	utilizationNoteOverTime = "; utilization over time is available via the metrics proxy " +
+		"(birdman_servers, query_range)"
+
 	utilizationNote = "current, platform-wide snapshot (allocated/ready/draining vs active-node " +
-		"capacity across ALL environments — the ?env filter does not narrow this capacity view); " +
-		"utilization over time is available via the metrics proxy (birdman_servers, query_range)"
+		"capacity across ALL environments — the ?env filter does not narrow this capacity view)" +
+		utilizationNoteOverTime
 )
+
+// utilizationNoteFor возвращает подпись снимка ёмкости ДЛЯ ТОГО ЖЕ фильтра,
+// которым снимок и получен (tracker #1009). Аргумент здесь тот же самый
+// store.RegionUtilFilter, что уехал в RegionUtilization, и это несущее
+// свойство, а не удобство: подпись и выборка физически не могут разъехаться,
+// потому что читают одно значение — тот же приём, что у общих unit-констант
+// выше.
+//
+// До #1009 подпись была ОДНОЙ константой на оба случая, и после сужения #993
+// ответ противоречил сам себе: привязанному ключу отдавали ЕГО слоты
+// (`capacity_slots: 7` вместо платформенных 25) и тут же подписывали их как
+// «platform-wide … across ALL environments». Врало ровно API: панель это поле
+// не рендерит вовсе, читает его тот, кто ходит curl'ом или пишет свой клиент.
+//
+// Пустой фильтр (глобальный/admin-ключ) обязан давать ПРЕЖНЮЮ строку
+// байт-в-байт: #993 специально сохранил ответ непривязанного ключа
+// неизменным, и «заодно причесать и его» здесь было бы отдельной регрессией.
+func utilizationNoteFor(f store.RegionUtilFilter) string {
+	if f.Project == "" && f.Env == "" {
+		return utilizationNote
+	}
+	scope := f.Project
+	if f.Env != "" {
+		if scope == "" {
+			// Половина пары публично недостижима (пара валидируется при
+			// создании ключа), но выдумывать вторую половину подпись не
+			// вправе — говорим ровно то, чем сужено.
+			scope = "environment " + f.Env
+		} else {
+			scope += "/" + f.Env
+		}
+	}
+	return "current snapshot of YOUR scope " + scope +
+		" (allocated/ready/draining vs the capacity of active nodes in that scope — " +
+		"this key is bound, so both halves are narrowed by the binding, not by the ?project/?env filter)" +
+		utilizationNoteOverTime
+}
 
 // --- chart-ready series shapes ---
 
@@ -147,7 +191,7 @@ func BuildOverview(matches []store.StatMatch, axis []time.Time, days int, now ti
 // cost — allocated dedik time) split across UTC days by region and by
 // version, plus a current utilization snapshot. Golden reference for
 // BuildCostFromDaily.
-func BuildCost(matches []store.StatMatch, util []store.RegionUtil, axis []time.Time, days int, now time.Time) CostResponse {
+func BuildCost(matches []store.StatMatch, util []store.RegionUtil, scope store.RegionUtilFilter, axis []time.Time, days int, now time.Time) CostResponse {
 	byRegion := newStackAccum()
 	byVersion := newStackAccum()
 	total := 0.0
@@ -173,7 +217,7 @@ func BuildCost(matches []store.StatMatch, util []store.RegionUtil, axis []time.T
 		SlotHoursPerDayByVersion: byVersion.series(unitSlotHours, axis),
 		SlotHoursTotal:           round2(total),
 		Utilization:              emptyNotNull(util),
-		UtilizationNote:          utilizationNote,
+		UtilizationNote:          utilizationNoteFor(scope),
 	}
 }
 
@@ -332,7 +376,7 @@ func dropZeroMatchSemvers(counts map[string]int) map[string]int {
 // BuildCostFromDaily builds the same CostResponse as BuildCost, but from
 // pre-aggregated daily dimensions instead of raw matches: slot-hours are
 // ΣSlotSeconds/3600, stacked by region-day and by version-day.
-func BuildCostFromDaily(dims []DailyDim, util []store.RegionUtil, axis []time.Time, days int, now time.Time) CostResponse {
+func BuildCostFromDaily(dims []DailyDim, util []store.RegionUtil, scope store.RegionUtilFilter, axis []time.Time, days int, now time.Time) CostResponse {
 	byRegion := newStackAccum()
 	byVersion := newStackAccum()
 	total := 0.0
@@ -354,7 +398,7 @@ func BuildCostFromDaily(dims []DailyDim, util []store.RegionUtil, axis []time.Ti
 		SlotHoursPerDayByVersion: byVersion.series(unitSlotHours, axis),
 		SlotHoursTotal:           round2(total),
 		Utilization:              emptyNotNull(util),
-		UtilizationNote:          utilizationNote,
+		UtilizationNote:          utilizationNoteFor(scope),
 	}
 }
 

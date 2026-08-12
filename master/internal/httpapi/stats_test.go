@@ -540,7 +540,7 @@ func TestStatsCostRollupBacked(t *testing.T) {
 			if err != nil {
 				t.Fatalf("reference RegionUtilization: %v", err)
 			}
-			want := stats.BuildCost(refMatches, util, axis, days, now)
+			want := stats.BuildCost(refMatches, util, store.RegionUtilFilter{}, axis, days, now)
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("days=%d: rollup-backed cost != on-the-fly reference\n got=%+v\nwant=%+v", days, got, want)
 			}

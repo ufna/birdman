@@ -103,13 +103,20 @@ func (s *Server) handleStatsCost(w http.ResponseWriter, r *http.Request) {
 	// серверы (`/v1/nodes`, `/v1/servers`) уже сужены. Именно ПРИВЯЗКА, а не
 	// разобранная пара: у глобального ключа bound=false → фильтр пуст → ответ
 	// байт-в-байт прежний, включая случай `?project=game` в панели.
+	// Фильтр СОБИРАЕТСЯ ОДИН РАЗ и уезжает в оба места — в выборку снимка и в
+	// его подпись (tracker #1009). Раньше подпись была константой и после
+	// сужения #993 противоречила собственным данным: привязанному ключу
+	// отдавали ЕГО слоты, подписанные как «platform-wide … across ALL
+	// environments». Одно значение на оба потребителя — единственный способ,
+	// которым они не разъедутся снова.
 	bp, be, _ := keyBinding(r)
-	util, err := s.st.RegionUtilization(r.Context(), store.RegionUtilFilter{Project: bp, Env: be})
+	scope := store.RegionUtilFilter{Project: bp, Env: be}
+	util, err := s.st.RegionUtilization(r.Context(), scope)
 	if err != nil {
 		storeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, stats.BuildCostFromDaily(dims, util, axis, days, now))
+	writeJSON(w, http.StatusOK, stats.BuildCostFromDaily(dims, util, scope, axis, days, now))
 }
 
 // statsDays parses ?days=N (default 7, 1..30). Writes the 400 itself.
