@@ -37,15 +37,32 @@ func insertEvent(ctx context.Context, db execer, kind string, ref EventRef, payl
 	// затем слаг в payload (его несут события без ссылок вовсе: project_created,
 	// environment_deleted, deploy_*, fleet_updated). Ничего не нашлось — NULL,
 	// и это законное значение: платформенному событию проект не приписывается.
+	//
+	// РЯДОМ ПИШЕТСЯ СНИМОК СЛАГА (миграция 000020, tracker #1083). FK объявлен
+	// `on delete set null`, поэтому удаление проекта обнуляет project_id у всей
+	// его истории — и без снимка эта история становится НЕОТЛИЧИМА от
+	// платформенной, а платформенное читается не скрывающе, то есть уезжает
+	// соседнему арендатору целиком. Снимок ставится ЗДЕСЬ, а не каскадом
+	// удаления: `set null` срабатывает всегда и не спрашивает, кто удалял, —
+	// маркер из каскада обходится вторым путём удаления и порядком операций
+	// внутри транзакции, а записанный в единственной точке записи не обходится.
+	//
+	// CTE, а не два одинаковых coalesce: выражение атрибуции остаётся ОДНО,
+	// иначе две копии однажды разойдутся, и разойдутся молча.
 	_, err = db.Exec(ctx, `
-		insert into events (kind, node_id, server_id, match_id, version_id, payload, project_id)
-		values ($1, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::jsonb, coalesce(
-		  (select n.project_id from nodes    n where n.id = $2::uuid),
-		  (select s.project_id from servers  s where s.id = $3::uuid),
-		  (select v.project_id from versions v where v.id = $5::uuid),
-		  (select m.project_id from matches  m where m.id = $4::uuid),
-		  (select p.id from projects p where p.slug = ($6::jsonb->>'project'))
-		))`,
+		with attr as (
+		  select coalesce(
+		    (select n.project_id from nodes    n where n.id = $2::uuid),
+		    (select s.project_id from servers  s where s.id = $3::uuid),
+		    (select v.project_id from versions v where v.id = $5::uuid),
+		    (select m.project_id from matches  m where m.id = $4::uuid),
+		    (select p.id from projects p where p.slug = ($6::jsonb->>'project'))
+		  ) as project_id
+		)
+		insert into events (kind, node_id, server_id, match_id, version_id, payload, project_id, project_slug)
+		select $1, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::jsonb, attr.project_id,
+		       (select p.slug from projects p where p.id = attr.project_id)
+		from attr`,
 		kind, ref.NodeID, ref.ServerID, ref.MatchID, ref.VersionID, string(raw))
 	return err
 }
@@ -60,9 +77,23 @@ func (s *Store) InsertEvent(ctx context.Context, kind string, ref EventRef, payl
 // платформа (поведение до мультипроекта).
 //
 // Сужение НЕ СКРЫВАЮЩЕЕ, как у алертов (#955): уходит только событие ЯВНО
-// чужого проекта, а платформенное (project_id is null — бекапы, CA, сессии)
-// видно под любым фильтром. Спрятать его значило бы утверждать, что при
-// выбранном проекте на платформе ничего не происходит.
+// чужого проекта, а платформенное (бекапы, CA, сессии) видно под любым
+// фильтром. Спрятать его значило бы утверждать, что при выбранном проекте на
+// платформе ничего не происходит.
+//
+// ПЛАТФОРМЕННОЕ — ЭТО «ПО РОЖДЕНИЮ», А НЕ «project_id is null» (tracker #1083).
+// FK объявлен `on delete set null`, поэтому у истории удалённого проекта
+// project_id обнуляется — и по одному лишь этому признаку она неотличима от
+// бекапа с ротацией CA, то есть проезжает не скрывающее сужение легально и
+// уезжает СОСЕДНЕМУ арендатору целиком, с hostname'ами нод и именами ключей.
+// Различает их снимок слага (миграция 000020): у платформенного по рождению он
+// пуст, у осиротевшего — остался. Оба условия вместе, потому что порознь каждое
+// ложно: `project_id is null` ловит и осиротевшее, а `project_slug is null` без
+// первого — вообще все строки живых проектов не ловит и ловит лишнее.
+//
+// Сужать по СЛАГУ вместо project_id нельзя, хотя выглядит дешевле: слаг
+// переиспользуем (пересоздание проекта с тем же именем — штатный путь), и
+// новый проект унаследовал бы ленту мёртвого.
 func (s *Store) ListEvents(ctx context.Context, limit int, project string) ([]Event, error) {
 	if limit <= 0 {
 		limit = 100
@@ -74,7 +105,7 @@ func (s *Store) ListEvents(ctx context.Context, limit int, project string) ([]Ev
 		select e.id, e.ts, e.kind, coalesce(p.slug, ''), e.node_id::text, e.server_id::text,
 		       e.match_id::text, e.version_id::text, e.payload
 		from events e left join projects p on p.id = e.project_id
-		where $2 = '' or e.project_id is null
+		where $2 = '' or (e.project_id is null and e.project_slug is null)
 		   or e.project_id = (select p.id from projects p where p.slug = $2)
 		order by e.ts desc, e.id desc limit $1`, limit, project)
 	if err != nil {
@@ -99,9 +130,10 @@ func (s *Store) ListEvents(ctx context.Context, limit int, project string) ([]Ev
 // ListEventsAfter returns events with id > afterID that `project` may see,
 // oldest first — the SSE stream cursor read (docs/specs/master.md §6). Пустой
 // project — вся платформа (поведение до мультипроекта); сужение то же и НЕ
-// СКРЫВАЮЩЕЕ, что у ListEvents (project_id is null видно под любым фильтром),
-// потому что это ВТОРОЙ ВХОД В ТУ ЖЕ ТАБЛИЦУ и расходиться правилам нельзя:
-// иначе сужение ленты обходится подпиской на стрим (tracker #999).
+// СКРЫВАЮЩЕЕ, что у ListEvents (платформенное ПО РОЖДЕНИЮ видно под любым
+// фильтром, история удалённого проекта — нет, tracker #1083), потому что это
+// ВТОРОЙ ВХОД В ТУ ЖЕ ТАБЛИЦУ и расходиться правилам нельзя: иначе сужение
+// ленты обходится подпиской на стрим (tracker #999).
 //
 // Второе возвращаемое значение — watermark: НАИБОЛЬШИЙ id, который эта выборка
 // РАССМОТРЕЛА, а не наибольший из отданных. Стрим двигает курсор именно им.
@@ -150,7 +182,7 @@ func (s *Store) ListEventsAfter(ctx context.Context, afterID int64, limit int, p
 		       e.match_id::text, e.version_id::text, e.payload
 		from events e left join projects p on p.id = e.project_id
 		where e.id > $1 and e.id <= $2
-		  and ($3 = '' or e.project_id is null
+		  and ($3 = '' or (e.project_id is null and e.project_slug is null)
 		       or e.project_id = (select p2.id from projects p2 where p2.slug = $3))
 		order by e.id`, afterID, watermark, project)
 	if err != nil {

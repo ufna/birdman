@@ -14,6 +14,7 @@ package store_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/golang-migrate/migrate/v4"
@@ -35,6 +36,22 @@ func eventProject(t *testing.T, st *store.Store, kind string) string {
 		return ""
 	}
 	return *pid
+}
+
+// eventSlug возвращает снимок слага владельца последнего события вида kind
+// (или "" для NULL) — то, чем осиротевшее событие отличается от платформенного.
+func eventSlug(t *testing.T, st *store.Store, kind string) string {
+	t.Helper()
+	var slug *string
+	err := st.Pool.QueryRow(context.Background(),
+		`select project_slug from events where kind = $1 order by id desc limit 1`, kind).Scan(&slug)
+	if err != nil {
+		t.Fatalf("read project_slug of %s: %v", kind, err)
+	}
+	if slug == nil {
+		return ""
+	}
+	return *slug
 }
 
 func projectID(t *testing.T, st *store.Store, slug string) string {
@@ -181,17 +198,23 @@ func TestEventsBackfillLeavesPlatformEventsNull(t *testing.T) {
 	}
 }
 
-// TestDeleteProjectKeepsEventsAsPlatform: удаление проекта не стирает аудит —
-// события остаются, теряя атрибуцию (on delete set null). Стереть их значило бы
-// потерять след того, что с проектом происходило.
-func TestDeleteProjectKeepsEventsAsPlatform(t *testing.T) {
+// TestDeleteProjectKeepsEventsAsOrphaned: удаление проекта не стирает аудит —
+// события остаются, теряя ССЫЛКУ на проект (on delete set null). Стереть их
+// значило бы потерять след того, что с проектом происходило.
+//
+// Но «потеряли ссылку» больше не значит «стали платформенными» (tracker #1083):
+// снимок слага остаётся, и именно по нему читатели отличают историю удалённого
+// проекта от бекапа с ротацией CA. Раньше этот тест назывался
+// …KeepsEventsAsPlatform и фиксировал ровно то, что оказалось утечкой: сегодня
+// он пинует ОБА свойства — строка жива И помечена как осиротевшая.
+func TestDeleteProjectKeepsEventsAsOrphaned(t *testing.T) {
 	st := testdb.New(t)
 	f := testdb.Seed(t, st, "eu", 8)
 	ctx := context.Background()
 
 	if _, err := st.Pool.Exec(ctx,
-		`insert into events (kind, project_id) values ('doomed_project_event', $1::uuid)`,
-		projectID(t, st, f.Project)); err != nil {
+		`insert into events (kind, project_id, project_slug) values ('doomed_project_event', $1::uuid, $2)`,
+		projectID(t, st, f.Project), f.Project); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	if _, err := st.RevokeNode(ctx, f.NodeID); err != nil {
@@ -211,6 +234,28 @@ func TestDeleteProjectKeepsEventsAsPlatform(t *testing.T) {
 	}
 	if got := eventProject(t, st, "doomed_project_event"); got != "" {
 		t.Fatalf("после удаления проекта событие всё ещё ссылается на него: %q", got)
+	}
+	if got := eventSlug(t, st, "doomed_project_event"); got != f.Project {
+		t.Fatalf("осиротевшее событие потеряло имя владельца: got %q, want %q", got, f.Project)
+	}
+}
+
+// TestEventProjectNamedConstraint: строка, назвавшая проект по id, обязана
+// назвать его и по имени. Инвариант держится СХЕМОЙ, а не соглашением: без него
+// любой писатель, забывший снимок, молча вернул бы утечку #1083, и заметили бы
+// это только на удалении проекта — то есть уже на живом чужом аудите.
+func TestEventProjectNamedConstraint(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 8)
+
+	_, err := st.Pool.Exec(context.Background(),
+		`insert into events (kind, project_id) values ('unnamed_project_event', $1::uuid)`,
+		projectID(t, st, f.Project))
+	if err == nil {
+		t.Fatal("событие с project_id и без project_slug записалось — инвариант ничем не держится")
+	}
+	if !strings.Contains(err.Error(), "events_project_named") {
+		t.Fatalf("отказ пришёл не от того ограничения: %v", err)
 	}
 }
 

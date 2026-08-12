@@ -448,9 +448,9 @@ func TestEventsStreamLosesNothingOnOversizedBatch(t *testing.T) {
 	// потому что вся пачка помещается в один батч (проверено мутацией).
 	const half = 600
 	if _, err := f.st.Pool.Exec(t.Context(), `
-		insert into events (kind, payload, project_id)
+		insert into events (kind, payload, project_id, project_slug)
 		select 'node_created', jsonb_build_object('hostname', t.prefix || g),
-		       (select id from projects where slug = t.slug)
+		       (select id from projects where slug = t.slug), t.slug
 		from generate_series(0, $1::int - 1) g
 		cross join (values ('secret-bulk-', 'game', 0), ('nb-bulk-', 'neighbour', 1))
 		            as t(prefix, slug, ord)
@@ -496,9 +496,9 @@ func TestEventsStreamCatchUpPaysSettleOncePerConnection(t *testing.T) {
 	foreign := windows * httpapi.SSEBatchLimitForTest()
 	start := f.event(t, "neighbour", "nb-catchup-start")
 	if _, err := f.st.Pool.Exec(t.Context(), `
-		insert into events (kind, payload, project_id)
+		insert into events (kind, payload, project_id, project_slug)
 		select 'node_created', jsonb_build_object('hostname', 'secret-catchup-' || g),
-		       (select id from projects where slug = 'game')
+		       (select id from projects where slug = 'game'), 'game'
 		from generate_series(1, $1::int) g`, foreign); err != nil {
 		t.Fatalf("bulk insert: %v", err)
 	}
