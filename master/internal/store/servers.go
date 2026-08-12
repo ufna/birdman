@@ -128,16 +128,19 @@ func (s *Store) FailStuckCreating(ctx context.Context, timeout time.Duration) (i
 	rows, err := s.Pool.Query(ctx, `
 		update servers set state = 'failed', updated_at = now()
 		where state = 'creating' and updated_at < now() - $1::interval
-		returning id::text, node_id::text, version_id::text`,
+		returning id::text, node_id::text, version_id::text, match_id::text`,
 		fmt.Sprintf("%d milliseconds", timeout.Milliseconds()))
 	if err != nil {
 		return 0, err
 	}
-	type ref struct{ id, node, version string }
+	type ref struct {
+		id, node, version string
+		match             *string
+	}
 	var failed []ref
 	for rows.Next() {
 		var r ref
-		if err := rows.Scan(&r.id, &r.node, &r.version); err != nil {
+		if err := rows.Scan(&r.id, &r.node, &r.version, &r.match); err != nil {
 			rows.Close()
 			return 0, err
 		}
@@ -149,7 +152,7 @@ func (s *Store) FailStuckCreating(ctx context.Context, timeout time.Duration) (i
 	}
 	for _, r := range failed {
 		if err := insertEvent(ctx, s.Pool, EventServerFailed,
-			EventRef{ServerID: &r.id, NodeID: &r.node, VersionID: &r.version},
+			EventRef{ServerID: &r.id, NodeID: &r.node, VersionID: &r.version, MatchID: r.match},
 			map[string]any{"reason": "start_timeout"}); err != nil {
 			return 0, err
 		}
@@ -204,15 +207,18 @@ func (s *Store) FailQuarantinedServers(ctx context.Context) (int, error) {
 		  and n.state = 'quarantine'
 		  and n.last_heartbeat_at < now() - interval '30 seconds'
 		  and s.state in ('creating','ready','allocated','draining')
-		returning s.id::text, s.node_id::text, s.version_id::text`)
+		returning s.id::text, s.node_id::text, s.version_id::text, s.match_id::text`)
 	if err != nil {
 		return 0, err
 	}
-	type ref struct{ id, node, version string }
+	type ref struct {
+		id, node, version string
+		match             *string
+	}
 	var failed []ref
 	for rows.Next() {
 		var r ref
-		if err := rows.Scan(&r.id, &r.node, &r.version); err != nil {
+		if err := rows.Scan(&r.id, &r.node, &r.version, &r.match); err != nil {
 			rows.Close()
 			return 0, err
 		}
@@ -224,7 +230,7 @@ func (s *Store) FailQuarantinedServers(ctx context.Context) (int, error) {
 	}
 	for _, r := range failed {
 		if err := insertEvent(ctx, s.Pool, EventServerFailed,
-			EventRef{ServerID: &r.id, NodeID: &r.node, VersionID: &r.version},
+			EventRef{ServerID: &r.id, NodeID: &r.node, VersionID: &r.version, MatchID: r.match},
 			map[string]any{"reason": "node_lost"}); err != nil {
 			return 0, err
 		}

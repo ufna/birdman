@@ -100,10 +100,11 @@ func applyReports(ctx context.Context, tx pgx.Tx, nodeID string, reports []Serve
 	for _, r := range reports {
 		reported = append(reported, r.ServerID)
 		var cur string
+		var matchID *string
 		err := tx.QueryRow(ctx, `
-			select state from servers
+			select state, match_id::text from servers
 			where id = $1::uuid and node_id = $2::uuid
-			for update`, r.ServerID, nodeID).Scan(&cur)
+			for update`, r.ServerID, nodeID).Scan(&cur, &matchID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			// Unknown or foreign server id — ignore (agent restart races,
 			// hostile agent). Reconcile owns the desired state.
@@ -163,8 +164,12 @@ func applyReports(ctx context.Context, tx pgx.Tx, nodeID string, reports []Serve
 		}
 		if next == "failed" && cur != "failed" {
 			id := r.ServerID
+			// MatchID included: an allocated one-shot that dies in its lobby
+			// (nobody joined, lobby-timeout exit) fails through THIS path, and
+			// downstream matchmakers correlate server_failed by match_id -- an
+			// event without it left the match listed forever (khl-3jb.14).
 			if err := insertEvent(ctx, tx, EventServerFailed,
-				EventRef{ServerID: &id, NodeID: &nodeID},
+				EventRef{ServerID: &id, NodeID: &nodeID, MatchID: matchID},
 				map[string]any{"reason": "agent_report", "agent_state": r.State}); err != nil {
 				return err
 			}
