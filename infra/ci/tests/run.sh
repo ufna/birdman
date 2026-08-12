@@ -861,6 +861,210 @@ vol_case "x-расширение не краснит, но и не прячет 
 	    <<: *common
 YML
 
+# ─── ГЕЙТ 5: ключи САМОГО СЕРВИСА (tracker #1107) ───────────────────────────
+# Третий и последний уровень роста форм. Гейт 4 закрыл сразу два — ключи
+# ДОКУМЕНТА и ключи ОПРЕДЕЛЕНИЯ тома (оба пришли с #1097); между ними оставался
+# уровень, на котором сторож знал ровно пять ключей сервиса, а ключ вне пятёрки
+# до него не доезжал ВОВСЕ. Замерено до перехода: `devices: [/srv/…:/dev/x]` рядом с
+# честным bind'ом давал RC=0 и «проверено маунтов: 1» — уверенное «всё хорошо»
+# при непроверенном хостовом пути.
+#
+# Закрыт белым списком, и это законно ровно потому же, почему на уровне
+# документа: набор конечен и закрыт схемой САМОГО compose. Замерено на v2.32.4
+# (client-side, демон не нужен): на неизвестном ключе `docker compose config`
+# отвечает «services.db Additional property выдумка is not allowed» и выходит
+# 15. Список в сторо́же промерен по этой же схеме: 95 кандидатов, 89 приняты (88
+# именованных ключей и расширение `x-…`), и четыре его списка дают ровно эти 88.
+#
+# Цена промерена тоже, и она НУЛЕВАЯ: восемь настоящих рендеров репозитория
+# (мастер; агент на боксе из одной и из двух нод — по два compose; мониторинг;
+# оверлей спок и хаб) используют 13 ключей сервиса, все понятые, и вывод
+# сторожа на них до и после перехода отличается только ДОПИСАННЫМИ строками про
+# ранее невидимые записи. Кейсы ниже пришпиливают ровно ту половину этой цены,
+# которую можно пришпилить отсюда: что `/dev/net/tun` и `env_file` 0600
+# root:root НЕ краснеют. Вторая половина замерена вручную и здесь только
+# записана: наивный вариант («devices — обычный маунт», «env_file судить
+# критерием #1072») давал на живых рендерах ТРИ ложных отказа — мониторинг и
+# оба режима оверлея.
+echo
+echo "── ключи сервиса: понятый набор закрыт, остальное роняет прогон"
+
+# — МУТАЦИЯ, ради которой карточка: devices протаскивает хостовый файл —
+vol_case "devices: 0600 root в контейнер не от root (#1107)" 1 "не годится контейнеру" <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    devices:
+	      - /srv/fixture/secret.conf:/dev/x
+	    volumes:
+	      - /srv/fixture/pg.conf:/etc/pg.conf:ro
+YML
+vol_case "devices: длинная форма протаскивает то же самое" 1 "не годится контейнеру" <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    devices:
+	      - source: /srv/fixture/secret.conf
+	        target: /dev/x
+	    volumes:
+	      - /srv/fixture/pg.conf:/etc/pg.conf:ro
+YML
+vol_case "devices: путь, который роль не кладёт" 1 "НИ ОДНА таска роли" --allow-no-mounts <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    devices:
+	      - /srv/чужое/thing:/dev/x
+YML
+# ЦЕНА ЭТОЙ ДВЕРИ, кейс 1: настоящая запись роли birdman_overlay. Узел под
+# /dev/ создаёт ядро, таской роли он не кладётся и класться не может —
+# пропуск сознательный, НАЗВАННЫЙ и посчитанный. Покраснеть тут значило бы
+# сломать обе сьюты оверлея (замерено на наивном варианте: ровно так и было).
+vol_case "devices: /dev/net/tun остаётся узлом устройства" 0 "узлов устройств пропущено: 1" <<-'YML'
+	services:
+	  overlay:
+	    image: birdman/overlay:dev
+	    devices:
+	      - /dev/net/tun:/dev/net/tun
+	    volumes:
+	      - /srv/fixture/pg.conf:/etc/pg.conf:ro
+YML
+
+# И обратная сторона того же: узел устройства НЕ засчитывается за bind-маунт.
+# Иначе compose без единого маунта, но с `devices:`, гасил бы громкий отказ
+# «bind-маунтов нет — они уехали из compose или рендер отдал не то» чужой
+# записью, и рендер, потерявший все маунты, проезжал бы зелёным.
+vol_case "устройство не гасит отказ «bind-маунтов нет»" 1 "нет bind-маунтов" <<-'YML'
+	services:
+	  overlay:
+	    image: birdman/overlay:dev
+	    devices:
+	      - /dev/net/tun:/dev/net/tun
+YML
+
+# — ДВЕРЬ 6: env_file/label_file — их читает САМ COMPOSE на хосте —
+# Критерий тут ДРУГОЙ, и это не поблажка, а замер: compose открывает файл сам
+# (v2.32.4 падает «env file … not found» ещё на `config`, без демона), а
+# контейнер его не открывает вовсе. Живой мониторинг ровно такой: grafana.env
+# лежит 0600 root:root и РАБОТАЕТ — судить его критерием #1072 значило бы
+# покраснеть на работающей раскладке.
+vol_case "env_file на путь, который роль не кладёт" 1 "НИ ОДНА таска роли" <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    env_file:
+	      - /srv/чужое/grafana.env
+	    volumes:
+	      - /srv/fixture/pg.conf:/etc/pg.conf:ro
+YML
+vol_case "label_file на путь, который роль не кладёт" 1 "НИ ОДНА таска роли" --allow-no-mounts <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    label_file: /srv/чужое/labels
+YML
+# ЦЕНА ЭТОЙ ДВЕРИ: 0600 root:root у env_file — НЕ дефект, и кейс стоит здесь
+# именно потому, что выглядит он как дефект #1072 дословно.
+vol_case "env_file 0600 root — не дефект, но и не молчание" 0 "читаемых самим compose: 1" <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    env_file:
+	      - /srv/fixture/secret.conf
+	    volumes:
+	      - /srv/fixture/pg.conf:/etc/pg.conf:ro
+YML
+# `required: false` — compose такой файл не требует (замерено): пропуск.
+vol_case "env_file required: false не требует пути" 0 "проверено маунтов: 1" <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    env_file:
+	      - path: /srv/чужое/optional.env
+	        required: false
+	    volumes:
+	      - /srv/fixture/pg.conf:/etc/pg.conf:ro
+YML
+
+# — ключи, которые ведут хостовый путь и НЕ разворачиваются: отказ —
+vol_case "build не проезжает молча" 1 "ХОСТОВЫЙ путь" --allow-no-mounts <<-'YML'
+	services:
+	  db:
+	    build:
+	      context: /srv/fixture
+YML
+vol_case "develop watch не проезжает молча" 1 "ХОСТОВЫЙ путь" --allow-no-mounts <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    develop:
+	      watch:
+	        - path: /srv/fixture
+	          action: sync
+	          target: /etc/pg
+YML
+
+# — САМ УРОВЕНЬ: неизвестный ключ сервиса роняет прогон —
+vol_case "неизвестный ключ сервиса" 1 "ключи сервиса: выдумка" <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    выдумка: 1
+	    volumes:
+	      - /srv/fixture/pg.conf:/etc/pg.conf:ro
+YML
+# Опечатка в законном ключе — тот же класс, и раньше она проезжала зелёной.
+vol_case "опечатка в законном ключе краснеет" 1 "ключи сервиса: volumez" <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumez:
+	      - /srv/fixture/secret.conf:/etc/pg.conf:ro
+	    volumes:
+	      - /srv/fixture/pg.conf:/etc/pg.conf:ro
+YML
+# ЦЕНА РЕШЕНИЯ: ровно те 13 ключей, что стоят в НАСТОЯЩИХ composes ролей
+# (замерено по восьми рендерам). Покраснеть тут значило бы сломать все пять
+# сьют разом — то есть лекарство хуже болезни.
+vol_case "13 ключей живых composes не краснеют" 0 "проверено маунтов: 1" <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    container_name: birdman-db
+	    command: ["postgres"]
+	    environment:
+	      PGDATA: /var/lib/postgresql/data
+	    ports:
+	      - "127.0.0.1:5433:5432"
+	    depends_on:
+	      - side
+	    restart: unless-stopped
+	    healthcheck:
+	      test: ["CMD-SHELL", "pg_isready"]
+	    cap_add: [NET_ADMIN]
+	    devices:
+	      - /dev/net/tun:/dev/net/tun
+	    env_file:
+	      - /srv/fixture/secret.conf
+	    volumes:
+	      - /srv/fixture/pg.conf:/etc/pg.conf:ro
+	  side:
+	    image: busybox:1.36
+	    network_mode: host
+YML
+# `x-…` у сервиса compose принимает (замерено), и пропускается он по той же
+# причине, что и на уровне документа: якорь раскрывает YAML-парсер до сторожа,
+# поэтому маунт из-под него обязан быть ПОЙМАН, а не пропущен вместе с ключом.
+vol_case "x- у сервиса не краснит, но и не прячет маунт" 1 "не годится контейнеру" <<-'YML'
+	x-common: &common
+	  - /srv/fixture/secret.conf:/etc/pg.conf:ro
+	services:
+	  db:
+	    image: postgres:16
+	    x-birdman: свой ключ
+	    volumes: *common
+YML
+
 # ─── САМ РАННЕР: упавший посредине обязан быть красным (tracker #1089) ──────
 # Гейт, который умеет молча зеленеть, не гейт вовсе — и однажды именно этим
 # кончилось: раннер умер на `set -u` посреди новой таблицы форм и отрапортовал
