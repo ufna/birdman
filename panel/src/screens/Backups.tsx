@@ -1,4 +1,6 @@
-// «Админка» (admin-only): вкладка «Бекапы» (Backups v1, docs/superpowers/specs/
+// Экран «Бекапы» (admin-only; nav-ключ nav.backups, /backups) — СОСЕДНИЙ с
+// «Админкой» пункт нави верхнего уровня, а не её секция (Backups v1,
+// docs/superpowers/specs/
 // 2026-07-13-backups-admin-v1-design.md). Дампы Postgres силами master:
 // статус последнего прогона, форма настроек (расписание + локальный ретеншн +
 // S3-оффсайт с write-only секретом), история прогонов и ручной run-now.

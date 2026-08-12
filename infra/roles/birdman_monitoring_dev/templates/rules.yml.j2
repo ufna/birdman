@@ -502,8 +502,8 @@ groups:
         annotations:
           summary: {% raw %}'BackupFailed: прогон бекапа падал за последний час'{% endraw %}
 
-          description: 'A backup run failed within the last hour — see Admin → Backups (history with the error text) and the backup_failed event. Keeps firing until an hour has passed since the error — by design (a rotation-immune gauge instead of increase over the non-monotonic runs_total).'
-          description_ru: 'Смотри Админку → Бекапы (история с текстом ошибки) и событие backup_failed. Горит до истечения часа после ошибки — осознанно (rotation-immune гейдж вместо increase по немонотонному runs_total).'
+          description: 'A backup run failed within the last hour — see the Backups screen in the panel (history with the error text) and the backup_failed event. Keeps firing until an hour has passed since the error — by design (a rotation-immune gauge instead of increase over the non-monotonic runs_total).'
+          description_ru: 'Смотри экран «Бекапы» в панели (история с текстом ошибки) и событие backup_failed. Горит до истечения часа после ошибки — осознанно (rotation-immune гейдж вместо increase по немонотонному runs_total).'
 
       # Дев-стенд v2 (spec 2026-08-10): pull-деплоер. Failed — была битая
       # сборка и откат; Stale — тики идут, но успеха нет (типично: каждый тик
