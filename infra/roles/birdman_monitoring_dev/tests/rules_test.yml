@@ -181,6 +181,157 @@ tests:
         alertname: ScrapeTargetMissing
         exp_alerts: []
 
+  # --- the scrape-freshness gate on the increase() rules (tracker #1063) ---
+  #
+  # WHAT IS BEING PINNED, AND WHAT CANNOT BE. On the dev stand the moment the
+  # master's target came back after a long outage, four alerts fired at once
+  # (three of them critical) off counters that had not moved at all: with no
+  # sample before the window, VictoriaMetrics reads the first returning sample
+  # as a rise from zero. That behaviour is MetricsQL-specific — measured on live
+  # VM v1.102.1 (a flat series appearing out of nowhere gives increase(...[5m])
+  # = 2), and measured NOT to happen under Prometheus, which is the engine
+  # running these very tests. So the BUG itself cannot be written as a red case
+  # here; what these cases pin is the MECHANISM of the cure, from both sides —
+  # the same honest boundary as the `duplicate output timeseries` case below.
+  #
+  # Note also that every OTHER case in this file carries no `up` series at all,
+  # so they all ride the second branch of the gate. That is not an oversight:
+  # it is the non-hiding guarantee (a series with no scrape identity keeps
+  # alerting) being exercised by every pre-existing case at once.
+
+  # BOTH SIDES ON ONE TIMELINE, which is the acceptance criterion of the card.
+  # A 4-minute outage (up=0, no counter samples), then the scrape returns. The
+  # "game" counter is flat at 2 — the accumulated total that produced the false
+  # critical. The "real" counter genuinely rises two minutes AFTER the return.
+  # Before the gate opens both are silent; once it opens, the real rise fires
+  # and the flat one still does not.
+  - interval: 1m
+    name: 'разрыв скрейпа: ложного залпа нет, а настоящий рост после возврата горит'
+    input_series:
+      - series: 'up{job="birdman-master",instance="127.0.0.1:9102"}'
+        values: '1 0 0 0 0 1 1 1 1 1 1 1'
+      - series: 'birdman_events_total{kind="crash_loop",project="game",job="birdman-master",instance="127.0.0.1:9102"}'
+        values: '2 _ _ _ _ 2 2 2 2 2 2 2'
+      - series: 'birdman_events_total{kind="crash_loop",project="real",job="birdman-master",instance="127.0.0.1:9102"}'
+        values: '3 _ _ _ _ 3 3 4 4 4 4 4'
+    alert_rule_test:
+      # t=8m: the rise IS inside the increase window and the ungated rule would
+      # fire — the up=0 sample at t=4m is still inside the gate window, so it
+      # does not. Delete the gate and this case goes red.
+      - eval_time: 8m
+        alertname: CrashLoop
+        exp_alerts: []
+      # t=9m: the bad scrape at t=4m has just left a bare 5m window — and the
+      # gate is 5m15s wide precisely so that it has NOT left the gate yet. This
+      # is the one-scrape sliver that leaked three false alerts on the live run;
+      # drop birdman_scrape_gate_margin to 0 and this case goes red.
+      - eval_time: 9m
+        alertname: CrashLoop
+        exp_alerts: []
+      # t=10m: the gate opens, and the real rise is STILL inside the increase
+      # window — the windows are deliberately the same length (plus that one
+      # scrape), so nothing is lost, only delayed to the edge.
+      #
+      # The 1.25 is Prometheus EXTRAPOLATING increase() over a window the
+      # samples do not fully cover (4 of 5 minutes, because the gap ate the
+      # rest). MetricsQL does not extrapolate, so on the stand this summary
+      # reads a plain 1 — the discrepancy is the test engine, not the rule.
+      - eval_time: 10m
+        alertname: CrashLoop
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              kind: crash_loop
+              project: real
+              job: birdman-master
+              instance: 127.0.0.1:9102
+            exp_annotations:
+              summary: 'CrashLoop: проект real, событий crash_loop за 5м: 1.25'
+              description: 'A bad release is likely — roll back (ops.md §6 runbook 3).'
+              description_ru: 'Вероятен плохой релиз — rollback (ops.md §6 runbook 3).'
+
+  # The same gate on a rule with a DIFFERENT window: AgentUpgradeFailed reads
+  # [10m], so its gate reads up[10m] too. An 8-minute outage, a real rise two
+  # minutes after the return — silent at 13m (the ungated rule would fire),
+  # firing at 19m when the last bad scrape leaves the 10m window.
+  - interval: 1m
+    name: 'гейт масштабируется вместе с окном правила (AgentUpgradeFailed, 10м)'
+    input_series:
+      - series: 'up{job="birdman-master",instance="127.0.0.1:9102"}'
+        values: '1 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1'
+      - series: 'birdman_events_total{kind="agent_upgrade_failed",project="game",job="birdman-master",instance="127.0.0.1:9102"}'
+        values: '2 _ _ _ _ _ _ _ _ 2 2 3 3 3 3 3 3 3 3 3'
+    alert_rule_test:
+      - eval_time: 13m
+        alertname: AgentUpgradeFailed
+        exp_alerts: []
+      - eval_time: 19m
+        alertname: AgentUpgradeFailed
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              kind: agent_upgrade_failed
+              project: game
+              job: birdman-master
+              instance: 127.0.0.1:9102
+            exp_annotations:
+              summary: 'AgentUpgradeFailed: проект game, неудачных апгрейдов агента за 10м: 1.1111111111111112'
+              description: 'Agent did not come back online with the new version (agent.md §7; rollback via ansible).'
+              description_ru: 'Агент не вышел на связь с новой версией (agent.md §7; откат — ansible).'
+
+  # THE NON-HIDING BRANCH, explicitly. A counter that carries a scrape identity
+  # for which NO `up` series exists must keep alerting — otherwise the cure is
+  # worse than the disease and the gate silently kills the rule. Measured on
+  # live VM: with only the first branch this series returned nothing; with the
+  # `unless on (job, instance) up` branch it returns its increase. Deleting that
+  # branch turns this case red.
+  - interval: 1m
+    name: 'серии up нет вовсе — алерт всё равно горит (не-скрывающая ветка)'
+    input_series:
+      - series: 'birdman_events_total{kind="crash_loop",project="orphan",job="pushed",instance="nowhere"}'
+        values: '0 0 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: CrashLoop
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              kind: crash_loop
+              project: orphan
+              job: pushed
+              instance: nowhere
+            exp_annotations:
+              summary: 'CrashLoop: проект orphan, событий crash_loop за 5м: 1'
+              description: 'A bad release is likely — roll back (ops.md §6 runbook 3).'
+              description_ru: 'Вероятен плохой релиз — rollback (ops.md §6 runbook 3).'
+
+  # The gate must not become a blanket "any bad scrape anywhere mutes
+  # everything": it is matched per target. A broken node job must not mute the
+  # master's alerts.
+  - interval: 1m
+    name: 'гейт пер-таргетный: сломанный чужой джоб не глушит алерты мастера'
+    input_series:
+      - series: 'up{job="birdman-master",instance="127.0.0.1:9102"}'
+        values: '1+0x10'
+      - series: 'up{job="node",instance="127.0.0.1:4027"}'
+        values: '0+0x10'
+      - series: 'birdman_events_total{kind="crash_loop",project="game",job="birdman-master",instance="127.0.0.1:9102"}'
+        values: '0 0 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: CrashLoop
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              kind: crash_loop
+              project: game
+              job: birdman-master
+              instance: 127.0.0.1:9102
+            exp_annotations:
+              summary: 'CrashLoop: проект game, событий crash_loop за 5м: 1'
+              description: 'A bad release is likely — roll back (ops.md §6 runbook 3).'
+              description_ru: 'Вероятен плохой релиз — rollback (ops.md §6 runbook 3).'
+
   # --- BufferEmptyReady: the dead-alert mechanism (#960) ---
 
   # WITNESS of the defect. A prod fleet with servers but ZERO ready ones: the
