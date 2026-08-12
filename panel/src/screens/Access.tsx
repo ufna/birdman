@@ -1,12 +1,18 @@
 // Админка (П2, admin-only; nav-ключ nav.access — маршрут/гейт исторический
-// /access не переименовывали, T6 меняет только видимые EN/RU-значения):
-// секция «API-ключи» (GET/POST/DELETE /v1/apikeys) — таблица (name, scopes,
-// created, active/revoked), создание диалогом с чекбоксами скоупов (секрет
-// показывается РОВНО один раз, после закрытия вычищается из памяти), отзыв
-// (confirm + 409 last_admin_key) и purge отозванных (hard-delete строки,
-// ?purge=true — см. RevokeAction/PurgeAction ниже); секция «Реестры»
-// (RegistriesSection) — приватные registry-креды, см. её файл. Экран скрыт
-// из навигации/роутинга для не-admin (эндпоинты admin-scoped).
+// /access не переименовывали, T6 меняет только видимые EN/RU-значения).
+// ЧЕТЫРЕ секции, ниже в порядке рендера; собственного гейта нет ни у одной —
+// admin-only гейтится экран целиком, поэтому число не зависит ни от прав, ни
+// от данных:
+//   1. «API-ключи» (GET/POST/DELETE /v1/apikeys) — таблица (name, scopes,
+//      created, active/revoked), создание диалогом с чекбоксами скоупов
+//      (секрет показывается РОВНО один раз, после закрытия вычищается из
+//      памяти), отзыв (confirm + 409 last_admin_key) и purge отозванных
+//      (hard-delete строки, ?purge=true — см. RevokeAction/PurgeAction ниже);
+//   2. «Проекты» (ProjectsSection) — CRUD проектов, см. её файл;
+//   3. «Окружения» (EnvironmentsSection) — CRUD окружений ВЫБРАННОГО проекта,
+//      см. её файл;
+//   4. «Реестры» (RegistriesSection) — приватные registry-креды, см. её файл.
+// Экран скрыт из навигации/роутинга для не-admin (эндпоинты admin-scoped).
 
 /* eslint-disable react-refresh/only-export-components -- SCOPE_OPTIONS/BINDABLE_SCOPES/canBindScopes — таблица скоупов и её предикаты рядом с экраном, покрыты юнит-тестами напрямую. Правило про гранулярность Fast Refresh в dev-сервере, не про корректность; разносить файл по модулям ради него дороже, чем оно стоит. Политика — в eslint.config.js. */
 
