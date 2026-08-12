@@ -168,6 +168,29 @@ func TestAllocFailuresNotDroppedOnQueryFailure(t *testing.T) {
 	if _, err := st.Pool.Exec(ctx, `alter table projects rename to projects_gone`); err != nil {
 		t.Fatalf("rename projects: %v", err)
 	}
+
+	// ЛИШНИЙ СКРЕЙП — не украшение, а условие, при котором тест вообще что-то
+	// проверяет. Уборка отстаёт от скрейпа ровно на один, как и заведение
+	// (вектор зарегистрирован отдельным коллектором и успевает отдать свою
+	// половину выдачи до того, как dbCollector дойдёт до preinitAllocFailures);
+	// тот же идиом стоит в трёх соседних тестах этого файла и здесь был забыт.
+	// Без него проверка ниже читала бы выдачу ПЕРВОГО Gather'а — состояние
+	// вектора ДО уборки, — и тест оставался зелёным даже при снятом `return`
+	// после `c.log.Error` в preinitAllocFailures, то есть не сторожил ничего.
+	_ = gaugeSeriesPresent(t, m.Registry, "birdman_allocation_failures_total", map[string]string{
+		"reason": "no_capacity", "project": f.Project,
+	})
+
+	// Радиус ошибки здесь — ВЕСЬ вектор, а не одна серия: пустой список живых
+	// снимает project за project'ом всё, что в векторе есть, и для increase()
+	// это одновременный сброс счётчика у всех проектов сразу. Поэтому сначала
+	// проверяем сам факт существования серии — счётчик, стёртый целиком, иначе
+	// был бы неотличим от опечатки в лейблах.
+	if !gaugeSeriesPresent(t, m.Registry, "birdman_allocation_failures_total", map[string]string{
+		"reason": "no_capacity", "project": f.Project,
+	}) {
+		t.Fatal("сбой запроса проектов снёс серию живого проекта — уборка по пустому списку живых стирает весь вектор")
+	}
 	if v := counterValue(t, m.Registry, "birdman_allocation_failures_total", map[string]string{
 		"reason": "no_capacity", "project": f.Project,
 	}); v != 2 {
