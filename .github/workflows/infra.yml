@@ -1,0 +1,74 @@
+name: infra
+
+# Гейт против РАЗОРВАННОГО приземления инфра-правки (tracker #1062).
+#
+# Дев-стенд катает pull-деплоер: каждый пуш в main авто-выкатывается, но выкат
+# — это БИНАРЬ, ansible деплоер не гоняет. Поэтому коммит, меняющий и код, и
+# роль, приземляется наполовину: код на боксе новый, конфигурация старая, пока
+# человек не прогонит плейбук руками. Замеренный случай — #1003 (9a5db06):
+# /metrics мастера уехал на свой листенер в коде И в роли одним коммитом,
+# бинарь приехал, роль нет, и стенд простоял слепым по метрикам мастера часами.
+#
+# Этот workflow разрыв НЕ закрывает — он закрывает его невидимость (громкую
+# половину сделал ScrapeTargetDown из #1061). Коммит, меняющий то, что ansible
+# СТАВИТ, обязан сказать об этом трейлером Needs-Ansible, и тогда список долгов
+# владельца собирается одной командой:
+#
+#   git log --grep '^Needs-Ansible:' <sha последнего прогона>..main
+#
+# До этого workflow на infra/** не гонялся НИ ОДИН прогон — ни один из семи.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'infra/**'
+      - '.github/workflows/infra.yml'
+  pull_request:
+    paths:
+      - 'infra/**'
+      - '.github/workflows/infra.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  needs-ansible:
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 — гейт читает диапазон коммитов пуша, а не только вершину.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # PyYAML: карта playbook→роли парсится из самих infra/playbooks/*.yml,
+      # чтобы в скрипте не заводилась таблица, которой суждено разъехаться.
+      - name: Install PyYAML
+        run: python3 -m pip install --quiet pyyaml
+
+      # Тесты гейта гоняются ДО него самого: гейт без тестов — это ровно тот
+      # «выглядит покрытым» отказ, против которого весь этот ряд карточек.
+      - name: Test the gate
+        run: ./infra/ci/tests/run.sh
+
+      - name: Check Needs-Ansible trailers
+        env:
+          BEFORE: ${{ github.event.before }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          # Диапазон пуша, а не одна вершина: пуш может нести несколько
+          # коммитов, и долг заявляет КАЖДЫЙ, кто его создал.
+          base=""
+          if [ -n "${BASE:-}" ]; then
+            base="$BASE"
+          elif [ -n "${BEFORE:-}" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            base="$BEFORE"
+          fi
+          # Первый пуш ветки, force-push, переписанная история: базы нет или она
+          # уже недостижима — проверяем хотя бы вершину, молча не пропускаем.
+          if [ -z "$base" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            echo "· базы диапазона нет — проверяю только вершину $HEAD_SHA"
+            exec python3 infra/ci/needs-ansible-check.py "$HEAD_SHA"
+          fi
+          exec python3 infra/ci/needs-ansible-check.py --range "${base}..${HEAD_SHA}"
