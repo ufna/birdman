@@ -33,6 +33,14 @@ import { Logs } from '../screens/Logs';
 /** Привязанная сессия: readonly ЕСТЬ, и отказ приходит всё равно — ровно та
  *  комбинация, на которой старый диагноз был ложным. */
 const BOUND: SessionInfo = { scopes: ['readonly'], name: 'ro-bound', binding: { project: 'game', env: 'dev' } };
+/** Привязанный ключ, ДОСТАЮЩИЙ до кнопки действия: сценарий #1000 — readonly+deploy.
+ *  До #1022 совпадал с BOUND по поведению, теперь нет: readonly-only ключ на
+ *  поверхности ДЕЙСТВИЯ получает честный текст про скоуп, а не про привязку. */
+const BOUND_DEPLOY: SessionInfo = {
+  scopes: ['readonly', 'deploy'],
+  name: 'rw-bound',
+  binding: { project: 'game', env: 'dev' },
+};
 /** Непривязанная — поле binding master не присылает вовсе (additive). */
 const UNBOUND: SessionInfo = { scopes: ['readonly'], name: 'ro-global' };
 
@@ -153,7 +161,7 @@ describe('ConfirmDialog: 403 на ДЕЙСТВИИ тоже объясняетс
   }
 
   it('привязанная сессия → называет привязку', async () => {
-    renderDialog(BOUND);
+    renderDialog(BOUND_DEPLOY);
     expect(await screen.findByText(/your key is bound to game\/dev/)).toBeTruthy();
     expect(document.body.textContent).not.toContain(CONFIRM_FORBIDDEN_EN);
     expect(document.body.textContent).not.toContain('key is bound to game/dev:'); // без сырого текста мастера
@@ -198,7 +206,7 @@ describe('ConfirmDialog: 403 на ДЕЙСТВИИ тоже объясняетс
   }
 
   it('override с веткой на 403 НЕ отключает честный диагноз привязки', async () => {
-    renderWithOverride(BOUND);
+    renderWithOverride(BOUND_DEPLOY);
     expect(await screen.findByText(/your key is bound to game\/dev/)).toBeTruthy();
     expect(document.body.textContent).not.toContain('ПЕРЕХВАЧЕНО override-ом');
   });
@@ -211,9 +219,84 @@ describe('ConfirmDialog: 403 на ДЕЙСТВИИ тоже объясняетс
   it('и на не-403 override главнее общего словаря даже у привязанного ключа', async () => {
     // Привязка отменяет override ТОЛЬКО на 403 — на своём коде поверхность
     // по-прежнему главная, иначе это была бы уже другая потеря.
-    renderWithOverride(BOUND, 409);
+    renderWithOverride(BOUND_DEPLOY, 409);
     expect(await screen.findByText(/State conflict/)).toBeTruthy();
     expect(document.body.textContent).not.toContain('is bound to game/dev');
+  });
+});
+
+describe('403 по СКОУПУ не выдаётся за 403 по привязке (tracker #1022)', () => {
+  // Master отдаёт 403 из ДВУХ мест, и различить их панель может по ПОРЯДКУ
+  // гейтов, а не по прозе detail: requireScope — обёртка НАД хендлером, то
+  // есть срабатывает раньше narrowScope, и пускает при scope ИЛИ admin.
+  // Значит нет нужного скоупа ⇒ отказ пришёл от гейта скоупа, привязка ни при
+  // чём. До #1022 хук смотрел только на наличие binding и приписывал привязке
+  // ВСЁ: оператор шёл менять привязку вместо того, чтобы выдать себе readonly.
+
+  /** И привязан, И без readonly — сочетание, на котором старый диагноз врал.
+   *  Достижимо штатно: POST /v1/session скоупа не требует (panel.md §1 п.5). */
+  const BOUND_NO_READ: SessionInfo = {
+    scopes: ['allocate'],
+    name: 'alloc-bound',
+    binding: { project: 'game', env: 'dev' },
+  };
+
+  it('ЧТЕНИЕ: привязанный ключ БЕЗ readonly → текст про СКОУП, не про привязку', () => {
+    renderAs(<ErrorNote error={forbiddenError()} />, BOUND_NO_READ);
+    expect(screen.getByText(new RegExp(FORBIDDEN_EN.slice(0, 30)))).toBeTruthy();
+    expect(document.body.textContent).not.toContain('is bound to game/dev');
+  });
+
+  it('ЧТЕНИЕ: привязанный ключ С readonly → по-прежнему про привязку (#1000 цел)', () => {
+    renderAs(<ErrorNote error={forbiddenError()} />, BOUND);
+    expect(screen.getByText(/your key is bound to game\/dev/)).toBeTruthy();
+  });
+
+  it('ЧТЕНИЕ: admin засчитывается за readonly — master пускает по нему тоже', () => {
+    const BOUND_ADMIN: SessionInfo = {
+      scopes: ['admin'],
+      name: 'admin-bound',
+      binding: { project: 'game', env: 'dev' },
+    };
+    renderAs(<ErrorNote error={forbiddenError()} />, BOUND_ADMIN);
+    expect(screen.getByText(/your key is bound to game\/dev/)).toBeTruthy();
+  });
+
+  it('ДЕЙСТВИЕ: привязанный readonly-БЕЗ-deploy → текст действия, не привязка', async () => {
+    renderAs(
+      <ConfirmButton
+        label="Promote"
+        title="t"
+        description="d"
+        confirmLabel="OK"
+        onConfirm={async () => {
+          throw new ApiError(403, 'forbidden', 'scope deploy required');
+        }}
+      />,
+      BOUND,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Promote' }));
+    fireEvent.click(screen.getByRole('button', { name: 'OK' }));
+    expect(await screen.findByText("You don't have permission for this action.")).toBeTruthy();
+    expect(document.body.textContent).not.toContain('is bound to game/dev');
+  });
+
+  it('ДЕЙСТВИЕ: привязанный С deploy → привязка (та самая комбинация #1000)', async () => {
+    renderAs(
+      <ConfirmButton
+        label="Promote"
+        title="t"
+        description="d"
+        confirmLabel="OK"
+        onConfirm={async () => {
+          throw new ApiError(403, 'forbidden', 'key is bound to game/dev');
+        }}
+      />,
+      BOUND_DEPLOY,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Promote' }));
+    fireEvent.click(screen.getByRole('button', { name: 'OK' }));
+    expect(await screen.findByText(/your key is bound to game\/dev/)).toBeTruthy();
   });
 });
 

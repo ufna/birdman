@@ -6,7 +6,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { api, ApiError } from './api';
-import type { KeyBinding, SessionInfo } from './api';
+import type { KeyBinding, Scope, SessionInfo } from './api';
 import { apiErrorMessage } from './apiError';
 import { useT } from './i18n';
 import type { I18nContextValue } from './i18n';
@@ -129,13 +129,37 @@ export function useKeyBinding(): KeyBinding | undefined {
  * недоступны»: серверное сужение (#994) вернёт привязанному оператору его
  * собственные данные, и текст обязан пережить это, не превратившись во вторую
  * ложь.
+ *
+ * `need` — скоуп, которого ТРЕБУЕТ эта поверхность (tracker #1022). Без него
+ * хук объяснял привязкой ЛЮБОЙ 403 у привязанного ключа, хотя master отдаёт
+ * 403 из ДВУХ независимых мест, и второе про скоупы:
+ *
+ *   1. `requireScope` (`master/internal/httpapi/auth.go:120-138`) —
+ *      `403 forbidden "scope <name> required"`;
+ *   2. `narrowScope` fail-closed — `403 forbidden "key is bound to …"`.
+ *
+ * Различить их панель МОЖЕТ, и не по прозе `detail` (её в UI не носят, #996), а
+ * по ПОРЯДКУ гейтов: `requireScope` — обёртка НАД хендлером, то есть работает
+ * раньше `narrowScope`, и пускает при наличии либо запрошенного скоупа, либо
+ * `admin` — ровно то, что считают canRead/canDeploy/canAdmin рядом. Значит нет
+ * нужного скоупа ⇒ 403 пришёл от первого гейта и привязка ни при чём; скоуп
+ * есть ⇒ первый гейт пройден и остаётся только второй. Ключу, который И
+ * привязан, И без readonly, панель до этого говорила «ключ привязан к
+ * game/dev», и оператор шёл менять привязку вместо того, чтобы выдать себе
+ * readonly.
+ *
+ * Дефолт `readonly` — для ЧТЕНИЙ (их большинство); поверхность ДЕЙСТВИЯ обязана
+ * попросить свой (`deploy`, `admin`), иначе снова назовёт не ту причину.
  */
-export function useBindingRefusal(): string | undefined {
+export function useBindingRefusal(need: Scope = 'readonly'): string | undefined {
   const { t } = useT();
-  const binding = useKeyBinding();
-  return binding === undefined
-    ? undefined
-    : t('ui.err.boundKey', { project: binding.project, env: binding.env });
+  const { session } = useSession();
+  if (session == null) return undefined;
+  const binding = session.binding;
+  if (binding === undefined) return undefined;
+  // Скоупа нет — честная причина отказа СКОУП, а не привязка (см. выше).
+  if (!session.scopes.includes(need) && !session.scopes.includes('admin')) return undefined;
+  return t('ui.err.boundKey', { project: binding.project, env: binding.env });
 }
 
 /**

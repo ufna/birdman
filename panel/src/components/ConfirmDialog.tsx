@@ -51,7 +51,7 @@ export function ConfirmButton({
   // «Недостаточно прав для этого действия» привязанному ключу называет скоуп,
   // хотя отказ пришёл по привязке (`requireBinding` — deploy/rollback/promote,
   // master §6). Привязанный ключ с deploy достигает этих кнопок штатно.
-  const bound = useBindingRefusal();
+  const bound = useBindingRefusal('deploy');
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);

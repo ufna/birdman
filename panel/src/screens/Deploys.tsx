@@ -355,7 +355,7 @@ function PromoteDialog({
   const toast = useToast();
   // Промоут привязанного ключа отказывает ВСЕГДА (master deploy.go:164 —
   // requireBinding на целевой env), поэтому 403 тут штатный путь, а не край.
-  const bound = useBindingRefusal();
+  const bound = useBindingRefusal('deploy');
   const [open, setOpen] = useState(false);
   const [target, setTarget] = useState(prodEnvs[0]?.name ?? '');
   const [pending, setPending] = useState(false);
@@ -469,7 +469,7 @@ function EnvSettingsCard({ env, onSaved }: { env: Environment; onSaved: () => vo
   // PATCH окружения гейтится admin'ом, а admin с привязкой несовместим
   // (store/apikeys.go:78) — bound здесь всегда undefined. Передаём его всё
   // равно: поверхность не должна знать про сегодняшнюю форму гейта мастера.
-  const bound = useBindingRefusal();
+  const bound = useBindingRefusal('deploy');
   const [autoDeploy, setAutoDeploy] = useState(env.auto_deploy);
   const [retention, setRetention] = useState(String(env.retention_keep));
   const [pending, setPending] = useState(false);

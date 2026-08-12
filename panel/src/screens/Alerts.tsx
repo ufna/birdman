@@ -290,7 +290,7 @@ function MuteButton({
   const { t } = useT();
   const fmt = useFormat();
   const toast = useToast();
-  const bound = useBindingRefusal();
+  const bound = useBindingRefusal('admin');
   const [open, setOpen] = useState(false);
   const [note, setNote] = useState('');
   const [mode, setMode] = useState<MutePreset | 'custom'>('8h');
