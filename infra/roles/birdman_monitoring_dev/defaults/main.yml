@@ -13,6 +13,22 @@ birdman_alertmanager_image: prom/alertmanager:v0.27.0
 birdman_alert_sink_image: python:3.12-alpine
 birdman_pg_image: postgres:16          # throwaway для restore-drill (совпадает с сервером)
 
+# uid, под которым бежит контейнер alertmanager'а (tracker #1072). Переменная
+# существует не для настройки, а чтобы число не стояло в таске голым: образ
+# выше намеренно бежит НЕ от root (`prom/alertmanager:v0.27.0` → nobody,
+# uid=65534 — `docker run --rm --entrypoint id <образ> -u`), а его конфиг
+# кладётся 0600 (может содержать Discord-webhook). 0600 + владелец root =
+# «permission denied» на старте, то есть доставка алертов не работает ВООБЩЕ и
+# молча — ровно это и случилось: контейнер стоял в краш-лупе с рождения,
+# RestartCount 2380 за ~40 часов, alerts.log заморожен, история панели пуста.
+# Поэтому владелец файла = uid контейнера (root читает и так, DAC-bypass), а
+# режим остаётся 0600.
+#
+# ПОДНЯЛ ВЕРСИЮ ОБРАЗА — ПЕРЕПРОВЕРЬ ЭТОТ uid. Забыть нечем: сьют роли
+# (tests/mounted_config_access.py) сверяет владельца немирочитаемых маунтов с
+# настоящим uid образа, а не с таблицей в тесте.
+birdman_alertmanager_uid: "65534"
+
 # --- каталоги ---
 birdman_monitoring_dir: /opt/birdman/monitoring        # compose.yml
 birdman_monitoring_conf_dir: /etc/birdman/monitoring   # шаблонные конфиги (ro-маунты)

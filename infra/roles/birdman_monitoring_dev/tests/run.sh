@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Unit tests for the vmalert rules of this role — LOCAL only, no host is
-# touched and no playbook runs: the template is rendered with the role defaults
-# into a temp dir and the rules are evaluated against synthetic series.
+# Unit tests for this role — LOCAL only, no host is touched and no playbook
+# runs: the templates are rendered with the role defaults into a temp dir, the
+# vmalert rules are evaluated against synthetic series, and the config mounts of
+# the rendered compose file are checked for being readable by their containers.
 #
 #   ./infra/roles/birdman_monitoring_dev/tests/run.sh
 #
@@ -73,5 +74,29 @@ grep -q 'absent_over_time(up{job="birdman-agent"}' "$work/two/rules.yml" \
 	|| fail "ScrapeTargetMissing потерял джоб первой ноды"
 cp "$here/rules_multinode_test.yml" "$work/two/"
 check_and_test "$work/two" rules_multinode_test.yml
+
+# ── конфиг обязан читаться контейнером, в который смонтирован (tracker #1072) ─
+# Роль клала alertmanager.yml 0600 root:root в контейнер, который бежит от
+# nobody: он падал на «permission denied» и стоял в краш-лупе с рождения, а
+# роль отрабатывала зелёно. Проверять это глазами больше не надо.
+#
+# PyYAML: у CI он приезжает вместе с ansible-core в тот же python3, но у
+# контрибьютора ansible может стоять из brew/pipx со своим интерпретатором —
+# тогда берём его. Иначе отказ выглядел бы как поломка теста, а не как
+# отсутствие зависимости.
+pick_python() {
+	local cand
+	for cand in "${BIRDMAN_PYTHON:-}" python3 python; do
+		[ -n "$cand" ] || continue
+		command -v "$cand" >/dev/null 2>&1 || continue
+		"$cand" -c 'import yaml' >/dev/null 2>&1 && { echo "$cand"; return 0; }
+	done
+	cand="$(head -1 "$(command -v ansible-playbook)" | sed 's|^#!||')"
+	[ -x "$cand" ] && "$cand" -c 'import yaml' >/dev/null 2>&1 && { echo "$cand"; return 0; }
+	return 1
+}
+echo "── mounted config access"
+py="$(pick_python)" || fail "не нашёл python с PyYAML (python3 -m pip install pyyaml)"
+"$py" "$here/mounted_config_access.py" "$work/one/compose.yml"
 
 echo "ALL OK"

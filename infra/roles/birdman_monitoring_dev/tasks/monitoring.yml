@@ -157,12 +157,18 @@
     group: root
     mode: "0755"
 
-- name: Render alertmanager config (0600 — may contain Discord webhook)
+# Владелец — uid КОНТЕЙНЕРА, а не root (tracker #1072). Файл монтируется ro в
+# alertmanager, который бежит от nobody, а 0600 root:root даёт ему «open
+# /etc/alertmanager/alertmanager.yml: permission denied» — то есть контейнер
+# вообще не стартует, а вместе с ним не работает всё звено доставки, и молча.
+# 0600 при этом остаётся: секрет webhook'а не должен становиться мирочитаемым,
+# а root файл читает и так. Почему uid вынесен в переменную — defaults/main.yml.
+- name: Render alertmanager config (0600, owned by the container's uid)
   ansible.builtin.template:
     src: alertmanager.yml.j2
     dest: "{{ birdman_monitoring_conf_dir }}/alertmanager/alertmanager.yml"
-    owner: root
-    group: root
+    owner: "{{ birdman_alertmanager_uid }}"
+    group: "{{ birdman_alertmanager_uid }}"
     mode: "0600"
   no_log: true
   notify: Restart birdman-alertmanager

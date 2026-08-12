@@ -1,8 +1,8 @@
 ---
-# Рендер правил vmalert и скрейп-конфига этой роли — локально, без хоста и без
-# плейбука. Переменные берутся ТОЛЬКО из defaults/main.yml роли: правила
-# обязаны быть валидны с теми порогами, которые оператор получает до любых
-# override'ов.
+# Рендер правил vmalert, скрейп-конфига и compose-файла этой роли — локально,
+# без хоста и без плейбука. Переменные берутся ТОЛЬКО из defaults/main.yml
+# роли: правила обязаны быть валидны с теми порогами, которые оператор получает
+# до любых override'ов.
 #
 # Играется настоящим ansible'ом, а не переписанным рендерером (tracker #1065):
 # список джобов скрейпа больше не константа в defaults, он ВЫВОДИТСЯ из нод
@@ -30,7 +30,11 @@
     - name: Derive the scrape jobs (the role's own task file)
       ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/scrape_jobs.yml"
 
-    - name: Render rules and scrape config
+    # compose.yml здесь же (tracker #1072): маунты конфигов в контейнеры
+    # проверяет mounted_config_access.py, и брать их он обязан из НАСТОЯЩЕГО
+    # рендера — в шаблоне пути собраны из переменных, а разбирать j2 глазами
+    # или регулярками значило бы завести вторую правду о раскладке.
+    - name: Render rules, scrape config and the compose file
       ansible.builtin.template:
         src: "{{ playbook_dir }}/../templates/{{ item }}.j2"
         dest: "{{ birdman_out }}/{{ item }}"
@@ -38,3 +42,4 @@
       loop:
         - rules.yml
         - scrape.yml
+        - compose.yml
