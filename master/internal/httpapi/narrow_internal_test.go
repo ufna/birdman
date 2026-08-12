@@ -208,3 +208,53 @@ func TestNarrowProbeVerdictExpires(t *testing.T) {
 		t.Fatalf("срок годности отказа = %s, want ≤%s", got, narrowProbeFailTTL)
 	}
 }
+
+// TestNarrowedQueriesIgnoreClientScopeParams (tracker #1014) пиннит ИСТОЧНИК
+// пары: она приходит ТОЛЬКО из привязки ключа и ни из чего больше.
+//
+// Батарея #994 проверяла, что клиентские `extra_*` отброшены, но `?project=` /
+// `?env=` не слал ни один тест — то есть мутация «взять пару из
+// query-параметра, раз уж она пришла» проходила ВСЮ батарею зелёной и при этом
+// открывала чтение чужого игрового вывода: ключ, привязанный к `alpha/dev`,
+// получал 200 на `?project=beta&env=dev` со строкой чужого стрима.
+//
+// Проверка построена как СРАВНЕНИЕ, а не как «должно быть равно константе»:
+// сужение с параметрами обязано совпасть байт-в-байт с сужением без них.
+// Такую проверку нельзя случайно «починить», подкрутив ожидаемую строку.
+func TestNarrowedQueriesIgnoreClientScopeParams(t *testing.T) {
+	base := url.Values{"query": {`{server_id="s1"}`}, "start": {"0"}, "end": {"10"}, "limit": {"100"}}
+	spiked := url.Values{}
+	for k, v := range base {
+		spiked[k] = append([]string(nil), v...)
+	}
+	// Всё, чем клиент мог бы попытаться назвать ЧУЖУЮ пару.
+	for k, v := range map[string]string{
+		"project": "beta", "env": "prod",
+		"scope": "beta/prod", "project_id": "beta", "tenant": "beta",
+	} {
+		spiked.Set(k, v)
+	}
+
+	gotBase := narrowedLogsQuery(base, "alpha", "dev")
+	gotSpiked := narrowedLogsQuery(spiked, "alpha", "dev")
+	if gotBase.Encode() != gotSpiked.Encode() {
+		t.Fatalf("logs: запрос с ?project=/?env= отличается от запроса без них:\n без: %s\n  c: %s",
+			gotBase.Encode(), gotSpiked.Encode())
+	}
+	if v := gotSpiked.Get("extra_stream_filters"); v != `{project="alpha",env="dev"}` {
+		t.Fatalf("logs: extra_stream_filters = %q — пара взята НЕ из привязки", v)
+	}
+
+	baseM := url.Values{"query": {"up"}, "step": {"15"}}
+	spikedM := url.Values{"query": {"up"}, "step": {"15"}, "project": {"beta"}, "env": {"prod"}}
+	gotBaseM := narrowedMetricsQuery(baseM, "alpha", "dev")
+	gotSpikedM := narrowedMetricsQuery(spikedM, "alpha", "dev")
+	if gotBaseM.Encode() != gotSpikedM.Encode() {
+		t.Fatalf("metrics: запрос с ?project=/?env= отличается от запроса без них:\n без: %s\n  c: %s",
+			gotBaseM.Encode(), gotSpikedM.Encode())
+	}
+	if want := []string{"project=alpha", "env=dev"}; len(gotSpikedM["extra_label"]) != 2 ||
+		gotSpikedM["extra_label"][0] != want[0] || gotSpikedM["extra_label"][1] != want[1] {
+		t.Fatalf("metrics: extra_label = %q, want %q — пара взята НЕ из привязки", gotSpikedM["extra_label"], want)
+	}
+}

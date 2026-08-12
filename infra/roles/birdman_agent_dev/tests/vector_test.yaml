@@ -1,0 +1,156 @@
+# Юнит-тесты VRL-трансформа `enrich` из vector.yaml.j2 — ГРАНИЦА ДОСТУПА, а не
+# косметика (tracker #1014, хвост #994).
+#
+# Пара (project, env) вешается СТРИМ-лейблами именно здесь, из ПУТИ файла, и
+# именно по этим лейблам master сужает запрос привязанного ключа
+# (`extra_stream_filters`, master.md §6). То есть кто попадёт в чужой лог —
+# решает этот регекс, а покрытия у него не было никакого: molecule в репо нет,
+# а живые тесты master'а кладут строки в VictoriaLogs напрямую, минуя vector.
+#
+# Гоняется настоящим бинарём vector'а (`vector test`, образ пинится ролью) —
+# не переписанным на другом языке регексом: проверять надо ту же машинку,
+# которая крутится на ноде.
+tests:
+  # 1. Размеченный путь: пара едет в лейблы, id — из имени файла.
+  - name: "labelled path — the owner pair reaches the stream labels"
+    inputs:
+      - insert_at: enrich
+        type: log
+        log_fields:
+          file: "/var/log/birdman/servers/game/prod/srv-1.log"
+          message: "dedik line"
+    outputs:
+      - extract_from: enrich
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.project, "game")
+              assert_eq!(.env, "prod")
+              assert_eq!(.server_id, "srv-1")
+
+  # 2. ЯКОРЬ. Плоский путь дедика, запущенного до разметки. Без `^` и полного
+  # корня в регексе он распадается на project="birdman", env="servers" — оба
+  # валидные слаги, то есть ДОСТИЖИМАЯ пара: ключ, привязанный к ней, получил
+  # бы всю нелейблованную историю флота. Замерено живьём в #1014.
+  - name: "flat legacy path — no pair (the ^ anchor is load-bearing)"
+    inputs:
+      - insert_at: enrich
+        type: log
+        log_fields:
+          file: "/var/log/birdman/servers/legacy.log"
+          message: "old dedik line"
+    outputs:
+      - extract_from: enrich
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.project, "")
+              assert_eq!(.env, "")
+              assert_eq!(.server_id, "legacy")
+
+  # 3. ЯКОРЬ, вторая сторона: путь ВНЕ корня. Совпади регекс где-то в середине
+  # строки — чужой каталог начал бы чеканить пару сам.
+  - name: "path outside the log root — no pair, no id"
+    inputs:
+      - insert_at: enrich
+        type: log
+        log_fields:
+          file: "/tmp/evil/var/log/birdman/servers/game/prod/srv-9.log"
+          message: "not ours"
+    outputs:
+      - extract_from: enrich
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.project, "")
+              assert_eq!(.env, "")
+              assert_eq!(.server_id, "unknown")
+
+  # 4. Каталог со странным именем не становится лейблом: алфавит слага —
+  # второй гвоздь той же доски (master подставляет пару в фильтр).
+  - name: "directory outside the slug alphabet — no pair"
+    inputs:
+      - insert_at: enrich
+        type: log
+        log_fields:
+          file: "/var/log/birdman/servers/Game/prod/srv-2.log"
+          message: "line"
+    outputs:
+      - extract_from: enrich
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.project, "")
+              assert_eq!(.env, "")
+              assert_eq!(.server_id, "srv-2")
+
+  # 5. Кавычка в имени каталога — пары нет. Пара уезжает в LogsQL-фильтр
+  # master'а, и «валидный по файловой системе» тут не значит «безопасный».
+  - name: "quote in the directory name — no pair"
+    inputs:
+      - insert_at: enrich
+        type: log
+        log_fields:
+          file: "/var/log/birdman/servers/ga\"me/prod/srv-3.log"
+          message: "line"
+    outputs:
+      - extract_from: enrich
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.project, "")
+              assert_eq!(.env, "")
+              assert_eq!(.server_id, "srv-3")
+
+  # 6. Ротированный файл: source его исключает, но регекс всё равно обязан
+  # требовать `.log$` на конце — иначе `.log.1` дал бы id вида "srv-4.log".
+  - name: "rotated .log.1 — not parsed as a server log"
+    inputs:
+      - insert_at: enrich
+        type: log
+        log_fields:
+          file: "/var/log/birdman/servers/game/prod/srv-4.log.1"
+          message: "rotated line"
+    outputs:
+      - extract_from: enrich
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.project, "")
+              assert_eq!(.env, "")
+              assert_eq!(.server_id, "unknown")
+
+  # 7. Лишний уровень вложенности: пара берётся ровно из двух каталогов, а не
+  # из «последних двух» — иначе раскладка логов начала бы значить не то.
+  - name: "deeper nesting — no pair"
+    inputs:
+      - insert_at: enrich
+        type: log
+        log_fields:
+          file: "/var/log/birdman/servers/game/prod/extra/srv-5.log"
+          message: "line"
+    outputs:
+      - extract_from: enrich
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.project, "")
+              assert_eq!(.env, "")
+              assert_eq!(.server_id, "unknown")
+
+  # 8. Нодовые лейблы едут как есть — они не про границу доступа, но их потеря
+  # сломала бы DiskHigh/TickDegraded по ноде.
+  - name: "node/region labels ride along"
+    inputs:
+      - insert_at: enrich
+        type: log
+        log_fields:
+          file: "/var/log/birdman/servers/game/prod/srv-6.log"
+          message: "line"
+    outputs:
+      - extract_from: enrich
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.node, "birdman-test-node")
+              assert_eq!(.region, "dev")
