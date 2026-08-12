@@ -235,6 +235,12 @@ export const en = {
   'metric.loading': 'Loading metrics…',
   'metric.unconfigured': "Metrics aren't configured on this master (victoriametrics_url is empty).",
   'metric.unreachable': 'VictoriaMetrics is unavailable — no data right now.',
+  // 502/504 со страницей ШЛЮЗА (tracker #1021). Виновника не называем: перед
+  // master шлюз стоит в поставляемой топологии, перед VictoriaMetrics его
+  // может поставить оператор, а по одному статусу они не различимы. Текст
+  // обязан быть верным в ОБЕИХ и при этом говорить, что смотреть.
+  'metric.gatewayDown':
+    'A gateway returned an error — metrics are unavailable. Check that master and VictoriaMetrics are up.',
   // Жёсткая ошибка графика. `{code}` — машинный код (ApiError.code), а НЕ
   // сообщение мастера: до #996 сюда интерполировался `${code}: ${detail}` из
   // тела ответа, то есть английская проза мастера/VM попадала на график в

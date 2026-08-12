@@ -68,6 +68,8 @@ export function MetricMessage({
         ? t('metric.unconfigured')
         : status === 'unreachable'
           ? t('metric.unreachable')
+          : status === 'gatewayDown'
+            ? t('metric.gatewayDown')
           : status === 'forbidden'
             ? (bound ?? t('ui.err.forbidden'))
             : status === 'error'
@@ -92,6 +94,11 @@ export function MetricMessage({
  */
 function errorText(code: MetricErrorCode, t: (key: MessageKey, params?: Record<string, string | number>) => string): string {
   if (code === null) return t('metric.err.offline');
-  const own = CODE_MESSAGE[code];
+  // Object.hasOwn, а не `!== undefined` (tracker #1021): санитайзер кода
+  // пропускает `constructor` (он проходит /^[a-z][a-z0-9_]{0,39}$/), а
+  // `CODE_MESSAGE['constructor']` достаёт через ПРОТОТИП функцию Object —
+  // проверка на undefined истинна, `t()` получает не MessageKey, и график
+  // рисуется ПУСТОТОЙ. Достижимость околонулевая, цена починки — одна строка.
+  const own = Object.hasOwn(CODE_MESSAGE, code) ? CODE_MESSAGE[code] : undefined;
   return own !== undefined ? t(own) : t('metric.error', { code });
 }

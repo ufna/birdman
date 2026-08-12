@@ -74,6 +74,15 @@ describe('MetricMessage: жёсткая ошибка объясняется ка
     expect(document.body.textContent).not.toContain(VM_PROSE);
   });
 
+  it('код с именем из Object.prototype не даёт ПУСТОГО графика (tracker #1021)', () => {
+    // `constructor` проходит санитайзер (/^[a-z][a-z0-9_]{0,39}$/), а
+    // CODE_MESSAGE['constructor'] достаёт через прототип функцию Object:
+    // проверка `!== undefined` истинна, t() получает не MessageKey, и на
+    // графике не остаётся НИЧЕГО. Лечится Object.hasOwn.
+    renderAs(<MetricMessage status="error" hasData={false} errorCode="constructor" height={120} />, UNBOUND, 'ru');
+    expect(screen.getByText(/Метрики недоступны \(ошибка constructor\)/)).toBeTruthy();
+  });
+
   it('401 unauthorized → свой текст про истёкшую сессию, а не общий «ошибка …»', () => {
     renderAs(<MetricMessage status="error" hasData={false} errorCode="unauthorized" height={120} />, UNBOUND, 'ru');
     expect(screen.getByText('Сессия истекла — войдите заново, чтобы видеть метрики.')).toBeTruthy();
@@ -267,11 +276,27 @@ describe('Формы отказа ДВУХ апстримов: код читае
     expect(JSON.stringify(result.current)).not.toContain('terribly wrong');
   });
 
-  it('HTML-страница шлюза на 504 → мягкая «VM недоступна», а не кусок HTML кодом', async () => {
+  it('HTML-страница шлюза на 504 → мягкий gatewayDown, а не кусок HTML кодом', async () => {
     stub(504, '<html><head><title>504 Gateway Time-out</title></head><body><center>nginx</center></body></html>', true);
     const result = await load();
     // До #996 `JSON.parse` бросал раньше проверки статуса и это выглядело как
     // жёсткая ошибка `bad_response` с куском HTML в тексте.
+    //
+    // Статус ИМЕННО gatewayDown, а не unreachable (tracker #1021): тело не
+    // разобралось, значит отвечал ШЛЮЗ, а перед кем он стоит — перед master
+    // или перед VM — по одному статусу неизвестно. Единственный nginx в
+    // `infra/` стоит перед МАСТЕРОМ, так что «VictoriaMetrics недоступна»
+    // здесь называла заведомо не того.
+    expect(result.current.status).toBe('gatewayDown');
+    expect(result.current.errorCode).toBeNull();
+  });
+
+  it('502 СОБСТВЕННЫМ JSON мастера → unreachable: тут виновник известен точно', async () => {
+    // Контраст к тесту выше и причина, по которой ветки две. `ops.go` отдаёт
+    // `{"error":"upstream"}` — это сказал сам master, значит не смог сходить
+    // именно в VictoriaMetrics, и называть её ВЕРНО.
+    stub(502, JSON.stringify({ error: 'upstream', detail: 'connection refused' }), true);
+    const result = await load();
     expect(result.current.status).toBe('unreachable');
     expect(result.current.errorCode).toBeNull();
   });
@@ -299,6 +324,7 @@ describe('Свойство, а не перечисление: ни одна фо
     'Не удалось связаться с master — проверьте соединение.',
     'Метрики не настроены на этом master (victoriametrics_url пуст).',
     'VictoriaMetrics недоступна — данных сейчас нет.',
+    'Шлюз вернул ошибку — метрики недоступны. Проверьте, что master и VictoriaMetrics подняты.',
     'Запрос отклонён: ключ привязан к',
     'Не хватает прав: нужен ключ со скоупом readonly или admin.',
     'Нет данных за выбранный период.',

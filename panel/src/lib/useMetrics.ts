@@ -14,7 +14,22 @@ import type { MetricRange, MetricSeries, VectorSample } from './metrics';
  * (а) его причину панель называет честно по сессии, без текста мастера, и
  * (б) он НЕ транзиентен, поэтому поллинг на нём останавливается.
  */
-export type MetricStatus = 'loading' | 'ok' | 'unconfigured' | 'unreachable' | 'forbidden' | 'error';
+// `unreachable` — виновник известен точно (VM); `gatewayDown` — ответил шлюз,
+// и перед кем он стоит, панель по статусу не знает (tracker #1021).
+export type MetricStatus =
+  | 'loading'
+  | 'ok'
+  | 'unconfigured'
+  | 'unreachable'
+  | 'gatewayDown'
+  | 'forbidden'
+  | 'error';
+
+/** reason из metrics-проксии → статус графика. Одно место на оба хука. */
+function statusOfUnavailable(reason: 'unconfigured' | 'upstream' | 'gateway'): MetricStatus {
+  if (reason === 'unconfigured') return 'unconfigured';
+  return reason === 'gateway' ? 'gatewayDown' : 'unreachable';
+}
 
 /** 403 — не транзиентная ошибка: ни нехватка скоупа, ни привязка ключа сама не
  *  пройдёт, и повтор через 15с даёт только новый отказ (tracker #1000). */
@@ -115,7 +130,7 @@ export function useQueryRange({ query, windowMs = 30 * 60_000, range, refreshMs 
         .then((res) => {
           if (!active) return;
           if (res.kind === 'unavailable') {
-            setStatus(res.reason === 'unconfigured' ? 'unconfigured' : 'unreachable');
+            setStatus(statusOfUnavailable(res.reason));
             return;
           }
           setSeries(res.series);
@@ -200,7 +215,7 @@ export function useInstantQuery({ query, refetchKey, enabled = true }: UseInstan
       .then((res) => {
         if (!active) return;
         if (res.kind === 'unavailable') {
-          setStatus(res.reason === 'unconfigured' ? 'unconfigured' : 'unreachable');
+          setStatus(statusOfUnavailable(res.reason));
           setVector(null);
           return;
         }

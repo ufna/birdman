@@ -23,7 +23,18 @@ export interface MetricSeries {
  */
 export type MetricsResult =
   | { kind: 'ok'; series: MetricSeries[] }
-  | { kind: 'unavailable'; reason: 'unconfigured' | 'upstream' };
+  | { kind: 'unavailable'; reason: UnavailableReason };
+
+/**
+ * Почему метрик сейчас нет. Три значения, и третье отличается от второго
+ * ИЗВЕСТНОСТЬЮ ИСТОЧНИКА, а не степенью беды (tracker #1021):
+ *   - `unconfigured` — master сказал, что `victoriametrics_url` пуст (503);
+ *   - `upstream` — master сказал СВОИМ JSON'ом, что не смог сходить в VM
+ *     (`ops.go` → `{"error":"upstream"}`), то есть виновник известен ТОЧНО;
+ *   - `gateway` — 502/504 с НЕразбираемым телом, то есть ответил не master, а
+ *     шлюз перед кем-то из них, и по одному статусу панель не знает, перед кем.
+ */
+export type UnavailableReason = 'unconfigured' | 'upstream' | 'gateway';
 
 interface VMMatrixResult {
   metric?: Record<string, string>;
@@ -131,7 +142,7 @@ export interface QueryRangeArgs {
   signal?: AbortSignal;
 }
 
-type Unavailable = { kind: 'unavailable'; reason: 'unconfigured' | 'upstream' };
+type Unavailable = { kind: 'unavailable'; reason: UnavailableReason };
 
 /**
  * Общий вызов metrics-proxy: GET path → либо мягкое `unavailable` (VM не
@@ -141,23 +152,40 @@ type Unavailable = { kind: 'unavailable'; reason: 'unconfigured' | 'upstream' };
 async function fetchVM(path: string, signal?: AbortSignal): Promise<Unavailable | { kind: 'body'; body: unknown }> {
   const res = await fetch(path, { credentials: 'same-origin', signal });
   // 502/504 — мягкая недоступность НЕЗАВИСИМО от тела, и решается это ДО
-  // разбора JSON (tracker #996). Апстрим на этих кодах чаще всего отвечает не
-  // JSON'ом, а HTML-страницей шлюза: `JSON.parse` бросал раньше, чем дело
-  // доходило до проверки статуса, и самый частый в self-host случай «VM за
-  // nginx лёг» показывал `bad_response` вместо готового человеческого
-  // «VictoriaMetrics недоступна» (а до #996 — ещё и кусок этой HTML-страницы
-  // как текст ошибки).
-  if (res.status === 502 || res.status === 504) {
-    return { kind: 'unavailable', reason: 'upstream' };
-  }
+  // разбора JSON (tracker #996): на этих кодах отвечает ШЛЮЗ, а он отдаёт не
+  // JSON, а HTML-страницу, и `JSON.parse` бросал раньше, чем дело доходило до
+  // проверки статуса (до #996 кусок этой страницы ещё и уезжал в UI текстом).
+  //
+  // Причина именно `gateway`, а не `upstream` (tracker #1021). Прежний
+  // комментарий мотивировал ветку «самым частым в self-host случаем „VM за
+  // nginx лёг“» — топологии, которой в `infra/` этого репозитория НЕТ ВОВСЕ:
+  // единственный nginx стоит перед МАСТЕРОМ
+  // (`birdman_master_dev/templates/nginx-panel.conf.j2`), а VictoriaMetrics
+  // публикует 8428 напрямую. Но и «значит это master» сказать нельзя:
+  // `victoriametrics_url` настраиваемый, продукт self-host, и оператор вправе
+  // поставить шлюз и перед VM. По ОДНОМУ статусу эти два случая не различимы —
+  // поэтому панель не угадывает виновника, а честно называет обоих.
+  // Собственный 502 мастера сюда не попадает: он JSON, у него
+  // `error:'upstream'`, и его ветка ниже знает источник точно.
   const text = await res.text();
   let body: unknown;
+  let parsed = true;
   try {
     body = text === '' ? undefined : JSON.parse(text);
   } catch {
-    throw new ApiError(res.status, 'bad_response', text.slice(0, 160));
+    parsed = false;
   }
-  const errCode = (body as { error?: string } | undefined)?.error;
+  const errCode = parsed ? (body as { error?: string } | undefined)?.error : undefined;
+  if (res.status === 502 || res.status === 504) {
+    // Тело РАЗОБРАНО и это собственный JSON мастера (`{"error":"upstream"}`,
+    // ops.go) — виновник известен ТОЧНО, это VictoriaMetrics. Не разобрано —
+    // отвечал шлюз, и перед кем он стоит, по статусу не видно.
+    const known = errCode === 'upstream' || errCode === 'bad_gateway';
+    return { kind: 'unavailable', reason: known ? 'upstream' : 'gateway' };
+  }
+  // Сюда доходят только НЕ-502/504, поэтому неразобранное тело здесь всё ещё
+  // жёсткая ошибка — мягкая ветка выше её уже забрала (см. #996).
+  if (!parsed) throw new ApiError(res.status, 'bad_response', text.slice(0, 160));
   if (res.status === 503 && errCode === 'metrics_unconfigured') {
     return { kind: 'unavailable', reason: 'unconfigured' };
   }

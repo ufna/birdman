@@ -212,6 +212,8 @@ export const ru: Record<MessageKey, string> = {
   'metric.loading': 'Загрузка метрик…',
   'metric.unconfigured': 'Метрики не настроены на этом master (victoriametrics_url пуст).',
   'metric.unreachable': 'VictoriaMetrics недоступна — данных сейчас нет.',
+  'metric.gatewayDown':
+    'Шлюз вернул ошибку — метрики недоступны. Проверьте, что master и VictoriaMetrics подняты.',
   'metric.error': 'Метрики недоступны (ошибка {code}).',
   'metric.err.expired': 'Сессия истекла — войдите заново, чтобы видеть метрики.',
   'metric.err.offline': 'Не удалось связаться с master — проверьте соединение.',
