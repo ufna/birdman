@@ -43,7 +43,10 @@ func (s *Server) handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 	// refused (403) here, so the matchmaker never learns about keys. A global key
 	// passes its request fields through unchanged (sole-project/sole-env resolve
 	// downstream in Submit).
-	project := bindProject(r, req.Project)
+	project, ok := bindProjectGate(w, r, req.Project)
+	if !ok {
+		return
+	}
 	env := req.Env
 	if env == "" {
 		if key, ok := keyFromContext(r.Context()); ok && key.Env != nil {

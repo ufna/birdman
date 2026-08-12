@@ -32,6 +32,10 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	// Binding (environments v1 §5): the target is the version's own (project,
 	// env). Load it first so a key bound to another env is refused (403) without
 	// side effects; an unknown version stays a 404 (same as Deploy would report).
+	// Гейт РАНЬШЕ стора здесь невозможен по построению (tracker #1004): проект
+	// не адресуется телом, а выводится из версии по uuid — тот же случай, что
+	// `GET /v1/matches/{id}` (#974), где поточечная проверка после резолва и
+	// является правилом.
 	v, err := s.st.GetVersion(r.Context(), req.VersionID)
 	if err != nil {
 		deployError(w, err)
@@ -63,9 +67,20 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	// Binding (environments v1 §5): a bound key defaults its own project; else the
-	// v0 sole-project convenience (mirroring matchmaking) fills it when omitted.
-	project := bindProject(r, req.Project)
+	// Гейт привязки по ПРОЕКТУ — ПЕРВЫМ, до единого похода в стор (tracker
+	// #1004). Раньше он стоял после резолва env, и чужой слаг успевал уехать в
+	// EnvsWithDeprecated: привязанный deploy-ключ различал состояние ЧУЖОГО
+	// проекта по ответу (409 «нет deprecated-версии» / 409 «env is required» /
+	// 403) — оракул того же класса, что закрыли #974/#988/#989. Отказ пишется
+	// общим writeBindingDenied, побайтово тем же, что на листингах.
+	//
+	// Вторая половина гейта — прежняя: привязка ДЕФОЛТИТ проект (environments
+	// v1 §5), поэтому CI одного проекта поле не шлёт; глобальному ключу
+	// остаётся v0-удобство sole-project ниже.
+	project, ok := bindProjectGate(w, r, req.Project)
+	if !ok {
+		return
+	}
 	if project == "" {
 		var err error
 		project, err = s.st.SoleProjectSlug(r.Context())

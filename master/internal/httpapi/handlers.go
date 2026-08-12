@@ -117,7 +117,10 @@ func (s *Server) handleCreateVersion(w http.ResponseWriter, r *http.Request) {
 	// Binding (environments v1 §5): a bound key defaults its project (so CI can
 	// POST just {semver, image_ref, env}) and may register only in its own
 	// (project, env) — enforced before the version is created.
-	project := bindProject(r, req.Project)
+	project, ok := bindProjectGate(w, r, req.Project)
+	if !ok {
+		return
+	}
 	// Пустоту env проверяем ДО binding-guard (w10, паритет с handleUpsertFleet):
 	// bound-CI без поля env должен получить «env is required» (400), а не «key is
 	// bound to …» (403). project уже дефолтнут из привязки строкой выше.
@@ -221,7 +224,10 @@ func (s *Server) handleUpsertFleet(w http.ResponseWriter, r *http.Request) {
 	// configure only its own (project, env). The route is admin-scoped and admin
 	// keys are never bound, so this is defense in depth against an out-of-band
 	// bound-admin row (TestAPIKeyBindingFleetGuard).
-	project := bindProject(r, req.Project)
+	project, ok := bindProjectGate(w, r, req.Project)
+	if !ok {
+		return
+	}
 	if !s.requireBinding(w, r, project, req.Env) {
 		return
 	}

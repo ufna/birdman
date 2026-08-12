@@ -254,18 +254,50 @@ func (s *Server) narrowScope(w http.ResponseWriter, r *http.Request) (project, e
 	return *key.Project, env, true, true
 }
 
-// bindProject resolves the project a request acts on when the field is optional:
-// an explicit value wins; otherwise a bound key contributes its own project
-// (environments v1 §5 — a bound key defaults project, not only validates it), so
-// CI keyed to one project can omit it. A global key with no explicit project
-// yields "" unchanged (the sole-project / ensureProject conventions apply
-// downstream).
-func bindProject(r *http.Request, project string) string {
-	if project != "" {
-		return project
+// bindProjectGate — ЕДИНЫЙ вход write-поверхностей, у которых проект приезжает
+// ПОЛЕМ ТЕЛА (`/v1/rollback`, `/v1/versions`, `/v1/fleets/{region}`,
+// `/v1/matchmaking/tickets`). Он и дефолтит поле из привязки, и энфорсит её:
+// это тот же двухполовинный приём, что `tenantScope` (#993) держит на чтениях,
+// и та же причина, по которой безопасным по умолчанию сделан ГЕЙТ, а не разбор
+// параметра.
+//
+//   - привязанный ключ + ЯВНЫЙ чужой слаг → `403 key is bound to X/Y`
+//     НЕМЕДЛЕННО, до единого похода в стор;
+//   - привязанный ключ без поля → его собственный проект (environments v1 §5:
+//     привязка ДЕФОЛТИТ проект, а не только валидирует, — CI одного проекта
+//     может поле не слать);
+//   - глобальный ключ → значение поля как есть, пустое остаётся пустым
+//     (конвенции sole-project/ensureProject разбираются ниже по течению).
+//
+// ПОЧЕМУ ГЕЙТ ЗДЕСЬ, А НЕ ПРИ `requireBinding` НИЖЕ (tracker #1004). В
+// `handleRollback` порядок был обратный: чужой слаг сначала уезжал в
+// `EnvsWithDeprecated`, и привязанный deploy-ключ различал состояние ЧУЖОГО
+// проекта по ответу — `409 "project game has no deprecated version to roll back
+// to"` (ноль окружений с окном отката), `409 "env is required: multiple
+// environments have a rollback window"` (больше одного), `403` (ровно одно).
+// Три различимых ответа = оракул состояния чужого тенанта; ровно этот класс
+// разобран правилом #989 («гейт настолько рано, насколько позволяет
+// адресация») и закрыт на листингах в #993/#988/#974. Отказ здесь пишется тем
+// же `writeBindingDenied`, что на всех прочих поверхностях, — байт-в-байт, и
+// это несущее свойство: разный текст на живом и выдуманном проекте сам стал бы
+// оракулом.
+//
+// ГРАНИЦА ПРИЁМА. Гейт закрывает ЧУЖОЙ проект, а не пару целиком: env
+// резолвится ниже (у `/v1/rollback` он вообще выводится из состояния БД), и
+// `requireBinding` на разрешённой паре остаётся обязательным. Внутри СВОЕГО
+// проекта 409-ответы оракулом не являются — это тот же тенант. И там, где
+// проект вообще не адресуется телом, а ВЫВОДИТСЯ из объекта (`/v1/deploy` и
+// `/v1/promote` берут его из версии по uuid), гейт раньше похода в стор
+// невозможен по построению — там остаётся поточечный `requireBinding` после
+// резолва, как у `GET /v1/matches/{id}` (#974).
+func bindProjectGate(w http.ResponseWriter, r *http.Request, project string) (string, bool) {
+	key, ok := keyFromContext(r.Context())
+	if !ok || key.Project == nil {
+		return project, true // глобальный ключ: поле как есть
 	}
-	if key, ok := keyFromContext(r.Context()); ok && key.Project != nil {
-		return *key.Project
+	if project != "" && project != *key.Project {
+		writeBindingDenied(w, r)
+		return "", false
 	}
-	return project
+	return *key.Project, true
 }
