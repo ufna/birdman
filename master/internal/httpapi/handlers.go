@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -308,6 +309,37 @@ type allocateRequest struct {
 	Region    string  `json:"region"`
 	VersionID *string `json:"version_id"`
 	MatchID   string  `json:"match_id"`
+
+	// Per-match payload for the dedik, delivered verbatim as liba's
+	// `allocated.metadata` (protocol.md §2 — the field the SDK has carried
+	// since the v0 freeze). The external matchmaker's channel for a join
+	// secret, a mode, a map name. Caps below keep the agentlink frame small;
+	// the agent and this master never read the contents.
+	Metadata map[string]string `json:"metadata,omitempty"`
+}
+
+// The allocate metadata caps: enough for a join secret and a handful of knobs,
+// small enough that the frame stays a frame. Violations are a 400 with the
+// offending key named — a truncated secret admitted nobody.
+const (
+	maxAllocMetadataKeys     = 16
+	maxAllocMetadataKeyLen   = 64
+	maxAllocMetadataValueLen = 512
+)
+
+func validateAllocMetadata(md map[string]string) string {
+	if len(md) > maxAllocMetadataKeys {
+		return fmt.Sprintf("metadata: at most %d keys", maxAllocMetadataKeys)
+	}
+	for k, v := range md {
+		if k == "" || len(k) > maxAllocMetadataKeyLen {
+			return fmt.Sprintf("metadata: key %q must be 1..%d bytes", k, maxAllocMetadataKeyLen)
+		}
+		if len(v) > maxAllocMetadataValueLen {
+			return fmt.Sprintf("metadata: value of %q exceeds %d bytes", k, maxAllocMetadataValueLen)
+		}
+	}
+	return ""
 }
 
 func (s *Server) handleAllocate(w http.ResponseWriter, r *http.Request) {
@@ -337,6 +369,11 @@ func (s *Server) handleAllocate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "bad_request", "version_id must be a uuid")
 			return
 		}
+	}
+	if problem := validateAllocMetadata(req.Metadata); problem != "" {
+		s.m.AllocFailures.WithLabelValues("bad_request", req.Project).Inc()
+		writeError(w, http.StatusBadRequest, "bad_request", problem)
+		return
 	}
 
 	// Environment resolution (environments v1 §3, I4): explicit field → the key's
@@ -403,7 +440,7 @@ func (s *Server) handleAllocate(w http.ResponseWriter, r *http.Request) {
 
 	// players_expected 0 = unknown: the external matchmaker behind this API
 	// does not report the match size (spec'd request shape, master.md §3).
-	alloc, err := s.st.Allocate(r.Context(), req.Project, env, req.Region, req.VersionID, req.MatchID, 0)
+	alloc, err := s.st.Allocate(r.Context(), req.Project, env, req.Region, req.VersionID, req.MatchID, 0, req.Metadata)
 	switch {
 	case errors.Is(err, store.ErrNoCapacity):
 		s.writeAllocNoCapacity(w, r, req)

@@ -225,7 +225,7 @@ func Run(ctx context.Context, opts Options) int {
 			}
 			transition(lifecycle.StateReady, "liba ready")
 			if opts.AllocateMatchID != "" {
-				if err := sock.SendAllocated(opts.AllocateMatchID, 0); err != nil {
+				if err := sock.SendAllocated(opts.AllocateMatchID, 0, nil); err != nil {
 					diag.Printf("send allocated: %v", err)
 				}
 				ev.printf("allocated match_id=%s players_expected=0", opts.AllocateMatchID)

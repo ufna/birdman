@@ -160,7 +160,7 @@ func (mm *Matchmaker) matchBucket(ctx context.Context, project, env string, size
 		}
 		ver := verFor[region]
 		matchID := uuid.NewString()
-		alloc, err := mm.st.Allocate(ctx, project, env, region, &ver.VersionID, matchID, int32(len(group)))
+		alloc, err := mm.st.Allocate(ctx, project, env, region, &ver.VersionID, matchID, int32(len(group)), nil)
 		if errors.Is(err, store.ErrNoCapacity) {
 			// Tickets stay queued; the warm pool catches up via reconcile and
 			// the next tick retries. Feeds the BufferEmpty alert (ops.md §1).

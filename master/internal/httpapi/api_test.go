@@ -260,3 +260,42 @@ func TestRESTFlow(t *testing.T) {
 		}
 	}
 }
+
+// khl-3jb.5: the metadata caps are enforced at the REST door — a truncated
+// join secret would admit nobody, so an oversized one is a named 400 before
+// anything touches the pool.
+func TestAllocateMetadataCaps(t *testing.T) {
+	st := testdb.New(t)
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	m := metrics.New(st, log)
+	mm := matchmaker.New(st, m, matchmaker.Config{}, log)
+	dep := deploy.New(deploy.Options{Store: st, Sender: &testdb.CommandRecorder{}, Log: log})
+	ts := httptest.NewServer(httpapi.New(st, m, mm, dep, nil, nil, "", "", log))
+	t.Cleanup(ts.Close)
+
+	_, allocKey, err := st.CreateAPIKey(t.Context(),
+		store.CreateAPIKeyParams{Name: "mm", Scopes: []string{httpapi.ScopeAllocate}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	alloc := &client{t: t, base: ts.URL, key: allocKey}
+
+	big := map[string]any{}
+	for i := 0; i < 17; i++ {
+		big[fmt.Sprintf("k%d", i)] = "v"
+	}
+	code, body := alloc.do("POST", "/v1/allocate", map[string]any{
+		"project": "game", "region": "eu", "match_id": uuid.NewString(), "metadata": big,
+	})
+	if code != 400 || body["error"] != "bad_request" {
+		t.Fatalf("17 keys: want 400 bad_request, got %d %v", code, body)
+	}
+
+	code, body = alloc.do("POST", "/v1/allocate", map[string]any{
+		"project": "game", "region": "eu", "match_id": uuid.NewString(),
+		"metadata": map[string]any{"k": strings.Repeat("x", 513)},
+	})
+	if code != 400 || body["error"] != "bad_request" {
+		t.Fatalf("long value: want 400 bad_request, got %d %v", code, body)
+	}
+}

@@ -1536,12 +1536,18 @@ func (x *DrainServer) GetReason() string {
 // remembers it for liba reconnect replay. Sent after every successful
 // allocation — both REST POST /v1/allocate and the built-in matchmaker.
 // players_expected = 0 means "unknown" (external matchmaker did not say).
+// metadata rides through verbatim to liba's `allocated.metadata` (the SDK has
+// carried the field since the v0 freeze; the wire finally fills it): the
+// external matchmaker's per-match payload — a join secret, a mode, a map
+// name. Small by contract: the master caps keys/sizes at the REST door, and
+// the agent never reads it. Absent/empty for the built-in matchmaker.
 type AllocateServer struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	CmdId           string                 `protobuf:"bytes,1,opt,name=cmd_id,json=cmdId,proto3" json:"cmd_id,omitempty"`
 	ServerId        string                 `protobuf:"bytes,2,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
 	MatchId         string                 `protobuf:"bytes,3,opt,name=match_id,json=matchId,proto3" json:"match_id,omitempty"`
 	PlayersExpected int32                  `protobuf:"varint,4,opt,name=players_expected,json=playersExpected,proto3" json:"players_expected,omitempty"`
+	Metadata        map[string]string      `protobuf:"bytes,5,rep,name=metadata,proto3" json:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -1602,6 +1608,13 @@ func (x *AllocateServer) GetPlayersExpected() int32 {
 		return x.PlayersExpected
 	}
 	return 0
+}
+
+func (x *AllocateServer) GetMetadata() map[string]string {
+	if x != nil {
+		return x.Metadata
+	}
+	return nil
 }
 
 type StartServer struct {
@@ -2162,12 +2175,16 @@ const file_agentlink_v1_agentlink_proto_rawDesc = "" +
 	"\tserver_id\x18\x02 \x01(\tR\bserverId\x12\x1d\n" +
 	"\n" +
 	"deadline_s\x18\x03 \x01(\x05R\tdeadlineS\x12\x16\n" +
-	"\x06reason\x18\x04 \x01(\tR\x06reason\"\x8a\x01\n" +
+	"\x06reason\x18\x04 \x01(\tR\x06reason\"\x8f\x02\n" +
 	"\x0eAllocateServer\x12\x15\n" +
 	"\x06cmd_id\x18\x01 \x01(\tR\x05cmdId\x12\x1b\n" +
 	"\tserver_id\x18\x02 \x01(\tR\bserverId\x12\x19\n" +
 	"\bmatch_id\x18\x03 \x01(\tR\amatchId\x12)\n" +
-	"\x10players_expected\x18\x04 \x01(\x05R\x0fplayersExpected\"\x8e\x02\n" +
+	"\x10players_expected\x18\x04 \x01(\x05R\x0fplayersExpected\x12F\n" +
+	"\bmetadata\x18\x05 \x03(\v2*.agentlink.v1.AllocateServer.MetadataEntryR\bmetadata\x1a;\n" +
+	"\rMetadataEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x8e\x02\n" +
 	"\vStartServer\x12\x1b\n" +
 	"\tserver_id\x18\x01 \x01(\tR\bserverId\x12\x1b\n" +
 	"\timage_ref\x18\x02 \x01(\tR\bimageRef\x124\n" +
@@ -2221,7 +2238,7 @@ func file_agentlink_v1_agentlink_proto_rawDescGZIP() []byte {
 	return file_agentlink_v1_agentlink_proto_rawDescData
 }
 
-var file_agentlink_v1_agentlink_proto_msgTypes = make([]protoimpl.MessageInfo, 27)
+var file_agentlink_v1_agentlink_proto_msgTypes = make([]protoimpl.MessageInfo, 28)
 var file_agentlink_v1_agentlink_proto_goTypes = []any{
 	(*EnrollRequest)(nil),  // 0: agentlink.v1.EnrollRequest
 	(*EnrollResponse)(nil), // 1: agentlink.v1.EnrollResponse
@@ -2249,7 +2266,8 @@ var file_agentlink_v1_agentlink_proto_goTypes = []any{
 	(*Drain)(nil),          // 23: agentlink.v1.Drain
 	(*UpgradeAgent)(nil),   // 24: agentlink.v1.UpgradeAgent
 	(*TailLogs)(nil),       // 25: agentlink.v1.TailLogs
-	nil,                    // 26: agentlink.v1.StartServer.EnvEntry
+	nil,                    // 26: agentlink.v1.AllocateServer.MetadataEntry
+	nil,                    // 27: agentlink.v1.StartServer.EnvEntry
 }
 var file_agentlink_v1_agentlink_proto_depIdxs = []int32{
 	3,  // 0: agentlink.v1.AgentMsg.hello:type_name -> agentlink.v1.Hello
@@ -2275,17 +2293,18 @@ var file_agentlink_v1_agentlink_proto_depIdxs = []int32{
 	14, // 20: agentlink.v1.MasterMsg.set_registries:type_name -> agentlink.v1.SetRegistries
 	13, // 21: agentlink.v1.MasterMsg.remove_image:type_name -> agentlink.v1.RemoveImage
 	15, // 22: agentlink.v1.SetRegistries.registries:type_name -> agentlink.v1.RegistryCred
-	26, // 23: agentlink.v1.StartServer.env:type_name -> agentlink.v1.StartServer.EnvEntry
-	20, // 24: agentlink.v1.StartServer.limits:type_name -> agentlink.v1.Limits
-	2,  // 25: agentlink.v1.AgentLink.Session:input_type -> agentlink.v1.AgentMsg
-	0,  // 26: agentlink.v1.AgentLink.Enroll:input_type -> agentlink.v1.EnrollRequest
-	12, // 27: agentlink.v1.AgentLink.Session:output_type -> agentlink.v1.MasterMsg
-	1,  // 28: agentlink.v1.AgentLink.Enroll:output_type -> agentlink.v1.EnrollResponse
-	27, // [27:29] is the sub-list for method output_type
-	25, // [25:27] is the sub-list for method input_type
-	25, // [25:25] is the sub-list for extension type_name
-	25, // [25:25] is the sub-list for extension extendee
-	0,  // [0:25] is the sub-list for field type_name
+	26, // 23: agentlink.v1.AllocateServer.metadata:type_name -> agentlink.v1.AllocateServer.MetadataEntry
+	27, // 24: agentlink.v1.StartServer.env:type_name -> agentlink.v1.StartServer.EnvEntry
+	20, // 25: agentlink.v1.StartServer.limits:type_name -> agentlink.v1.Limits
+	2,  // 26: agentlink.v1.AgentLink.Session:input_type -> agentlink.v1.AgentMsg
+	0,  // 27: agentlink.v1.AgentLink.Enroll:input_type -> agentlink.v1.EnrollRequest
+	12, // 28: agentlink.v1.AgentLink.Session:output_type -> agentlink.v1.MasterMsg
+	1,  // 29: agentlink.v1.AgentLink.Enroll:output_type -> agentlink.v1.EnrollResponse
+	28, // [28:30] is the sub-list for method output_type
+	26, // [26:28] is the sub-list for method input_type
+	26, // [26:26] is the sub-list for extension type_name
+	26, // [26:26] is the sub-list for extension extendee
+	0,  // [0:26] is the sub-list for field type_name
 }
 
 func init() { file_agentlink_v1_agentlink_proto_init() }
@@ -2322,7 +2341,7 @@ func file_agentlink_v1_agentlink_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_agentlink_v1_agentlink_proto_rawDesc), len(file_agentlink_v1_agentlink_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   27,
+			NumMessages:   28,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

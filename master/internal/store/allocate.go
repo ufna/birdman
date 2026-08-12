@@ -56,7 +56,9 @@ returning id, node_id, port`
 // on reconnect); the idempotent repeat does not re-send — the pending command
 // is already tracked by the hub. playersExpected 0 = unknown (external
 // matchmaker via REST does not report it).
-func (s *Store) Allocate(ctx context.Context, project, env, region string, versionID *string, matchID string, playersExpected int32) (Allocation, error) {
+// metadata rides through to liba's `allocated.metadata` verbatim (nil for the
+// built-in matchmaker); the REST door owns the size caps.
+func (s *Store) Allocate(ctx context.Context, project, env, region string, versionID *string, matchID string, playersExpected int32, metadata map[string]string) (Allocation, error) {
 	var projectID string
 	err := s.Pool.QueryRow(ctx, `select id::text from projects where slug = $1`, project).Scan(&projectID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -97,7 +99,7 @@ func (s *Store) Allocate(ctx context.Context, project, env, region string, versi
 
 	// The claim is committed — the dedik must learn about its match now,
 	// even if the host lookup below fails.
-	s.notifyAllocated(nodeID.String(), serverID.String(), matchID, playersExpected)
+	s.notifyAllocated(nodeID.String(), serverID.String(), matchID, playersExpected, metadata)
 
 	var host string
 	if err := s.Pool.QueryRow(ctx,
@@ -110,7 +112,7 @@ func (s *Store) Allocate(ctx context.Context, project, env, region string, versi
 // notifyAllocated sends AllocateServer to the node's agent via the hub. A nil
 // sender (not wired in some tests) is a no-op — production wiring installs it
 // at startup (SetCommandSender in cmd/birdman-master).
-func (s *Store) notifyAllocated(nodeID, serverID, matchID string, playersExpected int32) {
+func (s *Store) notifyAllocated(nodeID, serverID, matchID string, playersExpected int32, metadata map[string]string) {
 	if s.sender == nil {
 		return
 	}
@@ -119,6 +121,7 @@ func (s *Store) notifyAllocated(nodeID, serverID, matchID string, playersExpecte
 			ServerId:        serverID,
 			MatchId:         matchID,
 			PlayersExpected: playersExpected,
+			Metadata:        metadata,
 		},
 	}})
 }

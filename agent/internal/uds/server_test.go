@@ -174,7 +174,7 @@ func TestLifecycleFrames(t *testing.T) {
 	liba.send("ready", nil)
 	expectRec(t, ch, "ready")
 
-	if err := s.SendAllocated("m-1", 2); err != nil {
+	if err := s.SendAllocated("m-1", 2, nil); err != nil {
 		t.Fatal(err)
 	}
 	d := liba.expect("allocated")
@@ -231,7 +231,7 @@ func TestLifecycleFrames(t *testing.T) {
 func TestPendingAllocatedDeliveredOnConnect(t *testing.T) {
 	ev, _ := recorder()
 	s, path := listen(t, ev)
-	if err := s.SendAllocated("m-7", 4); !errors.Is(err, ErrNotConnected) {
+	if err := s.SendAllocated("m-7", 4, nil); !errors.Is(err, ErrNotConnected) {
 		t.Fatalf("want ErrNotConnected, got %v", err)
 	}
 	liba := dialLiba(t, path)
@@ -249,10 +249,12 @@ func TestReconnectReplaysAllocatedAndDrain(t *testing.T) {
 	liba1 := dialLiba(t, path)
 	liba1.send("hello", map[string]any{"sdk_version": "x"})
 	expectRec(t, ch, "hello")
-	if err := s.SendAllocated("m-9", 2); err != nil {
+	if err := s.SendAllocated("m-9", 2, map[string]string{"join_secret": "s3", "mode": "ranked"}); err != nil {
 		t.Fatal(err)
 	}
-	liba1.expect("allocated")
+	if d := liba1.expect("allocated"); d["metadata"].(map[string]any)["mode"] != "ranked" {
+		t.Fatalf("live allocated metadata: %v", d)
+	}
 	if err := s.SendDrain(15, "deploy"); err != nil {
 		t.Fatal(err)
 	}
@@ -263,6 +265,11 @@ func TestReconnectReplaysAllocatedAndDrain(t *testing.T) {
 	d := liba2.expect("allocated")
 	if d["match_id"] != "m-9" {
 		t.Fatalf("replayed allocated: %v", d)
+	}
+	// The replay carries the metadata because the FRAME is what is remembered —
+	// a reconnecting liba must see the same payload the first connection saw.
+	if md, ok := d["metadata"].(map[string]any); !ok || md["join_secret"] != "s3" {
+		t.Fatalf("replayed allocated lost metadata: %v", d)
 	}
 	d = liba2.expect("drain")
 	if d["reason"] != "deploy" || d["deadline_s"].(float64) != 15 {

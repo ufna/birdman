@@ -150,7 +150,7 @@ func TestAllocateConcurrentSingleServer(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := st.Allocate(context.Background(), "game", "dev", "eu", nil, uuid.NewString(), 0)
+			_, err := st.Allocate(context.Background(), "game", "dev", "eu", nil, uuid.NewString(), 0, nil)
 			mu.Lock()
 			defer mu.Unlock()
 			switch {
@@ -186,7 +186,7 @@ func TestAllocateConcurrentHundredServers(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			a, err := st.Allocate(context.Background(), "game", "dev", "eu", nil, uuid.NewString(), 0)
+			a, err := st.Allocate(context.Background(), "game", "dev", "eu", nil, uuid.NewString(), 0, nil)
 			if err != nil {
 				t.Errorf("allocate: %v", err)
 				return
@@ -216,11 +216,11 @@ func TestAllocateIdempotentByMatchID(t *testing.T) {
 	ctx := context.Background()
 
 	matchID := uuid.NewString()
-	first, err := st.Allocate(ctx, "game", "dev", "eu", nil, matchID, 0)
+	first, err := st.Allocate(ctx, "game", "dev", "eu", nil, matchID, 0, nil)
 	if err != nil {
 		t.Fatalf("allocate: %v", err)
 	}
-	again, err := st.Allocate(ctx, "game", "dev", "eu", nil, matchID, 0)
+	again, err := st.Allocate(ctx, "game", "dev", "eu", nil, matchID, 0, nil)
 	if err != nil || again.ServerID != first.ServerID {
 		t.Fatalf("sequential repeat: want %s, got %+v (%v)", first.ServerID, again, err)
 	}
@@ -235,7 +235,7 @@ func TestAllocateIdempotentByMatchID(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			a, err := st.Allocate(context.Background(), "game", "dev", "eu", nil, matchID2, 0)
+			a, err := st.Allocate(context.Background(), "game", "dev", "eu", nil, matchID2, 0, nil)
 			if err != nil {
 				t.Errorf("concurrent idempotent allocate: %v", err)
 				return
@@ -266,33 +266,33 @@ func TestAllocateFilters(t *testing.T) {
 	ctx := context.Background()
 
 	// No ready servers at all.
-	if _, err := st.Allocate(ctx, "game", "dev", "eu", nil, uuid.NewString(), 0); !errors.Is(err, store.ErrNoCapacity) {
+	if _, err := st.Allocate(ctx, "game", "dev", "eu", nil, uuid.NewString(), 0, nil); !errors.Is(err, store.ErrNoCapacity) {
 		t.Fatalf("empty pool: want no_capacity, got %v", err)
 	}
 	// Unknown project.
-	if _, err := st.Allocate(ctx, "nope", "dev", "eu", nil, uuid.NewString(), 0); !errors.Is(err, store.ErrNotFound) {
+	if _, err := st.Allocate(ctx, "nope", "dev", "eu", nil, uuid.NewString(), 0, nil); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("unknown project: want not_found, got %v", err)
 	}
 
 	f.InsertServer(t, f.NodeID, f.VersionID, "ready", 20001, 0)
 
 	// Wrong region.
-	if _, err := st.Allocate(ctx, "game", "dev", "us", nil, uuid.NewString(), 0); !errors.Is(err, store.ErrNoCapacity) {
+	if _, err := st.Allocate(ctx, "game", "dev", "us", nil, uuid.NewString(), 0, nil); !errors.Is(err, store.ErrNoCapacity) {
 		t.Fatalf("wrong region: want no_capacity, got %v", err)
 	}
 	// Version filter mismatch.
 	v2 := f.AddVersion(t, "2.0.0", "dev")
-	if _, err := st.Allocate(ctx, "game", "dev", "eu", &v2, uuid.NewString(), 0); !errors.Is(err, store.ErrNoCapacity) {
+	if _, err := st.Allocate(ctx, "game", "dev", "eu", &v2, uuid.NewString(), 0, nil); !errors.Is(err, store.ErrNoCapacity) {
 		t.Fatalf("version mismatch: want no_capacity, got %v", err)
 	}
 	// Stale heartbeat excludes the node.
 	f.SetHeartbeatAge(t, f.NodeID, 11*time.Second)
-	if _, err := st.Allocate(ctx, "game", "dev", "eu", nil, uuid.NewString(), 0); !errors.Is(err, store.ErrNoCapacity) {
+	if _, err := st.Allocate(ctx, "game", "dev", "eu", nil, uuid.NewString(), 0, nil); !errors.Is(err, store.ErrNoCapacity) {
 		t.Fatalf("stale heartbeat: want no_capacity, got %v", err)
 	}
 	// Fresh again → allocable, and version filter matches.
 	f.SetHeartbeatAge(t, f.NodeID, 0)
-	a, err := st.Allocate(ctx, "game", "dev", "eu", &f.VersionID, uuid.NewString(), 0)
+	a, err := st.Allocate(ctx, "game", "dev", "eu", &f.VersionID, uuid.NewString(), 0, nil)
 	if err != nil {
 		t.Fatalf("allocate: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestHeartbeatTransitions(t *testing.T) {
 	}
 
 	// Allocation wins over a stale 'ready' report (no downgrade).
-	if _, err := st.Allocate(ctx, "game", "dev", "eu", nil, uuid.NewString(), 0); err != nil {
+	if _, err := st.Allocate(ctx, "game", "dev", "eu", nil, uuid.NewString(), 0, nil); err != nil {
 		t.Fatalf("allocate: %v", err)
 	}
 	if err := st.ApplyHeartbeat(ctx, f.NodeID, []store.ServerReport{
@@ -398,5 +398,30 @@ func TestApplyServerEvent(t *testing.T) {
 	}
 	if n, _ := st.CountEvents(ctx, store.EventServerFailed); n != 1 {
 		t.Fatalf("want 1 server_failed event, got %d", n)
+	}
+}
+
+// khl-3jb.5: the external matchmaker's per-match payload rides the claim into
+// AllocateServer verbatim — the agent forwards it as allocated.metadata and
+// the replay carries it, so this is the seam that must not drop it.
+func TestAllocateCarriesMetadata(t *testing.T) {
+	st := testdb.New(t)
+	f := testdb.Seed(t, st, "eu", 10)
+	f.InsertServer(t, f.NodeID, f.VersionID, "ready", 20001, 0)
+	rec := &testdb.CommandRecorder{}
+	st.SetCommandSender(rec)
+	ctx := context.Background()
+
+	md := map[string]string{"join_secret": "cafe", "mode": "ranked"}
+	if _, err := st.Allocate(ctx, "game", "dev", "eu", nil, uuid.NewString(), 0, md); err != nil {
+		t.Fatalf("allocate: %v", err)
+	}
+	allocs := rec.Allocates()
+	if len(allocs) != 1 {
+		t.Fatalf("want 1 AllocateServer, got %d", len(allocs))
+	}
+	got := allocs[0].Msg.GetAllocate().GetMetadata()
+	if got["join_secret"] != "cafe" || got["mode"] != "ranked" {
+		t.Fatalf("metadata did not ride through: %v", got)
 	}
 }

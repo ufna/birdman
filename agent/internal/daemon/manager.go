@@ -544,7 +544,7 @@ func (m *Manager) Allocate(_ context.Context, cmd *agentlinkv1.AllocateServer) {
 		m.logf("[daemon] allocate %s: no liba socket, frame undeliverable", id)
 		return
 	}
-	if err := sock.SendAllocated(cmd.GetMatchId(), int(cmd.GetPlayersExpected())); err != nil {
+	if err := sock.SendAllocated(cmd.GetMatchId(), int(cmd.GetPlayersExpected()), cmd.GetMetadata()); err != nil {
 		// ErrNotConnected is fine: the frame is cached and replayed when liba
 		// (re)connects (protocol.md §2).
 		m.logf("[daemon] allocate %s: send allocated: %v", id, err)

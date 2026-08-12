@@ -150,14 +150,25 @@ func (a *agent) stdinLoop() {
 		switch fields[0] {
 		case "allocate":
 			if len(fields) < 2 {
-				fmt.Println("usage: allocate <match_id> [players_expected]")
+				fmt.Println("usage: allocate <match_id> [players_expected] [key=value ...]")
 				continue
 			}
 			n := 0
-			if len(fields) > 2 {
-				n, _ = strconv.Atoi(fields[2])
+			meta := map[string]string{}
+			for _, arg := range fields[2:] {
+				// Bare number = players_expected (the old shape); key=value =
+				// allocated.metadata, exactly as the real agent forwards it.
+				if k, v, ok := strings.Cut(arg, "="); ok {
+					meta[k] = v
+				} else {
+					n, _ = strconv.Atoi(arg)
+				}
 			}
-			f := a.remember("allocated", map[string]any{"match_id": fields[1], "players_expected": n})
+			data := map[string]any{"match_id": fields[1], "players_expected": n}
+			if len(meta) > 0 {
+				data["metadata"] = meta
+			}
+			f := a.remember("allocated", data)
 			a.sendFrame(f)
 		case "drain":
 			if len(fields) < 2 {

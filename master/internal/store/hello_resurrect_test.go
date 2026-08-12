@@ -84,7 +84,7 @@ func TestHelloResurrectsLeaseFailedServers(t *testing.T) {
 	}
 
 	// The resurrected server is allocatable again.
-	alloc, err := st.Allocate(ctx, f.Project, f.Env, f.Region, nil, uuid.NewString(), 0)
+	alloc, err := st.Allocate(ctx, f.Project, f.Env, f.Region, nil, uuid.NewString(), 0, nil)
 	if err != nil {
 		t.Fatalf("allocate after resurrection: %v", err)
 	}

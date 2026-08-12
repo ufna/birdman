@@ -232,11 +232,17 @@ message DrainServer {
 // remembers it for liba reconnect replay. Sent after every successful
 // allocation — both REST POST /v1/allocate and the built-in matchmaker.
 // players_expected = 0 means "unknown" (external matchmaker did not say).
+// metadata rides through verbatim to liba's `allocated.metadata` (the SDK has
+// carried the field since the v0 freeze; the wire finally fills it): the
+// external matchmaker's per-match payload — a join secret, a mode, a map
+// name. Small by contract: the master caps keys/sizes at the REST door, and
+// the agent never reads it. Absent/empty for the built-in matchmaker.
 message AllocateServer {
   string cmd_id = 1;
   string server_id = 2;
   string match_id = 3;
   int32 players_expected = 4;
+  map<string, string> metadata = 5;
 }
 
 message StartServer {

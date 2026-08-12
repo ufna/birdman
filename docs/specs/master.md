@@ -178,7 +178,9 @@ crash-loop: ≥3 failed одной версии на одной тачке за 
 
 ## 3. Allocation API (граница матчмейкер ↔ флот)
 
-`POST /v1/allocate {project, region, version_id?, match_id}` → `{server_id, host, port}` | `409 no_capacity`
+`POST /v1/allocate {project, region, version_id?, match_id, metadata?}` → `{server_id, host, port}` | `409 no_capacity`
+
+`metadata?` (map строка→строка, ≤16 ключей, ключ ≤64 Б, значение ≤512 Б, иначе именованный 400) — полезная нагрузка внешнего матчмейкера для дедика: доезжает дословно как `allocated.metadata` (protocol.md §2), master и агент содержимое не читают. Внутренний матчмейкер поле не использует.
 
 ```sql
 with c as (

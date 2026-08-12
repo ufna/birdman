@@ -150,12 +150,19 @@ func (s *Server) Close() error {
 
 // SendAllocated tells liba the master allocated a match to this server
 // (v0 run-once: the --allocate flag plays the master). The frame is
-// remembered and replayed to a (re)connecting liba.
-func (s *Server) SendAllocated(matchID string, playersExpected int) error {
-	f := &outFrame{V: Version, Type: "allocated", Data: map[string]any{
+// remembered and replayed to a (re)connecting liba. metadata (may be nil) is
+// the external matchmaker's per-match payload, forwarded verbatim — the
+// agent neither reads nor invents it, and the replay carries it because the
+// frame itself is what is remembered.
+func (s *Server) SendAllocated(matchID string, playersExpected int, metadata map[string]string) error {
+	data := map[string]any{
 		"match_id":         matchID,
 		"players_expected": playersExpected,
-	}}
+	}
+	if len(metadata) > 0 {
+		data["metadata"] = metadata
+	}
+	f := &outFrame{V: Version, Type: "allocated", Data: data}
 	s.mu.Lock()
 	s.lastAllocated = f
 	conn := s.conn
