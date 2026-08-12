@@ -11,6 +11,87 @@
 # операторов работают без него). summary остаётся одноязычной динамической
 # ops-строкой (Discord/лог).
 groups:
+  # Мониторинг, который сторожит САМ СЕБЯ (tracker #1061). До этой группы ни
+  # одного правила на упавший скрейп-таргет не было вовсе, и это отказ особого
+  # рода: он снимает ровно тот слой, который обязан о нём сообщить. Замерено на
+  # дев-стенде 12.08.2026 — #1003 увёл /metrics мастера на 127.0.0.1:9102 в коде
+  # И в роли, но pull-деплоер везёт бинарь и ansible НЕ гоняет, поэтому джоб
+  # birdman-master часами скрейпил старый порт и получал 404. Молчали при этом
+  # ВСЕ правила на сериях мастера — BufferEmpty*, CrashLoop, AllocationFailures,
+  # AgentUpgradeFailed, TickDegraded. Отсутствие алертов означало неизвестность,
+  # а выглядело как здоровье.
+  #
+  # ПЛАТФОРМЕННЫЕ ОБА, намеренно: лейбла project у `up` нет и быть не может —
+  # таргет несёт серии всех проектов сразу, приписать его одному было бы враньём
+  # (та же идиома, что у NodeDown/DiskHigh, ops.md §1). По не-скрывающему фильтру
+  # master.md §6 алерт без лейбла остаётся видимым при ЛЮБОМ выбранном проекте —
+  # это и нужно: слепой скрейп касается всех.
+  #
+  # SEVERITY — warning у обоих. Не потому, что не страшно, а потому, что в этом
+  # контуре critical не покупает другого канала: alertmanager.yml.j2 держит ОДИН
+  # receiver и по severity не маршрутизирует вовсе (alert-sink + опциональный
+  # Discord получают всё). Зато critical стоил бы ложной тревогой на каждом
+  # откате выката и на ЧУЖОМ prod-node_exporter'е (джоб `node` — роль его
+  # read-only скрейпит и НЕ управляет им). Вес несёт description, а не бейдж.
+  - name: birdman-scrape
+    rules:
+      # ScrapeTargetDown: таргет отвечает не тем (404 после переезда порта),
+      # не отвечает вовсе, лежит экспортёр, порвана сеть. `up` синтезирует
+      # ВМАГЕНТ на каждый таргет, поэтому правило сторожит все джобы
+      # `scrape.yml` без перечисления и подхватывает нодовые vmagent'ы оверлея
+      # (birdman_node_vmagent) само, по мере появления нод.
+      #
+      # ПОЧЕМУ ПРАВИЛО НЕ ГАСНЕТ ВМЕСТЕ С ТЕМ, ЧТО СТОРОЖИТ: `up` — СОБСТВЕННАЯ
+      # серия vmagent'а, а не серия мастера, поэтому падение мастера её не
+      # убивает — она просто становится нулём (замерено на живом VM v1.102.1:
+      # `up == 0` отдаёт ряд с job/instance). Падение САМОГО vmagent'а её,
+      # наоборот, гасит — ровно эту дыру закрывает второе правило ниже.
+      #
+      # ПОРОГ — по ХУДШЕМУ ШТАТНОМУ ВЫКАТУ, а не на глаз: pull-деплоер даёт
+      # мастеру birdman_devdeploy_health_timeout_s (деф. 60s) на /healthz, и
+      # при провале откатывается на прежний бинарь с ещё одним таким же
+      # ожиданием — то есть ~2 минуты недоступности в самом плохом штатном
+      # случае. birdman_scrape_down_for = 3m оставляет минуту запаса; обычный
+      # выкат укладывается в секунды.
+      - alert: ScrapeTargetDown
+        expr: up == 0
+        for: {{ birdman_scrape_down_for }}
+        labels:
+          severity: warning
+        annotations:
+          summary: {% raw %}'ScrapeTargetDown: джоб {{ $labels.job }} ({{ $labels.instance }}) не скрейпится — алерты на его сериях молчат'{% endraw %}
+
+          description: 'A scrape target has been unreachable (or answering with the wrong status) beyond the threshold, so NOTHING built on its series can fire — silence from those alerts means unknown, not healthy. Check the exporter and the target address in the vmagent scrape config; a code/role contract that moved (a port, a metrics path, a job name) is the usual cause on the dev stand, because the pull deployer ships the binary and does not run ansible (tracker #1061, #1062).'
+          description_ru: 'Скрейп-таргет дольше порога недоступен (или отвечает не тем статусом), поэтому НИ ОДНО правило на его сериях сработать не может — молчание этих алертов означает неизвестность, а не здоровье. Проверь экспортёр и адрес таргета в скрейп-конфиге vmagent; типичная причина на дев-стенде — уехавший контракт между кодом и ролью (порт, путь метрик, имя джоба): pull-деплоер везёт бинарь и ansible не гоняет (tracker #1061, #1062).'
+
+      # ScrapeTargetMissing: серии `up` для джоба НЕТ ВОВСЕ. `up == 0` этот
+      # случай не видит ПО ПОСТРОЕНИЮ — нет серии, нечему быть нулём, — а случай
+      # тот же самый по классу: джоб переименован, таргет выпилен из
+      # `scrape.yml`, или лёг сам vmagent (тогда гаснут ОБЕ серии `up`, и первое
+      # правило вместе с ними). Список джобов рендерится из birdman_scrape_jobs,
+      # то есть из ТОГО ЖЕ источника, что и сам scrape.yml.j2 — разъехаться им
+      # нечем.
+      #
+      # absent_over_time(...[окно]), а НЕ absent(...): у absent() порог «сколько
+      # молчания считать пропажей» задаётся не правилом, а lookback'ом движка
+      # (деф. 5м), то есть настройкой, которой в этом репозитории нет на виду.
+      # Явное окно делает семантику читаемой и одинаковой в promtool и vmalert.
+      # Оно же заменяет for: окно И ЕСТЬ порог, поэтому for: 0s — иначе задержка
+      # складывалась бы дважды.
+      # Лейблы матчера доезжают до алерта (замерено на живом VM v1.102.1:
+      # absent_over_time(up{job="node"}[10m]) → {job="node"} 1), поэтому summary
+      # может назвать джоб. Лейбла instance у него нет — в матчере его не было.
+      - alert: ScrapeTargetMissing
+        expr: '{% for job in birdman_scrape_jobs %}absent_over_time(up{job="{{ job.job_name }}"}[{{ birdman_scrape_missing_window }}]){% if not loop.last %} or {% endif %}{% endfor %}'
+        for: 0s
+        labels:
+          severity: warning
+        annotations:
+          summary: {% raw %}'ScrapeTargetMissing: серии up джоба {{ $labels.job }} нет вовсе — таргет пропал из скрейпа'{% endraw %}
+
+          description: 'A scrape job listed in the role has produced no `up` sample at all within the window — the target is gone rather than failing: the job was renamed or dropped from the vmagent config, or vmagent itself is down (in which case ScrapeTargetDown is dead too, and this rule is the only one left). Note the difference from ScrapeTargetDown: an unreachable target still yields up=0, so this alert means the series stopped existing, not that the scrape failed.'
+          description_ru: 'Джоб из скрейп-конфига роли за всё окно не дал НИ ОДНОГО сэмпла `up` — таргет не сбоит, а пропал: джоб переименован или выпилен из конфига vmagent, либо лёг сам vmagent (и тогда ScrapeTargetDown мёртв вместе с ним, а это правило — единственное, что осталось). Отличие от ScrapeTargetDown: недоступный таргет всё равно даёт up=0, поэтому здесь речь о том, что серия перестала существовать, а не о том, что скрейп упал.'
+
   - name: birdman-availability
     rules:
       # NodeDown: heartbeat_age растёт, пока агент молчит. for:0s + scrape/eval

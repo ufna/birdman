@@ -76,6 +76,19 @@ birdman_grafana_datasource_url: "http://victoriametrics:8428"   # bridge-DNS в�
 birdman_alert_discord_webhook: ""
 
 # --- пороги алертов (vmalert, ops.md §1) ---
+# ScrapeTargetDown (tracker #1061): сколько таргет обязан лежать, прежде чем
+# будить. 3м — с запасом к ХУДШЕМУ штатному выкату: pull-деплоер ждёт /healthz
+# birdman_devdeploy_health_timeout_s (60s) и при провале откатывается на прежний
+# бинарь с ещё одним таким же ожиданием, т.е. ~2м недоступности; обычный выкат —
+# секунды. Опускать ниже 2м = будить на каждом откате.
+birdman_scrape_down_for: "3m"
+# ScrapeTargetMissing (tracker #1061): окно, за которое отсутствие ЛЮБОГО сэмпла
+# `up` джоба считается пропажей таргета (а не сбоем скрейпа — тот даёт up=0).
+# Это окно И ЕСТЬ порог правила: у него for: 0s, иначе задержка складывалась бы
+# дважды. 10м > 3м у ScrapeTargetDown намеренно: пропажа серии — это либо
+# конфигурационный дрейф, либо смерть самого vmagent'а, и торопиться с ней
+# некуда, а вот ложно сработать на перезапуске стека мониторинга — легко.
+birdman_scrape_missing_window: "10m"
 birdman_heartbeat_max_age_seconds: 30
 birdman_tick_degraded_ms: 50           # порог игры для TickDegraded
 birdman_disk_warn_pct: 85
