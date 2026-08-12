@@ -34,7 +34,11 @@ repo="$(cd "$role/../../.." && pwd)"
 image="$(sed -n 's/^birdman_overlay_image:[[:space:]]*"\{0,1\}\([^"#[:space:]][^"#[:space:]]*\).*/\1/p' "$role/defaults/main.yml")"
 [ -n "$image" ] || { echo "не нашёл birdman_overlay_image в defaults" >&2; exit 1; }
 case "$image" in
-  *[![:alnum:]:._/-]*) echo "тег образа выглядит битым: «$image»" >&2; exit 1 ;;
+  # Скобки обязательны: за именем стоит МНОГОБАЙТНАЯ кавычка, и bash 3.2
+  # (/bin/bash на macOS) забирает её первый байт в имя переменной — вместо
+  # диагноза печаталось «image<байт>: unbound variable». Код тот же (1), но
+  # отказ переставал объяснять, ЧТО не так с тегом. Замерено на битом теге.
+  *[![:alnum:]:._/-]*) echo "тег образа выглядит битым: «${image}»" >&2; exit 1 ;;
 esac
 
 work="$(mktemp -d)"
