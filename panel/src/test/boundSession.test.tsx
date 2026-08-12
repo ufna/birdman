@@ -166,6 +166,55 @@ describe('ConfirmDialog: 403 на ДЕЙСТВИИ тоже объясняетс
     // действию нужен deploy/admin.
     expect(document.body.textContent).not.toContain(FORBIDDEN_EN);
   });
+
+  // --- tracker #1010: путь С errorOverride, которого тут не было вовсе ---
+  //
+  // Пока проверялась ТОЛЬКО кнопка без override, починка #1000 выглядела
+  // рабочей, а была отключаемой по умолчанию: вызов был
+  // `errorOverride?.(e) ?? errMessage(e, t, bound)`, то есть любой override с
+  // веткой на 403 забирал решение себе и до честного текста дело не доходило.
+  // Один из трёх существующих (muteErrorMessage в Alerts) ровно так и делал.
+
+  /** Override, который ОБРАБАТЫВАЕТ 403 — то есть худший из возможных. */
+  const greedyOverride = (e: unknown) =>
+    e instanceof ApiError && e.status === 403 ? 'ПЕРЕХВАЧЕНО override-ом' : undefined;
+
+  function renderWithOverride(session: SessionInfo | null, status = 403) {
+    renderAs(
+      <ConfirmButton
+        label="Promote"
+        title="t"
+        description="d"
+        confirmLabel="OK"
+        errorOverride={greedyOverride}
+        onConfirm={async () => {
+          throw new ApiError(status, status === 403 ? 'forbidden' : 'conflict', 'key is bound to game/dev');
+        }}
+      />,
+      session,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Promote' }));
+    fireEvent.click(screen.getByRole('button', { name: 'OK' }));
+  }
+
+  it('override с веткой на 403 НЕ отключает честный диагноз привязки', async () => {
+    renderWithOverride(BOUND);
+    expect(await screen.findByText(/your key is bound to game\/dev/)).toBeTruthy();
+    expect(document.body.textContent).not.toContain('ПЕРЕХВАЧЕНО override-ом');
+  });
+
+  it('но у НЕпривязанного ключа override по-прежнему работает (не сломали его)', async () => {
+    renderWithOverride(UNBOUND);
+    expect(await screen.findByText('ПЕРЕХВАЧЕНО override-ом')).toBeTruthy();
+  });
+
+  it('и на не-403 override главнее общего словаря даже у привязанного ключа', async () => {
+    // Привязка отменяет override ТОЛЬКО на 403 — на своём коде поверхность
+    // по-прежнему главная, иначе это была бы уже другая потеря.
+    renderWithOverride(BOUND, 409);
+    expect(await screen.findByText(/State conflict/)).toBeTruthy();
+    expect(document.body.textContent).not.toContain('is bound to game/dev');
+  });
 });
 
 describe('MetricMessage: статус forbidden не отрисовывается пустотой', () => {

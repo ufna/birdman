@@ -66,7 +66,10 @@ export function ConfirmButton({
       })
       .catch((e: unknown) => {
         setPending(false);
-        setError(errorOverride?.(e) ?? errMessage(e, t, bound));
+        // errorOverride ПРОКИДЫВАЕТСЯ внутрь, а не зовётся здесь (tracker #1010):
+        // порядок «привязка важнее уточнения поверхности» живёт в apiErrorMessage,
+        // в единственном месте, и его нельзя обойти, забыв про него на вызове.
+        setError(errMessage(e, t, bound, errorOverride));
       });
   };
 
@@ -142,11 +145,17 @@ export function ConfirmButton({
  *  сырую прозу мастера и уносили: 409 отдавал `e.detail` как есть, а хвост —
  *  `${code}: ${detail}`. Теперь 409 переведён своим ключом через `byStatus`,
  *  а прочие коды показывают только код. */
-function errMessage(e: unknown, t: I18nContextValue['t'], bound: string | undefined): string {
+function errMessage(
+  e: unknown,
+  t: I18nContextValue['t'],
+  bound: string | undefined,
+  override?: (e: unknown) => string | undefined,
+): string {
   return apiErrorMessage(e, t, {
     refusal: bound,
     forbidden: 'confirm.err.forbidden',
     generic: 'confirm.err.generic',
     byStatus: { 409: 'confirm.err.conflict' },
+    override,
   });
 }

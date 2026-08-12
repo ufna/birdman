@@ -50,6 +50,21 @@ export interface ApiErrorTexts {
    * `MetricMessage.tsx`.
    */
   byStatus?: Partial<Record<number, MessageKey>>;
+  /**
+   * Произвольный УТОЧНЯЮЩИЙ обработчик поверхности: вернул строку — она и
+   * показывается, вернул `undefined` — решает общий словарь ниже. Нужен там,
+   * где текст выбирается не по одному статусу, а по коду или по состоянию
+   * экрана (`last_admin_key` в Access, свои статусы mute в Alerts).
+   *
+   * УТОЧНЯЮЩИЙ, а не замещающий, и это существо дефекта #1010, а не оттенок
+   * формулировки. До него `ConfirmDialog` звал `errorOverride?.(e) ?? errMessage(…)`,
+   * то есть ЛЮБОЙ override с веткой на 403 отменял честный диагноз привязки
+   * целиком — и один из трёх существующих (`muteErrorMessage`) ровно это и
+   * делал, возвращая на 403 старый ложный «недостаточно прав». Теперь порядок
+   * зашит ЗДЕСЬ, в единственном месте, а не в каждом вызывающем: override
+   * лишён ровно одной способности — соврать привязанному ключу про скоуп.
+   */
+  override?: (e: unknown) => string | undefined;
 }
 
 /**
@@ -57,22 +72,27 @@ export interface ApiErrorTexts {
  * поэтому её зовут и из компонентов, и из юнит-тестов без рендера.
  *
  * Порядок веток не случаен и менять его нельзя:
- *   1. не `ApiError` — ответа не было вовсе, коду взяться неоткуда;
- *   2. 401 — единственный код, где действие оператора своё: войти заново;
- *   3. 403 — привязка ключа СПЕЦИФИЧНЕЕ скоупа, поэтому проверяется раньше
- *      `byStatus` (иначе поверхность со своим 403-текстом молча вернула бы
- *      ложный диагноз привязанному ключу — ровно дефект #1010);
- *   4. свой текст поверхности по статусу;
- *   5. общий текст с машинным кодом.
+ *   1. 403 у ПРИВЯЗАННОГО ключа — самая специфичная причина из возможных, и
+ *      единственная, которую поверхность отменить НЕ может (tracker #1010);
+ *   2. `override` — уточнение поверхности по коду/состоянию;
+ *   3. 401 — единственный код, где действие оператора своё: войти заново;
+ *   4. не `ApiError` — ответа не было вовсе, коду взяться неоткуда;
+ *   5. 403 без привязки — `forbidden`-ключ поверхности (чтение vs действие);
+ *   6. свой текст поверхности по статусу;
+ *   7. общий текст с машинным кодом.
  */
 export function apiErrorMessage(
   e: unknown,
   t: I18nContextValue['t'],
   texts: ApiErrorTexts = {},
 ): string {
+  // Привязка проверяется ПЕРВОЙ и мимо override — см. док к `override`.
+  if (e instanceof ApiError && e.status === 403 && texts.refusal !== undefined) return texts.refusal;
+  const refined = texts.override?.(e);
+  if (refined !== undefined) return refined;
   if (!(e instanceof ApiError)) return t(texts.generic ?? 'ui.err.offline');
   if (e.status === 401) return t('ui.err.expired');
-  if (e.status === 403) return texts.refusal ?? t(texts.forbidden ?? 'ui.err.forbidden');
+  if (e.status === 403) return t(texts.forbidden ?? 'ui.err.forbidden');
   const own = texts.byStatus?.[e.status];
   return own !== undefined ? t(own) : t('ui.err.code', { code: e.code });
 }

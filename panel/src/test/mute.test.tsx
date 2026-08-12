@@ -91,13 +91,18 @@ describe('mute вью-модель (чистые функции)', () => {
     expect(normalizeMuteLabel('dev')).toBe('dev');
     expect(normalizeMuteLabel('  alpha ')).toBe('alpha');
   });
-  it('muteErrorMessage: статусы → локализованные ключи', () => {
+  it('muteErrorMessage: СВОИ статусы → ключи, всё прочее → undefined (tracker #1010)', () => {
     const t = ((k: string) => k) as Parameters<typeof muteErrorMessage>[1];
     expect(muteErrorMessage(new ApiError(400, 'bad_request'), t)).toBe('alerts.mute.err.bad');
     expect(muteErrorMessage(new ApiError(404, 'not_found'), t)).toBe('alerts.mute.err.gone');
     expect(muteErrorMessage(new ApiError(409, 'conflict'), t)).toBe('alerts.mute.err.conflict');
-    expect(muteErrorMessage(new ApiError(403, 'forbidden'), t)).toBe('confirm.err.forbidden');
-    expect(muteErrorMessage(new Error('x'), t)).toBe('confirm.err.generic');
+    // 403 БОЛЬШЕ НЕ СВОЙ. Раньше он возвращал 'confirm.err.forbidden', и
+    // поскольку функция не отдавала undefined никогда, `errorOverride?.(e) ??
+    // errMessage(...)` в ConfirmDialog не доходил до правой части НИ РАЗУ —
+    // то есть у mute привязанный ключ читал «недостаточно прав» вместо
+    // честной причины. Теперь решает общий словарь.
+    expect(muteErrorMessage(new ApiError(403, 'forbidden'), t)).toBeUndefined();
+    expect(muteErrorMessage(new Error('x'), t)).toBeUndefined();
   });
 });
 

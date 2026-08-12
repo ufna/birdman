@@ -24,6 +24,7 @@ import type { ReactNode } from 'react';
 import type { ColumnDef } from '@tanstack/react-table';
 import * as Dialog from '@radix-ui/react-dialog';
 import { api } from '../lib/api';
+import { apiErrorMessage } from '../lib/apiError';
 import type { ActiveAlert, AlertEvent, AlertMute, AlertRule } from '../lib/api';
 import {
   MUTE_PRESETS,
@@ -40,7 +41,7 @@ import {
 import type { AlertScoped, MutePreset } from '../lib/alerts';
 import { useAsync } from '../lib/useAsync';
 import { useProject, useProjectAsync } from '../lib/project';
-import { canAdmin, useSession } from '../lib/session';
+import { canAdmin, useBindingRefusal, useSession } from '../lib/session';
 import { useT, useFormat } from '../lib/i18n';
 import type { BoundFormat, MessageKey } from '../lib/i18n';
 import { useToast } from '../components/Toast';
@@ -289,6 +290,7 @@ function MuteButton({
   const { t } = useT();
   const fmt = useFormat();
   const toast = useToast();
+  const bound = useBindingRefusal();
   const [open, setOpen] = useState(false);
   const [note, setNote] = useState('');
   const [mode, setMode] = useState<MutePreset | 'custom'>('8h');
@@ -333,7 +335,17 @@ function MuteButton({
       })
       .catch((e: unknown) => {
         setPending(false);
-        setError(muteErrorMessage(e, t));
+        // Не ConfirmDialog: общий словарь зовём сами, mute-статусы отдаём
+        // уточнением. refusal — чтобы привязанный ключ и здесь читал правду
+        // про причину 403, а не «недостаточно прав» (tracker #1010).
+        setError(
+          apiErrorMessage(e, t, {
+            refusal: bound,
+            forbidden: 'confirm.err.forbidden',
+            generic: 'confirm.err.generic',
+            override: (err) => muteErrorMessage(err, t),
+          }),
+        );
       });
   };
 

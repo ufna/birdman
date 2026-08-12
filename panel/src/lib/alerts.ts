@@ -7,7 +7,6 @@
 // (alertDescription). Обвязку UI переводим через каталог как обычно.
 
 import { ApiError } from './api';
-import { apiErrorMessage } from './apiError';
 import type { ActiveAlert, AlertScope } from './api';
 import type { I18nContextValue, Lang } from './i18n';
 
@@ -125,17 +124,24 @@ export function normalizeMuteLabel(value: string | undefined): string | undefine
 }
 
 /**
- * Человекочитаемая ошибка mute-действия: 400 (плохой запрос), 404 (mute уже
- * снят), 409 (конфликт), 403 (нет прав) → локализованные подписи; прочее — код.
+ * СВОИ статусы mute-действия: 400 (плохой запрос), 404 (mute уже снят), 409
+ * (конфликт) → локализованные подписи. Всё остальное — `undefined`: решает
+ * общий словарь `apiErrorMessage`.
+ *
+ * Возвращаемый тип `string | undefined` — предмет tracker #1010, а не деталь
+ * стиля. Раньше функция не возвращала `undefined` НИКОГДА, а `ConfirmDialog`
+ * звал её как `errorOverride?.(e) ?? errMessage(…)` — значит `??` не срабатывал
+ * ни на одной ошибке, и её ветка `403 → confirm.err.forbidden` («недостаточно
+ * прав») отменяла честный диагноз привязки, который #1000 поставил на его
+ * место. 403 отсюда убран нарочно: у mute нет своего 403, а общий словарь
+ * назовёт привязку, когда она и есть причина.
  */
-export function muteErrorMessage(e: unknown, t: I18nContextValue['t']): string {
-  if (e instanceof ApiError) {
-    if (e.status === 400) return t('alerts.mute.err.bad');
-    if (e.status === 404) return t('alerts.mute.err.gone');
-    if (e.status === 409) return t('alerts.mute.err.conflict');
-    if (e.status === 403) return t('confirm.err.forbidden');
-  }
-  return apiErrorMessage(e, t, { forbidden: 'confirm.err.forbidden', generic: 'confirm.err.generic' });
+export function muteErrorMessage(e: unknown, t: I18nContextValue['t']): string | undefined {
+  if (!(e instanceof ApiError)) return undefined;
+  if (e.status === 400) return t('alerts.mute.err.bad');
+  if (e.status === 404) return t('alerts.mute.err.gone');
+  if (e.status === 409) return t('alerts.mute.err.conflict');
+  return undefined;
 }
 
 // --- флажок звука нового critical (по умолчанию выкл) ---
