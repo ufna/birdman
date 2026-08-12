@@ -31,7 +31,7 @@
 | CrashLoop | событие crash_loop (см. master §2) | critical |
 | DiskHigh | disk > 85% (critical: > 92%) | warning |
 | MasterDown | внешний probe (healthchecks.io/UptimeRobot на `GET /healthz`) | critical |
-| TickDegraded | p95 tick_ms > порога игры 5м (**проектный** — `project` доклеивается join'ом с `birdman_server_info`; без совпадения остаётся платформенным, но горит, #958) | warning |
+| TickDegraded | p95 tick_ms > порога игры 5м (**проектный** — `project` доклеивается join'ом с `birdman_server_info`, #958). Join не сматчился → лейбл берётся с самой серии, если он там есть (#1008), иначе алерт горит ПЛАТФОРМЕННЫМ — и тогда его видит любой привязанный ключ вместе с `server_id` и тиком чужого дедика (цена названа в `master.md` §6, tracker #1020) | warning |
 | AgentlinkPendingStuck | unacked-команды master→agent висят дольше `birdman_pending_stuck_for` (деф. 10м) | warning |
 | CertExpiry | mTLS/TLS серты < 14 дней | warning |
 | AgentUpgradeFailed | событие agent_upgrade_failed | critical |
