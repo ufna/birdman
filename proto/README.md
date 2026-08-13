@@ -24,9 +24,15 @@ docker build -t birdman-protogen -f protogen.Dockerfile .
 # 2. генерация (перезаписывает agentlink/v1/*.pb.go)
 docker run --rm -v "$PWD":/workspace birdman-protogen generate
 
-# 3. линт контракта
+# 3. линт контракта (правила и список исключений — buf.yaml)
 docker run --rm -v "$PWD":/workspace birdman-protogen lint
 ```
+
+Шаги 2 и 3 — не только для человека: их гоняет CI (`.github/workflows/proto.yml`,
+джоб `contract-gates`) тем же образом и теми же командами, так что расхождение
+`.proto` ↔ `.pb.go` и нарушение правил `buf.yaml` роняют сборку, а не ждут, пока
+кто-нибудь запустит линт руками. Секция `breaking` из `buf.yaml` пока НЕ гоняется
+нигде — ей нужен baseline-ref, это отдельный разговор.
 
 Версии генераторов пинованы: `protoc-gen-go v1.36.6`, `protoc-gen-go-grpc v1.5.1`,
 `buf 1.55.1` (см. `protogen.Dockerfile`, `buf.gen.yaml`). После генерации:
