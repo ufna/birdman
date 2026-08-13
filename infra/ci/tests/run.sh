@@ -1455,6 +1455,137 @@ if [ -z "${BIRDMAN_TRAP_SELFTEST:-}" ]; then
 	fi
 fi
 
+# ─── ГЕЙТ «НЕТ ТРЕКНУТЫХ ИСПОЛНЯЕМЫХ АРТЕФАКТОВ» (tracker #1112) ─────────────
+#
+# 12.08 коммитом `bebbbac` (про allocate-metadata, к бинарю отношения не
+# имевшим) в индекс случайным `git add` уехал `sdk/mockagent/mockagent` — 4.2 МБ
+# ELF из `go build` без `-o`, запущенного прямо в каталоге модуля. Потребителей
+# у файла не было НИ ОДНОГО (smoke.sh, README и CMakeLists собирают mockagent
+# заново во временный каталог), но он уже разошёлся с репозиторием: go1.26.5
+# при пине 1.24, `CGO_ENABLED=1` при каноне `CGO_ENABLED=0`, внутри —
+# абсолютный путь другого чекаута владельца. Сверял его с исходником никто:
+# единственным шагом CI про mockagent был `go vet ./...`. Тот же класс
+# «выглядит покрытым», что закрывала #1110.
+#
+# ЧТО ИМЕННО ЗДЕСЬ ПРИШПИЛЕНО. Кейсы гоняют `infra/ci/no-tracked-binaries.sh`
+# на одноразовых репозиториях и перебирают СОСТОЯНИЯ ДЕРЕВА. Ложное
+# срабатывание тут дороже отсутствия гейта — краснеющий на ровном месте гейт
+# научат обходить, — поэтому зелёных кейсов столько же, сколько красных, и
+# каждый закрывает СВОЙ класс ложного красного: бит `755` на скрипте (таких в
+# дереве 18), трекнутый НЕисполняемый бинарь (два PNG в `docs/images/`) и
+# НЕтрекнутый бинарь в дереве (он есть у всякого, кто собирал локально).
+#
+# Фикстуры бинарных форматов — ЗАГЛУШКИ ИЗ ОДНОЙ МАГИИ, а не настоящие файлы:
+# чекер читает ровно первые 8 байт, и восьми байт ему довольно.
+if [ -z "${BIRDMAN_TRAP_SELFTEST:-}" ]; then
+	echo
+	echo "── гейт «нет трекнутых исполняемых артефактов»"
+
+	bincheck="$(dirname "$here")/no-tracked-binaries.sh"
+	if [ ! -x "$bincheck" ]; then
+		echo "FAIL гейт бинарей: $bincheck не найден или не исполняем"
+		fail=$((fail + 1))
+	else
+		# bin_scaffold <repo> — намеренно ПУСТАЯ миниатюра: только README и
+		# .gitignore. Всё, что кейс проверяет, кейс же и кладёт — иначе
+		# непонятно, на что именно он ответил.
+		bin_scaffold() {
+			local repo="$1"
+			mkdir -p "$repo"
+			echo "# birdman" >"$repo/README.md"
+			printf 'build/\n' >"$repo/.gitignore"
+			git -C "$repo" init -q
+			git -C "$repo" config user.email t@example.com
+			git -C "$repo" config user.name test
+			git -C "$repo" add -A
+			git -C "$repo" commit -qm "scaffold"
+		}
+
+		# bin_case <имя> <ожидаемый код> <мутация: shell в корне репо> [текст в выводе]
+		# Текст в выводе — не украшение: гейт, который краснеет НЕ НАЗЫВАЯ
+		# путь, отправляет следующего читателя искать вслепую.
+		bin_case() {
+			local name="$1" want="$2" mutate="$3" expect_text="${4:-}"
+			local repo="$work/bingate/$(echo "$name" | tr -c 'a-zA-Z0-9' '_')"
+			mkdir -p "$repo"
+			bin_scaffold "$repo"
+			(cd "$repo" && eval "$mutate")
+			local out rc=0
+			out="$("$bincheck" "$repo" 2>&1)" || rc=$?
+			if [ "$rc" != "$want" ]; then
+				echo "FAIL гейт бинарей: $name — код $rc, ожидался $want"
+				printf '%s\n' "$out" | sed 's/^/      /'
+				fail=$((fail + 1))
+				return
+			fi
+			if [ -n "$expect_text" ] && ! printf '%s' "$out" | grep -qF "$expect_text"; then
+				# Скобки обязательны: за именем стоит многобайтная кавычка.
+				echo "FAIL гейт бинарей: $name — в выводе нет «${expect_text}»"
+				printf '%s\n' "$out" | sed 's/^/      /'
+				fail=$((fail + 1))
+				return
+			fi
+			echo "ok   гейт бинарей: $name (код $rc)"
+			pass=$((pass + 1))
+		}
+
+		# ЗЕЛЁНОЕ 1 — базовая линия: обычное дерево не краснит.
+		bin_case "чистое дерево остаётся зелёным" 0 ':'
+		# ЗЕЛЁНОЕ 2, ГЛАВНЫЙ ложный красный — БИТ РЕЖИМА НЕ СИГНАЛ. В настоящем
+		# дереве трекнутых файлов с `100755` девятнадцать, и восемнадцать из них
+		# обычные скрипты. Сломайся здесь сигнал на режим — гейт покраснел бы на
+		# всех восемнадцати и был бы обойдён в первый же день.
+		bin_case "скрипт с битом 755 не краснит" 0 \
+			'printf "#!/bin/sh\nexit 0\n" >tool.sh && chmod 755 tool.sh && git add -A && git commit -qm tool'
+		# ЗЕЛЁНОЕ 3 — трекнутый бинарь, который НЕ исполняемый формат: в репо
+		# это два PNG в docs/images/. Гейт про исполняемые артефакты, не про
+		# бинарники вообще.
+		bin_case "трекнутый PNG не краснит" 0 \
+			'mkdir -p docs/images && printf "\211PNG\r\n\032\n" >docs/images/panel.png && git add -A && git commit -qm png'
+		# ЗЕЛЁНОЕ 4 — НЕтрекнутый бинарь в дереве. Он есть у каждого, кто собирал
+		# локально; покрасней гейт на нём — красное стало бы нормой и потеряло
+		# бы смысл. Ровно то, ради чего в скрипте `git ls-files`, а не обход ФС.
+		bin_case "нетрекнутый ELF в дереве не краснит" 0 \
+			'mkdir -p sdk/mockagent && printf "\177ELF\002\001\001\001" >sdk/mockagent/mockagent'
+		# КРАСНОЕ 1 — САМ ДЕФЕКТ #1112, один в один.
+		bin_case "трекнутый ELF краснит" 1 \
+			'mkdir -p sdk/mockagent && printf "\177ELF\002\001\001\001" >sdk/mockagent/mockagent && git add -Af && git commit -qm oops' \
+			'sdk/mockagent/mockagent'
+		# КРАСНОЕ 2 — формат хоста, с которого чаще всего и коммитят.
+		bin_case "трекнутый Mach-O краснит" 1 \
+			'printf "\317\372\355\376\014\000\000\001" >helper && git add -Af && git commit -qm oops' \
+			'Mach-O'
+		# КРАСНОЕ 3, НЕОЧЕВИДНОЕ И САМОЕ ЦЕННОЕ — .gitignore ТРЕКНУТЫЙ ФАЙЛ НЕ
+		# ЗАЩИЩАЕТ. Правило игнора действует только на нетрекнутые пути, так что
+		# «добавили в .gitignore» без `git rm --cached` оставляет бинарь в
+		# индексе, а `git status` при этом ЧИСТ (замерено на настоящем дереве
+		# #1112). Без этого кейса лечение можно было бы сделать наполовину и
+		# считать закрытым.
+		bin_case "трекнутый ELF краснит даже будучи в .gitignore" 1 \
+			'mkdir -p sdk/mockagent && printf "\177ELF\002\001\001\001" >sdk/mockagent/mockagent && git add -Af sdk/mockagent/mockagent && printf "sdk/mockagent/mockagent\n" >>.gitignore && git add -A && git commit -qm oops' \
+			'sdk/mockagent/mockagent'
+		# КРАСНОЕ 4 — приёмка не бывает пустой: ноль трекнутых файлов, значит
+		# проверять нечего и «зелёное» не значило бы ничего.
+		bin_case "пустая приёмка не проходит молча" 2 \
+			'git rm -q -r . && git commit -qm drop' \
+			'НИ ОДНОГО трекнутого файла'
+		# КРАСНОЕ 5 — не git-репозиторий вовсе: громкий отказ, а не тихий ноль.
+		# Мимо bin_case: тот по построению заводит репозиторий.
+		notrepo="$work/bingate-notrepo"
+		mkdir -p "$notrepo"
+		rc=0
+		out="$("$bincheck" "$notrepo" 2>&1)" || rc=$?
+		if [ "$rc" = 2 ] && printf '%s' "$out" | grep -qF "не git-репозиторий"; then
+			echo "ok   гейт бинарей: не-git-каталог отвергается (код $rc)"
+			pass=$((pass + 1))
+		else
+			echo "FAIL гейт бинарей: не-git-каталог — код $rc, ожидался 2"
+			printf '%s\n' "$out" | sed 's/^/      /'
+			fail=$((fail + 1))
+		fi
+	fi
+fi
+
 echo
 echo "прошло: $pass, упало: $fail"
 # Часовой снимается ровно здесь: всё, что ниже, — это и есть финал.

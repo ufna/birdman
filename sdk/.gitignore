@@ -1,2 +1,13 @@
 build/
 build-*/
+# Артефакт `go build` без `-o`, запущенного прямо в sdk/mockagent/: Go кладёт
+# бинарь рядом с исходником и называет его по модулю. Так 4.2 МБ ELF и уехали
+# в индекс случайным `git add` (bebbbac, tracker #1112) — при том что НИ ОДИН
+# потребитель его не берёт: smoke.sh, README и CMakeLists собирают mockagent
+# заново во временный каталог.
+#
+# Слэш в паттерне ЯКОРИТ его к каталогу этого .gitignore, то есть матчится
+# ровно sdk/mockagent/mockagent. Голый `mockagent` писать НЕЛЬЗЯ: без слэша
+# паттерн матчит на любой глубине и поймал бы САМ КАТАЛОГ sdk/mockagent/,
+# спрятав от git и main.go, и go.mod.
+mockagent/mockagent
