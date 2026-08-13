@@ -56,28 +56,61 @@ export function navItemsFor(session: SessionInfo | null | undefined): NavItem[] 
 const SECTION_ROOTS = NAV_ITEMS.map((it) => it.path).filter((p) => p !== '/');
 
 /**
- * Раздел, которому принадлежит путь: `/logs/x` → `/logs`, `/` и всё
- * неизвестное → `/` (Обзор). ЕДИНСТВЕННОЕ место в панели, где путь
- * сопоставляется с разделом, — её спрашивают все трое потребителей пути:
- * роутер (App.tsx), подсветка пункта нава и классификация скоупа ниже.
- * Пока их было трое независимых, они разъезжались: роутер и подсветка
- * матчили префиксно, а множества скоупа — точным `has(path)`, и на под-пути
- * вроде `/logs/x` рендерился экран Логов, но чипы окружения, спрятанные там
- * намеренно, возвращались вхолостую (tracker #1109).
+ * Половина правила: раздел, которому принадлежит ПУТЬ, — `/logs/x` → `/logs`,
+ * `/` и всё неизвестное → `/` (Обзор). НЕ экспортируется намеренно: сам по
+ * себе этот ответ неполон (см. `effectiveSectionOf` ниже), и потребителю не
+ * должно быть чем задать половинчатый вопрос.
  *
  * Режем по ГРАНИЦЕ СЕГМЕНТА, а не голым `startsWith`: иначе `/logsomething`
- * попадал бы в Логи (так и было до этой правки), а `/backupsx` — в Бекапы.
+ * попадал бы в Логи (так и было до tracker #1109), а `/backupsx` — в Бекапы.
  * Посторонний путь — это Обзор, как и любой неизвестный.
  *
  * Опираемся на то, что ни один корень не префикс другого (иначе порядок
  * перебора начал бы что-то значить) — это держит отдельный тест.
  */
-export function sectionOf(path: string): string {
+function sectionOf(path: string): string {
   return SECTION_ROOTS.find((root) => path === root || path.startsWith(`${root}/`)) ?? '/';
 }
 
-function isActive(item: string, path: string): boolean {
-  return sectionOf(path) === item;
+/**
+ * Раздел, который РЕАЛЬНО отрендерится для этой пары (путь, сессия), —
+ * ЕДИНСТВЕННОЕ место в панели, где путь сопоставляется с разделом. Её
+ * спрашивают все трое потребителей: роутер (App.tsx), подсветка пункта нава и
+ * классификация скоупа ниже.
+ *
+ * Расхождений здесь закрыто два, по одному измерению каждое.
+ *
+ * ПУТЬ (tracker #1109): пока правил разбора было три независимых, роутер и
+ * подсветка матчили префиксно, а множества скоупа — точным `has(path)`, и на
+ * под-пути `/logs/x` рендерился экран Логов, но чипы окружения, спрятанные там
+ * намеренно, возвращались вхолостую. Это закрыл `sectionOf` выше.
+ *
+ * СЕССИЯ (tracker #1111): экран выбирается парой (путь, права), а скоуп
+ * спрашивался про один путь. Два раздела admin-only — `/backups` и `/access`
+ * (`adminOnly` в NAV_ITEMS), и не-admin, набравший такой URL руками или
+ * открывший чужую закладку, видит Обзор, где живы ОБЕ оси. Классификация же
+ * продолжала отвечать про Бекапы, где мертвы обе, — и прятала селектор
+ * ЦЕЛИКОМ: оператор не видел, в каком он проекте, и не мог переключиться, не
+ * уйдя с экрана. Направление хуже, чем у #1109: там селектор ВРАЛ про
+ * мёртвую ось, здесь — ПРЯТАЛ живую.
+ *
+ * Правило одно и выведено из уже имеющихся источников правды, третьего не
+ * заводим: раздела нет в наве этой сессии (`navItemsFor`, тот же `adminOnly`,
+ * которым нав его вырезает) — значит его нет и на экране, отдаём Обзор.
+ * Поэтому гейт не переписывается руками в роутере per-section: новый
+ * admin-only пункт нава отгейтится сам.
+ *
+ * Сессия — обязательный аргумент, а не опциональный: вопрос «какой раздел у
+ * этого пути» БЕЗ прав неполон, и возможность его задать — это ровно та
+ * дырка, через которую расхождение вернулось бы.
+ */
+export function effectiveSectionOf(path: string, session: SessionInfo | null | undefined): string {
+  const section = sectionOf(path);
+  return navItemsFor(session).some((it) => it.path === section) ? section : '/';
+}
+
+function isActive(item: string, path: string, session: SessionInfo | null | undefined): boolean {
+  return effectiveSectionOf(path, session) === item;
 }
 
 /** Бейдж активных critical-алертов на пункте «Алерты». Пульс на росте
@@ -109,7 +142,7 @@ function NavLinks({
   return (
     <nav className="flex flex-col gap-1" aria-label={t('nav.sections')}>
       {items.map((item) => {
-        const active = isActive(item.path, path);
+        const active = isActive(item.path, path, session);
         const showBadge = item.icon === 'alerts' && critical.count > 0;
         return (
           <a
@@ -342,37 +375,42 @@ export function EnvChips({ stacked = false }: { stacked?: boolean } = {}) {
  *
  * Инвариант, который держит отдельный тест: PROJECTLESS ⊆ ENVLESS — окружения
  * принадлежат проекту, поэтому экран, слепой к проекту, слеп и к его
- * окружениям. Бекапы — по-прежнему единственный, где не рендерится ничего.
+ * окружениям. Бекапы — по-прежнему единственный, где не рендерится ничего, и
+ * только у admin: у не-admin экрана Бекапов там нет вовсе (ниже про сессию).
  *
  * Множества перечисляют КОРНИ разделов, и спрашиваются они не о сыром пути, а
- * о `sectionOf(path)` — той же функции, которой роутер выбирает экран, а нав
- * подсвечивает пункт. Иначе под-путь получал бы экран одного раздела и скоуп
- * другого (tracker #1109).
+ * о `effectiveSectionOf(path, session)` — той же функции, которой роутер
+ * выбирает экран, а нав подсвечивает пункт. Иначе классификация отвечала бы
+ * про раздел, которого на экране нет: про чужой под-путь (tracker #1109) или
+ * про admin-only раздел, деградировавший у не-admin в Обзор (tracker #1111).
  */
 const PROJECTLESS_PATHS = new Set(['/backups']);
 const ENVLESS_PATHS = new Set(['/backups', '/alerts', '/logs', '/access']);
 
-/** Влияет ли ВЫБОР ПРОЕКТА на то, что показывает экран этого пути. */
-export function pathUsesProject(path: string): boolean {
-  return !PROJECTLESS_PATHS.has(sectionOf(path));
+/** Влияет ли ВЫБОР ПРОЕКТА на то, что показывает экран этой пары. */
+export function pathUsesProject(path: string, session: SessionInfo | null | undefined): boolean {
+  return !PROJECTLESS_PATHS.has(effectiveSectionOf(path, session));
 }
 
-/** Влияет ли ВЫБОР ОКРУЖЕНИЯ на то, что показывает экран этого пути. */
-export function pathUsesEnv(path: string): boolean {
-  return !ENVLESS_PATHS.has(sectionOf(path));
+/** Влияет ли ВЫБОР ОКРУЖЕНИЯ на то, что показывает экран этой пары. */
+export function pathUsesEnv(path: string, session: SessionInfo | null | undefined): boolean {
+  return !ENVLESS_PATHS.has(effectiveSectionOf(path, session));
 }
 
-/** Есть ли на этом пути хоть одна живая ось — то есть рисовать ли блок вообще. */
-export function pathUsesScope(path: string): boolean {
-  return pathUsesProject(path) || pathUsesEnv(path);
+/** Есть ли здесь хоть одна живая ось — то есть рисовать ли блок вообще. */
+export function pathUsesScope(path: string, session: SessionInfo | null | undefined): boolean {
+  return pathUsesProject(path, session) || pathUsesEnv(path, session);
 }
 
 export function ScopePicker({ path }: { path: string }) {
-  if (!pathUsesScope(path)) return null;
+  // Сессию берём сами, а не пропом: половинки обязаны спрашивать про ТОТ ЖЕ
+  // экран, что выбрал роутер, а прокинутый проп можно забыть (tracker #1111).
+  const { session } = useSession();
+  if (!pathUsesScope(path, session)) return null;
   return (
     <div className="flex flex-col gap-3">
-      {pathUsesProject(path) && <ProjectSelector stacked />}
-      {pathUsesEnv(path) && <EnvChips stacked />}
+      {pathUsesProject(path, session) && <ProjectSelector stacked />}
+      {pathUsesEnv(path, session) && <EnvChips stacked />}
     </div>
   );
 }
@@ -391,12 +429,13 @@ export function ScopePicker({ path }: { path: string }) {
 export function ScopeIndicator({ path }: { path: string }) {
   const { selected: project } = useProject();
   const { selected: env } = useEnv();
+  const { session } = useSession();
   const { t } = useT();
-  if (!pathUsesProject(path) || project === null) return null;
+  if (!pathUsesProject(path, session) || project === null) return null;
   return (
     <span className="truncate font-mono text-xs text-muted" title={t('scope.current')}>
       {project}
-      {pathUsesEnv(path) && (
+      {pathUsesEnv(path, session) && (
         <>
           <span aria-hidden className="px-1 text-line">
             /

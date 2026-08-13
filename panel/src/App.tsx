@@ -1,13 +1,13 @@
 import { ThemeProvider } from './lib/theme';
 import { I18nProvider, useT } from './lib/i18n';
-import { SessionProvider, canAdmin, canRead, useSession } from './lib/session';
+import { SessionProvider, canRead, useSession } from './lib/session';
 import { LiveProvider } from './lib/live';
 import { EnvProvider } from './lib/env';
 import { ProjectProvider } from './lib/project';
 import { DrawerProvider } from './lib/drawer';
 import { ToastProvider } from './components/Toast';
 import { usePath } from './lib/usePath';
-import { Shell, sectionOf } from './components/Shell';
+import { Shell, effectiveSectionOf } from './components/Shell';
 import { Brand, Card } from './components/ui';
 import { Login } from './screens/Login';
 import { Overview } from './screens/Overview';
@@ -84,20 +84,24 @@ function Root() {
 
 /**
  * Экспортируется для тестов (как LiveContext в lib/live.tsx): роутер — это
- * место, где путь превращается в экран, и пин «под-путь получает экран и
- * скоуп ОДНОГО раздела» иначе не написать. В приложении рендерится только
- * из Root.
+ * место, где пара (путь, сессия) превращается в экран, и пин «экран и скоуп
+ * приезжают из ОДНОГО раздела» иначе не написать — ни для под-пути (#1109),
+ * ни для admin-only раздела у не-admin (#1111). В приложении рендерится
+ * только из Root.
  */
 export function Routed() {
   const [path, navigate] = usePath();
   const { session } = useSession();
-  const mayAdmin = session != null && canAdmin(session);
-  // Экран выбирает РАЗДЕЛ пути, а не сырой путь: sectionOf режет по границе
-  // сегмента, поэтому под-путь `/logs/x` — те же Логи, а посторонний
-  // `/logsomething` — Обзор (голый startsWith отдавал его Логам). Ту же
-  // функцию спрашивают подсветка нава и классификация скоупа, так что
-  // разъехаться им теперь негде (tracker #1109).
-  const section = sectionOf(path);
+  // Экран выбирает не сырой путь, а РАЗДЕЛ пары (путь, сессия). Резка по
+  // границе сегмента: под-путь `/logs/x` — те же Логи, а посторонний
+  // `/logsomething` — Обзор (голый startsWith отдавал его Логам, #1109).
+  // Права: admin-only раздел (`adminOnly` в NAV_ITEMS — сегодня `/backups` и
+  // `/access`) у не-admin деградирует в Обзор прямо здесь, поэтому веток
+  // `mayAdmin ? … : <Overview/>` ниже больше нет: гейт выводится из состава
+  // нава, а не переписывается руками на каждый раздел (tracker #1111).
+  // Ту же функцию спрашивают подсветка нава и классификация скоупа, так что
+  // разъехаться им негде — ни по пути, ни по сессии.
+  const section = effectiveSectionOf(path, session);
   const screen =
     section === '/fleet' ? (
       <Fleet />
@@ -116,19 +120,9 @@ export function Routed() {
     ) : section === '/logs' ? (
       <Logs />
     ) : section === '/backups' ? (
-      // Бекапы — admin-only: не-admin по прямому URL уводим на Обзор (в нав его нет).
-      mayAdmin ? (
-        <Backups />
-      ) : (
-        <Overview />
-      )
+      <Backups />
     ) : section === '/access' ? (
-      // Доступ — admin-only: не-admin по прямому URL уводим на Обзор (в нав его нет).
-      mayAdmin ? (
-        <Access />
-      ) : (
-        <Overview />
-      )
+      <Access />
     ) : (
       <Overview />
     );
