@@ -32,7 +32,7 @@ service AgentLink {
 message EnrollRequest {
   string node_token    = 1; // bootstrap/recovery; ПУСТОЙ при renewal по действующему client-серту
   bytes  csr_pem       = 2; // PKCS#10; ключ генерит агент, приватный ключ никогда не покидает ноду
-  string agent_version = 3; // наблюдаемость (лог/событие)
+  string agentVersion   = 3; // наблюдаемость (лог/событие)
 }
 
 // EnrollResponse — подписанный master'ом ответ на заявку. cert_pem/ca_bundle_pem
