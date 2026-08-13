@@ -863,8 +863,8 @@ YML
 
 # ─── ГЕЙТ 5: ключи САМОГО СЕРВИСА (tracker #1107) ───────────────────────────
 # Третий уровень роста форм — но НЕ последний: уровнем ниже лежат ключи внутри
-# ОДНОЙ ЗАПИСИ длинной формы, и там рост по-прежнему тихий (замерено, названо в
-# шапке сторожа, заведена карточка). Гейт 4 закрыл сразу два — ключи
+# ОДНОЙ ЗАПИСИ длинной формы, и их закрывает ГЕЙТ 6 в конце этого файла
+# (tracker #1115). Гейт 4 закрыл сразу два — ключи
 # ДОКУМЕНТА и ключи ОПРЕДЕЛЕНИЯ тома (оба пришли с #1097); между ними оставался
 # уровень, на котором сторож знал ровно пять ключей сервиса, а ключ вне пятёрки
 # до него не доезжал ВОВСЕ. Замерено до перехода: `devices: [/srv/…:/dev/x]` рядом с
@@ -1066,6 +1066,209 @@ vol_case "x- у сервиса не краснит, но и не прячет м
 	    image: postgres:16
 	    x-birdman: свой ключ
 	    volumes: *common
+YML
+
+# ─── ГЕЙТ 6: ключи ВНУТРИ ОДНОЙ ЗАПИСИ длинной формы (tracker #1115) ────────
+# ЧЕТВЁРТЫЙ и самый глубокий уровень роста форм, и последний, что оставался
+# открытым. Уровни выше (документ, сервис, определение тома) уже громкие: ключ,
+# которого сторож не знает, роняет прогон. А ЗАПИСЬ под понятым ключом сторож
+# читал ВЫБОРОЧНО — брал знакомые поля, остальные не смотрел вовсе. Замерено до
+# перехода: `{type: bind, source: …, target: …, выдумка: 1}` давало RC=0 и
+# «проверено маунтов: 1» — запись проезжала молча и зелёно.
+#
+# ЗАМЕР ПЕРЕД ВЫБОРОМ МЕХАНИЗМА, а не после (урок #1107, где допущение карточки
+# опроверглось дважды): отвергает ли неизвестный ключ ЗАПИСИ сам compose?
+# ОТВЕРГАЕТ, во всех пяти — `docker compose config` v2.32.4 client-side отвечает
+# «services.db.volumes.0 Additional property выдумка is not allowed», RC=15, и
+# так же на `devices.0`, `env_file.0`, `configs.0`, `secrets.0`. Значит набор
+# КОНЕЧЕН и закрыт схемой, и белый список тут законен ровно по той же причине,
+# что уровнем выше. Будь ответ обратным, список краснел бы на легальном.
+#
+# Записей ПЯТЬ, а не три, как называла карточка: ссылка `configs:`/`secrets:` у
+# сервиса — тоже длинная запись со своим набором (`source, target, uid, gid,
+# mode`), она нашлась замером, и без неё уровень остался бы дырявым.
+#
+# Цена промерена восемью настоящими рендерами (мастер; агент на боксе из одной и
+# из двух нод — по два compose; мониторинг; оверлей спок и хаб): длинной формы
+# не использует сегодня НИ ОДИН compose-шаблон роли, и вывод сторожа на всех
+# восьми совпал ПОБАЙТНО — ни один код возврата не изменился. Ровно как не было
+# в шаблонах и `devices:` в тот день, когда его объявили несуществующим, — так
+# что кейс «законная длинная форма НЕ краснеет» ниже стоит не для симметрии.
+echo
+echo "── ключи внутри записи длинной формы: понятый набор закрыт, остальное роняет прогон"
+
+# — МУТАЦИЯ, ради которой карточка: сегодня она давала RC=0 —
+vol_case "запись тома: выдумка рядом с понятыми ключами" 1 "ключи записи: выдумка" <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - type: bind
+	        source: /srv/fixture/pg.conf
+	        target: /etc/pg.conf
+	        выдумка: 1
+YML
+vol_case "запись devices: выдумка" 1 "ключи записи: выдумка" --allow-no-mounts <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    devices:
+	      - source: /srv/fixture/pg.conf
+	        target: /dev/x
+	        выдумка: 1
+YML
+vol_case "запись env_file: выдумка" 1 "ключи записи: выдумка" --allow-no-mounts <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    env_file:
+	      - path: /srv/fixture/pg.conf
+	        выдумка: 1
+YML
+vol_case "ссылка configs: выдумка" 1 "ключи записи: выдумка" --allow-no-mounts <<-'YML'
+	configs:
+	  c1:
+	    file: /srv/fixture/pg.conf
+	services:
+	  db:
+	    image: postgres:16
+	    configs:
+	      - source: c1
+	        выдумка: 1
+YML
+vol_case "ссылка secrets: выдумка" 1 "ключи записи: выдумка" --allow-no-mounts <<-'YML'
+	secrets:
+	  s1:
+	    file: /srv/fixture/pg.conf
+	services:
+	  db:
+	    image: postgres:16
+	    secrets:
+	      - source: s1
+	        выдумка: 1
+YML
+# `required: false` — законный ПРОПУСК, и он обязан пропускать запись, а не
+# ключи в ней: иначе выдумку унесло бы вместе с пропуском. Проверка стоит ДО
+# раннего выхода именно поэтому.
+vol_case "env_file required: false не прячет выдумку" 1 "ключи записи: выдумка" --allow-no-mounts <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    env_file:
+	      - path: /srv/чужое/optional.env
+	        required: false
+	        выдумка: 1
+YML
+# Опечатка в законном ключе записи — тот же класс, и раньше она проезжала
+# зелёной: `sourse` не source, а маунта у записи как бы и нет.
+vol_case "опечатка в ключе записи краснеет" 1 "ключи записи: sourse" --allow-no-mounts <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - type: bind
+	        sourse: /srv/fixture/secret.conf
+	        target: /etc/pg.conf
+YML
+# УРОВНЕМ НИЖЕ ЗАПИСИ — её вложенные опции. Схема закрывает и их, поэтому они
+# закрыты здесь же: оставить их значило бы, закрыв четвёртый остаток, тут же
+# завести пятый.
+vol_case "вложенные опции bind: выдумка" 1 "ключи опций bind: выдумка" <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - type: bind
+	        source: /srv/fixture/pg.conf
+	        target: /etc/pg.conf
+	        bind:
+	          выдумка: 1
+YML
+vol_case "вложенные опции volume: выдумка" 1 "ключи опций volume: выдумка" --allow-no-mounts <<-'YML'
+	volumes:
+	  v1: {}
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - type: volume
+	        source: v1
+	        target: /var/lib/x
+	        volume:
+	          выдумка: 1
+YML
+vol_case "вложенные опции не словарь" 1 "не словарь" --allow-no-mounts <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - type: bind
+	        source: /srv/fixture/pg.conf
+	        target: /etc/pg.conf
+	        bind: rprivate
+YML
+
+# — ЦЕНА РЕШЕНИЯ: законная длинная форма НЕ краснеет —
+# Ровно тот compose, что ниже, `docker compose config` v2.32.4 принимает целиком
+# (RC=0, замерено): здесь стоят ВСЕ промеренные ключи всех пяти записей и все
+# вложенные опции. Покраснеть тут значило бы поменять тихую дыру на ложный
+# отказ — то, чем кончился бы наивный вариант в #1107.
+vol_case "все законные ключи записей не краснеют" 0 "проверено маунтов: 2" <<-'YML'
+	configs:
+	  c1:
+	    file: /srv/fixture/pg.conf
+	volumes:
+	  v1: {}
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - type: bind
+	        source: /srv/fixture/pg.conf
+	        target: /etc/pg.conf
+	        read_only: true
+	        consistency: consistent
+	        bind:
+	          propagation: rprivate
+	          create_host_path: false
+	          selinux: z
+	          recursive: enabled
+	      - type: volume
+	        source: v1
+	        target: /var/lib/x
+	        volume:
+	          nocopy: true
+	          subpath: sub
+	      - type: tmpfs
+	        target: /tmp/x
+	        tmpfs:
+	          size: 1024
+	          mode: 493
+	    devices:
+	      - source: /dev/net/tun
+	        target: /dev/net/tun
+	        permissions: rwm
+	    configs:
+	      - source: c1
+	        target: /etc/c1
+	        uid: "0"
+	        gid: "0"
+	        mode: 292
+YML
+# `x-…` ВНУТРИ записи — замер, а не симметрия с уровнями выше, и замер этот
+# НЕсимметричен: compose принимает `x-birdman` внутри записи тома, devices и
+# ссылок configs:/secrets: (RC=0), а внутри записи env_file ОТВЕРГАЕТ (RC=15).
+# Правило у сторожа одно на все записи — покраснеть на форме, которую compose
+# ПРИНИМАЕТ, значило бы дать ложный отказ на легальном.
+vol_case "x- внутри записи не краснит, но и не прячет маунт" 1 "не годится контейнеру" <<-'YML'
+	services:
+	  db:
+	    image: postgres:16
+	    volumes:
+	      - type: bind
+	        source: /srv/fixture/secret.conf
+	        target: /etc/pg.conf
+	        x-birdman: свой ключ
 YML
 
 # ─── САМ РАННЕР: упавший посредине обязан быть красным (tracker #1089) ──────
