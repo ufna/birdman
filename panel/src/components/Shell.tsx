@@ -31,7 +31,18 @@ export interface NavItem {
   adminOnly?: boolean;
 }
 
-const NAV_ITEMS: NavItem[] = [
+/**
+ * Состав меню — и ЕДИНСТВЕННЫЙ источник списка разделов панели.
+ *
+ * `as const satisfies` вместо аннотации `NavItem[]` — не стиль, а несущая
+ * конструкция: `satisfies` по-прежнему проверяет каждый пункт по `NavItem`
+ * (опечатка в `icon`/`key` — ошибка здесь же), а `as const` сохраняет пути
+ * ЛИТЕРАЛАМИ, из которых ниже выводится `SectionPath`. Роутер объявляет свою
+ * таблицу экранов как `Record<SectionPath, …>` (App.tsx), поэтому пункт нава
+ * без экрана перестаёт компилироваться — соответствие «пункт нава ⇄ ветка
+ * роутера» держит тип, а не договорённость (tracker #1118).
+ */
+const NAV_ITEMS = [
   { path: '/', key: 'nav.overview', icon: 'overview' },
   { path: '/fleet', key: 'nav.fleet', icon: 'fleet' },
   { path: '/matches', key: 'nav.matches', icon: 'matches' },
@@ -45,11 +56,24 @@ const NAV_ITEMS: NavItem[] = [
   { path: '/logs', key: 'nav.logs', icon: 'logs' },
   { path: '/backups', key: 'nav.backups', icon: 'backups', adminOnly: true },
   { path: '/access', key: 'nav.access', icon: 'access', adminOnly: true },
-];
+] as const satisfies readonly NavItem[];
+
+/** Любой путь навигации, включая корень Обзора. */
+export type NavPath = (typeof NAV_ITEMS)[number]['path'];
+
+/**
+ * Корень РАЗДЕЛА — путь навигации, у которого обязан быть свой экран. Обзор
+ * исключён намеренно: он не раздел, а `else` роутера (туда же уходит всё
+ * неизвестное), поэтому в таблице экранов ему записи не полагается.
+ */
+export type SectionPath = Exclude<NavPath, '/'>;
 
 /** Пункты навигации для сессии: admin-only скрыты у не-admin. Чистая — тест scope-гейта. */
 export function navItemsFor(session: SessionInfo | null | undefined): NavItem[] {
-  return NAV_ITEMS.filter((it) => it.adminOnly !== true || (session != null && canAdmin(session)));
+  // Расширяем литеральный тип обратно до `NavItem` одной аннотацией: пункты
+  // без `adminOnly` — свой тип в объединении, и поле у них не спросить.
+  const items: readonly NavItem[] = NAV_ITEMS;
+  return items.filter((it) => it.adminOnly !== true || (session != null && canAdmin(session)));
 }
 
 /** Корни разделов — из самого NAV_ITEMS, чтобы источник разделов был один. */

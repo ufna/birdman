@@ -12,7 +12,7 @@
 // уже спрятаны.
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import type { Environment, ProjectInfo, SessionInfo } from '../lib/api';
 import { I18nProvider } from '../lib/i18n';
@@ -21,7 +21,7 @@ import { ProjectContext } from '../lib/project';
 import { SessionContext } from '../lib/session';
 import { ThemeProvider } from '../lib/theme';
 import { DrawerProvider } from '../lib/drawer';
-import { Routed } from '../App';
+import { Routed, SECTION_SCREENS } from '../App';
 import {
   EnvChips,
   ScopeIndicator,
@@ -582,3 +582,75 @@ describe('роутер и скоуп сходятся и по ПРАВАМ се�
     expect(envGroup()).toBeNull();
   });
 });
+
+// --- ОБРАТНАЯ сторона соответствия «нав ⇄ роутер» (tracker #1118) ---
+
+/**
+ * Инвариант #1111 выше — одна сторона: «эффективный раздел ВСЕГДА есть в наве
+ * своей сессии». Обратной не было: «у КАЖДОГО пункта нава есть свой экран в
+ * роутере». Все десять непустых корней экран имели, но держалось это на
+ * договорённости — пункт, добавленный БЕЗ экрана, провалился бы в `else`
+ * роутера: `effectiveSectionOf` вернул бы его же (пункт в наве есть), нав
+ * подсветил бы «Secrets», а на экране был бы Обзор. Классификация скоупа при
+ * этом молчит (новому корню припишут обе живые оси, у Обзора они тоже живы),
+ * так что единственным симптомом была бы подсветка — и заметить её нечем.
+ *
+ * Держим это ТРЕМЯ разными способами, потому что они ловят разные ошибки:
+ *
+ * 1) ТИПОМ. `SECTION_SCREENS` объявлена `Record<SectionPath, …>`, а
+ *    `SectionPath` выведён из литералов `NAV_ITEMS` — пункт нава без экрана не
+ *    компилируется вовсе (`npm run check`), лишний экран без пункта нава тоже.
+ *    Это сильнее любого прогона, но живёт только в `tsc`.
+ * 2) МНОЖЕСТВАМИ (тест ниже). Тот же факт, но проверяемый `npm test` в
+ *    одиночку — и читаемый глазами: вот ключи роутера, вот пути нава.
+ * 3) ПОВЕДЕНИЕМ (тест ниже). Первые два проверяют ТАБЛИЦУ; этот — что роутер
+ *    её действительно читает. Вернуть в роутер цепочку `section === '…'`,
+ *    оставив таблицу декоративной, — и он покраснеет.
+ *
+ * Разбор исходника `App.tsx` регуляркой на `section === '…'` сознательно НЕ
+ * используется: такой пин краснеет на переформатировании и на законной
+ * переписи цепочки в `switch`, то есть учит себя обходить.
+ */
+describe('у КАЖДОГО пункта нава есть свой экран в роутере', () => {
+  /** Корни разделов глазами admin — то есть все, кому положен свой экран. */
+  const sectionRoots = navItemsFor(adminSession)
+    .map((it) => it.path)
+    .filter((p) => p !== '/');
+
+  it('ключи таблицы экранов роутера = пути навигации (кроме Обзора)', () => {
+    expect(new Set(Object.keys(SECTION_SCREENS))).toEqual(new Set(sectionRoots));
+  });
+
+  it('Обзора в таблице нет: он не раздел, а `else` роутера', () => {
+    expect(Object.keys(SECTION_SCREENS)).not.toContain('/');
+    expect(navItemsFor(adminSession).map((it) => it.path)).toContain('/');
+  });
+
+  // Санити ПЕРВЫМ: без него «маркера Обзора нет» проходит и тогда, когда
+  // маркер перестал ловиться вовсе, и весь тест ниже — пустышка.
+  it('санити: на постороннем пути маркер Обзора ЛОВИТСЯ этим же способом', async () => {
+    renderRouted('/nope');
+    await settle();
+    expect(screen.queryByText(OVERVIEW_MARKER)).not.toBeNull();
+  });
+
+  it.each(sectionRoots)('корень %s рендерит СВОЙ экран, а не Обзор под подсвеченным навом', async (path) => {
+    renderRouted(path, adminSession);
+    await settle();
+    // Ровно симптом карточки: нав говорит «мы здесь», а на экране Обзор.
+    expect({ path, overview: screen.queryByText(OVERVIEW_MARKER) !== null }).toEqual({ path, overview: false });
+    expect(currentNavHref()).toBe(path);
+  });
+});
+
+/**
+ * Даём асинхронной загрузке экранов осесть: иначе «маркера Обзора нет» могло
+ * бы означать «ещё ничего не отрендерилось». Реальный таймер, а не счёт
+ * микрозадач, — устойчивее к числу await-хопов внутри запросов (тот же приём,
+ * что в screens.test.tsx).
+ */
+async function settle() {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}

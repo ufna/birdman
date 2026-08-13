@@ -1,3 +1,6 @@
+/* eslint-disable react-refresh/only-export-components -- SECTION_SCREENS — таблица «раздел → экран», которую читает роутер в этом же файле; её же читает пин соответствия «пункт нава ⇄ экран» (tracker #1118). Разносить таблицу и её единственного потребителя по модулям ради гранулярности Fast Refresh в dev-сервере дороже, чем оно стоит. Политика — в eslint.config.js. */
+
+import type { ReactNode } from 'react';
 import { ThemeProvider } from './lib/theme';
 import { I18nProvider, useT } from './lib/i18n';
 import { SessionProvider, canRead, useSession } from './lib/session';
@@ -8,6 +11,7 @@ import { DrawerProvider } from './lib/drawer';
 import { ToastProvider } from './components/Toast';
 import { usePath } from './lib/usePath';
 import { Shell, effectiveSectionOf } from './components/Shell';
+import type { SectionPath } from './components/Shell';
 import { Brand, Card } from './components/ui';
 import { Login } from './screens/Login';
 import { Overview } from './screens/Overview';
@@ -82,6 +86,38 @@ function Root() {
   );
 }
 
+/** Что рендерить в разделе. Функция от `navigate`, а не готовый узел: экрану
+ *  Деплоев нужна навигация, а замыкать её в модульной константе нельзя. */
+type ScreenOf = (navigate: (p: string) => void) => ReactNode;
+
+/**
+ * Экраны разделов — ОДНА таблица «корень раздела → что рендерить», которую и
+ * читает роутер ниже. Была цепочка `section === '…' ? … :` в теле роутера, и
+ * соответствие «пункт нава ⇄ ветка роутера» держалось на договорённости:
+ * сегодня ветка есть у всех десяти корней, но пункт, добавленный БЕЗ ветки,
+ * провалился бы в `else` — нав подсвечивал бы «Secrets», а на экране был бы
+ * Обзор, и заметить это было нечем (tracker #1118).
+ *
+ * Тип `Record<SectionPath, …>` превращает эту договорённость в проверку
+ * КОМПИЛЯТОРА: `SectionPath` выведён из литералов `NAV_ITEMS` (Shell.tsx), а
+ * `Record` требует ключ на КАЖДЫЙ из них — новый пункт нава без записи здесь
+ * роняет `tsc`, лишний ключ без пункта нава роняет его же. Инвариант #1111
+ * («эффективный раздел ВСЕГДА есть в наве своей сессии») — это первая
+ * половина соответствия; таблица — вторая.
+ */
+export const SECTION_SCREENS: Record<SectionPath, ScreenOf> = {
+  '/fleet': () => <Fleet />,
+  '/matches': () => <Matches />,
+  '/deploys': (navigate) => <Deploys navigate={navigate} />,
+  '/events': () => <Events />,
+  '/stats': () => <Stats />,
+  '/cost': () => <Cost />,
+  '/alerts': () => <Alerts />,
+  '/logs': () => <Logs />,
+  '/backups': () => <Backups />,
+  '/access': () => <Access />,
+};
+
 /**
  * Экспортируется для тестов (как LiveContext в lib/live.tsx): здесь пара
  * (путь, сессия) превращается в РАЗДЕЛ и экран, и пин «экран и скоуп приезжают
@@ -105,30 +141,11 @@ export function Routed() {
   // Ту же функцию спрашивают подсветка нава и классификация скоупа, так что
   // разъехаться им негде — ни по пути, ни по сессии.
   const section = effectiveSectionOf(path, session);
-  const screen =
-    section === '/fleet' ? (
-      <Fleet />
-    ) : section === '/matches' ? (
-      <Matches />
-    ) : section === '/deploys' ? (
-      <Deploys navigate={navigate} />
-    ) : section === '/events' ? (
-      <Events />
-    ) : section === '/stats' ? (
-      <Stats />
-    ) : section === '/cost' ? (
-      <Cost />
-    ) : section === '/alerts' ? (
-      <Alerts />
-    ) : section === '/logs' ? (
-      <Logs />
-    ) : section === '/backups' ? (
-      <Backups />
-    ) : section === '/access' ? (
-      <Access />
-    ) : (
-      <Overview />
-    );
+  // Экран берётся из SECTION_SCREENS выше. Индексируем через `string`, а не
+  // через `SectionPath`: `section` — это Обзор ИЛИ корень раздела, и `undefined`
+  // здесь легитимен ровно для Обзора (`/` и всё неизвестное).
+  const make = (SECTION_SCREENS as Partial<Record<string, ScreenOf>>)[section];
+  const screen = make === undefined ? <Overview /> : make(navigate);
   return (
     <Shell path={path} navigate={navigate}>
       {screen}
