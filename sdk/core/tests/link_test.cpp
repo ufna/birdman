@@ -135,6 +135,38 @@ BT_TEST(ping_pong) {
   link.Shutdown();
 }
 
+// The keepalive has to survive QUIET, which is the state a warm pool server
+// spends its whole life in. ping_pong above sends its pings back to back, so
+// for a long time nothing here measured what happens when the link has had
+// nothing to say for longer than the write-stall window: the stall clock was
+// only refreshed by an iteration that saw an empty buffer, and an idle I/O
+// thread does not iterate -- it sleeps inside poll(). The first frame produced
+// after the quiet (this pong, or the periodic `players`) therefore looked like
+// a write that had been stuck for the whole idle period, and the connection was
+// dropped before the frame ever reached the socket. On the dev fleet that read
+// as every dedik reconnecting to its agent every 10 seconds, forever.
+//
+// The sleep is the test: it must exceed kWriteStall (3s) to mean anything.
+BT_TEST(ping_pong_after_idle) {
+  bt::MockAgent mock;
+  ServerLink link;
+  Config cfg;
+  cfg.socket_path = mock.Path();
+  BT_CHECK(link.Init(cfg));
+  mock.Accept();
+  mock.Expect("hello");
+
+  SleepMs(3500);  // > kWriteStall
+
+  mock.Send("ping", "{}");
+  mock.Expect("pong");
+  // ...and on the SAME connection: a reconnect would answer the ping too (the
+  // agent replays, liba re-hellos), so the pong alone is not proof of health.
+  BT_CHECK(!mock.SawConnAttempt(200));
+
+  link.Shutdown();
+}
+
 // Drain callback fires once per distinct request; the agent's replay of the
 // same frame after reconnect is deduplicated.
 BT_TEST(drain_callback) {
