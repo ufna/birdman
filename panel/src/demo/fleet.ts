@@ -70,7 +70,11 @@ const NODE_PLAN: { host: string; region: string; env: string; state: NodeInfo['s
   { host: 'bm-eu-01', region: 'eu-central', env: 'prod', state: 'active' },
   { host: 'bm-eu-02', region: 'eu-central', env: 'prod', state: 'active' },
   { host: 'bm-eu-03', region: 'eu-central', env: 'prod', state: 'active' },
-  { host: 'bm-eu-04', region: 'eu-central', env: 'prod', state: 'draining' },
+  // Все ноды active. Дренящаяся нода дала бы на Обзоре пару «11 / 12» и
+  // «all active» разом: панель считает подпись по отсутствию quarantine/down,
+  // и на витрине это читается как противоречие. Историю слива несёт Деплой —
+  // там версия 1.14.2 сливается ВИДИМО, с числом живых дедиков.
+  { host: 'bm-eu-04', region: 'eu-central', env: 'prod', state: 'active' },
   { host: 'bm-us-01', region: 'us-east', env: 'prod', state: 'active' },
   { host: 'bm-us-02', region: 'us-east', env: 'prod', state: 'active' },
   { host: 'bm-us-03', region: 'us-east', env: 'prod', state: 'active' },
@@ -97,7 +101,11 @@ const VERSION_PLAN: {
   ageDays: number;
   deprecatedMin?: number;
 }[] = [
-  { semver: '1.15.1', env: 'dev', state: 'active', ageDays: 0.4 },
+  // dev-версия ПРЯМО СЕЙЧАС разъезжается (auto_deploy у dev включён), поэтому
+  // prepulling, а не active: карточка «окно мультиверсий» берёт новейшую
+  // active-версию, и dev-версия с нулём дедиков забирала бы у неё место —
+  // окно показывало бы «Active 1.15.1 · 0 dedics» вместо прод-пары.
+  { semver: '1.15.1', env: 'dev', state: 'prepulling', ageDays: 0.4 },
   { semver: '1.15.0', env: 'prod', state: 'active', ageDays: 1.2 },
   { semver: '1.14.3', env: 'prod', state: 'active', ageDays: 6.1 },
   { semver: '1.14.2', env: 'prod', state: 'deprecated', ageDays: 11.4, deprecatedMin: 26 },
@@ -112,7 +120,7 @@ const SERVER_PLAN: { state: GameServer['state']; count: number }[] = [
   { state: 'creating', count: 2 },
 ];
 
-/** Ядра ленты событий: kind + шаблон payload. Крутятся по кругу. */
+/** Фон ленты: то, чем флот занят непрерывно. Крутится по кругу. */
 const EVENT_KINDS = [
   'match_start',
   'match_end',
@@ -123,10 +131,28 @@ const EVENT_KINDS = [
   'match_start',
   'match_end',
   'server_ready',
-  'node_drained',
-  'deploy_started',
-  'deploy_activated',
 ] as const;
+
+/**
+ * Сценарий выката поверх фона: индекс в ленте (0 — самое свежее) → вид события.
+ * Индексы 2…14 — семь отчётов о пре-пуле dev-версии 1.15.1, индекс 16 — её
+ * старт. Порядок именно такой: панель сидирует прогресс от СТАРЫХ к новым
+ * (`Deploys.tsx`, `useDeployProgress`), и `deploy_started` обязан быть СТАРШЕ
+ * своих `deploy_node_pulled` — иначе он обнулит уже набранный прогресс.
+ * Индексы 32/36 — завершённый выкат прод-версии 1.15.0 получасом раньше.
+ */
+const EVENT_SCRIPT: Record<number, string> = {
+  2: 'deploy_node_pulled',
+  4: 'deploy_node_pulled',
+  6: 'deploy_node_pulled',
+  8: 'deploy_node_pulled',
+  10: 'deploy_node_pulled',
+  12: 'deploy_node_pulled',
+  14: 'deploy_node_pulled',
+  16: 'deploy_started',
+  32: 'deploy_activated',
+  36: 'deploy_started',
+};
 
 export function buildFleet(now: number): Fleet {
   const r = rng(0xb17d); // одно семя на весь флот
@@ -190,7 +216,8 @@ export function buildFleet(now: number): Fleet {
     if (v === undefined) throw new Error(`demo: нет версии ${semver}`);
     return v;
   };
-  const rolling = versionOf('1.15.0'); // катится
+  const warming = versionOf('1.15.1'); // греется на dev прямо сейчас
+  const rolling = versionOf('1.15.0'); // выкачена в прод сутки назад
   const stable = versionOf('1.14.3'); // держит флот
   const draining = versionOf('1.14.2'); // сливается
 
@@ -298,23 +325,35 @@ export function buildFleet(now: number): Fleet {
   // себе — `region=us-east` рядом с `hostname=bm-eu-03`.
   const nodeById = new Map(nodes.map((n) => [n.id, n]));
   const matchOfServer = new Map(matches.map((m) => [m.server_id, m]));
-  const drainingNode = nodes.find((n) => n.state === 'draining') ?? nodes[0];
+  // Порядок отчётов о пре-пуле, считая от свежего: он задаёт и ноду, и остаток.
+  // Семь спуленных при остатке 5 дают на полосе прогресса «7 / 12 nodes».
+  const pullAt = Object.keys(EVENT_SCRIPT)
+    .map(Number)
+    .filter((k) => EVENT_SCRIPT[k] === 'deploy_node_pulled')
+    .sort((a, b) => a - b);
   const events: ApiEvent[] = Array.from({ length: 60 }, (_, i) => {
-    const kind = EVENT_KINDS[i % EVENT_KINDS.length];
+    const kind = EVENT_SCRIPT[i] ?? EVENT_KINDS[i % EVENT_KINDS.length];
     const s = servers[(i * 7) % servers.length];
-    const node = kind === 'node_drained' ? drainingNode : (nodeById.get(s.node_id) ?? nodes[0]);
     const m = matchOfServer.get(s.id) ?? matches[0];
     const ts = now - i * 40_000 - between(r, 0, 20) * 1000;
+    // Пре-пул отчитывается ПО НОДЕ, а не по дедику: у каждого отчёта своя
+    // тачка (панель складывает их в множество) и свой остаток.
+    const pullIdx = pullAt.indexOf(i);
+    const isPull = pullIdx >= 0;
+    const node = isPull ? nodes[pullIdx] : (nodeById.get(s.node_id) ?? nodes[0]);
+    const version = kind === 'deploy_node_pulled' || i === 16 ? warming : rolling;
     return {
       id: 4821 - i,
       ts: iso(ts),
       kind,
       project: PROJECT,
       node_id: node.id,
-      server_id: s.id,
+      ...(isPull ? {} : { server_id: s.id }),
       ...(kind.startsWith('match') ? { match_id: m.id } : {}),
-      ...(kind.startsWith('deploy') ? { version_id: rolling.id } : {}),
-      payload: payloadFor(kind, s, m, node, rolling.semver, between(r, 214, 1180)),
+      ...(kind.startsWith('deploy') ? { version_id: version.id } : {}),
+      payload: isPull
+        ? { semver: warming.semver, env: warming.env, hostname: node.hostname, remaining: 5 + pullIdx }
+        : payloadFor(kind, s, m, node, version.semver, between(r, 214, 1180)),
     };
   });
 
@@ -372,15 +411,15 @@ function payloadFor(
 ): Record<string, unknown> {
   switch (kind) {
     case 'match_start':
-      return { match: match.id, players: match.players_peak, region: match.region };
+      // id матча панель печатает сама из match_id — в payload его дублировать
+      // незачем, строка ленты и так узкая.
+      return { players: match.players_peak, region: match.region, semver: match.semver };
     case 'match_end':
-      return { match: match.id, duration_s: durationS, players_peak: match.players_peak };
+      return { duration_s: durationS, players_peak: match.players_peak, region: match.region };
     case 'server_ready':
       return { port: server.port, region: server.region, hostname: node.hostname };
     case 'server_reaped':
       return { reason: 'version deprecated', hostname: node.hostname, region: node.region };
-    case 'node_drained':
-      return { hostname: node.hostname, region: node.region, live_servers: 6 };
     case 'deploy_started':
       return { semver: rollingSemver, env: 'prod', pending_nodes: 4 };
     case 'deploy_activated':

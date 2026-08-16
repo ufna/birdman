@@ -32,7 +32,12 @@ export function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-const SESSION: SessionInfo = { name: `demo-admin (${DEMO_MARKER})`, scopes: ['admin'] };
+const SESSION: SessionInfo = { name: 'demo-admin', scopes: ['admin'] };
+
+/** Маркер живёт в теле ответа /v1/ca — литерал, который точно доедет до бандла
+ *  демо-входа. На него смотрит гейт `panel/build.sh`: если он оказался в dist/,
+ *  значит demo/ просочился в граф index.html. */
+const CA_PEM = `-----BEGIN CERTIFICATE-----\n${DEMO_MARKER}\n-----END CERTIFICATE-----\n`;
 
 let fleetCache: Fleet | null = null;
 function fleet(): Fleet {
@@ -77,7 +82,7 @@ function handleGet(path: string, q: URLSearchParams, f: Fleet, now: number): unk
     case '/v1/session':
       return SESSION;
     case '/v1/ca':
-      return { pem: '-----BEGIN CERTIFICATE-----\ndemo\n-----END CERTIFICATE-----\n' };
+      return { pem: CA_PEM };
     case '/v1/nodes':
       return { nodes: keepEnv(keepProject(f.nodes, project, (n) => n.project), env, (n) => n.env) };
     case '/v1/servers': {

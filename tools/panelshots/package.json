@@ -1,0 +1,9 @@
+{
+  "name": "birdman-panelshots",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Съёмка скриншотов панели на демо-фикстурах для README",
+  "scripts": { "shoot": "node shoot.mjs" },
+  "dependencies": { "playwright": "^1.62.1" }
+}
