@@ -11,31 +11,49 @@
 
 Русская версия: [README.ru.md](README.ru.md)
 
+<p align="center">
+  <img src="docs/images/panel-overview.png" width="100%" alt="birdman admin panel — Overview: 50 live matches, 583 players online, a ready buffer of 24 dedicated servers across three regions, 12 of 12 nodes active, fleet version 1.14.3, a sparkline of matches this hour and a real-time event feed (dark theme)">
+  <br>
+  <em>Overview — the live fleet at a glance: matches, players, warm buffer, nodes and a real-time event feed.</em>
+  <br>
+  <sub><i>Panel screenshots are captured against the built-in demo dataset (<code>npm run dev:demo</code> in <code>panel/</code>), not a production fleet.</i></sub>
+</p>
+
 birdman runs your own fleet of dedicated game servers — matchmaking, allocation, deploys and observability — without Kubernetes. It is three cooperating pieces: a **master** (matchmaker + fleet control + REST API + admin panel), a **node agent** on each machine that runs dedicated servers as containerd containers, and an **in-server SDK** the game server links against. Linux-only, session-based (short-lived matches, not persistent worlds). Built for our own games and open-sourced under MIT.
-
-<p align="center">
-  <img src="docs/images/panel-overview.png" width="100%" alt="birdman admin panel — Overview: live matches, players online, ready buffer, node count, fleet version and a real-time events feed (dark theme)">
-  <br>
-  <em>Overview — the live fleet at a glance.</em>
-</p>
-
-<p align="center">
-  <img src="docs/images/panel-stats.png" width="100%" alt="birdman admin panel — Statistics: players online, matches running, matchmaker queue depth, slot utilization and dedicated servers by state over time (dark theme)">
-  <br>
-  <em>Statistics — players, matches, queue depth and utilization over time.</em>
-</p>
 
 ## Features
 
 - **Warm pool, millisecond allocation.** Ready dedicated servers wait in a buffer, so a match gets a `host:port` in milliseconds instead of a cold container start.
 - **Soft multi-version deploys.** Roll out a new build with two versions live at once, drain the old one gracefully, roll back instantly — without dropping matches in flight.
 - **Region- and RTT-aware matchmaker.** Tickets are placed by region and by real measured round-trip time to the fleet.
+- **Many games and environments, one install.** Projects and environments are a first-class dimension: nodes, versions, matches, events, metrics and logs each belong to one `(project, env)` pair, every screen narrows to the selected scope, and an API key bound to a pair can reach nothing outside it.
 - **mTLS agent link.** Nodes enroll against a built-in CA and dial the master over mTLS gRPC, so game machines need no inbound admin port.
 - **Secrets encrypted at rest.** Registry tokens and the internal CA key are sealed with AES-256-GCM.
 - **Central observability.** Per-server logs, fleet metrics and alerts in one place; log history survives server reaping.
+- **Postgres backups with an offsite copy.** Scheduled dumps with local retention and an optional S3 target; schedule, history, failures and run-now live in the panel, and a stale backup raises an alert.
 - **Isolated control-plane overlay.** An optional WireGuard overlay keeps master↔node traffic off the public internet.
 - **Bilingual admin panel.** Real-time fleet, matches, deploys, statistics, cost and alerts — English/Russian, light/dark, embedded in the master binary.
 - **Self-host in one command.** `docker compose up` brings up the master and Postgres with the panel baked in.
+
+## Two versions live at once
+
+A new build does not replace the running one — it joins it. birdman pre-pulls the image on every node, flips the fleet once the pull lands, and lets the previous version *drain*: its dedicated servers keep serving the matches they already hold and disappear as those matches end. Nobody is dropped mid-game. A rollback is the same move in reverse.
+
+<p align="center">
+  <img src="docs/images/panel-deploys.png" width="100%" alt="birdman admin panel — Deploys: the multi-version window with 1.15.0 active on 14 dedicated servers and 1.14.2 deprecated with 6 still draining, active version per region, a pre-pull progress bar for 1.15.1 at 7 of 12 nodes, and the version table with states and live dedic counts (dark theme)">
+  <br>
+  <em>Deploys — 1.15.0 and 1.14.3 both active, 1.14.2 draining its last six dedicated servers, 1.15.1 pre-pulling across the fleet.</em>
+</p>
+
+## What the fleet is doing
+
+Per-server logs, fleet metrics and alerts land in one place. The master proxies VictoriaMetrics and VictoriaLogs, so the panel never talks to your monitoring stack directly and log history outlives the servers that wrote it.
+
+<p align="center">
+  <img src="docs/images/panel-stats.png" width="100%" alt="birdman admin panel — Statistics: 24-hour charts of players online, matches running, matchmaker queue depth and slot utilization, plus dedicated servers by state over time with an allocated/ready/draining/creating legend (dark theme)">
+  <br>
+  <em>Statistics — players, running matches, queue depth and slot utilization over 24 hours, with dedicated servers by state below.</em>
+</p>
 
 ## Quickstart
 
@@ -51,6 +69,8 @@ docker compose logs master | grep 'bootstrap admin'   # 4. admin key (bmk_…) �
 ```
 
 Adding game nodes, releasing a build and running your first match: [docs/self-host.md](docs/self-host.md).
+
+Want to see the panel before installing anything? `cd panel && npm ci && npm run dev:demo` opens it against a built-in demo fleet — no master, no database, no nodes.
 
 ## Architecture
 
@@ -73,7 +93,7 @@ Full component specs: [docs/specs/architecture.md](docs/specs/architecture.md) *
 
 ## Status
 
-Built for our own games, then open-sourced. Iterations 0–5 are implemented and accepted on a live multi-node fleet: matchmaking, warm pool, multi-version deploys with rollback and drain, observability, mTLS agent enrollment, at-rest secret encryption, and a second region reached over an isolated overlay. It is young software shaped around our own needs — expect rough edges, and APIs that may still change.
+Built for our own games, then open-sourced. Iterations 0–5 are implemented and accepted on a live multi-node fleet: matchmaking, warm pool, multi-version deploys with rollback and drain, observability, mTLS agent enrollment, at-rest secret encryption, and a second region reached over an isolated overlay. Since then the platform became multi-tenant — projects and environments with API keys bound to a pair — and grew scheduled Postgres backups with an S3 target. It is young software shaped around our own needs — expect rough edges, and APIs that may still change.
 
 ## Documentation
 
@@ -81,6 +101,7 @@ Built for our own games, then open-sourced. Iterations 0–5 are implemented and
 |---|---|
 | [Self-host guide](docs/self-host.md) | From `git clone` to your first match: master (`deploy/`), first node (`infra/add-node.sh`), release a version and run a match (`mmcli`). |
 | [Component specs](docs/specs/README.md) | master, agent, SDK, protocols, panel, ops/CI — reference specs *(in Russian)*. |
+| [Panel screenshots](tools/panelshots/README.md) | How the screenshots above are produced from the panel's demo dataset. |
 | [LICENSE](LICENSE) | MIT. |
 
 Code comments occasionally reference internal design notes (`docs/superpowers/...`) — those live in a private companion repo; the public specs are under `docs/specs/`.
