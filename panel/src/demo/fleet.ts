@@ -133,7 +133,10 @@ export function buildFleet(now: number): Fleet {
 
   // --- Проекты и окружения -------------------------------------------------
   const projects: ProjectInfo[] = [
-    { id: hex(r), slug: PROJECT, match_size: 10, created_at: iso(now - 96 * DAY) },
+    // 16 игроков в матче: столько же держит верхнюю границу players_peak у
+    // дедиков ниже. Размер матча и заполненность обязаны сходиться — иначе на
+    // скриншоте матч на 10 мест показывает 15 игроков.
+    { id: hex(r), slug: PROJECT, match_size: 16, created_at: iso(now - 96 * DAY) },
     { id: hex(r), slug: SECOND_PROJECT, match_size: 6, created_at: iso(now - 31 * DAY) },
   ];
   const environments: Environment[] = projects.flatMap((p) => [
@@ -290,11 +293,17 @@ export function buildFleet(now: number): Fleet {
 
   // --- Лента событий -------------------------------------------------------
   // 60 штук за последние 40 минут, id убывает: панель показывает свежие сверху.
+  // Каждое событие собирается вокруг ОДНОГО дедика: нода и матч берутся из
+  // него, а не выбираются независимо. Иначе строка ленты противоречит сама
+  // себе — `region=us-east` рядом с `hostname=bm-eu-03`.
+  const nodeById = new Map(nodes.map((n) => [n.id, n]));
+  const matchOfServer = new Map(matches.map((m) => [m.server_id, m]));
+  const drainingNode = nodes.find((n) => n.state === 'draining') ?? nodes[0];
   const events: ApiEvent[] = Array.from({ length: 60 }, (_, i) => {
     const kind = EVENT_KINDS[i % EVENT_KINDS.length];
     const s = servers[(i * 7) % servers.length];
-    const m = matches[(i * 5) % matches.length];
-    const node = nodes[(i * 3) % prodNodes.length];
+    const node = kind === 'node_drained' ? drainingNode : (nodeById.get(s.node_id) ?? nodes[0]);
+    const m = matchOfServer.get(s.id) ?? matches[0];
     const ts = now - i * 40_000 - between(r, 0, 20) * 1000;
     return {
       id: 4821 - i,
@@ -305,7 +314,7 @@ export function buildFleet(now: number): Fleet {
       server_id: s.id,
       ...(kind.startsWith('match') ? { match_id: m.id } : {}),
       ...(kind.startsWith('deploy') ? { version_id: rolling.id } : {}),
-      payload: payloadFor(kind, s, m, node, rolling.semver),
+      payload: payloadFor(kind, s, m, node, rolling.semver, between(r, 214, 1180)),
     };
   });
 
@@ -319,16 +328,17 @@ function payloadFor(
   match: Match,
   node: NodeInfo,
   rollingSemver: string,
+  durationS: number,
 ): Record<string, unknown> {
   switch (kind) {
     case 'match_start':
-      return { detail: `${match.id}-${node.region}`, players: match.players_peak, region: match.region };
+      return { match: match.id, players: match.players_peak, region: match.region };
     case 'match_end':
-      return { detail: `${match.id}-${node.region}`, duration_s: 541, players_peak: match.players_peak };
+      return { match: match.id, duration_s: durationS, players_peak: match.players_peak };
     case 'server_ready':
       return { port: server.port, region: server.region, hostname: node.hostname };
     case 'server_reaped':
-      return { reason: 'version deprecated', hostname: node.hostname };
+      return { reason: 'version deprecated', hostname: node.hostname, region: node.region };
     case 'node_drained':
       return { hostname: node.hostname, region: node.region, live_servers: 6 };
     case 'deploy_started':
