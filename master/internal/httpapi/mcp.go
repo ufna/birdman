@@ -313,9 +313,30 @@ func (s *Server) WithMCP(writeEnabled bool) *Server {
 // в SDK: неавторизованный вызов обязан получить обычную 401 в формате API, а не
 // протокольную ошибку MCP, — иначе оператор, перепутавший ключ, увидит невнятный
 // сбой сессии вместо «ключ не подошёл».
+//
+// ЭНДПОИНТ СТРОГО BEARER-ONLY: кука сессии панели здесь не принимается, хотя
+// s.auth.authenticate её понимает. Причины две, и обе существенные.
+//
+// Первая — она всё равно не работала: инструмент исполняется настоящим
+// запросом, несущим ЗАГОЛОВОК вызывающего, и у сессии на куке заголовка нет —
+// первый же tools/call упирался бы в 401 после успешного initialize. Явный
+// отказ на входе лучше загадочной половинчатости.
+//
+// Вторая важнее. Кука — это ambient authority: браузер шлёт её сам. Пока она
+// принималась, страница, добравшаяся до этого пути (например, подменив DNS на
+// адрес мастера), могла бы читать флот правами залогиненного оператора. С
+// bearer-only вектора нет вовсе: кросс-доменно навесить Authorization браузер
+// не может без preflight'а, которого мы не отвечаем, а подмена DNS заголовков
+// не выдаёт. Именно это снимает необходимость в хостовой защите SDK ниже.
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
-	if _, _, ok := s.auth.authenticate(r); !ok {
+	_, viaCookie, ok := s.auth.authenticate(r)
+	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid API key")
+		return
+	}
+	if viaCookie {
+		writeError(w, http.StatusForbidden, "bearer_required",
+			"/v1/mcp accepts an API key in the Authorization header only, not the panel session cookie")
 		return
 	}
 	s.mcpHandler().ServeHTTP(w, r)
@@ -331,7 +352,22 @@ func (s *Server) mcpHandler() http.Handler {
 				return nil // SDK ответит 400; до сюда доходит только уже проверенный запрос
 			}
 			return s.mcpServerFor(key.Scopes, r.Header.Get("Authorization"))
-		}, nil)
+		}, &mcp.StreamableHTTPOptions{
+			// ЗАЧЕМ ВЫКЛЮЧЕНО (проверено на живом стенде, а не выведено из
+			// документации). Защита SDK режет запрос, ПРИШЕДШИЙ С LOCALHOST, но
+			// несущий не-localhost Host. Это в точности штатная топология
+			// birdman: мастер слушает 127.0.0.1:8100, наружу его публикует
+			// обратный прокси, — то есть с включённой защитой `/v1/mcp` отвечал
+			// 403 «invalid Host header» на любом домене и работал ровно там, где
+			// он никому не нужен.
+			//
+			// Защита эта — от DNS-rebinding'а против ЛОКАЛЬНОГО MCP-сервера,
+			// доверяющего вызывающему без учётных данных. У нас модель другая:
+			// каждый запрос предъявляет API-ключ заголовком (см. bearer-only в
+			// handleMCP выше), а заголовков подмена DNS не даёт. Проверять Host
+			// сверх этого — значит ломать штатный деплой, ничего не защищая.
+			DisableLocalhostProtection: true,
+		})
 	})
 	return s.mcpHTTP
 }

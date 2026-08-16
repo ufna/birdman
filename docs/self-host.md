@@ -726,6 +726,10 @@ Revoking the agent's key (`DELETE /v1/apikeys/{id}`) cuts it off immediately —
 including a session it already has open, since every tool call is authorized
 afresh.
 
+The key must travel in the `Authorization` header: `/v1/mcp` does not accept the
+panel session cookie (`403 bearer_required`). A browser cannot attach that header
+cross-origin, so no web page can drive your fleet with an operator's live session.
+
 ### The `matchmaking` key and `player_id`
 
 birdman authenticates operators, services and nodes — **never the end player**,
