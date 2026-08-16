@@ -20,6 +20,7 @@ import {
 import { buildFleet, PROJECT } from './fleet';
 import type { Fleet } from './fleet';
 import { DEMO_MARKER } from './marker';
+import { streamResponse } from './stream';
 
 /** Ответ-JSON с проставленным Content-Type (панель читает text() → JSON.parse). */
 export function jsonResponse(body: unknown, status = 200): Response {
@@ -221,6 +222,7 @@ export async function demoFetch(input: RequestInfo | URL, init?: RequestInit): P
   const f = fleet();
 
   if (method === 'GET') {
+    if (path === '/v1/events/stream') return streamResponse(f, init?.signal ?? undefined);
     const body = handleGet(path, url.searchParams, f, now);
     if (body !== undefined) return jsonResponse(body);
   } else {
