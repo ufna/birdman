@@ -32,7 +32,8 @@ const day = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
 // --- Алерты -----------------------------------------------------------------
 
 const TICK_DESC_EN = `p95 server tick above 30 ms on ${SLOW_NODE} for 10m`;
-const TICK_DESC_RU = `p95 тика дедиков выше 30 мс на ${SLOW_NODE} десять минут подряд`;
+// i18n-allow: не копия интерфейса, а поле `description_ru` алерта — master отдаёт его ровно таким.
+const TICK_DESC_RU = `p95 тика дедиков выше 30 мс на ${SLOW_NODE} десять минут подряд`; // i18n-allow
 
 export function alertRules(): AlertRule[] {
   return [
@@ -54,7 +55,7 @@ export function alertRules(): AlertRule[] {
       for: '5m',
       state: 'inactive',
       description: 'a node stopped sending heartbeats',
-      description_ru: 'нода перестала слать heartbeat',
+      description_ru: 'нода перестала слать heartbeat', // i18n-allow
     },
     {
       name: 'BackupStale',
@@ -64,7 +65,7 @@ export function alertRules(): AlertRule[] {
       for: '30m',
       state: 'inactive',
       description: 'no successful Postgres backup in the last 24h',
-      description_ru: 'сутки без успешного бекапа Postgres',
+      description_ru: 'сутки без успешного бекапа Postgres', // i18n-allow
     },
   ];
 }
@@ -112,7 +113,7 @@ export function alertHistory(now: number): AlertEvent[] {
       startsAt: iso(now - 6 * HOUR),
       endsAt: iso(now - 6 * HOUR + 22 * MIN),
       description: 'a node stopped sending heartbeats',
-      description_ru: 'нода перестала слать heartbeat',
+      description_ru: 'нода перестала слать heartbeat', // i18n-allow
       active: false,
       received_at: iso(now - 6 * HOUR),
       project: PROJECT,
@@ -126,7 +127,7 @@ export function alertHistory(now: number): AlertEvent[] {
       startsAt: iso(now - 3 * DAY),
       endsAt: iso(now - 3 * DAY + 51 * MIN),
       description: 'no successful Postgres backup in the last 24h',
-      description_ru: 'сутки без успешного бекапа Postgres',
+      description_ru: 'сутки без успешного бекапа Postgres', // i18n-allow
       active: false,
       received_at: iso(now - 3 * DAY),
       scope: 'platform',

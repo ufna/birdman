@@ -264,7 +264,7 @@ export async function demoFetch(input: RequestInfo | URL, init?: RequestInit): P
     if (body !== undefined) return jsonResponse(body);
   }
 
-  console.error(`demo: необслуженная ручка ${method} ${path} — экран останется пустым`);
+  console.error(`demo: unhandled endpoint ${method} ${path} — the screen will stay empty`);
   return jsonResponse({ error: 'demo_unhandled', detail: path }, 500);
 }
 

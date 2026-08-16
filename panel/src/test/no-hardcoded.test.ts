@@ -40,16 +40,13 @@ const CYRILLIC = /[Ѐ-ӿ]/;
 const ALLOW_MARKER = 'i18n-allow';
 
 // Каталоги (на любом уровне пути), где кириллица легитимна и не сканируется:
-// lib/locales/{en,ru}.ts — сам каталог переводов; test/ — тесты; demo/ —
-// фикстуры демо-режима.
+// lib/locales/{en,ru}.ts — сам каталог переводов; test/ — тесты.
 //
-// Почему demo/ здесь, а не под маркером `i18n-allow` построчно: этот каталог
-// НЕ рендерит интерфейс. Он подменяет window.fetch и играет роль master'а, а
-// значит его строки — это ДАННЫЕ API (`description_ru` алерта master отдаёт
-// ровно таким полем) и диагностика в консоль для разработчика. Проверка (A)
-// ловит русский текст, УТЁКШИЙ мимо каталога переводов в интерфейс; в demo/
-// интерфейса нет вовсе — там нечему утечь. То же основание, что у locales/.
-const SKIP_DIRS = new Set(['locales', 'test', 'demo']);
+// demo/ (фикстуры демо-режима) сюда СОЗНАТЕЛЬНО не входит: он под проверкой
+// наравне с остальным кодом. Единственное, что там легитимно по-русски, —
+// поле `description_ru` алерта, которое master отдаёт ровно таким; эти строки
+// помечены маркером `i18n-allow` поштучно, а не спрятаны целым каталогом.
+const SKIP_DIRS = new Set(['locales', 'test']);
 
 // Все исходники src/ как сырой текст (ключи вида '../lib/format.ts').
 const RAW = import.meta.glob('../**/*.{ts,tsx}', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
@@ -64,42 +61,51 @@ function isScanned(rel: string): boolean {
   return !rel.split('/').some((seg) => SKIP_DIRS.has(seg));
 }
 
-/**
- * Вырезает комментарии (// и /* *\/), сохраняя строковые/шаблонные литералы и
- * структуру строк (переводы строк не теряются — номера строк совпадают). Char-
- * машина корректно игнорирует `//` и `/*` внутри строк (например, в URL).
- */
-function stripComments(src: string): string {
-  type State = 'code' | 'line' | 'block' | 'sq' | 'dq' | 'tpl';
-  let state: State = 'code';
-  let out = '';
-  for (let i = 0; i < src.length; i++) {
-    const c = src[i];
-    const c2 = src[i + 1] ?? '';
-    if (state === 'code') {
-      if (c === '/' && c2 === '/') { state = 'line'; out += '  '; i++; continue; }
-      if (c === '/' && c2 === '*') { state = 'block'; out += '  '; i++; continue; }
-      if (c === "'") state = 'sq';
-      else if (c === '"') state = 'dq';
-      else if (c === '`') state = 'tpl';
-      out += c;
-      continue;
-    }
-    if (state === 'line') {
-      if (c === '\n') { state = 'code'; out += c; } else out += ' ';
-      continue;
-    }
-    if (state === 'block') {
-      if (c === '*' && c2 === '/') { state = 'code'; out += '  '; i++; } else out += c === '\n' ? '\n' : ' ';
-      continue;
-    }
-    // Внутри строкового/шаблонного литерала: сохраняем символы, чтим экранирование.
-    const quote = state === 'sq' ? "'" : state === 'dq' ? '"' : '`';
-    if (c === '\\') { out += c + c2; i++; continue; }
-    if (c === quote) state = 'code';
-    out += c;
+/** Узлы, чей текст пользователь может увидеть: литералы и JSX-текст. */
+function isLiteralish(node: ts.Node): boolean {
+  switch (node.kind) {
+    case ts.SyntaxKind.StringLiteral:
+    case ts.SyntaxKind.NoSubstitutionTemplateLiteral:
+    case ts.SyntaxKind.TemplateHead:
+    case ts.SyntaxKind.TemplateMiddle:
+    case ts.SyntaxKind.TemplateTail:
+    case ts.SyntaxKind.RegularExpressionLiteral:
+    case ts.SyntaxKind.JsxText:
+      return true;
+    default:
+      return false;
   }
-  return out;
+}
+
+/**
+ * Номера строк, где кириллица стоит в ЛИТЕРАЛЕ. Разбор — типовым парсером
+ * TypeScript, а не посимвольной машиной.
+ *
+ * Почему не машина (она тут была до 16.08): машина не знала про регулярки и
+ * принимала кавычку ВНУТРИ них — `/server_id="([^"]+)"/` — за начало строки.
+ * С этого места она считала литералом всё подряд до следующей кавычки где-то
+ * ниже по файлу, и каждый русский КОММЕНТАРИЙ в этом промежутке становился
+ * «нарушением». Разбор такого класса ошибок не делает: что литерал, а что
+ * комментарий, решает грамматика языка.
+ *
+ * Комментарии литералами не являются и не проверяются — русские пояснения в
+ * коде здесь норма (см. шапку файла).
+ */
+function findCyrillicLiterals(rel: string, raw: string): number[] {
+  const src = ts.createSourceFile(rel, raw, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const lines = new Set<number>();
+  const visit = (node: ts.Node): void => {
+    if (isLiteralish(node)) {
+      const start = node.getStart(src);
+      const idx = raw.slice(start, node.getEnd()).search(CYRILLIC);
+      // Указываем строку САМОЙ кириллицы, а не начало узла: в многострочном
+      // шаблоне это разные строки, и сообщение должно вести туда, где текст.
+      if (idx >= 0) lines.add(src.getLineAndCharacterOfPosition(start + idx).line + 1);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(src);
+  return [...lines].sort((a, b) => a - b);
 }
 
 // [путь относительно src/, сырой текст] для сканируемых файлов.
@@ -163,23 +169,33 @@ describe('нет захардкоженных user-facing строк (guard ре
     expect(files).toContain('screens/Events.tsx');
   });
 
-  it('stripComments режет комментарии, но не строковые литералы (санити)', () => {
-    expect(CYRILLIC.test(stripComments('// это комментарий'))).toBe(false);
-    expect(CYRILLIC.test(stripComments('/* блок\n коммент */'))).toBe(false);
-    expect(CYRILLIC.test(stripComments("const s = 'привет';"))).toBe(true);
-    expect(CYRILLIC.test(stripComments('const u = "http://x"; // ok'))).toBe(false);
+  it('findCyrillicLiterals видит литералы, не трогает комментарии и не путается в регулярках (санити)', () => {
+    // Строки пронумерованы вручную: 2–3 — блочный комментарий, 4 — нарушение.
+    const probe = [
+      '// это комментарий', // 1
+      '/* блок', // 2
+      '   коммент */', // 3
+      "const s = 'привет';", // 4  ← единственное нарушение
+      'const u = "http://x"; // ok', // 5
+      'const re = /server_id="([^"]+)"/;', // 6
+      '// комментарий ПОСЛЕ регулярки с кавычками', // 7
+      'const t = `demo: строка ${x}`;', // 8  ← и это тоже
+    ].join('\n');
+    expect(findCyrillicLiterals('probe.ts', probe)).toEqual([4, 8]);
+  });
+
+  it('нарушение указывает ту строку, где кириллица, даже в многострочном шаблоне (санити)', () => {
+    const probe = ['const t = `', 'ok', 'нельзя', '`;'].join('\n');
+    expect(findCyrillicLiterals('probe.ts', probe)).toEqual([3]);
   });
 
   it('в исходниках panel/src нет кириллических литералов вне locales/format', () => {
     const violations: string[] = [];
     for (const [rel, raw] of scanned) {
       const rawLines = raw.split('\n');
-      const codeLines = stripComments(raw).split('\n');
-      for (let i = 0; i < codeLines.length; i++) {
-        if (rawLines[i]?.includes(ALLOW_MARKER)) continue;
-        if (CYRILLIC.test(codeLines[i])) {
-          violations.push(`${rel}:${String(i + 1)}: ${rawLines[i]?.trim() ?? ''}`);
-        }
+      for (const line of findCyrillicLiterals(rel, raw)) {
+        if (rawLines[line - 1]?.includes(ALLOW_MARKER)) continue;
+        violations.push(`${rel}:${String(line)}: ${rawLines[line - 1]?.trim() ?? ''}`);
       }
     }
     expect(

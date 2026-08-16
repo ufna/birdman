@@ -70,10 +70,10 @@ const NODE_PLAN: { host: string; region: string; env: string; state: NodeInfo['s
   { host: 'bm-eu-01', region: 'eu-central', env: 'prod', state: 'active' },
   { host: 'bm-eu-02', region: 'eu-central', env: 'prod', state: 'active' },
   { host: 'bm-eu-03', region: 'eu-central', env: 'prod', state: 'active' },
-  // Все ноды active. Дренящаяся нода дала бы на Обзоре пару «11 / 12» и
-  // «all active» разом: панель считает подпись по отсутствию quarantine/down,
-  // и на витрине это читается как противоречие. Историю слива несёт Деплой —
-  // там версия 1.14.2 сливается ВИДИМО, с числом живых дедиков.
+  // Все ноды active — сознательный выбор витрины, а не обход бага: подпись
+  // карточки «Ноды» про слив теперь честная (`Overview.tsx`, чип «N draining»),
+  // но герой README должен показывать флот в норме. Историю слива несёт экран
+  // Деплоев — там версия 1.14.2 сливается видимо, с числом живых дедиков.
   { host: 'bm-eu-04', region: 'eu-central', env: 'prod', state: 'active' },
   { host: 'bm-us-01', region: 'us-east', env: 'prod', state: 'active' },
   { host: 'bm-us-02', region: 'us-east', env: 'prod', state: 'active' },
@@ -213,7 +213,7 @@ export function buildFleet(now: number): Fleet {
   }));
   const versionOf = (semver: string): VersionInfo => {
     const v = versions.find((x) => x.semver === semver);
-    if (v === undefined) throw new Error(`demo: нет версии ${semver}`);
+    if (v === undefined) throw new Error(`demo: unknown version ${semver}`);
     return v;
   };
   const warming = versionOf('1.15.1'); // греется на dev прямо сейчас
