@@ -321,6 +321,46 @@ export function buildFleet(now: number): Fleet {
   return { projects, environments, nodes, versions, servers, matches, events };
 }
 
+/**
+ * Снапшот флота для рядов метрик (demo/series.ts): чем должен заканчиваться
+ * график в точке «сейчас». Все числа НЕ зависят от `now` (раскладка по
+ * состояниям задана арифметикой, игроки — семенем), поэтому флот тут строится
+ * один раз и от произвольного момента.
+ */
+export interface Snapshot {
+  playersOnline: number;
+  matchesRunning: number;
+  allocated: number;
+  ready: number;
+  draining: number;
+  creating: number;
+  capacitySlots: number;
+  /** Сколько секунд назад версию демотнули — с этого места на стеке ступенька. */
+  deprecatedAgoSec: number;
+  serverById: (id: string) => { players: number; tickMs: number } | undefined;
+}
+
+let snapshotCache: Snapshot | null = null;
+
+export function fleetSnapshot(): Snapshot {
+  if (snapshotCache !== null) return snapshotCache;
+  const f = buildFleet(0);
+  const count = (state: GameServer['state']) => f.servers.filter((s) => s.state === state).length;
+  const byId = new Map(f.servers.map((s) => [s.id, { players: s.players, tickMs: s.tick_ms ?? 14 }]));
+  snapshotCache = {
+    playersOnline: f.servers.filter((s) => s.state === 'allocated').reduce((a, s) => a + s.players, 0),
+    matchesRunning: f.matches.filter((m) => m.state === 'running').length,
+    allocated: count('allocated'),
+    ready: count('ready'),
+    draining: count('draining'),
+    creating: count('creating'),
+    capacitySlots: f.nodes.filter((n) => n.state !== 'dead').length * CAPACITY_SLOTS,
+    deprecatedAgoSec: 26 * 60,
+    serverById: (id) => byId.get(id),
+  };
+  return snapshotCache;
+}
+
 /** Полезная нагрузка события — то, что панель печатает справа в ленте. */
 function payloadFor(
   kind: string,

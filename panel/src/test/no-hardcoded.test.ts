@@ -40,8 +40,16 @@ const CYRILLIC = /[Ѐ-ӿ]/;
 const ALLOW_MARKER = 'i18n-allow';
 
 // Каталоги (на любом уровне пути), где кириллица легитимна и не сканируется:
-// lib/locales/{en,ru}.ts — сам каталог переводов; test/ — тесты.
-const SKIP_DIRS = new Set(['locales', 'test']);
+// lib/locales/{en,ru}.ts — сам каталог переводов; test/ — тесты; demo/ —
+// фикстуры демо-режима.
+//
+// Почему demo/ здесь, а не под маркером `i18n-allow` построчно: этот каталог
+// НЕ рендерит интерфейс. Он подменяет window.fetch и играет роль master'а, а
+// значит его строки — это ДАННЫЕ API (`description_ru` алерта master отдаёт
+// ровно таким полем) и диагностика в консоль для разработчика. Проверка (A)
+// ловит русский текст, УТЁКШИЙ мимо каталога переводов в интерфейс; в demo/
+// интерфейса нет вовсе — там нечему утечь. То же основание, что у locales/.
+const SKIP_DIRS = new Set(['locales', 'test', 'demo']);
 
 // Все исходники src/ как сырой текст (ключи вида '../lib/format.ts').
 const RAW = import.meta.glob('../**/*.{ts,tsx}', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;

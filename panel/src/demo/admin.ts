@@ -284,24 +284,37 @@ function simple(days: number, now: number, unit: string, base: number, spreadPct
   return { unit, points };
 }
 
-const VERSION_SHARE: VersionShare[] = [
-  { version: '1.14.3', matches: 21_412, share: 0.71 },
-  { version: '1.15.0', matches: 5428, share: 0.18 },
-  { version: '1.14.2', matches: 3317, share: 0.11 },
+/** Доли версий в матчах периода. Абсолютные числа считаются от итога ряда
+ *  matches_per_day — иначе экран сообщал бы «107 164 матча за 30 дней» и тут же
+ *  расписывал по версиям 30 157. */
+const VERSION_SHARES: { version: string; share: number }[] = [
+  { version: '1.14.3', share: 0.71 },
+  { version: '1.15.0', share: 0.18 },
+  { version: '1.14.2', share: 0.11 },
 ];
 
+function versionDistribution(totalMatches: number): VersionShare[] {
+  let rest = totalMatches;
+  return VERSION_SHARES.map((v, i) => {
+    const matches = i === VERSION_SHARES.length - 1 ? rest : Math.round(totalMatches * v.share);
+    rest -= matches;
+    return { version: v.version, matches, share: v.share };
+  });
+}
+
 export function statsOverview(days: number, now: number): StatsOverview {
+  const matchesPerDay = stacked(days, now, 'matches', [...REGIONS], 3180, [0.24, 0.44, 0.32], 0x51a1);
   return {
     days,
     timezone: 'UTC',
     generated_at: iso(now),
-    matches_per_day: stacked(days, now, 'matches', [...REGIONS], 3180, [0.24, 0.44, 0.32], 0x51a1),
+    matches_per_day: matchesPerDay,
     players_per_day: stacked(days, now, 'players', [...REGIONS], 24_600, [0.23, 0.45, 0.32], 0x51a2),
     peak_ccu_per_day: simple(days, now, 'players', 764, 0.09, 0x51a3),
     peak_ccu: 812,
     avg_match_duration_seconds: 618,
     avg_match_duration_per_day: simple(days, now, 'seconds', 618, 0.05, 0x51a4),
-    version_distribution: VERSION_SHARE,
+    version_distribution: versionDistribution(matchesPerDay.points.reduce((a, p) => a + p.total, 0)),
     time_to_match: {
       p50_seconds: 7.4,
       p95_seconds: 21.8,

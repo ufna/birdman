@@ -20,6 +20,7 @@ import {
 import { buildFleet, PROJECT } from './fleet';
 import type { Fleet } from './fleet';
 import { DEMO_MARKER } from './marker';
+import { matrixFor, vectorFor } from './series';
 import { streamResponse } from './stream';
 
 /** Ответ-JSON с проставленным Content-Type (панель читает text() → JSON.parse). */
@@ -223,6 +224,23 @@ export async function demoFetch(input: RequestInfo | URL, init?: RequestInit): P
 
   if (method === 'GET') {
     if (path === '/v1/events/stream') return streamResponse(f, init?.signal ?? undefined);
+    if (path === '/v1/metrics/query_range') {
+      const q = url.searchParams;
+      const nowSec = Math.floor(now / 1000);
+      return jsonResponse(
+        matrixFor(
+          q.get('query') ?? '',
+          num(q, 'start', nowSec - 3600),
+          num(q, 'end', nowSec),
+          // step приходит строкой вида "300s" — секунды нужны числом.
+          Number.parseInt(q.get('step') ?? '60', 10) || 60,
+        ),
+      );
+    }
+    if (path === '/v1/metrics/query') {
+      const q = url.searchParams;
+      return jsonResponse(vectorFor(q.get('query') ?? '', num(q, 'time', Math.floor(now / 1000))));
+    }
     const body = handleGet(path, url.searchParams, f, now);
     if (body !== undefined) return jsonResponse(body);
   } else {
