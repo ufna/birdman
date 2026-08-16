@@ -115,17 +115,24 @@ function OverviewBody({
             // оператора ровно там, где запускать дедики физически не на чем.
             stats.nodesLive === 0 ? (
               <span className="font-medium text-dead">{t('ov.noNodes')}</span>
-            ) : stats.nodesQuarantine > 0 || stats.nodesDown > 0 ? (
-              // Два отдельных красных чипа: карантин и down живут одновременно
-              // (часть тачек молчит дольше node_down_after_min и уже деградировала).
+            ) : stats.nodesQuarantine > 0 || stats.nodesDown > 0 || stats.nodesDraining > 0 ? (
+              // Отдельные чипы: карантин, down и слив живут одновременно (часть
+              // тачек молчит дольше node_down_after_min и уже деградировала,
+              // другую в это время выводит оператор).
+              //
+              // Слив попал сюда вместе с ними по одной причине: числитель
+              // карточки считает ТОЛЬКО `active`, поэтому при дренящейся тачке
+              // «11 / 12» подписывалось «все активны» — числа и слова на одной
+              // карточке противоречили друг другу. Но чип у слива нейтральный,
+              // а не красный: это не деградация, а запрошенное оператором
+              // действие, и красным оно звало бы чинить исправное.
               <>
-                {stats.nodesQuarantine > 0 && (
-                  <span className="font-medium text-dead">{t('ov.inQuarantine', { count: stats.nodesQuarantine })}</span>
-                )}
-                {stats.nodesQuarantine > 0 && stats.nodesDown > 0 && <span className="text-muted"> · </span>}
-                {stats.nodesDown > 0 && (
-                  <span className="font-medium text-dead">{t('ov.down', { count: stats.nodesDown })}</span>
-                )}
+                {chipsOf(stats).map((chip, i) => (
+                  <span key={chip.key}>
+                    {i > 0 && <span className="text-muted"> · </span>}
+                    <span className={chip.tone}>{t(chip.key, { count: chip.count })}</span>
+                  </span>
+                ))}
               </>
             ) : (
               t('ov.allActive')
@@ -186,6 +193,19 @@ function maxDefined(xs: (number | undefined)[]): number | undefined {
   return max;
 }
 
+/** Чип состояния в подписи карточки «Ноды»: ключ подписи, число, тон. */
+function chipsOf(stats: Stats): { key: 'ov.inQuarantine' | 'ov.down' | 'ov.draining'; count: number; tone: string }[] {
+  return (
+    [
+      { key: 'ov.inQuarantine', count: stats.nodesQuarantine, tone: 'font-medium text-dead' },
+      { key: 'ov.down', count: stats.nodesDown, tone: 'font-medium text-dead' },
+      { key: 'ov.draining', count: stats.nodesDraining, tone: 'font-medium text-warn' },
+    ] as const
+  )
+    .filter((c) => c.count > 0)
+    .map((c) => ({ ...c }));
+}
+
 interface Stats {
   liveMatches: number;
   runningMatches: number;
@@ -200,6 +220,9 @@ interface Stats {
   nodesLive: number;
   nodesQuarantine: number;
   nodesDown: number;
+  /** Тачки, которые оператор выводит из-под нагрузки: числителем карточки не
+   *  считаются, но и деградацией не являются. */
+  nodesDraining: number;
   fleetVersions: { region: string; semver: string; extra: number }[];
 }
 
@@ -249,6 +272,7 @@ function computeStats(nodes: NodeInfo[], servers: GameServer[], versions: Versio
     // Карантин дольше node_down_after_min → мастер деградирует ноду в `down`;
     // считаем отдельно, чтобы красная сводка не гасла, когда стало хуже.
     nodesDown: nodes.filter((n) => n.state === 'down').length,
+    nodesDraining: nodes.filter((n) => n.state === 'draining').length,
     fleetVersions,
   };
 }

@@ -88,3 +88,32 @@ describe('Overview — красный чип недоступных (down) но�
     expect(screen.queryByText(/in quarantine/)).toBeNull();
   });
 });
+
+// Дренящаяся нода — ТРЕТЬЕ состояние, которое числитель карточки не считает
+// активным. До этих кейсов подпись строилась только по quarantine/down, и флот
+// «11 / 12» подписывался «all active»: числа и слова на одной карточке
+// противоречили друг другу. Отличие от quarantine/down — не в тяжести, а в
+// происхождении: слив ЗАПРОСИЛ оператор, поэтому чип нейтральный, а не красный.
+describe('Overview — чип дренящихся нод', () => {
+  it('draining-нода даёт чип «1 draining», а не «all active»', async () => {
+    stubFleet([mkNode('a', 'active'), mkNode('b', 'draining')]);
+    renderEn(<Overview />);
+    expect(await screen.findByText('1 draining')).toBeTruthy();
+    expect(screen.queryByText('all active')).toBeNull();
+  });
+
+  it('слив и недоступность показаны рядом отдельными чипами', async () => {
+    stubFleet([mkNode('a', 'draining'), mkNode('b', 'down'), mkNode('c', 'quarantine')]);
+    renderEn(<Overview />);
+    expect(await screen.findByText('1 in quarantine')).toBeTruthy();
+    expect(screen.getByText('1 down')).toBeTruthy();
+    expect(screen.getByText('1 draining')).toBeTruthy();
+  });
+
+  it('выведенная (dead) нода в чип слива не попадает', async () => {
+    stubFleet([mkNode('a', 'active'), mkNode('b', 'dead')]);
+    renderEn(<Overview />);
+    expect(await screen.findByText('all active')).toBeTruthy();
+    expect(screen.queryByText(/draining/)).toBeNull();
+  });
+});

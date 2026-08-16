@@ -354,6 +354,7 @@ export const en = {
   'ov.nodes': 'Nodes',
   'ov.inQuarantine': '{count} in quarantine',
   'ov.down': '{count} down',
+  'ov.draining': '{count} draining',
   'ov.allActive': 'all active',
   // Ноль тачек — не «все активны» (tracker #1071): при пустом флоте quarantine и
   // down тоже нули, и карточка успокаивала оператора нового проекта ровно там,

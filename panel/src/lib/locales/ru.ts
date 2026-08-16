@@ -321,6 +321,7 @@ export const ru: Record<MessageKey, string> = {
   'ov.nodes': 'Тачки',
   'ov.inQuarantine': '{count} в карантине',
   'ov.down': '{count} недоступн.',
+  'ov.draining': '{count} опустошаются',
   'ov.allActive': 'все активны',
   // Ноль тачек — не «все активны» (tracker #1071): при пустом флоте quarantine и
   // down тоже нули, и карточка успокаивала оператора нового проекта ровно там,
