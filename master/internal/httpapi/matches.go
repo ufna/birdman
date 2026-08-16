@@ -52,7 +52,7 @@ func (s *Server) handleListMatches(w http.ResponseWriter, r *http.Request) {
 		storeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"matches": emptyNotNull(matches)})
+	writeJSON(w, http.StatusOK, matchesResp{Matches: emptyNotNull(matches)})
 }
 
 func (s *Server) handleGetMatch(w http.ResponseWriter, r *http.Request) {
@@ -76,7 +76,7 @@ func (s *Server) handleGetMatch(w http.ResponseWriter, r *http.Request) {
 	if !s.requireBinding(w, r, m.Project, m.Env) {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"match": m})
+	writeJSON(w, http.StatusOK, matchResp{Match: m})
 }
 
 // queryInt parses a non-negative integer query parameter (default when

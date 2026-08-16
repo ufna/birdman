@@ -49,7 +49,7 @@ func (s *Server) handleListRegistries(w http.ResponseWriter, r *http.Request) {
 		storeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"registries": emptyNotNull(regs)})
+	writeJSON(w, http.StatusOK, registriesResp{Registries: emptyNotNull(regs)})
 }
 
 // handleCreateRegistry is POST /v1/registries (admin). It is an upsert by
@@ -87,7 +87,7 @@ func (s *Server) handleCreateRegistry(w http.ResponseWriter, r *http.Request) {
 		// disconnecting (see the doc comment above).
 		s.onRegistriesChanged(context.WithoutCancel(r.Context()))
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"registry": reg})
+	writeJSON(w, http.StatusCreated, registryResp{Registry: reg})
 }
 
 // handlePatchRegistry is PATCH /v1/registries/{id} (admin) — the partial edit
@@ -131,7 +131,7 @@ func (s *Server) handlePatchRegistry(w http.ResponseWriter, r *http.Request) {
 	if s.onRegistriesChanged != nil {
 		s.onRegistriesChanged(context.WithoutCancel(r.Context()))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"registry": reg})
+	writeJSON(w, http.StatusOK, registryResp{Registry: reg})
 }
 
 // handleDeleteRegistry is DELETE /v1/registries/{id} (admin). 204 on a real

@@ -72,7 +72,7 @@ func (s *Server) setNodeDrain(w http.ResponseWriter, r *http.Request, drain bool
 				Undrain: &agentlinkv1.Undrain{}}})
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"node": node})
+	writeJSON(w, http.StatusOK, nodeResp{Node: node})
 }
 
 // handleRevokeNode retires a node for good: state → `dead` (store.RevokeNode).
@@ -96,7 +96,7 @@ func (s *Server) handleRevokeNode(w http.ResponseWriter, r *http.Request) {
 		storeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"node": node})
+	writeJSON(w, http.StatusOK, nodeResp{Node: node})
 }
 
 // --- server logs proxy (итерация 4, docs/specs/agent.md §5) ---

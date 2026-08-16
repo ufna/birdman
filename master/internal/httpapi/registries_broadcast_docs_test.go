@@ -8,9 +8,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/ufna/birdman/master/internal/httpapi"
 )
 
 // РЕЕСТР НОСИТЕЛЕЙ ПЕРЕЧНЯ РУЧЕК, РАССЫЛАЮЩИХ SetRegistries (tracker #1108).
@@ -24,8 +25,8 @@ import (
 // утверждения, который стоит пришпилить структурно, а не перечитывать глазами.
 //
 // Пин выводит перечень ИЗ ИСХОДНИКОВ: находит функции пакета, ВЫЗЫВАЮЩИЕ
-// onRegistriesChanged, поднимает их HTTP-методы из таблицы s.mux.HandleFunc (в
-// порядке объявления маршрутов) и требует от каждого носителя реестра ниже
+// onRegistriesChanged, поднимает их HTTP-методы из таблицы маршрутов
+// (routes.go, в порядке её объявления) и требует от каждого носителя реестра ниже
 // (а) хотя бы одно вхождение канонического перечня и (б) отсутствие вхождений,
 // от него отличающихся. Второе условие обязательно: без него файл с ДВУМЯ
 // упоминаниями проходил бы зелёным с одним починенным и одним протухшим — это
@@ -45,7 +46,10 @@ import (
 //     «API POST/DELETE» из .proto склеилось бы в APIPOST и вхождение потерялось
 //     бы (ложный ЗЕЛЁНЫЙ — проверено мутацией);
 //   - функция, дёргающая хук, но не найденная в таблице маршрутов, — ФАТАЛ, а
-//     не тихий пропуск: перечень методов перестал бы быть полным.
+//     не тихий пропуск: перечень методов перестал бы быть полным;
+//   - маршруты берутся из САМОЙ таблицы (RouteFactsForTest), а не разбором её
+//     литерала: разбор был бы третьим представлением одной правды и краснел бы
+//     от переформатирования.
 //
 // ЧЕГО НЕ ЛОВИТ (честная граница, а не недоделка): носителя, не внесённого в
 // реестр ниже (в том числе в панели и в docs вне перечисленных файлов); текст,
@@ -112,7 +116,7 @@ func TestRegistriesBroadcastTriggersAreDocumented(t *testing.T) {
 // порядке объявления их маршрутов — это и есть канонический перечень.
 func registriesBroadcastMethods(t *testing.T) []string {
 	t.Helper()
-	fset, files := parsePackageDir(t, ".")
+	_, files := parsePackageDir(t, ".")
 
 	// Шаг 1: функции, ВЫЗЫВАЮЩИЕ хук. Именно вызов, не упоминание: сеттер
 	// WithRegistriesHook хуку присваивает и ручкой не является.
@@ -139,74 +143,33 @@ func registriesBroadcastMethods(t *testing.T) []string {
 		t.Fatalf("сканер не нашёл ни одного вызова %s — пин прошёл бы вхолостую", registriesHookName)
 	}
 
-	// Шаг 2: их маршруты. Хендлер сидит вторым аргументом HandleFunc, обёрнутый
-	// в requireScope, поэтому ищем селектор по всему поддереву аргумента.
-	type route struct {
-		pos     token.Pos
-		method  string
-		handler string
-	}
-	var routes []route
-	for _, f := range files {
-		ast.Inspect(f, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok || len(call.Args) < 2 {
-				return true
-			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "HandleFunc" {
-				return true
-			}
-			lit, ok := call.Args[0].(*ast.BasicLit)
-			if !ok || lit.Kind != token.STRING {
-				return true
-			}
-			pattern, err := strconv.Unquote(lit.Value)
-			if err != nil {
-				return true
-			}
-			var handler string
-			ast.Inspect(call.Args[1], func(n ast.Node) bool {
-				s, ok := n.(*ast.SelectorExpr)
-				if ok && firing[s.Sel.Name] {
-					handler = s.Sel.Name
-				}
-				return true
-			})
-			if handler == "" {
-				return true
-			}
-			parts := strings.Fields(pattern)
-			if len(parts) != 2 || !strings.HasPrefix(parts[1], "/v1/registries") {
-				t.Fatalf("%s: маршрут %q ведёт на %s, который будит рассылку кредов, но пин умеет "+
-					"описывать только «МЕТОД /v1/registries…» — почини пин вместе с текстами",
-					fset.Position(call.Pos()), pattern, handler)
-			}
-			routes = append(routes, route{pos: call.Pos(), method: parts[0], handler: handler})
-			return true
-		})
-	}
-
+	// Шаг 2: их маршруты — прямо из таблицы (routes.go). Таблица перечислена в
+	// порядке объявления, поэтому досортировывать по позиции в исходнике,
+	// как делал прежний AST-сканер, больше не нужно.
+	var methods []string
 	seen := map[string]bool{}
-	for _, r := range routes {
-		if seen[r.handler] {
-			t.Fatalf("%s зарегистрирован на два маршрута — канонический перечень стал неоднозначным, "+
-				"почини пин", r.handler)
+	for _, rt := range httpapi.RouteFactsForTest() {
+		if !firing[rt.Handler] {
+			continue
 		}
-		seen[r.handler] = true
+		if !strings.HasPrefix(rt.Path, "/v1/registries") {
+			t.Fatalf("маршрут %s %s ведёт на %s, который будит рассылку кредов, но пин умеет "+
+				"описывать только «МЕТОД /v1/registries…» — почини пин вместе с текстами",
+				rt.Method, rt.Path, rt.Handler)
+		}
+		if seen[rt.Handler] {
+			t.Fatalf("%s зарегистрирован на два маршрута — канонический перечень стал неоднозначным, "+
+				"почини пин", rt.Handler)
+		}
+		seen[rt.Handler] = true
+		methods = append(methods, rt.Method)
 	}
 	for name := range firing {
 		if !seen[name] {
-			t.Fatalf("%s вызывает %s, но не найден в таблице маршрутов: либо это хелпер (тогда "+
-				"перечень методов надо выводить иначе), либо ручку забыли зарегистрировать",
+			t.Fatalf("%s вызывает %s, но не найден в таблице маршрутов (routes.go): либо это хелпер "+
+				"(тогда перечень методов надо выводить иначе), либо ручку забыли зарегистрировать",
 				name, registriesHookName)
 		}
-	}
-	sort.Slice(routes, func(i, j int) bool { return routes[i].pos < routes[j].pos })
-
-	methods := make([]string, 0, len(routes))
-	for _, r := range routes {
-		methods = append(methods, r.method)
 	}
 	return methods
 }

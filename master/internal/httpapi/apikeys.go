@@ -24,7 +24,7 @@ func (s *Server) handleListAPIKeys(w http.ResponseWriter, r *http.Request) {
 		storeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"apikeys": emptyNotNull(keys)})
+	writeJSON(w, http.StatusOK, apiKeysResp{APIKeys: emptyNotNull(keys)})
 }
 
 type createAPIKeyRequest struct {
@@ -85,7 +85,7 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		s.log.Error("apikey: create event write failed", "key_id", key.ID, "err", err)
 	}
 	// The secret is shown exactly once; only its bcrypt hash is persisted.
-	writeJSON(w, http.StatusCreated, map[string]any{"key": key, "secret": secret})
+	writeJSON(w, http.StatusCreated, apiKeyCreatedResp{Key: key, Secret: secret})
 }
 
 func (s *Server) handleRevokeAPIKey(w http.ResponseWriter, r *http.Request) {
@@ -128,7 +128,7 @@ func (s *Server) handleRevokeAPIKey(w http.ResponseWriter, r *http.Request) {
 			s.log.Error("apikey: revoke event write failed", "key_id", key.ID, "err", err)
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"key": key})
+	writeJSON(w, http.StatusOK, apiKeyResp{Key: key})
 }
 
 // purgeAPIKey handles DELETE /v1/apikeys/{id}?purge=true (registries v1

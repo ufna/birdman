@@ -222,7 +222,7 @@ func (s *Server) handleQoS(w http.ResponseWriter, r *http.Request) {
 		storeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"qos": emptyNotNull(eps)})
+	writeJSON(w, http.StatusOK, qosResp{QoS: emptyNotNull(eps)})
 }
 
 // --- projects (match_size, docs/specs/master.md §4) ---
@@ -260,7 +260,7 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"project": p})
+	writeJSON(w, http.StatusCreated, projectResp{Project: p})
 }
 
 // handleProjectUsage is GET /v1/projects/{slug}/usage (admin): состав проекта.
@@ -272,7 +272,7 @@ func (s *Server) handleProjectUsage(w http.ResponseWriter, r *http.Request) {
 		storeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"usage": usage})
+	writeJSON(w, http.StatusOK, projectUsageResp{Usage: usage})
 }
 
 // handleDeleteProject is DELETE /v1/projects/{slug} (admin), тело
@@ -319,7 +319,7 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"deleted": res})
+	writeJSON(w, http.StatusOK, projectDeletedResp{Deleted: res})
 }
 
 // handleListProjects is GET /v1/projects (readonly) — the panel's project
@@ -353,7 +353,7 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 	if bp, _, bound := keyBinding(r); bound {
 		projects = keepProject(projects, bp)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"projects": emptyNotNull(projects)})
+	writeJSON(w, http.StatusOK, projectsResp{Projects: emptyNotNull(projects)})
 }
 
 // keepProject оставляет проект с этим слагом (0 или 1 строка: слаг уникален).
@@ -378,5 +378,5 @@ func (s *Server) handleUpsertProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"project": p})
+	writeJSON(w, http.StatusOK, projectResp{Project: p})
 }

@@ -14,6 +14,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -68,6 +69,14 @@ type Server struct {
 	// wired by WithSilenceMirror. nil-safe — an unwired mirror leaves mutes in
 	// pure v0 annotation semantics (tracker #245).
 	silences SilenceMirror
+
+	// MCP (mcp.go). mcpWrite — рубильник пишущих инструментов, ВЫКЛЮЧЕН по
+	// умолчанию: без него `/v1/mcp` отдаёт агенту только чтение, каким бы
+	// ключом тот ни пришёл. mcpHTTP строится лениво (mcpOnce), потому что
+	// транспорт SDK нужен не всякому мастеру.
+	mcpWrite bool
+	mcpOnce  sync.Once
+	mcpHTTP  http.Handler
 }
 
 func New(st *store.Store, m *metrics.Metrics, mm *matchmaker.Matchmaker, dep *deploy.Manager, sender CommandSender, logs *agentlink.LogRouter, vmURL, vlURL string, log *slog.Logger) *Server {
@@ -78,105 +87,10 @@ func New(st *store.Store, m *metrics.Metrics, mm *matchmaker.Matchmaker, dep *de
 		logsProbe: newLogsNarrowProbe(), metricsProbe: newMetricsNarrowProbe(),
 	}
 
-	s.mux.HandleFunc("GET /healthz", s.handleHealthz) // no auth by design
-	// Прометеевской экспозиции на API-листенере БОЛЬШЕ НЕТ (tracker #1003) —
-	// она уехала на свой адрес, см. MetricsHandler ниже. Явный 404 вместо
-	// «просто не регистрировать»: последним зарегистрирован катч-олл панели
-	// («/»), и без этой строки скрейпер получал бы на `/metrics` HTML-страницу
-	// с кодом 200 — то есть переезд выглядел бы как испорченная экспозиция, а
-	// не как переезд. Тело называет новый адрес и не несёт ничего тенантного.
-	s.mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, http.StatusNotFound, "not_found",
-			"metrics moved to the dedicated metrics listener (config listen_metrics, default 127.0.0.1:9102)")
-	})
-
-	s.mux.HandleFunc("POST /v1/nodes", s.requireScope(ScopeAdmin, s.handleCreateNode))
-	s.mux.HandleFunc("GET /v1/nodes", s.requireScope(ScopeReadonly, s.handleListNodes))
-	s.mux.HandleFunc("POST /v1/nodes/{id}/drain", s.requireScope(ScopeAdmin, s.handleDrainNode))
-	s.mux.HandleFunc("POST /v1/nodes/{id}/undrain", s.requireScope(ScopeAdmin, s.handleUndrainNode))
-	// Вывод ноды из флота навсегда: state → dead (ops.go). Отдельный глагол, а не
-	// DELETE: строка ноды остаётся (на неё ссылается история серверов и матчей).
-	s.mux.HandleFunc("POST /v1/nodes/{id}/revoke", s.requireScope(ScopeAdmin, s.handleRevokeNode))
-	// Move a node to another environment (environments v1 §2, environments.go).
-	s.mux.HandleFunc("PATCH /v1/nodes/{id}", s.requireScope(ScopeAdmin, s.handleSetNodeEnv))
-	// Public internal-CA cert bundle (mTLS agentlink v1, ca.go) — ansible
-	// delivers it to nodes; cert-only, the CA key cannot leak (design §5).
-	s.mux.HandleFunc("GET /v1/ca", s.requireScope(ScopeReadonly, s.handleGetCA))
-	s.mux.HandleFunc("GET /v1/servers", s.requireScope(ScopeReadonly, s.handleListServers))
-	s.mux.HandleFunc("GET /v1/servers/{id}/logs", s.requireScope(ScopeReadonly, s.handleServerLogs))
-	s.mux.HandleFunc("POST /v1/agent-upgrade", s.requireScope(ScopeAdmin, s.handleAgentUpgrade))
-	s.mux.HandleFunc("GET /v1/metrics/query", s.requireScope(ScopeReadonly, s.handleMetricsQuery))
-	s.mux.HandleFunc("GET /v1/metrics/query_range", s.requireScope(ScopeReadonly, s.handleMetricsQueryRange))
-	s.mux.HandleFunc("GET /v1/logs/query", s.requireScope(ScopeReadonly, s.handleLogsQuery))
-	s.mux.HandleFunc("POST /v1/versions", s.requireScope(ScopeDeploy, s.handleCreateVersion))
-	s.mux.HandleFunc("GET /v1/versions", s.requireScope(ScopeReadonly, s.handleListVersions))
-	s.mux.HandleFunc("POST /v1/deploy", s.requireScope(ScopeDeploy, s.handleDeploy))
-	s.mux.HandleFunc("POST /v1/rollback", s.requireScope(ScopeDeploy, s.handleRollback))
-	// Promote a version into another environment (environments v1 §4, deploy.go).
-	s.mux.HandleFunc("POST /v1/promote", s.requireScope(ScopeDeploy, s.handlePromote))
-	s.mux.HandleFunc("PUT /v1/fleets/{region}", s.requireScope(ScopeAdmin, s.handleUpsertFleet))
-	// Список проектов — readonly (селектор проекта в панели, мультипроект W1);
-	// правка match_size остаётся admin.
-	s.mux.HandleFunc("GET /v1/projects", s.requireScope(ScopeReadonly, s.handleListProjects))
-	s.mux.HandleFunc("PUT /v1/projects/{slug}", s.requireScope(ScopeAdmin, s.handleUpsertProject))
-	// Явное управление проектами из админки (matchmaking.go): POST создаёт и
-	// падает на занятом слаге (в отличие от идемпотентного PUT), DELETE сносит
-	// каскадом с подтверждением вводом слага, usage показывает состав заранее.
-	s.mux.HandleFunc("POST /v1/projects", s.requireScope(ScopeAdmin, s.handleCreateProject))
-	s.mux.HandleFunc("GET /v1/projects/{slug}/usage", s.requireScope(ScopeAdmin, s.handleProjectUsage))
-	s.mux.HandleFunc("DELETE /v1/projects/{slug}", s.requireScope(ScopeAdmin, s.handleDeleteProject))
-	// Environments CRUD (environments v1 §2, environments.go). List/usage are
-	// readonly; create/patch/delete are admin. DELETE сносит окружение вместе с
-	// содержимым (нужен confirm с именем), usage — состав для диалога удаления.
-	s.mux.HandleFunc("GET /v1/environments", s.requireScope(ScopeReadonly, s.handleListEnvironments))
-	s.mux.HandleFunc("POST /v1/environments", s.requireScope(ScopeAdmin, s.handleCreateEnvironment))
-	s.mux.HandleFunc("GET /v1/environments/{project}/{name}/usage", s.requireScope(ScopeReadonly, s.handleEnvironmentUsage))
-	s.mux.HandleFunc("PATCH /v1/environments/{project}/{name}", s.requireScope(ScopeAdmin, s.handlePatchEnvironment))
-	s.mux.HandleFunc("DELETE /v1/environments/{project}/{name}", s.requireScope(ScopeAdmin, s.handleDeleteEnvironment))
-	s.mux.HandleFunc("GET /v1/events", s.requireScope(ScopeReadonly, s.handleListEvents))
-	s.mux.HandleFunc("GET /v1/events/stream", s.requireScope(ScopeReadonly, s.handleEventsStream))
-	s.mux.HandleFunc("GET /v1/matches", s.requireScope(ScopeReadonly, s.handleListMatches))
-	s.mux.HandleFunc("GET /v1/matches/{id}", s.requireScope(ScopeReadonly, s.handleGetMatch))
-	s.mux.HandleFunc("POST /v1/allocate", s.requireScope(ScopeAllocate, s.handleAllocate))
-
-	// API-key management (П2 Access, apikeys.go); stats aggregates (П2
-	// Statistics/Cost-view, stats.go); alerts (П2 Alerts, alerts.go).
-	s.mux.HandleFunc("GET /v1/apikeys", s.requireScope(ScopeAdmin, s.handleListAPIKeys))
-	s.mux.HandleFunc("POST /v1/apikeys", s.requireScope(ScopeAdmin, s.handleCreateAPIKey))
-	s.mux.HandleFunc("DELETE /v1/apikeys/{id}", s.requireScope(ScopeAdmin, s.handleRevokeAPIKey))
-	// Private registry credentials (П2 Admin/Реестры, registries.go) — admin
-	// scope on every route, including the list read (secret-adjacent).
-	s.mux.HandleFunc("GET /v1/registries", s.requireScope(ScopeAdmin, s.handleListRegistries))
-	s.mux.HandleFunc("POST /v1/registries", s.requireScope(ScopeAdmin, s.handleCreateRegistry))
-	s.mux.HandleFunc("PATCH /v1/registries/{id}", s.requireScope(ScopeAdmin, s.handlePatchRegistry))
-	s.mux.HandleFunc("DELETE /v1/registries/{id}", s.requireScope(ScopeAdmin, s.handleDeleteRegistry))
-	// Backups v1 (П2 Backups — its own screen, not a section of Admin;
-	// backups.go) — policy is secret-adjacent, so admin scope on every route,
-	// including the reads.
-	s.mux.HandleFunc("GET /v1/backups/settings", s.requireScope(ScopeAdmin, s.handleGetBackupSettings))
-	s.mux.HandleFunc("PATCH /v1/backups/settings", s.requireScope(ScopeAdmin, s.handlePatchBackupSettings))
-	s.mux.HandleFunc("GET /v1/backups/runs", s.requireScope(ScopeAdmin, s.handleListBackupRuns))
-	s.mux.HandleFunc("POST /v1/backups/run", s.requireScope(ScopeAdmin, s.handleRunBackup))
-	s.mux.HandleFunc("POST /v1/backups/s3/test", s.requireScope(ScopeAdmin, s.handleTestBackupS3))
-	s.mux.HandleFunc("GET /v1/stats/overview", s.requireScope(ScopeReadonly, s.handleStatsOverview))
-	s.mux.HandleFunc("GET /v1/stats/cost", s.requireScope(ScopeReadonly, s.handleStatsCost))
-	s.mux.HandleFunc("GET /v1/alerts/rules", s.requireScope(ScopeReadonly, s.handleAlertRules))
-	s.mux.HandleFunc("GET /v1/alerts/history", s.requireScope(ScopeReadonly, s.handleAlertHistory))
-	s.mux.HandleFunc("GET /v1/alerts/active", s.requireScope(ScopeReadonly, s.handleAlertsActive))
-	s.mux.HandleFunc("POST /v1/alerts/mutes", s.requireScope(ScopeAdmin, s.handleCreateAlertMute))
-	s.mux.HandleFunc("GET /v1/alerts/mutes", s.requireScope(ScopeReadonly, s.handleListAlertMutes))
-	s.mux.HandleFunc("DELETE /v1/alerts/mutes/{id}", s.requireScope(ScopeAdmin, s.handleDeleteAlertMute))
-
-	s.mux.HandleFunc("POST /v1/matchmaking/tickets", s.requireScope(ScopeMatchmaking, s.handleCreateTicket))
-	s.mux.HandleFunc("GET /v1/matchmaking/tickets/{id}", s.requireScope(ScopeMatchmaking, s.handleGetTicket))
-	s.mux.HandleFunc("DELETE /v1/matchmaking/tickets/{id}", s.requireScope(ScopeMatchmaking, s.handleCancelTicket))
-	s.mux.HandleFunc("GET /v1/qos", s.handleQoS) // public by design (master.md §6)
-
-	// Browser sessions for the panel (session.go); auth is inside the
-	// handlers (login carries the key in the body, logout the cookie).
-	s.mux.HandleFunc("POST /v1/session", s.handleCreateSession)
-	s.mux.HandleFunc("GET /v1/session", s.handleGetSession)
-	s.mux.HandleFunc("DELETE /v1/session", s.handleDeleteSession)
+	// Вся поверхность публичного API описана таблицей маршрутов (routes.go) и
+	// навешивается из неё: там же лежат требуемые скоупы и образцы типов, по
+	// которым собирается openapi.yaml и MCP-инструменты (#972).
+	s.registerRoutes()
 
 	// Embedded panel SPA: `/`, `/assets/*` and SPA-fallback routes
 	// (panelui). Registered last — "/" catches everything unrouted.
@@ -245,7 +159,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func writeError(w http.ResponseWriter, status int, code, detail string) {
-	writeJSON(w, status, map[string]string{"error": code, "detail": detail})
+	writeJSON(w, status, apiError{Error: code, Detail: detail})
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
@@ -297,7 +211,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	if panelui.Embedded() {
 		panelState = "embedded"
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "panel": panelState})
+	writeJSON(w, http.StatusOK, healthzResp{Status: "ok", Panel: panelState})
 }
 
 // MetricsHandler — прометеевская экспозиция реестра master'а, ОТДЕЛЬНЫМ

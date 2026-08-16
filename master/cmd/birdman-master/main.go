@@ -273,7 +273,10 @@ func run() error {
 		// "test connection" button verifying the saved S3 config.
 		WithBackups(backupRunner, func(ctx context.Context) error { return backup.TestS3(ctx, st) }).
 		// Mirror mute/unmute into alertmanager silences best-effort (tracker #245).
-		WithSilenceMirror(silenceMirror)
+		WithSilenceMirror(silenceMirror).
+		// MCP (`/v1/mcp`): пишущие инструменты агента открываются только явным
+		// рубильником конфига — по умолчанию агент видит один лишь read-набор.
+		WithMCP(cfg.MCP.WriteEnabled)
 	api := &http.Server{
 		Addr:              cfg.ListenAPI,
 		Handler:           apiHandler,

@@ -1,0 +1,3063 @@
+# СГЕНЕРИРОВАНО, РУКАМИ НЕ ПРАВИТЬ.
+# Источник — таблица маршрутов master/internal/httpapi/routes.go.
+# Пересобрать: go generate ./... в каталоге master.
+openapi: 3.1.0
+info:
+  title: birdman master API
+  version: v1
+  description: |-
+    Public REST API of birdman-master: matchmaking, fleet control, deploys and observability.
+
+    This document is GENERATED from the master's route table (master/internal/httpapi/routes.go)
+    and cannot drift from the router: the router is registered from that same table.
+
+    Coverage: paths, methods, authentication and success status codes are complete.
+    Response bodies are described for every endpoint except a handful that assemble
+    them dynamically — each of those says so in its own response description.
+    Query parameters and request bodies are not described yet.
+  license:
+    name: MIT
+    url: https://github.com/ufna/birdman/blob/main/LICENSE
+servers:
+  - url: '{master}'
+    description: Your own birdman master. Every install has its own address; there is no hosted service.
+    variables:
+      master:
+        default: http://127.0.0.1:8100
+        description: Base URL of the master — the default of the deploy/ compose stack.
+paths:
+  /healthz:
+    get:
+      operationId: healthz
+      summary: Liveness probe
+      description: 'Public by design: no API key required.'
+      security: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.healthzResp'
+  /metrics:
+    get:
+      operationId: metricsMoved
+      summary: 'Gone: the Prometheus exposition moved to its own listener'
+      description: 'Public by design: no API key required.'
+      security: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+  /v1/agent-upgrade:
+    post:
+      operationId: agentUpgrade
+      summary: Roll out an agent self-upgrade across the fleet
+      description: Requires an API key with the "admin" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "202":
+          description: Success. This endpoint's response body is not described yet (it is assembled dynamically); see docs/specs/master.md §6.
+  /v1/alerts/active:
+    get:
+      operationId: alertsActive
+      summary: Currently firing alerts
+      description: Requires an API key with the "readonly" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.activeAlertsResp'
+  /v1/alerts/history:
+    get:
+      operationId: alertHistory
+      summary: Alert history
+      description: Requires an API key with the "readonly" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.alertHistoryResp'
+  /v1/alerts/mutes:
+    get:
+      operationId: listAlertMutes
+      summary: List alert mutes
+      description: Requires an API key with the "readonly" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.alertMutesResp'
+    post:
+      operationId: createAlertMute
+      summary: Mute an alert
+      description: Requires an API key with the "admin" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "201":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.alertMuteResp'
+  /v1/alerts/mutes/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    delete:
+      operationId: deleteAlertMute
+      summary: Remove an alert mute
+      description: Requires an API key with the "admin" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "204":
+          description: Success. Body is not described by this contract (an upstream proxy response, an event stream, a non-JSON payload or no body at all).
+  /v1/alerts/rules:
+    get:
+      operationId: alertRules
+      summary: List alert rules
+      description: Requires an API key with the "readonly" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.alertRulesResp'
+  /v1/allocate:
+    post:
+      operationId: allocate
+      summary: Allocate a ready dedicated server directly
+      description: Requires an API key with the "allocate" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/store.Allocation'
+  /v1/apikeys:
+    get:
+      operationId: listAPIKeys
+      summary: List API keys (never returns secrets)
+      description: Requires an API key with the "admin" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiKeysResp'
+    post:
+      operationId: createAPIKey
+      summary: Create an API key; the secret is returned once
+      description: Requires an API key with the "admin" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "201":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiKeyCreatedResp'
+  /v1/apikeys/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    delete:
+      operationId: revokeAPIKey
+      summary: Revoke an API key
+      description: Requires an API key with the "admin" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiKeyResp'
+  /v1/backups/run:
+    post:
+      operationId: runBackup
+      summary: Run a backup now
+      description: Requires an API key with the "admin" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "202":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.backupStartedResp'
+  /v1/backups/runs:
+    get:
+      operationId: listBackupRuns
+      summary: List backup runs
+      description: Requires an API key with the "admin" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.backupRunsResp'
+  /v1/backups/s3/test:
+    post:
+      operationId: testBackupS3
+      summary: Test the S3 offsite target
+      description: Requires an API key with the "admin" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.okResp'
+  /v1/backups/settings:
+    get:
+      operationId: getBackupSettings
+      summary: Get the backup schedule and target
+      description: Requires an API key with the "admin" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.backupSettingsResp'
+    patch:
+      operationId: patchBackupSettings
+      summary: Update the backup schedule and target
+      description: Requires an API key with the "admin" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.backupSettingsResp'
+  /v1/ca:
+    get:
+      operationId: getCA
+      summary: Internal CA certificate bundle (certificates only)
+      description: Requires an API key with the "readonly" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success. Body is not described by this contract (an upstream proxy response, an event stream, a non-JSON payload or no body at all).
+  /v1/deploy:
+    post:
+      operationId: deploy
+      summary: Roll a version out to the fleet
+      description: Requires an API key with the "deploy" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success. This endpoint's response body is not described yet (it is assembled dynamically); see docs/specs/master.md §6.
+  /v1/environments:
+    get:
+      operationId: listEnvironments
+      summary: List environments
+      description: Requires an API key with the "readonly" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.environmentsResp'
+    post:
+      operationId: createEnvironment
+      summary: Create an environment
+      description: Requires an API key with the "admin" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "201":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.environmentResp'
+  /v1/environments/{project}/{name}:
+    parameters:
+      - name: project
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+    patch:
+      operationId: patchEnvironment
+      summary: Update an environment
+      description: Requires an API key with the "admin" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.environmentResp'
+    delete:
+      operationId: deleteEnvironment
+      summary: Delete an environment and everything in it
+      description: Requires an API key with the "admin" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.environmentDeletedResp'
+  /v1/environments/{project}/{name}/usage:
+    parameters:
+      - name: project
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: environmentUsage
+      summary: What an environment currently holds (pre-delete inventory)
+      description: Requires an API key with the "readonly" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.environmentUsageResp'
+  /v1/events:
+    get:
+      operationId: listEvents
+      summary: List fleet events
+      description: Requires an API key with the "readonly" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.eventsResp'
+  /v1/events/stream:
+    get:
+      operationId: eventsStream
+      summary: Live event stream (SSE, resumable via after_id)
+      description: Requires an API key with the "readonly" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success. Body is not described by this contract (an upstream proxy response, an event stream, a non-JSON payload or no body at all).
+  /v1/fleets/{region}:
+    parameters:
+      - name: region
+        in: path
+        required: true
+        schema:
+          type: string
+    put:
+      operationId: upsertFleet
+      summary: Set the desired warm-pool size for a region
+      description: Requires an API key with the "admin" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success. This endpoint's response body is not described yet (it is assembled dynamically); see docs/specs/master.md §6.
+  /v1/logs/query:
+    get:
+      operationId: logsQuery
+      summary: Log search (VictoriaLogs proxy)
+      description: Requires an API key with the "readonly" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success. Body is not described by this contract (an upstream proxy response, an event stream, a non-JSON payload or no body at all).
+  /v1/matches:
+    get:
+      operationId: listMatches
+      summary: List matches
+      description: Requires an API key with the "readonly" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.matchesResp'
+  /v1/matches/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: getMatch
+      summary: Get one match
+      description: Requires an API key with the "readonly" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.matchResp'
+  /v1/matchmaking/tickets:
+    post:
+      operationId: createTicket
+      summary: File a matchmaking ticket
+      description: Requires an API key with the "matchmaking" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "201":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/matchmaker.Ticket'
+  /v1/matchmaking/tickets/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: getTicket
+      summary: Poll a matchmaking ticket
+      description: Requires an API key with the "matchmaking" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/matchmaker.Ticket'
+    delete:
+      operationId: cancelTicket
+      summary: Cancel a matchmaking ticket
+      description: Requires an API key with the "matchmaking" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/matchmaker.Ticket'
+  /v1/mcp:
+    get:
+      operationId: mcpGet
+      summary: 'MCP endpoint: open the server-to-client stream'
+      description: Credentials travel in the request body, not in an Authorization header.
+      security: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success. Body is not described by this contract (an upstream proxy response, an event stream, a non-JSON payload or no body at all).
+    post:
+      operationId: mcpPost
+      summary: 'MCP endpoint: call a tool (Model Context Protocol, streamable HTTP)'
+      description: Credentials travel in the request body, not in an Authorization header.
+      security: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success. Body is not described by this contract (an upstream proxy response, an event stream, a non-JSON payload or no body at all).
+    delete:
+      operationId: mcpDelete
+      summary: 'MCP endpoint: end the session'
+      description: Credentials travel in the request body, not in an Authorization header.
+      security: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success. Body is not described by this contract (an upstream proxy response, an event stream, a non-JSON payload or no body at all).
+  /v1/metrics/query:
+    get:
+      operationId: metricsQuery
+      summary: Instant metrics query (VictoriaMetrics proxy)
+      description: Requires an API key with the "readonly" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success. Body is not described by this contract (an upstream proxy response, an event stream, a non-JSON payload or no body at all).
+  /v1/metrics/query_range:
+    get:
+      operationId: metricsQueryRange
+      summary: Range metrics query (VictoriaMetrics proxy)
+      description: Requires an API key with the "readonly" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success. Body is not described by this contract (an upstream proxy response, an event stream, a non-JSON payload or no body at all).
+  /v1/nodes:
+    get:
+      operationId: listNodes
+      summary: List fleet nodes
+      description: Requires an API key with the "readonly" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.nodesResp'
+    post:
+      operationId: createNode
+      summary: Enroll a node into the fleet
+      description: Requires an API key with the "admin" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "201":
+          description: Success. This endpoint's response body is not described yet (it is assembled dynamically); see docs/specs/master.md §6.
+  /v1/nodes/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    patch:
+      operationId: setNodeEnv
+      summary: Move a node to another environment
+      description: Requires an API key with the "admin" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.nodeResp'
+  /v1/nodes/{id}/drain:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      operationId: drainNode
+      summary: 'Drain a node: stop placing new servers on it'
+      description: Requires an API key with the "admin" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.nodeResp'
+  /v1/nodes/{id}/revoke:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      operationId: revokeNode
+      summary: Retire a node permanently and revoke its certificate
+      description: Requires an API key with the "admin" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.nodeResp'
+  /v1/nodes/{id}/undrain:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      operationId: undrainNode
+      summary: 'Undrain a node: allow placement again'
+      description: Requires an API key with the "admin" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.nodeResp'
+  /v1/openapi.yaml:
+    get:
+      operationId: openAPI
+      summary: This API's own OpenAPI 3.1 contract, generated from the route table
+      description: 'Public by design: no API key required.'
+      security: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success. Body is not described by this contract (an upstream proxy response, an event stream, a non-JSON payload or no body at all).
+  /v1/projects:
+    get:
+      operationId: listProjects
+      summary: List projects
+      description: Requires an API key with the "readonly" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.projectsResp'
+    post:
+      operationId: createProject
+      summary: Create a project; fails if the slug is taken
+      description: Requires an API key with the "admin" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "201":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.projectResp'
+  /v1/projects/{slug}:
+    parameters:
+      - name: slug
+        in: path
+        required: true
+        schema:
+          type: string
+    put:
+      operationId: upsertProject
+      summary: Create or update a project (idempotent)
+      description: Requires an API key with the "admin" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.projectResp'
+    delete:
+      operationId: deleteProject
+      summary: Delete a project and everything under it
+      description: Requires an API key with the "admin" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.projectDeletedResp'
+  /v1/projects/{slug}/usage:
+    parameters:
+      - name: slug
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: projectUsage
+      summary: What a project currently holds (pre-delete inventory)
+      description: Requires an API key with the "admin" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.projectUsageResp'
+  /v1/promote:
+    post:
+      operationId: promote
+      summary: Promote a version into another environment
+      description: Requires an API key with the "deploy" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success. This endpoint's response body is not described yet (it is assembled dynamically); see docs/specs/master.md §6.
+  /v1/qos:
+    get:
+      operationId: qoS
+      summary: QoS probe endpoints for client-side RTT measurement
+      description: 'Public by design: no API key required.'
+      security: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.qosResp'
+  /v1/registries:
+    get:
+      operationId: listRegistries
+      summary: List container registries
+      description: Requires an API key with the "admin" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.registriesResp'
+    post:
+      operationId: createRegistry
+      summary: Add a container registry
+      description: Requires an API key with the "admin" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "201":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.registryResp'
+  /v1/registries/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    patch:
+      operationId: patchRegistry
+      summary: Update registry credentials
+      description: Requires an API key with the "admin" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.registryResp'
+    delete:
+      operationId: deleteRegistry
+      summary: Delete a registry
+      description: Requires an API key with the "admin" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "204":
+          description: Success. Body is not described by this contract (an upstream proxy response, an event stream, a non-JSON payload or no body at all).
+  /v1/rollback:
+    post:
+      operationId: rollback
+      summary: Roll back to the previous active version
+      description: Requires an API key with the "deploy" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success. This endpoint's response body is not described yet (it is assembled dynamically); see docs/specs/master.md §6.
+  /v1/servers:
+    get:
+      operationId: listServers
+      summary: List dedicated servers and their states
+      description: Requires an API key with the "readonly" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.serversResp'
+  /v1/servers/{id}/logs:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: serverLogs
+      summary: Fetch the log tail of one dedicated server
+      description: Requires an API key with the "readonly" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success. Body is not described by this contract (an upstream proxy response, an event stream, a non-JSON payload or no body at all).
+  /v1/session:
+    get:
+      operationId: getSession
+      summary: Describe the current browser session
+      description: Accepts the panel session cookie or an API key.
+      security:
+        - sessionCookie: []
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.sessionResponse'
+    post:
+      operationId: createSession
+      summary: Exchange an API key for a browser session cookie
+      description: Credentials travel in the request body, not in an Authorization header.
+      security: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.sessionResponse'
+    delete:
+      operationId: deleteSession
+      summary: 'Log out: drop the browser session'
+      description: Accepts the panel session cookie or an API key.
+      security:
+        - sessionCookie: []
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success. This endpoint's response body is not described yet (it is assembled dynamically); see docs/specs/master.md §6.
+  /v1/stats/cost:
+    get:
+      operationId: statsCost
+      summary: Cost aggregates
+      description: Requires an API key with the "readonly" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/stats.CostResponse'
+  /v1/stats/overview:
+    get:
+      operationId: statsOverview
+      summary: Fleet overview aggregates
+      description: Requires an API key with the "readonly" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/stats.OverviewResponse'
+  /v1/versions:
+    get:
+      operationId: listVersions
+      summary: List versions with their fleet state
+      description: Requires an API key with the "readonly" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.versionsResp'
+    post:
+      operationId: createVersion
+      summary: Register a build version
+      description: Requires an API key with the "deploy" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "201":
+          description: Success. This endpoint's response body is not described yet (it is assembled dynamically); see docs/specs/master.md §6.
+components:
+  schemas:
+    httpapi.activeAlert:
+      type: object
+      properties:
+        active_at:
+          type: string
+          format: date-time
+        description:
+          type: string
+        description_ru:
+          type: string
+        muted:
+          type: boolean
+        name:
+          type: string
+        node:
+          type: string
+        project:
+          type: string
+        region:
+          type: string
+        scope:
+          type: string
+        severity:
+          type: string
+        state:
+          type: string
+        value:
+          type: string
+      required:
+        - active_at
+        - description
+        - muted
+        - name
+        - node
+        - project
+        - region
+        - scope
+        - severity
+        - state
+        - value
+    httpapi.activeAlertsResp:
+      type: object
+      properties:
+        alerts:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: '#/components/schemas/httpapi.activeAlert'
+      required:
+        - alerts
+    httpapi.alertEvent:
+      type: object
+      properties:
+        active:
+          type: boolean
+        description:
+          type: string
+        description_ru:
+          type: string
+        endsAt:
+          type: string
+        muted:
+          type: boolean
+        name:
+          type: string
+        node:
+          type: string
+        project:
+          type: string
+        received_at:
+          type: string
+        region:
+          type: string
+        scope:
+          type: string
+        severity:
+          type: string
+        startsAt:
+          type: string
+      required:
+        - active
+        - description
+        - endsAt
+        - muted
+        - name
+        - node
+        - project
+        - region
+        - scope
+        - severity
+        - startsAt
+    httpapi.alertHistoryResp:
+      type: object
+      properties:
+        alerts:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: '#/components/schemas/httpapi.alertEvent'
+      required:
+        - alerts
+    httpapi.alertMuteResp:
+      type: object
+      properties:
+        mute:
+          $ref: '#/components/schemas/store.AlertMute'
+      required:
+        - mute
+    httpapi.alertMutesResp:
+      type: object
+      properties:
+        mutes:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: '#/components/schemas/store.AlertMute'
+      required:
+        - mutes
+    httpapi.alertRule:
+      type: object
+      properties:
+        description:
+          type: string
+        description_ru:
+          type: string
+        expr:
+          type: string
+        for:
+          type: string
+        group:
+          type: string
+        name:
+          type: string
+        severity:
+          type: string
+        state:
+          type: string
+      required:
+        - description
+        - expr
+        - for
+        - group
+        - name
+        - severity
+        - state
+    httpapi.alertRulesResp:
+      type: object
+      properties:
+        rules:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: '#/components/schemas/httpapi.alertRule'
+      required:
+        - rules
+    httpapi.apiError:
+      type: object
+      properties:
+        detail:
+          type: string
+        error:
+          type: string
+      required:
+        - detail
+        - error
+    httpapi.apiKeyCreatedResp:
+      type: object
+      properties:
+        key:
+          $ref: '#/components/schemas/store.APIKey'
+        secret:
+          type: string
+      required:
+        - key
+        - secret
+    httpapi.apiKeyResp:
+      type: object
+      properties:
+        key:
+          $ref: '#/components/schemas/store.APIKey'
+      required:
+        - key
+    httpapi.apiKeysResp:
+      type: object
+      properties:
+        apikeys:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: '#/components/schemas/store.APIKey'
+      required:
+        - apikeys
+    httpapi.backupRunsResp:
+      type: object
+      properties:
+        runs:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: '#/components/schemas/store.BackupRun'
+      required:
+        - runs
+    httpapi.backupSettingsResp:
+      type: object
+      properties:
+        settings:
+          $ref: '#/components/schemas/store.BackupSettings'
+      required:
+        - settings
+    httpapi.backupStartedResp:
+      type: object
+      properties:
+        started:
+          type: boolean
+      required:
+        - started
+    httpapi.environmentDeletedResp:
+      type: object
+      properties:
+        deleted:
+          $ref: '#/components/schemas/store.DeleteEnvironmentResult'
+      required:
+        - deleted
+    httpapi.environmentResp:
+      type: object
+      properties:
+        environment:
+          $ref: '#/components/schemas/store.Environment'
+      required:
+        - environment
+    httpapi.environmentUsageResp:
+      type: object
+      properties:
+        usage:
+          $ref: '#/components/schemas/store.EnvironmentUsage'
+      required:
+        - usage
+    httpapi.environmentsResp:
+      type: object
+      properties:
+        environments:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: '#/components/schemas/store.Environment'
+      required:
+        - environments
+    httpapi.eventsResp:
+      type: object
+      properties:
+        events:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: '#/components/schemas/store.Event'
+      required:
+        - events
+    httpapi.healthzResp:
+      type: object
+      properties:
+        panel:
+          type: string
+        status:
+          type: string
+      required:
+        - panel
+        - status
+    httpapi.matchResp:
+      type: object
+      properties:
+        match:
+          $ref: '#/components/schemas/store.Match'
+      required:
+        - match
+    httpapi.matchesResp:
+      type: object
+      properties:
+        matches:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: '#/components/schemas/store.Match'
+      required:
+        - matches
+    httpapi.nodeResp:
+      type: object
+      properties:
+        node:
+          $ref: '#/components/schemas/store.Node'
+      required:
+        - node
+    httpapi.nodesResp:
+      type: object
+      properties:
+        nodes:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: '#/components/schemas/store.Node'
+      required:
+        - nodes
+    httpapi.okResp:
+      type: object
+      properties:
+        ok:
+          type: boolean
+      required:
+        - ok
+    httpapi.projectDeletedResp:
+      type: object
+      properties:
+        deleted:
+          $ref: '#/components/schemas/store.DeleteProjectResult'
+      required:
+        - deleted
+    httpapi.projectResp:
+      type: object
+      properties:
+        project:
+          $ref: '#/components/schemas/store.Project'
+      required:
+        - project
+    httpapi.projectUsageResp:
+      type: object
+      properties:
+        usage:
+          $ref: '#/components/schemas/store.ProjectUsage'
+      required:
+        - usage
+    httpapi.projectsResp:
+      type: object
+      properties:
+        projects:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: '#/components/schemas/store.Project'
+      required:
+        - projects
+    httpapi.qosResp:
+      type: object
+      properties:
+        qos:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: '#/components/schemas/store.QoSEndpoint'
+      required:
+        - qos
+    httpapi.registriesResp:
+      type: object
+      properties:
+        registries:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: '#/components/schemas/store.Registry'
+      required:
+        - registries
+    httpapi.registryResp:
+      type: object
+      properties:
+        registry:
+          $ref: '#/components/schemas/store.Registry'
+      required:
+        - registry
+    httpapi.serversResp:
+      type: object
+      properties:
+        servers:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: '#/components/schemas/store.Server'
+      required:
+        - servers
+    httpapi.sessionBinding:
+      type: object
+      properties:
+        env:
+          type: string
+        project:
+          type: string
+      required:
+        - env
+        - project
+    httpapi.sessionResponse:
+      type: object
+      properties:
+        binding:
+          $ref: '#/components/schemas/httpapi.sessionBinding'
+        name:
+          type: string
+        scopes:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+      required:
+        - name
+        - scopes
+    httpapi.versionsResp:
+      type: object
+      properties:
+        versions:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: '#/components/schemas/store.Version'
+      required:
+        - versions
+    matchmaker.RegionPing:
+      type: object
+      properties:
+        region:
+          type: string
+        rtt_ms:
+          type: integer
+      required:
+        - region
+        - rtt_ms
+    matchmaker.Result:
+      type: object
+      properties:
+        host:
+          type: string
+        join_token:
+          type: string
+        match_id:
+          type: string
+        port:
+          type: integer
+      required:
+        - host
+        - match_id
+        - port
+    matchmaker.Ticket:
+      type: object
+      properties:
+        client_version:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        env:
+          type: string
+        match:
+          $ref: '#/components/schemas/matchmaker.Result'
+        player_id:
+          type: string
+        project:
+          type: string
+        regions:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: '#/components/schemas/matchmaker.RegionPing'
+        status:
+          type: string
+        ticket_id:
+          type: string
+      required:
+        - client_version
+        - created_at
+        - env
+        - player_id
+        - project
+        - regions
+        - status
+        - ticket_id
+    stats.CostResponse:
+      type: object
+      properties:
+        days:
+          type: integer
+        generated_at:
+          type: string
+          format: date-time
+        slot_hours_per_day_by_region:
+          $ref: '#/components/schemas/stats.stackedSeries'
+        slot_hours_per_day_by_version:
+          $ref: '#/components/schemas/stats.stackedSeries'
+        slot_hours_total:
+          type: number
+        timezone:
+          type: string
+        utilization:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: '#/components/schemas/store.RegionUtil'
+        utilization_note:
+          type: string
+      required:
+        - days
+        - generated_at
+        - slot_hours_per_day_by_region
+        - slot_hours_per_day_by_version
+        - slot_hours_total
+        - timezone
+        - utilization
+        - utilization_note
+    stats.OverviewResponse:
+      type: object
+      properties:
+        avg_match_duration_per_day:
+          $ref: '#/components/schemas/stats.simpleSeries'
+        avg_match_duration_seconds:
+          type:
+            - number
+            - "null"
+        days:
+          type: integer
+        generated_at:
+          type: string
+          format: date-time
+        matches_per_day:
+          $ref: '#/components/schemas/stats.stackedSeries'
+        peak_ccu:
+          type: integer
+        peak_ccu_per_day:
+          $ref: '#/components/schemas/stats.simpleSeries'
+        players_per_day:
+          $ref: '#/components/schemas/stats.stackedSeries'
+        time_to_match:
+          $ref: '#/components/schemas/stats.timeToMatch'
+        timezone:
+          type: string
+        version_distribution:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: '#/components/schemas/stats.versionShare'
+      required:
+        - avg_match_duration_per_day
+        - avg_match_duration_seconds
+        - days
+        - generated_at
+        - matches_per_day
+        - peak_ccu
+        - peak_ccu_per_day
+        - players_per_day
+        - time_to_match
+        - timezone
+        - version_distribution
+    stats.simplePoint:
+      type: object
+      properties:
+        date:
+          type: string
+        value:
+          type: number
+      required:
+        - date
+        - value
+    stats.simpleSeries:
+      type: object
+      properties:
+        points:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: '#/components/schemas/stats.simplePoint'
+        unit:
+          type: string
+      required:
+        - points
+        - unit
+    stats.stackedPoint:
+      type: object
+      properties:
+        date:
+          type: string
+        total:
+          type: number
+        values:
+          type:
+            - object
+            - "null"
+          additionalProperties:
+            type: number
+      required:
+        - date
+        - total
+        - values
+    stats.stackedSeries:
+      type: object
+      properties:
+        keys:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        points:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: '#/components/schemas/stats.stackedPoint'
+        unit:
+          type: string
+      required:
+        - keys
+        - points
+        - unit
+    stats.timeToMatch:
+      type: object
+      properties:
+        note:
+          type: string
+        p50_seconds:
+          type:
+            - number
+            - "null"
+        p95_seconds:
+          type:
+            - number
+            - "null"
+        samples:
+          type: integer
+        source:
+          type: string
+      required:
+        - note
+        - p50_seconds
+        - p95_seconds
+        - samples
+        - source
+    stats.versionShare:
+      type: object
+      properties:
+        matches:
+          type: integer
+        share:
+          type: number
+        version:
+          type: string
+      required:
+        - matches
+        - share
+        - version
+    store.APIKey:
+      type: object
+      properties:
+        created_at:
+          type: string
+          format: date-time
+        env:
+          type:
+            - string
+            - "null"
+        id:
+          type: string
+        name:
+          type: string
+        project:
+          type:
+            - string
+            - "null"
+        project_id:
+          type:
+            - string
+            - "null"
+        revoked_at:
+          type:
+            - string
+            - "null"
+          format: date-time
+        scopes:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+      required:
+        - created_at
+        - id
+        - name
+        - revoked_at
+        - scopes
+    store.AlertMute:
+      type: object
+      properties:
+        alertname:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        created_by:
+          type: string
+        expires_at:
+          type:
+            - string
+            - "null"
+          format: date-time
+        id:
+          type: string
+        note:
+          type: string
+        project:
+          type:
+            - string
+            - "null"
+        region:
+          type:
+            - string
+            - "null"
+        silence_id:
+          type:
+            - string
+            - "null"
+      required:
+        - alertname
+        - created_at
+        - created_by
+        - expires_at
+        - id
+        - note
+        - project
+        - region
+        - silence_id
+    store.Allocation:
+      type: object
+      properties:
+        host:
+          type: string
+        port:
+          type: integer
+        server_id:
+          type: string
+      required:
+        - host
+        - port
+        - server_id
+    store.BackupRun:
+      type: object
+      properties:
+        error:
+          type: string
+        finished_at:
+          type:
+            - string
+            - "null"
+          format: date-time
+        id:
+          type: integer
+        kind:
+          type: string
+        result:
+          type: string
+        s3_uploaded:
+          type: boolean
+        size_bytes:
+          type:
+            - integer
+            - "null"
+        started_at:
+          type: string
+          format: date-time
+      required:
+        - error
+        - finished_at
+        - id
+        - kind
+        - result
+        - s3_uploaded
+        - size_bytes
+        - started_at
+    store.BackupSettings:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        has_s3_secret:
+          type: boolean
+        interval_hours:
+          type: integer
+        retention_local:
+          type: integer
+        retention_s3:
+          type: integer
+        s3_access_key:
+          type: string
+        s3_bucket:
+          type: string
+        s3_enabled:
+          type: boolean
+        s3_endpoint:
+          type: string
+        s3_prefix:
+          type: string
+        s3_region:
+          type: string
+        updated_at:
+          type: string
+          format: date-time
+      required:
+        - enabled
+        - has_s3_secret
+        - interval_hours
+        - retention_local
+        - retention_s3
+        - s3_access_key
+        - s3_bucket
+        - s3_enabled
+        - s3_endpoint
+        - s3_prefix
+        - s3_region
+        - updated_at
+    store.DeleteEnvironmentResult:
+      type: object
+      properties:
+        api_keys_revoked:
+          type: integer
+        fleets:
+          type: integer
+        matches:
+          type: integer
+        name:
+          type: string
+        production:
+          type: boolean
+        servers:
+          type: integer
+        versions:
+          type: integer
+      required:
+        - api_keys_revoked
+        - fleets
+        - matches
+        - name
+        - production
+        - servers
+        - versions
+    store.DeleteProjectResult:
+      type: object
+      properties:
+        alert_mutes:
+          type: integer
+        api_keys_revoked:
+          type: integer
+        environments:
+          type: integer
+        fleets:
+          type: integer
+        matches:
+          type: integer
+        revoked_key_ids:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        servers:
+          type: integer
+        slug:
+          type: string
+        versions:
+          type: integer
+        was_empty:
+          type: boolean
+      required:
+        - alert_mutes
+        - api_keys_revoked
+        - environments
+        - fleets
+        - matches
+        - servers
+        - slug
+        - versions
+        - was_empty
+    store.Environment:
+      type: object
+      properties:
+        auto_deploy:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        name:
+          type: string
+        production:
+          type: boolean
+        project:
+          type: string
+        project_id:
+          type: string
+        retention_keep:
+          type: integer
+      required:
+        - auto_deploy
+        - created_at
+        - name
+        - production
+        - project
+        - project_id
+        - retention_keep
+    store.EnvironmentUsage:
+      type: object
+      properties:
+        api_keys:
+          type: integer
+        fleets:
+          type: integer
+        matches:
+          type: integer
+        nodes:
+          type: integer
+        servers:
+          type: integer
+        versions:
+          type: integer
+      required:
+        - api_keys
+        - fleets
+        - matches
+        - nodes
+        - servers
+        - versions
+    store.Event:
+      type: object
+      properties:
+        id:
+          type: integer
+        kind:
+          type: string
+        match_id:
+          type:
+            - string
+            - "null"
+        node_id:
+          type:
+            - string
+            - "null"
+        payload:
+          type:
+            - object
+            - "null"
+          additionalProperties:
+            description: any JSON value
+        project:
+          type: string
+        server_id:
+          type:
+            - string
+            - "null"
+        ts:
+          type: string
+          format: date-time
+        version_id:
+          type:
+            - string
+            - "null"
+      required:
+        - id
+        - kind
+        - payload
+        - ts
+    store.Match:
+      type: object
+      properties:
+        created_at:
+          type: string
+          format: date-time
+        ended_at:
+          type:
+            - string
+            - "null"
+          format: date-time
+        env:
+          type: string
+        host:
+          type: string
+        id:
+          type: string
+        players_peak:
+          type: integer
+        port:
+          type: integer
+        project:
+          type: string
+        region:
+          type: string
+        semver:
+          type: string
+        server_id:
+          type: string
+        server_players:
+          type: integer
+        started_at:
+          type:
+            - string
+            - "null"
+          format: date-time
+        state:
+          type: string
+        version_id:
+          type: string
+      required:
+        - created_at
+        - env
+        - host
+        - id
+        - players_peak
+        - port
+        - project
+        - region
+        - semver
+        - server_id
+        - server_players
+        - state
+        - version_id
+    store.Node:
+      type: object
+      properties:
+        agent_version:
+          type: string
+        capacity_slots:
+          type: integer
+        cert_not_after:
+          type:
+            - string
+            - "null"
+          format: date-time
+        cert_serial:
+          type:
+            - string
+            - "null"
+        created_at:
+          type: string
+          format: date-time
+        enrolled_at:
+          type:
+            - string
+            - "null"
+          format: date-time
+        env:
+          type: string
+        hostname:
+          type: string
+        id:
+          type: string
+        labels:
+          type:
+            - object
+            - "null"
+          additionalProperties:
+            description: any JSON value
+        last_heartbeat_at:
+          type:
+            - string
+            - "null"
+          format: date-time
+        project:
+          type: string
+        project_id:
+          type: string
+        public_ip:
+          type: string
+        region:
+          type: string
+        state:
+          type: string
+      required:
+        - agent_version
+        - capacity_slots
+        - created_at
+        - env
+        - hostname
+        - id
+        - labels
+        - project
+        - project_id
+        - public_ip
+        - region
+        - state
+    store.Project:
+      type: object
+      properties:
+        created_at:
+          type: string
+          format: date-time
+        id:
+          type: string
+        match_size:
+          type: integer
+        slug:
+          type: string
+      required:
+        - created_at
+        - id
+        - match_size
+        - slug
+    store.ProjectUsage:
+      type: object
+      properties:
+        api_keys:
+          type: integer
+        environments:
+          type: integer
+        fleets:
+          type: integer
+        matches:
+          type: integer
+        nodes:
+          type: integer
+        retired_nodes:
+          type: integer
+        servers:
+          type: integer
+        versions:
+          type: integer
+      required:
+        - api_keys
+        - environments
+        - fleets
+        - matches
+        - nodes
+        - retired_nodes
+        - servers
+        - versions
+    store.QoSEndpoint:
+      type: object
+      properties:
+        host:
+          type: string
+        region:
+          type: string
+        udp_port:
+          type: integer
+      required:
+        - host
+        - region
+        - udp_port
+    store.RegionUtil:
+      type: object
+      properties:
+        allocated:
+          type: integer
+        capacity_slots:
+          type: integer
+        draining:
+          type: integer
+        ready:
+          type: integer
+        region:
+          type: string
+      required:
+        - allocated
+        - capacity_slots
+        - draining
+        - ready
+        - region
+    store.Registry:
+      type: object
+      properties:
+        created_at:
+          type: string
+          format: date-time
+        host:
+          type: string
+        id:
+          type: string
+        note:
+          type: string
+        type:
+          type: string
+        updated_at:
+          type: string
+          format: date-time
+        username:
+          type: string
+      required:
+        - created_at
+        - host
+        - id
+        - note
+        - type
+        - updated_at
+        - username
+    store.Server:
+      type: object
+      properties:
+        created_at:
+          type: string
+          format: date-time
+        id:
+          type: string
+        match_id:
+          type:
+            - string
+            - "null"
+        node_id:
+          type: string
+        players:
+          type: integer
+        port:
+          type: integer
+        project_id:
+          type: string
+        region:
+          type: string
+        state:
+          type: string
+        tick_ms:
+          type:
+            - number
+            - "null"
+        updated_at:
+          type: string
+          format: date-time
+        version_id:
+          type: string
+      required:
+        - created_at
+        - id
+        - node_id
+        - players
+        - port
+        - project_id
+        - region
+        - state
+        - updated_at
+        - version_id
+    store.Version:
+      type: object
+      properties:
+        created_at:
+          type: string
+          format: date-time
+        deprecated_at:
+          type:
+            - string
+            - "null"
+          format: date-time
+        env:
+          type: string
+        id:
+          type: string
+        image_ref:
+          type: string
+        project:
+          type: string
+        project_id:
+          type: string
+        promoted_from:
+          type:
+            - string
+            - "null"
+        semver:
+          type: string
+        state:
+          type: string
+      required:
+        - created_at
+        - env
+        - id
+        - image_ref
+        - project
+        - project_id
+        - semver
+        - state
+  securitySchemes:
+    apiKey:
+      type: http
+      scheme: bearer
+      description: 'birdman API key (bmk_…) in `Authorization: Bearer`. A key carries scopes (admin, deploy, matchmaking, allocate, readonly) and may be bound to one (project, environment) pair, outside of which it can reach nothing.'
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: birdman_session
+      description: Browser session cookie issued by POST /v1/session; the panel uses it instead of carrying an API key in every request.

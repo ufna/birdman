@@ -49,7 +49,7 @@ func (s *Server) handleGetBackupSettings(w http.ResponseWriter, r *http.Request)
 		storeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"settings": set})
+	writeJSON(w, http.StatusOK, backupSettingsResp{Settings: set})
 }
 
 // handlePatchBackupSettings is PATCH /v1/backups/settings (admin). The nil
@@ -77,7 +77,7 @@ func (s *Server) handlePatchBackupSettings(w http.ResponseWriter, r *http.Reques
 		storeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"settings": set})
+	writeJSON(w, http.StatusOK, backupSettingsResp{Settings: set})
 }
 
 // handleListBackupRuns is GET /v1/backups/runs?limit=N (admin): the run history
@@ -94,7 +94,7 @@ func (s *Server) handleListBackupRuns(w http.ResponseWriter, r *http.Request) {
 		storeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"runs": emptyNotNull(runs)})
+	writeJSON(w, http.StatusOK, backupRunsResp{Runs: emptyNotNull(runs)})
 }
 
 // handleRunBackup is POST /v1/backups/run (admin): trigger a run now. 202 once
@@ -113,7 +113,7 @@ func (s *Server) handleRunBackup(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"started": true})
+	writeJSON(w, http.StatusAccepted, backupStartedResp{Started: true})
 }
 
 // handleTestBackupS3 is POST /v1/backups/s3/test (admin): verify the saved S3
@@ -128,5 +128,5 @@ func (s *Server) handleTestBackupS3(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "s3_test_failed", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(w, http.StatusOK, okResp{OK: true})
 }

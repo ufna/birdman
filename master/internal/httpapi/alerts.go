@@ -142,7 +142,7 @@ func (s *Server) handleAlertRules(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"rules": rules})
+	writeJSON(w, http.StatusOK, alertRulesResp{Rules: rules})
 }
 
 // vmAlertsResponse is the vmalert /api/v1/alerts payload.
@@ -229,7 +229,7 @@ func (s *Server) handleAlertsActive(w http.ResponseWriter, r *http.Request) {
 	for i := range out {
 		out[i].Muted = anyMuteMatches(mutes, out[i].Name, out[i].Region, out[i].Project)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"alerts": out})
+	writeJSON(w, http.StatusOK, activeAlertsResp{Alerts: out})
 }
 
 func (s *Server) vmalertGet(ctx context.Context, path string, out any) error {
@@ -518,7 +518,7 @@ func (s *Server) handleAlertHistory(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) || s.alertsLogPath == "" {
 			// No sink yet is a normal state, not an error.
-			writeJSON(w, http.StatusOK, map[string]any{"alerts": []alertEvent{}})
+			writeJSON(w, http.StatusOK, alertHistoryResp{Alerts: []alertEvent{}})
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
@@ -532,7 +532,7 @@ func (s *Server) handleAlertHistory(w http.ResponseWriter, r *http.Request) {
 	for i := range events {
 		events[i].Muted = anyMuteMatches(mutes, events[i].Name, events[i].Region, events[i].Project)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"alerts": events})
+	writeJSON(w, http.StatusOK, alertHistoryResp{Alerts: events})
 }
 
 // alertsTailInitialWindow — стартовое окно чтения хвоста alerts.log. Число
@@ -894,7 +894,7 @@ func (s *Server) handleCreateAlertMute(w http.ResponseWriter, r *http.Request) {
 	if s.silences != nil {
 		s.silences.MuteUpserted(r.Context(), mute)
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"mute": mute})
+	writeJSON(w, http.StatusCreated, alertMuteResp{Mute: mute})
 }
 
 // handleListAlertMutes is GET /v1/alerts/mutes (readonly): active mutes
@@ -939,7 +939,7 @@ func (s *Server) handleListAlertMutes(w http.ResponseWriter, r *http.Request) {
 		}
 		mutes = kept
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"mutes": emptyNotNull(mutes)})
+	writeJSON(w, http.StatusOK, alertMutesResp{Mutes: emptyNotNull(mutes)})
 }
 
 // handleDeleteAlertMute is DELETE /v1/alerts/mutes/{id} (admin). 204 on a real

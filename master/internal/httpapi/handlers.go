@@ -73,7 +73,7 @@ func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
 		storeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"nodes": emptyNotNull(nodes)})
+	writeJSON(w, http.StatusOK, nodesResp{Nodes: emptyNotNull(nodes)})
 }
 
 // --- servers ---
@@ -98,7 +98,7 @@ func (s *Server) handleListServers(w http.ResponseWriter, r *http.Request) {
 		storeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"servers": emptyNotNull(servers)})
+	writeJSON(w, http.StatusOK, serversResp{Servers: emptyNotNull(servers)})
 }
 
 // --- versions ---
@@ -191,7 +191,7 @@ func (s *Server) handleListVersions(w http.ResponseWriter, r *http.Request) {
 		storeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"versions": emptyNotNull(versions)})
+	writeJSON(w, http.StatusOK, versionsResp{Versions: emptyNotNull(versions)})
 }
 
 // --- fleets ---
@@ -331,7 +331,7 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 		storeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"events": emptyNotNull(events)})
+	writeJSON(w, http.StatusOK, eventsResp{Events: emptyNotNull(events)})
 }
 
 // --- allocation (docs/specs/master.md §3) ---

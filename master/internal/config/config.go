@@ -5,6 +5,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -156,6 +157,21 @@ type Config struct {
 	// BIRDMAN_SECRETS_KEY (the base64 key itself, for dev-compose/CI where the
 	// container has no /etc/birdman). Resolved to key bytes by SecretsKey().
 	SecretsKeyFile string `yaml:"secrets_key_file"`
+	// MCP настраивает эндпоинт Model Context Protocol (`/v1/mcp`,
+	// internal/httpapi/mcp.go) — тот, через который ИИ-агент работает с флотом.
+	MCP MCP `yaml:"mcp"`
+}
+
+// MCP — настройки эндпоинта Model Context Protocol.
+type MCP struct {
+	// WriteEnabled открывает агенту ПИШУЩИЕ инструменты: дренаж ноды, мьют
+	// алерта, деплой, откат, бэкап по требованию. ВЫКЛЮЧЕНО по умолчанию, и это
+	// сознательно отдельный рубильник, а не производная от скоупов ключа:
+	// скоупы заводятся под человека и живут долго, а «пустить агента менять
+	// флот» — решение другого рода и другого срока. Пока выключено, `/v1/mcp`
+	// отдаёт только чтение — даже админскому ключу. Env-override
+	// BIRDMAN_MCP_WRITE_ENABLED (1/true — включить).
+	WriteEnabled bool `yaml:"write_enabled"`
 }
 
 func defaults() Config {
@@ -232,6 +248,17 @@ func Load(path string) (Config, error) {
 	}
 	if v := os.Getenv("BIRDMAN_ALERTMANAGER_URL"); v != "" {
 		cfg.Alerts.AlertmanagerURL = v
+	}
+	// Рубильник пишущих MCP-инструментов из окружения: в compose-стеке
+	// конфиг-файла может не быть вовсе. Строгий разбор, а не «непустое значит
+	// да»: BIRDMAN_MCP_WRITE_ENABLED=0 обязано ВЫКЛЮЧАТЬ, иначе оператор,
+	// выключивший запись нулём, получил бы ровно обратное.
+	if v := os.Getenv("BIRDMAN_MCP_WRITE_ENABLED"); v != "" {
+		on, err := strconv.ParseBool(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("BIRDMAN_MCP_WRITE_ENABLED=%q: %w", v, err)
+		}
+		cfg.MCP.WriteEnabled = on
 	}
 	if v := os.Getenv("BIRDMAN_AGENTLINK_AUTH"); v != "" {
 		cfg.AgentlinkAuth = v

@@ -85,7 +85,7 @@ func (s *Server) handleListEnvironments(w http.ResponseWriter, r *http.Request) 
 	if env != "" {
 		envs = keepEnvironment(envs, env)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"environments": emptyNotNull(envs)})
+	writeJSON(w, http.StatusOK, environmentsResp{Environments: emptyNotNull(envs)})
 }
 
 // keepEnvironment оставляет окружение с этим именем (0 или 1 строка: имя
@@ -123,7 +123,7 @@ func (s *Server) handleCreateEnvironment(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"environment": env})
+	writeJSON(w, http.StatusCreated, environmentResp{Environment: env})
 }
 
 // handlePatchEnvironment is PATCH /v1/environments/{project}/{name} (admin).
@@ -148,7 +148,7 @@ func (s *Server) handlePatchEnvironment(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"environment": env})
+	writeJSON(w, http.StatusOK, environmentResp{Environment: env})
 }
 
 // handleEnvironmentUsage is GET /v1/environments/{project}/{name}/usage (readonly):
@@ -198,7 +198,7 @@ func (s *Server) handleEnvironmentUsage(w http.ResponseWriter, r *http.Request) 
 		storeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"usage": usage})
+	writeJSON(w, http.StatusOK, environmentUsageResp{Usage: usage})
 }
 
 // handleDeleteEnvironment is DELETE /v1/environments/{project}/{name} (admin).
@@ -233,7 +233,7 @@ func (s *Server) handleDeleteEnvironment(w http.ResponseWriter, r *http.Request)
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"deleted": res})
+	writeJSON(w, http.StatusOK, environmentDeletedResp{Deleted: res})
 }
 
 // handleSetNodeEnv is PATCH /v1/nodes/{id} {env} (admin): move a node to another
@@ -260,5 +260,5 @@ func (s *Server) handleSetNodeEnv(w http.ResponseWriter, r *http.Request) {
 		storeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"node": node})
+	writeJSON(w, http.StatusOK, nodeResp{Node: node})
 }
