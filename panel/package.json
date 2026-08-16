@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:demo": "vite --open /demo.html",
     "check": "tsc --noEmit",
     "lint": "eslint . --max-warnings 0",
     "test": "vitest run",
