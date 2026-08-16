@@ -20,9 +20,17 @@ function pathOf(input: RequestInfo | URL): string {
   return new URL(raw, 'http://demo.invalid').pathname;
 }
 
-export async function demoFetch(input: RequestInfo | URL, _init?: RequestInit): Promise<Response> {
+/** Метод запроса; панель шлёт его в init, GET — по умолчанию. */
+function methodOf(input: RequestInfo | URL, init?: RequestInit): string {
+  if (init?.method !== undefined) return init.method.toUpperCase();
+  if (typeof input !== 'string' && !(input instanceof URL)) return input.method.toUpperCase();
+  return 'GET';
+}
+
+export async function demoFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const path = pathOf(input);
-  if (path === '/v1/session') return jsonResponse(SESSION);
+  const method = methodOf(input, init);
+  if (path === '/v1/session') return method === 'DELETE' ? new Response(null, { status: 204 }) : jsonResponse(SESSION);
   console.error(`demo: необслуженная ручка ${path} — экран останется пустым`);
   return jsonResponse({ error: 'demo_unhandled', detail: path }, 500);
 }
