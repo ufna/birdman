@@ -19,6 +19,7 @@ import {
 } from './admin';
 import { buildFleet, PROJECT } from './fleet';
 import type { Fleet } from './fleet';
+import { logLines, logStreamResponse } from './logs';
 import { DEMO_MARKER } from './marker';
 import { matrixFor, vectorFor } from './series';
 import { streamResponse } from './stream';
@@ -240,6 +241,16 @@ export async function demoFetch(input: RequestInfo | URL, init?: RequestInit): P
     if (path === '/v1/metrics/query') {
       const q = url.searchParams;
       return jsonResponse(vectorFor(q.get('query') ?? '', num(q, 'time', Math.floor(now / 1000))));
+    }
+    if (path === '/v1/logs/query') {
+      return new Response(logLines(f, now, num(url.searchParams, 'limit', 200)), {
+        status: 200,
+        headers: { 'Content-Type': 'application/stream+json' },
+      });
+    }
+    const serverLogs = /^\/v1\/servers\/([^/]+)\/logs$/.exec(path);
+    if (serverLogs !== null) {
+      return logStreamResponse(f, decodeURIComponent(serverLogs[1]), init?.signal ?? undefined);
     }
     const body = handleGet(path, url.searchParams, f, now);
     if (body !== undefined) return jsonResponse(body);

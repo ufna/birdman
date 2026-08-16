@@ -5,6 +5,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { demoFetch, installDemoFetch } from '../demo/router';
 import { api } from '../lib/api';
+import { parseLogLines } from '../lib/logsHistory';
 
 async function get(path: string): Promise<{ status: number; body: unknown }> {
   const res = await demoFetch(path);
@@ -55,6 +56,17 @@ describe('роутер обслуживает весь публичный REST �
     expect((await api.listRegistries()).length).toBe(1);
     expect((await api.getBackupSettings()).s3_bucket).toBe('birdman-backups-demo');
     expect((await api.listBackupRuns(20)).some((r) => r.result === 'error')).toBe(true);
+  });
+
+  it('логи разбираются парсером панели', async () => {
+    const res = await demoFetch(
+      `/v1/logs/query?query=${encodeURIComponent('{project="nova-arena"}')}&limit=200`,
+    );
+    expect(res.status).toBe(200);
+    const lines = parseLogLines(await res.text());
+    expect(lines.length).toBeGreaterThan(50);
+    expect(lines[0].msg).not.toBe('');
+    expect(lines[0].fields.server_id).toEqual(expect.any(String));
   });
 
   it('статистика отдаёт зерофилленные ряды за запрошенный период', async () => {

@@ -27,6 +27,15 @@ else
     node:22 sh -c 'npm ci --no-fund --no-audit && npm run check && npm run build'
 fi
 
+# Гейт витрины: демо-фикстуры живут во ВТОРОЙ точке входа (demo.html) и в
+# прод-бандл входить не должны. Если маркер нашёлся в dist/, значит демо-модуль
+# просочился в граф index.html и уехал бы в бинарь master через go:embed.
+if grep -rq 'birdman-demo-fixture' dist/; then
+  echo "panel: ОШИБКА — демо-фикстуры попали в прод-бандл (маркер birdman-demo-fixture в dist/)" >&2
+  echo "panel: смотри panel/src/demo/ и граф импортов index.html" >&2
+  exit 1
+fi
+
 rm -rf "$OUT"
 mkdir -p "$OUT"
 cp -R dist/. "$OUT/"
