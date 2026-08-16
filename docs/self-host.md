@@ -693,6 +693,39 @@ Secrets and where they live:
 Everything else (overlay addresses `10.77.0.0/24`, the WG port `51827`, the game
 `20000–20050`/`19999`) — not secrets: RFC1918 or public by design.
 
+### Letting an AI agent operate the fleet
+
+The master is also an MCP server, at `POST /v1/mcp` — see the "AI agents"
+section of the [README](../README.md). It needs no extra port and no extra
+process: it rides the same `8100` listener and the same API keys.
+
+Two things are worth knowing before you point an agent at a production fleet.
+
+**Give the agent its own key, not yours.** Issue a key scoped to what the agent
+actually needs — `readonly` is enough for everything diagnostic — and bind it to
+one `(project, environment)` pair if the agent only ever works on one. The tool
+list it receives is assembled from that key's scopes, so a `readonly` key does
+not merely get refused on write tools: it never sees them.
+
+**Write tools are off until you turn them on.** Draining a node, muting an
+alert, deploying, rolling back and running a backup stay hidden — even from an
+`admin` key — until the master is configured with:
+
+```yaml
+# master.yaml
+mcp:
+  write_enabled: true
+```
+
+or `BIRDMAN_MCP_WRITE_ENABLED=1` in the environment (the compose stack has no
+`master.yaml` by default). Turn it on deliberately: the switch is separate from
+key scopes precisely because "this person may deploy" and "an agent may deploy
+on its own initiative" are different decisions.
+
+Revoking the agent's key (`DELETE /v1/apikeys/{id}`) cuts it off immediately —
+including a session it already has open, since every tool call is authorized
+afresh.
+
 ### The `matchmaking` key and `player_id`
 
 birdman authenticates operators, services and nodes — **never the end player**,

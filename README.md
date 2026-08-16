@@ -34,6 +34,7 @@ birdman runs your own fleet of dedicated game servers — matchmaking, allocatio
 - **Isolated control-plane overlay.** An optional WireGuard overlay keeps master↔node traffic off the public internet.
 - **Bilingual admin panel.** Real-time fleet, matches, deploys, statistics, cost and alerts — English/Russian, light/dark, embedded in the master binary.
 - **Self-host in one command.** `docker compose up` brings up the master and Postgres with the panel baked in.
+- **AI-ready by construction.** The master is itself an MCP server, and its OpenAPI 3.1 contract is generated from the router — so an agent can drive the fleet without a separate integration to install or version.
 
 ## Two versions live at once
 
@@ -91,6 +92,48 @@ and files tickets on their behalf, not to the game client. Details: the
 
 Full component specs: [docs/specs/architecture.md](docs/specs/architecture.md) *(in Russian)*.
 
+## AI agents
+
+**A running master *is* an MCP server.** Point an MCP client at `POST /v1/mcp`
+(streamable HTTP) with an ordinary birdman API key, and an agent can look at
+matches, nodes, dedicated servers, events, alerts, logs and metrics — and, if you
+let it, drain a node or roll a build out.
+
+```bash
+claude mcp add --transport http birdman https://your-master.example/v1/mcp \
+  --header "Authorization: Bearer bmk_..."
+```
+
+Nothing to install and no second version to track: the endpoint ships inside the
+master binary you already run.
+
+**Its permissions are the key's permissions.** `tools/list` is assembled per
+request from the scopes of the key presented, so a `readonly` key does not see
+write tools at all — it cannot spend context on them or try to call them. Write
+tools stay hidden until the operator sets `mcp.write_enabled` (default `false`),
+because "let an agent change the fleet" is a decision of a different kind than
+handing out a scope, and it deserves its own switch. A key bound to a
+`(project, environment)` pair reaches nothing outside it here either.
+
+**The tools cannot drift from the API**, because a tool call *is* an API call:
+the handler builds a real HTTP request and runs it through the master's own
+router, with the caller's key. Authorization, tenant narrowing, rate limits and
+error shapes are inherited rather than reimplemented, and a test fails if any
+tool names a route the router does not have.
+
+**There is a machine-readable contract.** OpenAPI 3.1, at
+[`master/api/openapi.yaml`](master/api/openapi.yaml) and served by a live master
+at `GET /v1/openapi.yaml`. It is *generated* from the route table the router is
+registered from, so it cannot silently disagree with the code, and CI fails if
+the committed file falls behind. It covers every path, method, required scope,
+success code and response body; query parameters and request bodies are not
+described yet.
+
+**Contributing agents get a map too:** [AGENTS.md](AGENTS.md) has the build and
+test commands, the repository layout and the rules that are not visible from the
+code, and [llms.txt](llms.txt) points at the docs with their language labelled.
+
+
 ## Status
 
 Built for our own games, then open-sourced. Iterations 0–5 are implemented and accepted on a live multi-node fleet: matchmaking, warm pool, multi-version deploys with rollback and drain, observability, mTLS agent enrollment, at-rest secret encryption, and a second region reached over an isolated overlay. Since then the platform became multi-tenant — projects and environments with API keys bound to a pair — and grew scheduled Postgres backups with an S3 target. It is young software shaped around our own needs — expect rough edges, and APIs that may still change.
@@ -102,6 +145,10 @@ Built for our own games, then open-sourced. Iterations 0–5 are implemented and
 | [Self-host guide](docs/self-host.md) | From `git clone` to your first match: master (`deploy/`), first node (`infra/add-node.sh`), release a version and run a match (`mmcli`). |
 | [Component specs](docs/specs/README.md) | master, agent, SDK, protocols, panel, ops/CI — reference specs *(in Russian)*. |
 | [Panel screenshots](tools/panelshots/README.md) | How the screenshots above are produced from the panel's demo dataset. |
+| [AGENTS.md](AGENTS.md) | Build, test and change this repo — written for coding agents, useful to humans. |
+| [OpenAPI contract](master/api/openapi.yaml) | The master's REST API, generated from its route table; a live master serves it at `/v1/openapi.yaml`. |
+| [Contributing](CONTRIBUTING.md) | How to propose a change, and what is unlikely to be accepted. |
+| [Security policy](SECURITY.md) | How to report a vulnerability, and what is in scope. |
 | [LICENSE](LICENSE) | MIT. |
 
 Code comments occasionally reference internal design notes (`docs/superpowers/...`) — those live in a private companion repo; the public specs are under `docs/specs/`.

@@ -1,0 +1,49 @@
+# birdman
+
+> Lightweight dedicated-server hosting runtime for session-based multiplayer
+> games — matchmaking, warm pool, multi-version deploys and observability,
+> without Kubernetes. Linux-only, MIT, self-hosted: there is no hosted service,
+> every user runs their own master.
+
+Three cooperating pieces: a **master** (Go + Postgres — matchmaker, fleet
+control, REST+SSE API, embedded admin panel), a **node agent** on each game
+machine running dedicated servers as containerd containers, and a small **C++
+SDK** linked into the game server itself.
+
+Two facts that explain most of the design: the agent dials *out* to the master
+over mTLS gRPC, so game machines expose no inbound admin port; and players
+connect straight to a dedicated server's `host:port`, so game traffic never
+passes through the master.
+
+Language note: the README and the self-host guide are bilingual (EN + RU); the
+component specs under `docs/specs/` are **Russian only** and large — `master.md`
+alone is ~200 KB. Read them for detail, not for orientation.
+
+## Start here
+
+- [README](https://github.com/ufna/birdman/blob/main/README.md): what it is, features, quickstart, architecture.
+- [Self-host guide](https://github.com/ufna/birdman/blob/main/docs/self-host.md): from `git clone` to a first match — master, first node, releasing a version.
+- [AGENTS.md](https://github.com/ufna/birdman/blob/main/AGENTS.md): how to build, test and change this repository. Read before writing code.
+
+## For AI agents
+
+- [OpenAPI 3.1 contract](https://github.com/ufna/birdman/blob/main/master/api/openapi.yaml): the master's REST API, generated from its route table. A running master also serves it at `GET /v1/openapi.yaml`.
+- MCP endpoint: a running master **is** an MCP server at `POST /v1/mcp` (streamable HTTP), authenticated with the same API key as the REST API. Tools are filtered by the key's scopes; write tools are off until the operator enables them.
+- [Tool definitions](https://github.com/ufna/birdman/blob/main/master/internal/httpapi/mcp.go): what the agent-facing tools are and what each one is for.
+- [Route table](https://github.com/ufna/birdman/blob/main/master/internal/httpapi/routes.go): the single source of truth for the API surface — every path, method and required scope.
+
+## Reference (Russian)
+
+- [Architecture](https://github.com/ufna/birdman/blob/main/docs/specs/architecture.md): components and the decisions behind them.
+- [Master spec](https://github.com/ufna/birdman/blob/main/docs/specs/master.md): the big one — matchmaker, reconciler, API, ~200 KB.
+- [Agent spec](https://github.com/ufna/birdman/blob/main/docs/specs/agent.md): node agent and container lifecycle.
+- [Protocol spec](https://github.com/ufna/birdman/blob/main/docs/specs/protocol.md): master↔agent gRPC link and matchmaking protocol.
+- [Panel spec](https://github.com/ufna/birdman/blob/main/docs/specs/panel.md): admin panel, including the bilingual requirement.
+- [SDK spec](https://github.com/ufna/birdman/blob/main/docs/specs/sdk.md): the in-server C++ library.
+- [Ops spec](https://github.com/ufna/birdman/blob/main/docs/specs/ops.md): deployment, monitoring, CI.
+
+## Optional
+
+- [Contributing](https://github.com/ufna/birdman/blob/main/CONTRIBUTING.md): how to propose a change.
+- [Security policy](https://github.com/ufna/birdman/blob/main/SECURITY.md): how to report a vulnerability.
+- [Panel screenshots](https://github.com/ufna/birdman/blob/main/tools/panelshots/README.md): how the README images are produced from the demo dataset.
