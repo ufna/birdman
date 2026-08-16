@@ -32,6 +32,7 @@ set(BIRDMAN_CORE_TESTS
   noop_mode
   lifecycle
   ping_pong
+  ping_pong_after_idle
   drain_callback
   poll_mode
   reconnect_replay

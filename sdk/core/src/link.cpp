@@ -325,7 +325,18 @@ class ServerLink::Impl {
       next_players_at_ = Clock::now() + kPlayersEvery;
     }
 
+    // stall_since answers "since when have we been unable to get these bytes
+    // out", so it must start ticking when the buffer BECOMES non-empty -- not
+    // when it was last seen empty. Those are the same instant only for a busy
+    // link: an idle I/O thread does not loop, it sleeps inside poll(), so "last
+    // seen empty" can be a minute old while the buffer filled a microsecond
+    // ago. Getting that wrong killed the connection on the first frame after
+    // any quiet spell longer than kWriteStall -- a pong, or the periodic
+    // `players` -- which on a warm-pool server (quiet by definition) meant a
+    // reconnect every keepalive, forever. had_pending is what makes the
+    // distinction, and it is why the empty case clears it.
     auto stall_since = Clock::now();
+    bool had_pending = false;
     bool alive = true;
     while (alive && !stop_.load()) {
       const auto now = Clock::now();
@@ -344,7 +355,13 @@ class ServerLink::Impl {
         wants_write = !pending.empty() || !outq_.empty();
       }
 
-      if (!wants_write) stall_since = now;
+      if (!wants_write) {
+        stall_since = now;
+        had_pending = false;
+      } else if (!had_pending) {
+        stall_since = now;  // the write starts here
+        had_pending = true;
+      }
       if (wants_write && now - stall_since > kWriteStall) {
         Debug("write stalled >3s, dropping connection");
         break;
