@@ -56,8 +56,10 @@ These are the ones that get broken by well-meaning changes:
    through `panel/src/lib/i18n.tsx`; a hardcoded string is a bug, and
    `panel/src/test/i18n.test.tsx` is the guard that fails on one. No exceptions,
    including error toasts and empty states.
-2. **`README.md` and `README.ru.md` are a pair**, as are `docs/self-host.md` and
-   `docs/self-host.ru.md`. Edit one, edit the other in the same commit.
+2. **Documentation is written in English.** That is the rule for everything new.
+   Two bodies of existing text are deliberate exceptions and are not to be
+   "fixed": the reference specs under `docs/specs/` are Russian (they are the
+   only copy, not a translation), and code comments are mixed — see rule 8.
 3. **Never hand-edit `master/api/openapi.yaml`.** It is generated from the route
    table; run `go generate ./...` inside `master/`. A hand-written contract is a
    second copy of the truth and drifts silently — the whole design exists to

@@ -1,7 +1,4 @@
-<!-- NB: bilingual pair — правишь один, правь второй (self-host.md ↔ self-host.ru.md). -->
 # birdman self-host: from `git clone` to your first match
-
-Русская версия: [self-host.ru.md](self-host.ru.md)
 
 End-to-end guide for a **third-party project**: bring up the master, add your
 first game node, roll out a build version and get your first match. Every snippet

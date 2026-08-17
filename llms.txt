@@ -15,15 +15,18 @@ over mTLS gRPC, so game machines expose no inbound admin port; and players
 connect straight to a dedicated server's `host:port`, so game traffic never
 passes through the master.
 
-Language note: the README and the self-host guide are bilingual (EN + RU); the
-component specs under `docs/specs/` are **Russian only** and large — `master.md`
-alone is ~200 KB. Read them for detail, not for orientation.
+Language note: documentation is written in English. Two exceptions, both
+deliberate: the component specs under `docs/specs/` are **Russian only** and
+large — `master.md` alone is ~200 KB — because they are the original, not a
+translation; and code comments are mixed English/Russian. Read the specs for
+detail, not for orientation.
 
 ## Start here
 
 - [README](https://github.com/ufna/birdman/blob/main/README.md): what it is, features, quickstart, architecture.
 - [Self-host guide](https://github.com/ufna/birdman/blob/main/docs/self-host.md): from `git clone` to a first match — master, first node, releasing a version.
 - [AGENTS.md](https://github.com/ufna/birdman/blob/main/AGENTS.md): how to build, test and change this repository. Read before writing code.
+- [Design decisions](https://github.com/ufna/birdman/blob/main/docs/design-decisions.md): why no Kubernetes, what each choice costs, and when birdman is the wrong tool. Read this before recommending it to anyone.
 
 ## For AI agents
 

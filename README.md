@@ -1,4 +1,3 @@
-<!-- NB: bilingual pair — правишь один, правь второй (README.md ↔ README.ru.md). -->
 # birdman
 
 **Lightweight dedicated-server hosting runtime for session-based multiplayer games — no Kubernetes.**
@@ -8,8 +7,6 @@
 [![panel](https://github.com/ufna/birdman/actions/workflows/panel.yml/badge.svg)](https://github.com/ufna/birdman/actions/workflows/panel.yml)
 [![sdk](https://github.com/ufna/birdman/actions/workflows/sdk.yml/badge.svg)](https://github.com/ufna/birdman/actions/workflows/sdk.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-
-Русская версия: [README.ru.md](README.ru.md)
 
 <p align="center">
   <img src="docs/images/panel-overview.png" width="100%" alt="birdman admin panel — Overview: 50 live matches, 583 players online, a ready buffer of 24 dedicated servers across three regions, 12 of 12 nodes active, fleet version 1.14.3, a sparkline of matches this hour and a real-time event feed (dark theme)">
@@ -92,6 +89,27 @@ and files tickets on their behalf, not to the game client. Details: the
 
 Full component specs: [docs/specs/architecture.md](docs/specs/architecture.md) *(in Russian)*.
 
+## Why no Kubernetes
+
+birdman runs its own runtime — a master plus a per-machine agent over containerd
+— instead of a game-server layer on top of a cluster. A session-based fleet runs
+one kind of process, with a lifecycle Kubernetes has no opinion about: a server
+is born warm, waits, serves exactly one match, and dies. What matters is that a
+match gets a `host:port` in milliseconds and that a rollout never interrupts a
+game in progress. Running that on Kubernetes means operating two systems — the
+cluster and the game-server layer above it — where a fleet of dozens of machines
+running a single workload needs neither.
+
+The price is real: no Helm, no HPA, no service mesh, no `kubectl` for debugging,
+no cloud autoscaler. Machines are provisioned with Ansible, and the operational
+tooling is ours alone.
+
+**birdman is the wrong choice if** you already run Kubernetes with a team that
+knows it, your game is a persistent world rather than short sessions, your
+dedicated server is Windows-only, or you want a managed service instead of
+infrastructure you operate yourself. Every decision behind the runtime, with what
+it costs you: [docs/design-decisions.md](docs/design-decisions.md).
+
 ## AI agents
 
 **A running master *is* an MCP server.** Point an MCP client at `POST /v1/mcp`
@@ -144,6 +162,7 @@ Built for our own games, then open-sourced. Iterations 0–5 are implemented and
 |---|---|
 | [Self-host guide](docs/self-host.md) | From `git clone` to your first match: master (`deploy/`), first node (`infra/add-node.sh`), release a version and run a match (`mmcli`). |
 | [Component specs](docs/specs/README.md) | master, agent, SDK, protocols, panel, ops/CI — reference specs *(in Russian)*. |
+| [Design decisions](docs/design-decisions.md) | Why the runtime is shaped this way, what each choice costs, and when to pick something else. |
 | [Panel screenshots](tools/panelshots/README.md) | How the screenshots above are produced from the panel's demo dataset. |
 | [AGENTS.md](AGENTS.md) | Build, test and change this repo — written for coding agents, useful to humans. |
 | [OpenAPI contract](master/api/openapi.yaml) | The master's REST API, generated from its route table; a live master serves it at `/v1/openapi.yaml`. |

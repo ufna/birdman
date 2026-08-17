@@ -19,7 +19,7 @@ ansible or a TSAN toolchain. It skips loudly whatever your machine cannot run.
 Then read **[AGENTS.md](AGENTS.md)** — it is written for coding agents but is
 exactly what a human needs too: the repository layout, per-component commands,
 and the handful of rules that are not visible from the code (the panel is
-strictly bilingual, the READMEs are a pair, `openapi.yaml` is generated, a new
+strictly bilingual, docs are written in English, `openapi.yaml` is generated, a new
 endpoint is one entry in the route table).
 
 ## Commits
