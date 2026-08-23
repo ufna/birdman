@@ -78,6 +78,22 @@ These are the ones that get broken by well-meaning changes:
    many carry a tracker number. Match the surrounding style; several files mix
    English and Russian, and that is deliberate rather than an oversight to fix.
 
+## Releases
+
+Cut from `main`: push a `vX.Y.Z` tag and `.github/workflows/release.yml` runs
+the tests, builds the binaries and publishes a GitHub Release
+(`birdman-master`, `mmcli`, `birdman-agent`, `SHA256SUMS`). Two invariants the
+workflow enforces — break either and it stops before publishing:
+
+- **The notes come from `CHANGELOG.md`.** The version's `## [X.Y.Z]` section is
+  the release text; no section, no release.
+- **The agent version string carries no `v` prefix** (`-X main.version=X.Y.Z`):
+  the master's upgrade watchdog string-compares it with `version` in
+  `POST /v1/agent-upgrade`.
+
+Dev builds are releases of nothing: `dev-build.yml` keeps pushing the moving
+`dev` OCI tag to GHCR, and tags/Releases remain for real releases only.
+
 ## Commits
 
 Conventional-commit prefixes with a **Russian** subject line — match the

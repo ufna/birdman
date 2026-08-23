@@ -21,6 +21,9 @@ infra/
 # 1) собрать бинари (docker, Go на хосте не нужен)
 (cd ../agent && ./build.sh)           # → agent/dist/birdman-agent
 (cd ../master && ./build.sh)          # → master/dist/birdman-master
+#    …или взять готовые с GitHub Releases (linux/amd64), например:
+#    curl -fsSL -o ../agent/dist/birdman-agent \
+#      https://github.com/ufna/birdman/releases/latest/download/birdman-agent
 
 # 2) экспортировать GHCR-токен (classic PAT, скоуп read:packages).
 #    Токен живёт ТОЛЬКО в env и в /etc/birdman/ghcr.token (0600 root) на тачке.

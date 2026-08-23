@@ -1,0 +1,139 @@
+name: release
+
+# Тег vX.Y.Z — единственный способ нарезать публичный релиз: тесты → сборка →
+# GitHub Release с бинарями (birdman-master, mmcli, birdman-agent) и
+# SHA256SUMS. Дев-стейт едет в GHCR подвижным тегом `dev` (dev-build.yml) и
+# обещаний не несёт; релиз — обещание пользователям, поэтому он живёт
+# отдельным workflow и запускается только тегом.
+#
+# Текст релиза — секция версии из CHANGELOG.md: релиз без заметок не выходит
+# вообще (шаг падает ДО сборки). Автосгенерированный список коммитов заметки
+# не заменяет: первое, что читает self-host пользователь, — «что я получаю».
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # gh release create + загрузка ассетов
+
+# Один тег — один прогон: повторный пуш того же тега (force) не должен
+# публиковать два релиза навстречу друг другу. Прогоны НЕ отменяются:
+# отменённая на середине публикация хуже, чем дождавшаяся очереди.
+concurrency:
+  group: release-${{ github.ref }}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 — как в dev-build: сборка опирается на git-историю.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Строка версии — БЕЗ префикса v: она зашивается в бинарь агента
+      # (-X main.version) и едет в его Hello, а watchdog мастера сверяет её
+      # строково с полем version из POST /v1/agent-upgrade. «v0.7.0» в бинаре
+      # против «0.7.0» в запросе — ложный agent_upgrade_failed на каждой ноде.
+      - name: Resolve version from tag
+        id: ver
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "тег '$TAG' не вида vMAJOR.MINOR.PATCH — релиз не режем"
+            exit 1
+          }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "· версия релиза: $VERSION"
+
+      # Секция «## [X.Y.Z]» из CHANGELOG.md — от строки заголовка до следующего
+      # «## [». Пустая вырезка = заметок нет = релиза нет.
+      - name: Extract release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          awk -v ver="$VERSION" '
+            index($0, "## [" ver "]") == 1 { found=1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          test -s notes.md || {
+            echo "в CHANGELOG.md нет секции ## [$VERSION] — релиз без заметок не выходит"
+            exit 1
+          }
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: panel/package-lock.json
+
+      # Тег может указать на ЛЮБОЙ коммит, и чужой CI-зелени на нём могло не
+      # быть — тесты гоняются здесь, до публикации (та же логика и таймаут,
+      # что в dev-build, tracker #1016).
+      - name: Test master
+        run: cd master && go test -timeout 20m ./...
+
+      - name: Test agent
+        run: cd agent && go test ./...
+
+      # Именно ./panel/build.sh, а не «npm run build» руками — как в dev-build:
+      # build.sh кладёт результат туда, откуда master забирает его go:embed'ом.
+      - name: Build panel and stage it for go:embed
+        run: ./panel/build.sh
+
+      # Гейт из dev-build: go:embed на пустом каталоге не падает — бинарь тихо
+      # уехал бы с placeholder'ом вместо панели.
+      - name: Assert the panel is staged for embedding
+        run: |
+          set -euo pipefail
+          test -s master/internal/panelui/static/index.html || {
+            echo "панель не выложена в master/internal/panelui/static — бинарь уехал бы без неё"
+            exit 1
+          }
+
+      - name: Build binaries
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: amd64
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          (cd master && go build -trimpath -ldflags "-s -w" -o ../dist/birdman-master ./cmd/birdman-master \
+                      && go build -trimpath -ldflags "-s -w" -o ../dist/mmcli ./cmd/mmcli)
+          (cd agent && go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o ../dist/birdman-agent ./cmd/birdman-agent)
+
+      # SHA256SUMS — не косметика: POST /v1/agent-upgrade требует
+      # {url, sha256, version}, и оператор берёт sha256 из этого файла.
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum birdman-master mmcli birdman-agent > SHA256SUMS
+          cat SHA256SUMS
+
+      # gh CLI, а не сторонний release-action: раннер его уже несёт, встроенного
+      # GITHUB_TOKEN хватает, и в цепочке публикации не появляется новой
+      # зависимости (тот же выбор, что чистка безымянных версий в dev-build).
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file notes.md \
+            --latest \
+            dist/birdman-master dist/mmcli dist/birdman-agent dist/SHA256SUMS

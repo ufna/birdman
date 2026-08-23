@@ -156,6 +156,8 @@ code, and [llms.txt](llms.txt) points at the docs with their language labelled.
 
 Built for our own games, then open-sourced. Iterations 0–5 are implemented and accepted on a live multi-node fleet: matchmaking, warm pool, multi-version deploys with rollback and drain, observability, mTLS agent enrollment, at-rest secret encryption, and a second region reached over an isolated overlay. Since then the platform became multi-tenant — projects and environments with API keys bound to a pair — and grew scheduled Postgres backups with an S3 target. It is young software shaped around our own needs — expect rough edges, and APIs that may still change.
 
+Releases are cut from `main` as `vX.Y.Z` tags and published on [GitHub Releases](https://github.com/ufna/birdman/releases) with prebuilt linux/amd64 binaries (`birdman-master`, `mmcli`, `birdman-agent`); notable changes land in [CHANGELOG.md](CHANGELOG.md).
+
 ## Documentation
 
 | Doc | What's inside |

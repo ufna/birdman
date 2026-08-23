@@ -48,5 +48,6 @@ detail, not for orientation.
 ## Optional
 
 - [Contributing](https://github.com/ufna/birdman/blob/main/CONTRIBUTING.md): how to propose a change.
+- [Changelog](https://github.com/ufna/birdman/blob/main/CHANGELOG.md): notable changes per release.
 - [Security policy](https://github.com/ufna/birdman/blob/main/SECURITY.md): how to report a vulnerability.
 - [Panel screenshots](https://github.com/ufna/birdman/blob/main/tools/panelshots/README.md): how the README images are produced from the demo dataset.

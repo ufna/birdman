@@ -34,6 +34,9 @@ Requirements:
 > v1 self-host builds the master **from source** (`docker compose … --build`).
 > There is no public image yet — the `birdman-master` image compiles the panel in
 > via `go:embed`, so self-host gets the whole product (see `master/Dockerfile`).
+> Prebuilt linux/amd64 binaries (`birdman-master`, `mmcli`, `birdman-agent`) are
+> published on GitHub Releases. This guide tracks `main`; check out a release
+> tag (`git clone --branch <tag> …`) if you want a pinned reference.
 
 ---
 
@@ -147,7 +150,16 @@ umask 077 && printf '%s' 'bmk_…' | sudo tee /etc/birdman/master-admin.key >/de
 sudo chmod 600 /etc/birdman/master-admin.key
 ```
 
-Then there are two ways to add a node.
+Then there are two ways to add a node. Either way the playbook installs the
+agent binary from your clone (`agent/dist/birdman-agent`, role variable
+`birdman_agent_binary`) — build it with Docker (`cd ../agent && ./build.sh`)
+or take the release binary:
+
+```bash
+mkdir -p ../agent/dist
+curl -fsSL -o ../agent/dist/birdman-agent \
+  https://github.com/ufna/birdman/releases/latest/download/birdman-agent
+```
 
 ### Path A — direct link (recommended for the `deploy/` stack)
 
@@ -230,8 +242,9 @@ curl -s -X POST http://127.0.0.1:8100/v1/deploy -H "Authorization: Bearer $KEY" 
 After the flip, reconcile creates `buffer_ready` dedicated servers on the node;
 wait until the servers become `ready` (the "Fleet" panel or `GET /v1/servers`).
 
-**First match — `mmcli`** (a second binary, built by `./master/build.sh` →
-`master/dist/mmcli`; a key with the `matchmaking` or `admin` scope). `mmcli`
+**First match — `mmcli`** (a second binary — build it with `./master/build.sh` →
+`master/dist/mmcli`, or download `mmcli` from GitHub Releases; a key with the
+`matchmaking` or `admin` scope). `mmcli`
 creates a ticket, long-polls it and prints `host:port` on a match.
 
 ⚠️ **Flag order**: `--master`/`--key` are global and go **before** the `request`
