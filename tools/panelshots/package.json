@@ -4,6 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "description": "Съёмка скриншотов панели на демо-фикстурах для README",
-  "scripts": { "shoot": "node shoot.mjs" },
+  "scripts": {
+    "shoot": "node shoot.mjs",
+    "shoot:previews": "node shoot.mjs --previews-only"
+  },
   "dependencies": { "playwright": "^1.62.1" }
 }

@@ -39,26 +39,25 @@ and open-sourced under MIT.
 a match gets a `host:port` without a cold container start. The matchmaker places
 tickets by region and by measured round-trip time to the fleet.
 
-<table>
-  <tr>
-    <td width="42%" valign="middle">
-      <h3>Two versions live at once</h3>
-      <p>Roll out a new build while matches keep running. birdman pre-pulls the image on every node before switching the fleet. Previous versions drain: their servers keep serving the matches they already hold and disappear as those matches end. A rollback is the same move in reverse.</p>
-    </td>
-    <td width="58%">
-      <a href="docs/images/panel-deploys.png"><img src="docs/images/panel-deploys.png" alt="Deploys: two active versions, an older version draining its last matches and a new build pre-pulling across the fleet" width="640" /></a>
-    </td>
-  </tr>
-  <tr>
-    <td valign="middle">
-      <h3>What the fleet is doing</h3>
-      <p>Players, running matches, queue depth and slot utilization over time, alongside per-server logs and alerts. The master proxies VictoriaMetrics and VictoriaLogs, so the panel reaches your monitoring stack through the public API and log history outlives the servers that wrote it.</p>
-    </td>
-    <td>
-      <a href="docs/images/panel-stats.png"><img src="docs/images/panel-stats.png" alt="Statistics: 24-hour charts of players, matches, queue depth, slot utilization and dedicated servers by state" width="640" /></a>
-    </td>
-  </tr>
-</table>
+### Two versions live at once
+
+Pre-pull a new build, then switch the fleet while existing matches keep running.
+Previous versions drain as their matches end; a rollback is the same move in
+reverse.
+
+<p align="center">
+  <a href="docs/images/panel-deploys.png"><img src="docs/images/panel-deploys-preview.png" alt="Deploys: active and draining versions, with a new build pre-pulling across the fleet" width="640" /></a>
+</p>
+
+### What the fleet is doing
+
+Follow players, matches, queue depth and slot utilization over time, with logs
+and alerts in the same panel. VictoriaMetrics and VictoriaLogs stay behind the
+master's public API, and log history outlives the servers that wrote it.
+
+<p align="center">
+  <a href="docs/images/panel-stats.png"><img src="docs/images/panel-stats-preview.png" alt="Statistics: players online and running matches over 24 hours" width="640" /></a>
+</p>
 
 - **Many games and environments, one install.** Nodes, versions, matches, events,
   metrics and logs belong to a `(project, env)` pair. Every screen narrows to the

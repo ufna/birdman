@@ -1,32 +1,47 @@
-# panelshots — съёмка витрины
+# Panel screenshots
 
-Пересоздаёт скриншоты панели для `README.md`, снимая их с
-демо-режима панели (`panel/demo.html`), а не с боевого стенда.
+Capture the README screenshots from the panel's built-in demo fleet
+(`panel/demo.html`). No master, database or live fleet is needed.
 
 ```bash
-cd tools/panelshots
-npm install          # ставит playwright и браузер (в panel/ он не нужен)
+cd panel
+npm ci
+cd ../tools/panelshots
+npm ci
+npx playwright install chromium
 npm run shoot
 ```
 
-На выходе — три файла в `docs/images/`:
+The output goes to `docs/images/`:
 
-| Файл | Экран | Что должен доказывать |
-|---|---|---|
-| `panel-overview.png` | Обзор | флот живой: матчи, игроки, тёплый буфер, лента событий |
-| `panel-deploys.png` | Деплои | две версии активны одновременно, третья сливается |
-| `panel-stats.png` | Статистика | сутки с формой: игроки, матчи, очередь, утилизация |
+| File | Content |
+|---|---|
+| `panel-overview.png` | Full overview: matches, players, warm buffer and events. |
+| `panel-deploys.png` | Full deploys screen, including the version table. |
+| `panel-stats.png` | Full statistics screen with 24-hour metrics and server states. |
+| `panel-deploys-preview.png` | Versions, regions and pre-pull progress at a phone width. |
+| `panel-stats-preview.png` | Players and matches charts stacked at a phone width. |
 
-## Что важно знать
+To refresh only the two previews while keeping the full screenshots:
 
-- **Инструмент вне `panel/`.** `playwright` в зависимостях панели ставить
-  нельзя: `npm ci` панели гоняется в CI и в docker-сборке `build.sh`, а
-  postinstall пакета тянет браузеры.
-- **Картинки воспроизводимы по ФОРМЕ, не побайтово.** Ряды привязаны ко
-  времени суток, поэтому значения зависят от часа съёмки, а форма кривых и
-  раскладка флота — нет (фикстуры детерминированы, см. `panel/src/demo/`).
-- **Данные демонстрационные.** Оба README обязаны нести под первым скриншотом
-  строку о том, что это встроенный демо-набор, а не боевой флот.
-- **Экран переименовали → скрипт не дождался.** Скрипт падает по таймауту на
-  `waitForSelector`. Поправьте маркер `ready` в списке `SHOTS` в `shoot.mjs`.
-- **Съёмка не в CI.** Запускается руками, когда витрину надо обновить.
+```bash
+npm run shoot:previews
+```
+
+## Capture conventions
+
+- **Keep feature sections in one column.** A text-and-image table stays in two
+  columns on GitHub Mobile, producing narrow text and a tiny image. Each section
+  uses a heading, a short paragraph and a preview underneath.
+- **Use real responsive layouts.** Previews are captured directly from the demo
+  panel at a 392 px viewport width, at 2x pixel density. They do not redraw the
+  interface or change its data. The same focused previews work on every screen
+  without custom CSS or media queries. Each preview links to the full screenshot.
+- **Keep Playwright outside `panel/`.** Panel dependencies are installed in CI
+  and Docker builds; screenshot tooling and browser downloads belong here.
+- **The data is synthetic.** Keep the demo-data disclosure directly below the
+  first screenshot in every README that uses these images.
+- **The shape is reproducible, the bytes are not.** Fixtures are deterministic,
+  but metric curves follow the time of day. Values and timestamps can change.
+- **Capture manually.** Screenshots are not regenerated in CI. If a screen label
+  changes, update the readiness markers and preview locators in `shoot.mjs`.
