@@ -1,61 +1,88 @@
-# birdman
-
-**Lightweight dedicated-server hosting runtime for session-based multiplayer games — no Kubernetes.**
-
-[![agent](https://github.com/ufna/birdman/actions/workflows/agent.yml/badge.svg)](https://github.com/ufna/birdman/actions/workflows/agent.yml)
-[![master](https://github.com/ufna/birdman/actions/workflows/master.yml/badge.svg)](https://github.com/ufna/birdman/actions/workflows/master.yml)
-[![panel](https://github.com/ufna/birdman/actions/workflows/panel.yml/badge.svg)](https://github.com/ufna/birdman/actions/workflows/panel.yml)
-[![sdk](https://github.com/ufna/birdman/actions/workflows/sdk.yml/badge.svg)](https://github.com/ufna/birdman/actions/workflows/sdk.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+<h1 align="center">
+  <img src="docs/images/birdman.svg" alt="" width="64" valign="middle" /> birdman
+</h1>
 
 <p align="center">
-  <img src="docs/images/panel-overview.png" width="100%" alt="birdman admin panel — Overview: 50 live matches, 583 players online, a ready buffer of 24 dedicated servers across three regions, 12 of 12 nodes active, fleet version 1.14.3, a sparkline of matches this hour and a real-time event feed (dark theme)">
-  <br>
-  <em>Overview — the live fleet at a glance: matches, players, warm buffer, nodes and a real-time event feed.</em>
-  <br>
-  <sub><i>Panel screenshots are captured against the built-in demo dataset (<code>npm run dev:demo</code> in <code>panel/</code>), not a production fleet.</i></sub>
+  <strong>Your servers. Your matches. Your fleet.</strong><br />
+  Dedicated game-server hosting without Kubernetes.<br />
+  Matchmaking, warm pool, deploys and observability on your own Linux machines.
 </p>
 
-birdman runs your own fleet of dedicated game servers — matchmaking, allocation, deploys and observability — without Kubernetes. It is three cooperating pieces: a **master** (matchmaker + fleet control + REST API + admin panel), a **node agent** on each machine that runs dedicated servers as containerd containers, and an **in-server SDK** the game server links against. Linux-only, session-based (short-lived matches, not persistent worlds). Built for our own games and open-sourced under MIT.
+<p align="center">
+  <a href="#quick-start">Quick start</a> &nbsp; | &nbsp;
+  <a href="#features">Features</a> &nbsp; | &nbsp;
+  <a href="#ai-agents">AI agents</a> &nbsp; | &nbsp;
+  <a href="#documentation">Documentation</a><br />
+  <sub>Linux &nbsp; | &nbsp; Session-based games &nbsp; | &nbsp; English and Russian panel &nbsp; | &nbsp; MIT</sub>
+</p>
+
+<p align="center">
+  <kbd><img src="https://www.google.com/s2/favicons?domain=go.dev&amp;sz=64" alt="" width="16" valign="middle" /> Go</kbd> &nbsp;
+  <kbd><img src="https://www.google.com/s2/favicons?domain=containerd.io&amp;sz=64" alt="" width="16" valign="middle" /> containerd</kbd> &nbsp;
+  <kbd><img src="https://www.google.com/s2/favicons?domain=postgresql.org&amp;sz=64" alt="" width="16" valign="middle" /> PostgreSQL</kbd>
+</p>
+
+birdman runs your own fleet of dedicated game servers for **short-lived matches**.
+A **master** handles matchmaking, fleet control, the REST API and the admin panel.
+A **node agent** on each game machine runs servers as containerd containers, and a
+small **C++ SDK** links into your game server. Linux-only, built for our own games
+and open-sourced under MIT.
+
+<p align="center">
+  <a href="docs/images/panel-overview.png"><img src="docs/images/panel-overview.png" alt="birdman Overview: live matches, players, warm buffer, nodes across three regions and a real-time event feed in the dark theme" width="1100" /></a><br />
+  <sub>Panel screenshots use the built-in demo dataset (<code>npm run dev:demo</code> in <code>panel/</code>), not a production fleet.</sub>
+</p>
 
 ## Features
 
-- **Warm pool, millisecond allocation.** Ready dedicated servers wait in a buffer, so a match gets a `host:port` in milliseconds instead of a cold container start.
-- **Soft multi-version deploys.** Roll out a new build with two versions live at once, drain the old one gracefully, roll back instantly — without dropping matches in flight.
-- **Region- and RTT-aware matchmaker.** Tickets are placed by region and by real measured round-trip time to the fleet.
-- **Many games and environments, one install.** Projects and environments are a first-class dimension: nodes, versions, matches, events, metrics and logs each belong to one `(project, env)` pair, every screen narrows to the selected scope, and an API key bound to a pair can reach nothing outside it.
-- **mTLS agent link.** Nodes enroll against a built-in CA and dial the master over mTLS gRPC, so game machines need no inbound admin port.
-- **Secrets encrypted at rest.** Registry tokens and the internal CA key are sealed with AES-256-GCM.
-- **Central observability.** Per-server logs, fleet metrics and alerts in one place; log history survives server reaping.
-- **Postgres backups with an offsite copy.** Scheduled dumps with local retention and an optional S3 target; schedule, history, failures and run-now live in the panel, and a stale backup raises an alert.
-- **Isolated control-plane overlay.** An optional WireGuard overlay keeps master↔node traffic off the public internet.
-- **Bilingual admin panel.** Real-time fleet, matches, deploys, statistics, cost and alerts — English/Russian, light/dark, embedded in the master binary.
-- **Self-host in one command.** `docker compose up` brings up the master and Postgres with the panel baked in.
-- **AI-ready by construction.** The master is itself an MCP server, and its OpenAPI 3.1 contract is generated from the router — so an agent can drive the fleet without a separate integration to install or version.
+**A match ready in milliseconds.** Dedicated servers wait in a warm buffer, so
+a match gets a `host:port` without a cold container start. The matchmaker places
+tickets by region and by measured round-trip time to the fleet.
 
-## Two versions live at once
+<table>
+  <tr>
+    <td width="42%" valign="middle">
+      <h3>Two versions live at once</h3>
+      <p>Roll out a new build while matches keep running. birdman pre-pulls the image on every node before switching the fleet. Previous versions drain: their servers keep serving the matches they already hold and disappear as those matches end. A rollback is the same move in reverse.</p>
+    </td>
+    <td width="58%">
+      <a href="docs/images/panel-deploys.png"><img src="docs/images/panel-deploys.png" alt="Deploys: two active versions, an older version draining its last matches and a new build pre-pulling across the fleet" width="640" /></a>
+    </td>
+  </tr>
+  <tr>
+    <td valign="middle">
+      <h3>What the fleet is doing</h3>
+      <p>Players, running matches, queue depth and slot utilization over time, alongside per-server logs and alerts. The master proxies VictoriaMetrics and VictoriaLogs, so the panel reaches your monitoring stack through the public API and log history outlives the servers that wrote it.</p>
+    </td>
+    <td>
+      <a href="docs/images/panel-stats.png"><img src="docs/images/panel-stats.png" alt="Statistics: 24-hour charts of players, matches, queue depth, slot utilization and dedicated servers by state" width="640" /></a>
+    </td>
+  </tr>
+</table>
 
-A new build does not replace the running one — it joins it. birdman pre-pulls the image on every node, flips the fleet once the pull lands, and lets the previous version *drain*: its dedicated servers keep serving the matches they already hold and disappear as those matches end. Nobody is dropped mid-game. A rollback is the same move in reverse.
+- **Many games and environments, one install.** Nodes, versions, matches, events,
+  metrics and logs belong to a `(project, env)` pair. Every screen narrows to the
+  selected scope, and a key bound to a pair reaches nothing outside it.
+- **mTLS and encrypted secrets.** Nodes enroll against a built-in CA and dial the
+  master over mTLS gRPC. Registry tokens and the CA key are sealed with AES-256-GCM.
+- **Postgres backups with an offsite copy.** Scheduled dumps, local retention and
+  an optional S3 target. Manage schedules, history and run-now from the panel;
+  a stale backup raises an alert.
+- **Optional WireGuard overlay.** Keep master-to-node control traffic off the
+  public internet.
+- **English and Russian panel.** Fleet, matches, deploys, statistics, cost and
+  alerts, with light and dark themes. The panel ships inside the master binary.
+- **Built-in MCP and OpenAPI.** An agent can drive the fleet through the master's
+  own API, with its permissions and a contract generated from the router.
 
-<p align="center">
-  <img src="docs/images/panel-deploys.png" width="100%" alt="birdman admin panel — Deploys: the multi-version window with 1.15.0 active on 14 dedicated servers and 1.14.2 deprecated with 6 still draining, active version per region, a pre-pull progress bar for 1.15.1 at 7 of 12 nodes, and the version table with states and live dedic counts (dark theme)">
-  <br>
-  <em>Deploys — 1.15.0 and 1.14.3 both active, 1.14.2 draining its last six dedicated servers, 1.15.1 pre-pulling across the fleet.</em>
-</p>
+<a id="quickstart"></a>
 
-## What the fleet is doing
+## Quick start
 
-Per-server logs, fleet metrics and alerts land in one place. The master proxies VictoriaMetrics and VictoriaLogs, so the panel never talks to your monitoring stack directly and log history outlives the servers that wrote it.
+### Run the master
 
-<p align="center">
-  <img src="docs/images/panel-stats.png" width="100%" alt="birdman admin panel — Statistics: 24-hour charts of players online, matches running, matchmaker queue depth and slot utilization, plus dedicated servers by state over time with an allocated/ready/draining/creating legend (dark theme)">
-  <br>
-  <em>Statistics — players, running matches, queue depth and slot utilization over 24 hours, with dedicated servers by state below.</em>
-</p>
-
-## Quickstart
-
-Bring up the master (REST API + admin panel + Postgres) with Docker Compose. You only need Docker and Docker Compose v2.
+You need **Docker and Docker Compose v2**. The stack starts the master, its
+embedded admin panel and Postgres:
 
 ```bash
 git clone https://github.com/ufna/birdman.git && cd birdman/deploy
@@ -66,9 +93,21 @@ docker compose logs master | grep 'bootstrap admin'   # 4. admin key (bmk_…) �
 # then open http://127.0.0.1:8100 in your browser     # 5. panel + REST (host localhost only)
 ```
 
-Adding game nodes, releasing a build and running your first match: [docs/self-host.md](docs/self-host.md).
+Open **http://127.0.0.1:8100** and sign in with the bootstrap admin key.
+To add game nodes, release a build and run your first match, follow the
+[self-host guide](docs/self-host.md).
 
-Want to see the panel before installing anything? `cd panel && npm ci && npm run dev:demo` opens it against a built-in demo fleet — no master, no database, no nodes.
+### Preview the panel
+
+Explore the panel with a built-in demo fleet. From the repository root:
+
+```bash
+cd panel
+npm ci
+npm run dev:demo
+```
+
+The demo runs locally without a master, database or game nodes.
 
 ## Architecture
 
@@ -151,12 +190,18 @@ described yet.
 test commands, the repository layout and the rules that are not visible from the
 code, and [llms.txt](llms.txt) points at the docs with their language labelled.
 
-
 ## Status
 
 Built for our own games, then open-sourced. Iterations 0–5 are implemented and accepted on a live multi-node fleet: matchmaking, warm pool, multi-version deploys with rollback and drain, observability, mTLS agent enrollment, at-rest secret encryption, and a second region reached over an isolated overlay. Since then the platform became multi-tenant — projects and environments with API keys bound to a pair — and grew scheduled Postgres backups with an S3 target. It is young software shaped around our own needs — expect rough edges, and APIs that may still change.
 
 Releases are cut from `main` as `vX.Y.Z` tags and published on [GitHub Releases](https://github.com/ufna/birdman/releases) with prebuilt linux/amd64 binaries (`birdman-master`, `mmcli`, `birdman-agent`); notable changes land in [CHANGELOG.md](CHANGELOG.md).
+
+<p align="center">
+  <a href="https://github.com/ufna/birdman/actions/workflows/agent.yml"><img src="https://github.com/ufna/birdman/actions/workflows/agent.yml/badge.svg" alt="agent CI" /></a>
+  <a href="https://github.com/ufna/birdman/actions/workflows/master.yml"><img src="https://github.com/ufna/birdman/actions/workflows/master.yml/badge.svg" alt="master CI" /></a>
+  <a href="https://github.com/ufna/birdman/actions/workflows/panel.yml"><img src="https://github.com/ufna/birdman/actions/workflows/panel.yml/badge.svg" alt="panel CI" /></a>
+  <a href="https://github.com/ufna/birdman/actions/workflows/sdk.yml"><img src="https://github.com/ufna/birdman/actions/workflows/sdk.yml/badge.svg" alt="SDK CI" /></a>
+</p>
 
 ## Documentation
 
