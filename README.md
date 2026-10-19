@@ -46,7 +46,7 @@ Previous versions drain as their matches end; a rollback is the same move in
 reverse.
 
 <p align="center">
-  <a href="docs/images/panel-deploys.png"><img src="docs/images/panel-deploys-preview.png" alt="Deploys: active and draining versions, with a new build pre-pulling across the fleet" width="640" /></a>
+  <a href="docs/images/panel-deploys.png"><img src="docs/images/panel-deploys-preview.png" alt="Deploys: active and draining versions, with a new build pre-pulling across the fleet" width="400" /></a>
 </p>
 
 ### What the fleet is doing
