@@ -56,7 +56,7 @@ and alerts in the same panel. VictoriaMetrics and VictoriaLogs stay behind the
 master's public API, and log history outlives the servers that wrote it.
 
 <p align="center">
-  <a href="docs/images/panel-stats.png"><img src="docs/images/panel-stats-preview.png" alt="Statistics: players online and running matches over 24 hours" width="640" /></a>
+  <a href="docs/images/panel-stats.png"><img src="docs/images/panel-stats-preview.png" alt="Statistics: players online and running matches over 24 hours" width="400" /></a>
 </p>
 
 - **Many games and environments, one install.** Nodes, versions, matches, events,
