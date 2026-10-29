@@ -44,11 +44,21 @@ type JoinToken struct {
 
 // Matchmaking configures the v0 matchmaker (docs/specs/master.md §4).
 type Matchmaking struct {
-	TickMS         int       `yaml:"tick_ms"`         // queue scan period, default 500
-	WidenAfterS    int       `yaml:"widen_after_s"`   // widen to next region, default 30
-	TicketTTLS     int       `yaml:"ticket_ttl_s"`    // queued → expired, default 120
-	DefaultProject string    `yaml:"default_project"` // empty → sole project in DB
-	JoinToken      JoinToken `yaml:"join_token"`
+	TickMS         int           `yaml:"tick_ms"`         // queue scan period, default 500
+	WidenAfterS    int           `yaml:"widen_after_s"`   // widen to next region, default 30
+	TicketTTLS     int           `yaml:"ticket_ttl_s"`    // queued → expired, default 120
+	DefaultProject string        `yaml:"default_project"` // empty → sole project in DB
+	JoinToken      JoinToken     `yaml:"join_token"`
+	Policies       []QueuePolicy `yaml:"policies"`
+}
+
+type QueuePolicy struct {
+	Project          string `yaml:"project"`
+	Env              string `yaml:"env"`
+	MinimumSize      int    `yaml:"minimum_size"`
+	PartialWaitS     int    `yaml:"partial_wait_s"`
+	MaxRTTms         int32  `yaml:"max_rtt_ms"`
+	ExpandedMaxRTTms int32  `yaml:"expanded_max_rtt_ms"`
 }
 
 // CompatOverride is one compat.overrides row (docs/specs/ops.md §3):

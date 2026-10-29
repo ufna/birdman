@@ -16,12 +16,24 @@ import (
 // intermediary timeouts).
 const maxWait = 30 * time.Second
 
+func ticketRateKey(t matchmaker.Ticket) string {
+	if len(t.Members) > 0 {
+		return t.Members[0].PlayerID
+	}
+	return t.PlayerID
+}
+
 type submitTicketRequest struct {
-	Project       string                  `json:"project,omitempty"`
-	Env           string                  `json:"env,omitempty"`
-	PlayerID      string                  `json:"player_id"`
-	ClientVersion string                  `json:"client_version"`
-	Regions       []matchmaker.RegionPing `json:"regions"`
+	Project           string                  `json:"project,omitempty"`
+	Env               string                  `json:"env,omitempty"`
+	PlayerID          string                  `json:"player_id"`
+	ClientVersion     string                  `json:"client_version"`
+	Regions           []matchmaker.RegionPing `json:"regions"`
+	Members           []matchmaker.Member     `json:"members,omitempty"`
+	PartyID           string                  `json:"party_id,omitempty"`
+	PartyRevision     int64                   `json:"party_revision,omitempty"`
+	ClientRequestID   string                  `json:"client_request_id,omitempty"`
+	AllocationPayload string                  `json:"allocation_payload,omitempty"`
 }
 
 func (s *Server) handleCreateTicket(w http.ResponseWriter, r *http.Request) {
@@ -29,14 +41,20 @@ func (s *Server) handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if req.PlayerID == "" {
-		writeError(w, http.StatusBadRequest, "bad_request", "player_id is required")
+	if req.PlayerID == "" && len(req.Members) == 0 {
+		writeError(w, http.StatusBadRequest, "bad_request", "player_id or members is required")
 		return
 	}
-	if !s.mmLimit.allow(req.PlayerID) {
-		writeError(w, http.StatusTooManyRequests, "rate_limited",
-			"matchmaking rate limit: 5 rps per player_id")
-		return
+	ids := []string{req.PlayerID}
+	if req.Members != nil {
+		if len(req.Members) > 64 {
+			writeError(w, http.StatusBadRequest, "bad_request", "too many members")
+			return
+		}
+		ids = nil
+		for _, m := range req.Members {
+			ids = append(ids, m.PlayerID)
+		}
 	}
 	// Binding (environments v1 §3/§5): a bound key defaults AND constrains both
 	// project and env; an explicit field that disagrees with the binding is
@@ -56,14 +74,25 @@ func (s *Server) handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 	if !s.requireBinding(w, r, project, env) {
 		return
 	}
+	for _, id := range ids {
+		if !s.mmLimit.allow(id) {
+			writeError(w, http.StatusTooManyRequests, "rate_limited", "matchmaking rate limit: 5 rps per player_id")
+			return
+		}
+	}
 	t, err := s.mm.Submit(r.Context(), matchmaker.SubmitParams{
 		Project:       project,
 		Env:           env,
 		PlayerID:      req.PlayerID,
 		ClientVersion: req.ClientVersion,
 		Regions:       req.Regions,
+		Members:       req.Members, PartyID: req.PartyID, PartyRevision: req.PartyRevision,
+		ClientRequestID: req.ClientRequestID, AllocationPayload: req.AllocationPayload,
 	})
 	switch {
+	case errors.Is(err, matchmaker.ErrRequestConflict):
+		writeError(w, http.StatusConflict, "request_conflict", "request ID or party revision conflicts with an accepted ticket")
+		return
 	case errors.Is(err, matchmaker.ErrInvalid):
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
@@ -127,7 +156,7 @@ func (s *Server) handleGetTicket(w http.ResponseWriter, r *http.Request) {
 	if !s.requireTicketBinding(w, r, t) {
 		return
 	}
-	if !s.mmLimit.allow(t.PlayerID) {
+	if !s.mmLimit.allow(ticketRateKey(t)) {
 		writeError(w, http.StatusTooManyRequests, "rate_limited",
 			"matchmaking rate limit: 5 rps per player_id")
 		return
@@ -164,7 +193,7 @@ func (s *Server) handleCancelTicket(w http.ResponseWriter, r *http.Request) {
 	if !s.requireTicketBinding(w, r, t) {
 		return
 	}
-	if !s.mmLimit.allow(t.PlayerID) {
+	if !s.mmLimit.allow(ticketRateKey(t)) {
 		writeError(w, http.StatusTooManyRequests, "rate_limited",
 			"matchmaking rate limit: 5 rps per player_id")
 		return

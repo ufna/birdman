@@ -1,9 +1,8 @@
 // Package matchmaker is the v0 matchmaker of birdman-master
 // (docs/specs/master.md §4): in-memory ticket queues per (region,
 // compat-bucket) on top of the allocation API (store.Allocate). Tickets are
-// deliberately not persisted — a master restart loses the queue and clients
-// simply re-queue (sdk.md). Explicitly out of v0: skills, parties, backfill,
-// reconnect.
+// not persisted yet — see docs/party-matchmaking.md before enabling party
+// traffic. Identity, invitations and reconnect remain application concerns.
 package matchmaker
 
 import (
@@ -33,6 +32,8 @@ const (
 // ErrInvalid marks ticket validation errors (HTTP 400).
 var ErrInvalid = errors.New("invalid_ticket")
 
+var ErrRequestConflict = errors.New("request_conflict")
+
 // RegionPing is one client-measured rtt sample (GET /v1/qos targets).
 type RegionPing struct {
 	Region string `json:"region"`
@@ -41,23 +42,30 @@ type RegionPing struct {
 
 // Result is what every participant of a formed match receives.
 type Result struct {
-	Host      string `json:"host"`
-	Port      int32  `json:"port"`
-	MatchID   string `json:"match_id"`
-	JoinToken string `json:"join_token,omitempty"`
+	Host      string   `json:"host"`
+	Port      int32    `json:"port"`
+	MatchID   string   `json:"match_id"`
+	JoinToken string   `json:"join_token,omitempty"`
+	ServerID  string   `json:"server_id,omitempty"`
+	VersionID string   `json:"version_id,omitempty"`
+	TicketIDs []string `json:"ticket_ids,omitempty"`
 }
 
 // Ticket is an immutable snapshot returned to the API layer.
 type Ticket struct {
-	ID            string       `json:"ticket_id"`
-	Project       string       `json:"project"`
-	Env           string       `json:"env"`
-	PlayerID      string       `json:"player_id"`
-	ClientVersion string       `json:"client_version"`
-	Regions       []RegionPing `json:"regions"`
-	Status        string       `json:"status"`
-	CreatedAt     time.Time    `json:"created_at"`
-	Match         *Result      `json:"match,omitempty"`
+	ID              string       `json:"ticket_id"`
+	Project         string       `json:"project"`
+	Env             string       `json:"env"`
+	PlayerID        string       `json:"player_id"`
+	ClientVersion   string       `json:"client_version"`
+	Regions         []RegionPing `json:"regions"`
+	Status          string       `json:"status"`
+	CreatedAt       time.Time    `json:"created_at"`
+	Match           *Result      `json:"match,omitempty"`
+	Members         []Member     `json:"members,omitempty"`
+	PartyID         string       `json:"party_id,omitempty"`
+	PartyRevision   int64        `json:"party_revision,omitempty"`
+	ClientRequestID string       `json:"client_request_id,omitempty"`
 }
 
 type Config struct {
@@ -74,6 +82,7 @@ type Config struct {
 	JoinTokenEnabled bool // off by default (master.md §4: v0 optional)
 	JoinTokenSecret  []byte
 	JoinTokenTTL     time.Duration // default 60s
+	Policies         []QueuePolicy // explicit project/env overrides; full-only by default
 }
 
 func (c Config) withDefaults() Config {
@@ -105,6 +114,12 @@ type ticket struct {
 	bucket        string // MajorMinor(clientVersion)
 	regions       []RegionPing
 	createdAt     time.Time
+	members       []Member
+	partyID       string
+	partyRevision int64
+	requestID     string
+	fingerprint   [32]byte
+	payload       string // never included in Ticket or Result
 
 	status     string
 	match      *Result
@@ -115,7 +130,18 @@ type ticket struct {
 // playerKey is the anti-dup key: (project, env, player). A new ticket for the
 // same player in the same env cancels the previous one; two envs of a player
 // are independent (environments v1 §3, M6).
-func (t *ticket) playerKey() string { return t.project + "\x00" + t.env + "\x00" + t.playerID }
+func scopeKey(project, env, id string) string { return project + "\x00" + env + "\x00" + id }
+
+func (t *ticket) playerKeys() []string {
+	if len(t.members) == 0 {
+		return []string{scopeKey(t.project, t.env, t.playerID)}
+	}
+	keys := make([]string, 0, len(t.members))
+	for _, m := range t.members {
+		keys = append(keys, scopeKey(t.project, t.env, m.PlayerID))
+	}
+	return keys
+}
 
 func (t *ticket) snapshot() Ticket {
 	regions := make([]RegionPing, len(t.regions))
@@ -123,12 +149,14 @@ func (t *ticket) snapshot() Ticket {
 	var match *Result
 	if t.match != nil {
 		m := *t.match
+		m.TicketIDs = append([]string(nil), t.match.TicketIDs...)
 		match = &m
 	}
 	return Ticket{
 		ID: t.id, Project: t.project, Env: t.env, PlayerID: t.playerID,
 		ClientVersion: t.clientVersion, Regions: regions,
 		Status: t.status, CreatedAt: t.createdAt, Match: match,
+		Members: cloneMembers(t.members), PartyID: t.partyID, PartyRevision: t.partyRevision, ClientRequestID: t.requestID,
 	}
 }
 
@@ -141,6 +169,8 @@ type Matchmaker struct {
 	mu          sync.Mutex
 	tickets     map[string]*ticket
 	byPlayer    map[string]*ticket // active (queued) ticket per (project, env, player)
+	byParty     map[string]*ticket
+	byRequest   map[string]*ticket // retained for the same lifetime as terminal tickets
 	regionsSeen map[regionEnv]bool // (region, env) pairs ever seen — for zeroing the queue-depth gauge
 }
 
@@ -149,6 +179,8 @@ func New(st *store.Store, m *metrics.Metrics, cfg Config, log *slog.Logger) *Mat
 		st: st, m: m, cfg: cfg.withDefaults(), log: log,
 		tickets:     map[string]*ticket{},
 		byPlayer:    map[string]*ticket{},
+		byParty:     map[string]*ticket{},
+		byRequest:   map[string]*ticket{},
 		regionsSeen: map[regionEnv]bool{},
 	}
 }
@@ -172,11 +204,16 @@ func (mm *Matchmaker) Run(ctx context.Context) {
 }
 
 type SubmitParams struct {
-	Project       string
-	Env           string // окружение тикета (опционально); резолв — §3
-	PlayerID      string
-	ClientVersion string
-	Regions       []RegionPing
+	Project           string
+	Env               string // окружение тикета (опционально); резолв — §3
+	PlayerID          string
+	ClientVersion     string
+	Regions           []RegionPing
+	Members           []Member
+	PartyID           string
+	PartyRevision     int64
+	ClientRequestID   string
+	AllocationPayload string
 }
 
 // Submit validates and enqueues a ticket. Anti-dup (master.md §4, env v1 §3 M6):
@@ -185,18 +222,14 @@ type SubmitParams struct {
 // deprecated in the multi-version window, per compat rules) is rejected as
 // update_required right away (the ticket is still stored for GET).
 func (mm *Matchmaker) Submit(ctx context.Context, p SubmitParams) (Ticket, error) {
-	if p.PlayerID == "" {
-		return Ticket{}, fmt.Errorf("%w: player_id is required", ErrInvalid)
+	members, regions, err := normalizeParty(p)
+	if err != nil {
+		return Ticket{}, err
 	}
 	bucket, err := mm.cfg.Compat.BucketOf(p.ClientVersion)
 	if err != nil {
 		return Ticket{}, fmt.Errorf("%w: client_version: %v", ErrInvalid, err)
 	}
-	regions, err := normalizeRegions(p.Regions)
-	if err != nil {
-		return Ticket{}, err
-	}
-
 	project := p.Project
 	if project == "" {
 		project = mm.cfg.DefaultProject
@@ -208,7 +241,8 @@ func (mm *Matchmaker) Submit(ctx context.Context, p SubmitParams) (Ticket, error
 			return Ticket{}, fmt.Errorf("resolve project: %w", err)
 		}
 	}
-	if _, err := mm.st.GetProject(ctx, project); err != nil {
+	proj, err := mm.st.GetProject(ctx, project)
+	if err != nil {
 		return Ticket{}, err
 	}
 
@@ -232,6 +266,24 @@ func (mm *Matchmaker) Submit(ctx context.Context, p SubmitParams) (Ticket, error
 	} else if _, err := mm.st.GetEnvironment(ctx, project, env); err != nil {
 		return Ticket{}, err
 	}
+	// Fingerprint normalized input, not the transport spelling of a bound
+	// project/env. Check retries before the live version gate: deployments must
+	// not change the result of an already accepted request.
+	p.Project, p.Env, p.Members, p.Regions = project, env, members, regions
+	fingerprint := requestFingerprint(p)
+	mm.mu.Lock()
+	defer mm.mu.Unlock()
+	if p.ClientRequestID != "" {
+		if prev := mm.byRequest[scopeKey(project, env, p.ClientRequestID)]; prev != nil {
+			if prev.fingerprint != fingerprint {
+				return Ticket{}, ErrRequestConflict
+			}
+			return prev.snapshot(), nil
+		}
+	}
+	if len(members) > int(proj.MatchSize) {
+		return Ticket{}, fmt.Errorf("%w: party exceeds project match_size", ErrInvalid)
+	}
 
 	// Version gate at submit time; re-checked every tick for queued tickets
 	// (an active version swap must not strand incompatible clients). Candidates
@@ -250,16 +302,34 @@ func (mm *Matchmaker) Submit(ctx context.Context, p SubmitParams) (Ticket, error
 		id: uuid.NewString(), project: project, env: env, playerID: p.PlayerID,
 		clientVersion: p.ClientVersion, bucket: bucket, regions: regions,
 		createdAt: now, status: status, done: make(chan struct{}),
+		members: members, partyID: p.PartyID, partyRevision: p.PartyRevision,
+		requestID: p.ClientRequestID, fingerprint: fingerprint, payload: p.AllocationPayload,
 	}
 
-	mm.mu.Lock()
-	defer mm.mu.Unlock()
-	if prev, ok := mm.byPlayer[t.playerKey()]; ok {
-		mm.finalize(prev, StatusCancelled, nil, now)
+	if t.partyID != "" {
+		if prev := mm.byParty[scopeKey(project, env, t.partyID)]; prev != nil {
+			if t.partyRevision <= prev.partyRevision {
+				return Ticket{}, ErrRequestConflict
+			}
+			mm.finalize(prev, StatusCancelled, nil, now)
+		}
+	}
+	for _, key := range t.playerKeys() {
+		if prev := mm.byPlayer[key]; prev != nil {
+			mm.finalize(prev, StatusCancelled, nil, now)
+		}
 	}
 	mm.tickets[t.id] = t
+	if t.partyID != "" {
+		mm.byParty[scopeKey(project, env, t.partyID)] = t
+	}
+	if t.requestID != "" {
+		mm.byRequest[scopeKey(project, env, t.requestID)] = t
+	}
 	if status == StatusQueued {
-		mm.byPlayer[t.playerKey()] = t
+		for _, key := range t.playerKeys() {
+			mm.byPlayer[key] = t
+		}
 	} else {
 		// Terminal at birth (update_required).
 		t.terminalAt = now
@@ -331,8 +401,10 @@ func (mm *Matchmaker) finalize(t *ticket, status string, match *Result, now time
 	t.match = match
 	t.terminalAt = now
 	close(t.done)
-	if cur, ok := mm.byPlayer[t.playerKey()]; ok && cur == t {
-		delete(mm.byPlayer, t.playerKey())
+	for _, key := range t.playerKeys() {
+		if mm.byPlayer[key] == t {
+			delete(mm.byPlayer, key)
+		}
 	}
 	mm.m.MMTickets.WithLabelValues(status).Inc()
 	if status == StatusMatched {

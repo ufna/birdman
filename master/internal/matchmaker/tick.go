@@ -11,8 +11,8 @@ import (
 	"github.com/ufna/birdman/master/internal/store"
 )
 
-// qt is a queued-ticket snapshot used while matching, so no lock is held
-// across store calls (Submit/Cancel stay responsive during a tick).
+// qt is a queued-ticket snapshot used for unlocked candidate selection.
+// Server claim and assignment publication revalidate it under the queue lock.
 type qt struct {
 	id      string
 	player  string
@@ -20,6 +20,9 @@ type qt struct {
 	version string // client_version (compat checks against candidates)
 	created time.Time
 	regions []RegionPing
+	players int
+	payload string
+	party   bool
 }
 
 // projectEnv keys the per-tick match pass: tickets are grouped and candidates
@@ -56,9 +59,16 @@ func (mm *Matchmaker) RunOnce(ctx context.Context) error {
 			queued[pe] = append(queued[pe], qt{
 				id: t.id, player: t.playerID, bucket: t.bucket,
 				version: t.clientVersion, created: t.createdAt, regions: t.regions,
+				players: max(1, len(t.members)), payload: t.payload, party: len(t.members) > 0,
 			})
 			depth[regionEnv{t.regions[0].Region, t.env}]++ // depth by the player's best (region, env)
 		case now.Sub(t.terminalAt) > mm.retention():
+			if key := scopeKey(t.project, t.env, t.partyID); mm.byParty[key] == t {
+				delete(mm.byParty, key)
+			}
+			if t.requestID != "" {
+				delete(mm.byRequest, scopeKey(t.project, t.env, t.requestID))
+			}
 			delete(mm.tickets, id)
 		}
 	}
@@ -154,14 +164,39 @@ func (mm *Matchmaker) matchBucket(ctx context.Context, project, env string, size
 	exhausted := map[string]bool{} // regions that answered no_capacity this tick
 
 	for {
-		region, group := mm.bestGroup(pool, size, verFor, exhausted, now)
+		region, group := mm.bestGroup(pool, size, verFor, exhausted, now, mm.policy(project, env, size))
 		if region == "" {
 			return
 		}
 		ver := verFor[region]
 		matchID := uuid.NewString()
-		alloc, err := mm.st.Allocate(ctx, project, env, region, &ver.VersionID, matchID, int32(len(group)), nil)
+		// Keep cancel/revision and concurrent ticks on one side of the claim.
+		// The store call is bounded by the tick context. Durable assignment and
+		// restart recovery are a separate required step before deployment.
+		mm.mu.Lock()
+		valid := true
+		metadata := map[string]string{}
+		for _, g := range group {
+			if t := mm.tickets[g.id]; t == nil || t.status != StatusQueued {
+				delete(pool, g.id)
+				valid = false
+			}
+			if g.payload != "" {
+				metadata["ticket_"+g.id] = g.payload
+			}
+		}
+		if !valid {
+			mm.mu.Unlock()
+			continue
+		}
+		if len(metadata) > 16 {
+			mm.mu.Unlock()
+			mm.log.Error("mm: allocation exceeds metadata ticket limit", "project", project)
+			return
+		}
+		alloc, err := mm.st.Allocate(ctx, project, env, region, &ver.VersionID, matchID, int32(groupSeats(group)), metadata)
 		if errors.Is(err, store.ErrNoCapacity) {
+			mm.mu.Unlock()
 			// Tickets stay queued; the warm pool catches up via reconcile and
 			// the next tick retries. Feeds the BufferEmpty alert (ops.md §1).
 			mm.m.AllocFailures.WithLabelValues("no_capacity", project).Inc()
@@ -169,25 +204,27 @@ func (mm *Matchmaker) matchBucket(ctx context.Context, project, env string, size
 			continue
 		}
 		if err != nil {
+			mm.mu.Unlock()
 			mm.log.Error("mm: allocate failed", "project", project, "region", region, "err", err)
 			return
 		}
 		if err := mm.st.RecordMatch(ctx, matchID, project, region, alloc.ServerID, ver.VersionID, env); err != nil {
 			mm.log.Error("mm: record match failed", "match_id", matchID, "err", err) // non-fatal
 		}
-		mm.deliver(group, matchID, alloc)
+		mm.deliverLocked(group, matchID, ver.VersionID, alloc)
+		mm.mu.Unlock()
 		for _, t := range group {
 			delete(pool, t.id)
 		}
 		mm.log.Info("mm: match formed", "project", project, "region", region,
-			"match_id", matchID, "server_id", alloc.ServerID, "version", ver.Semver, "players", len(group))
+			"match_id", matchID, "server_id", alloc.ServerID, "version", ver.Semver, "players", groupSeats(group))
 	}
 }
 
-// bestGroup picks the region with the lowest median group rtt that can field
-// a full group of the oldest eligible tickets (master.md §4).
+// bestGroup preserves FIFO between fitting parties, then minimizes their
+// worst RTT. Legacy-only queues retain median RTT scoring.
 func (mm *Matchmaker) bestGroup(pool map[string]qt, size int,
-	verFor map[string]store.RegionVersion, exhausted map[string]bool, now time.Time) (string, []qt) {
+	verFor map[string]store.RegionVersion, exhausted map[string]bool, now time.Time, policy QueuePolicy) (string, []qt) {
 
 	// Deterministic region order for stable tie-breaks.
 	regions := make([]string, 0, len(verFor))
@@ -201,25 +238,39 @@ func (mm *Matchmaker) bestGroup(pool map[string]qt, size int,
 	bestRegion := ""
 	var bestGroup []qt
 	var bestMedian float64
+	parties := false
+	for _, t := range pool {
+		parties = parties || t.party
+	}
 	for _, r := range regions {
 		var elig []qt
 		for _, t := range pool {
-			if eligibleFor(t, r, mm.cfg.WidenAfter, now) {
+			limit := policy.MaxRTTms
+			if now.Sub(t.created) >= mm.cfg.WidenAfter && policy.ExpandedMaxRTTms > 0 {
+				limit = policy.ExpandedMaxRTTms
+			}
+			if eligibleFor(t, r, mm.cfg.WidenAfter, now) && (limit == 0 || worstRTT([]qt{t}, r) <= float64(limit)) {
 				elig = append(elig, t)
 			}
 		}
-		if len(elig) < size {
+		group := pack(elig, size, policy, now)
+		if len(group) == 0 {
 			continue
 		}
-		sort.Slice(elig, func(i, j int) bool { // FIFO fairness
-			if !elig[i].created.Equal(elig[j].created) {
-				return elig[i].created.Before(elig[j].created)
-			}
-			return elig[i].id < elig[j].id
-		})
-		group := elig[:size]
 		med := medianRTT(group, r)
-		if bestRegion == "" || med < bestMedian {
+		if parties {
+			med = worstRTT(group, r)
+		}
+		// Prefer full matches; preserve legacy median scoring for old clients.
+		better := bestRegion == "" || groupSeats(group) > groupSeats(bestGroup)
+		if !better && groupSeats(group) == groupSeats(bestGroup) {
+			if parties && !group[0].created.Equal(bestGroup[0].created) {
+				better = group[0].created.Before(bestGroup[0].created)
+			} else {
+				better = med < bestMedian
+			}
+		}
+		if better {
 			bestRegion, bestGroup, bestMedian = r, group, med
 		}
 	}
@@ -262,13 +313,14 @@ func medianRTT(group []qt, region string) float64 {
 	return float64(rtts[mid-1]+rtts[mid]) / 2
 }
 
-// deliver flips still-queued group members to matched. A member cancelled
-// while the allocation was in flight is skipped (the match starts short —
-// accepted v0 race, the game session handles absentees).
-func (mm *Matchmaker) deliver(group []qt, matchID string, alloc store.Allocation) {
+// deliverLocked publishes the assignment while still holding the claim fence.
+func (mm *Matchmaker) deliverLocked(group []qt, matchID, versionID string, alloc store.Allocation) {
 	now := time.Now()
-	mm.mu.Lock()
-	defer mm.mu.Unlock()
+	refs := make([]string, 0, len(group))
+	for _, g := range group {
+		refs = append(refs, g.id)
+	}
+	sort.Strings(refs)
 	for _, g := range group {
 		t, ok := mm.tickets[g.id]
 		if !ok || t.status != StatusQueued {
@@ -276,8 +328,8 @@ func (mm *Matchmaker) deliver(group []qt, matchID string, alloc store.Allocation
 				"ticket_id", g.id, "match_id", matchID)
 			continue
 		}
-		res := &Result{Host: alloc.Host, Port: alloc.Port, MatchID: matchID}
-		if mm.cfg.JoinTokenEnabled {
+		res := &Result{Host: alloc.Host, Port: alloc.Port, MatchID: matchID, ServerID: alloc.ServerID, VersionID: versionID, TicketIDs: refs}
+		if mm.cfg.JoinTokenEnabled && len(t.members) == 0 {
 			res.JoinToken = GenerateJoinToken(mm.cfg.JoinTokenSecret,
 				matchID, t.playerID, now.Add(mm.cfg.JoinTokenTTL))
 		}

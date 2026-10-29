@@ -2195,6 +2195,20 @@ components:
             $ref: '#/components/schemas/store.Version'
       required:
         - versions
+    matchmaker.Member:
+      type: object
+      properties:
+        player_id:
+          type: string
+        regions:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: '#/components/schemas/matchmaker.RegionPing'
+      required:
+        - player_id
+        - regions
     matchmaker.RegionPing:
       type: object
       properties:
@@ -2216,6 +2230,16 @@ components:
           type: string
         port:
           type: integer
+        server_id:
+          type: string
+        ticket_ids:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        version_id:
+          type: string
       required:
         - host
         - match_id
@@ -2223,6 +2247,8 @@ components:
     matchmaker.Ticket:
       type: object
       properties:
+        client_request_id:
+          type: string
         client_version:
           type: string
         created_at:
@@ -2232,6 +2258,16 @@ components:
           type: string
         match:
           $ref: '#/components/schemas/matchmaker.Result'
+        members:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: '#/components/schemas/matchmaker.Member'
+        party_id:
+          type: string
+        party_revision:
+          type: integer
         player_id:
           type: string
         project:

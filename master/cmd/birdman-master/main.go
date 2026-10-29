@@ -413,6 +413,16 @@ func matchmakerConfig(cfg config.Config, log *slog.Logger) (matchmaker.Config, e
 		Compat:           compat,
 		JoinTokenEnabled: cfg.Matchmaking.JoinToken.Enabled,
 	}
+	for _, p := range cfg.Matchmaking.Policies {
+		mc.Policies = append(mc.Policies, matchmaker.QueuePolicy{
+			Project: p.Project, Env: p.Env, MinimumSize: p.MinimumSize,
+			PartialWait: time.Duration(p.PartialWaitS) * time.Second,
+			MaxRTTms:    p.MaxRTTms, ExpandedMaxRTTms: p.ExpandedMaxRTTms,
+		})
+	}
+	if err := matchmaker.ValidatePolicies(mc.Policies); err != nil {
+		return mc, err
+	}
 	if !mc.JoinTokenEnabled {
 		return mc, nil
 	}
