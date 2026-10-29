@@ -29,6 +29,7 @@ set(BIRDMAN_CORE_TESTS
   json_parser
   golden_outgoing
   golden_incoming
+  malformed_frame_debug_redacts_payload
   noop_mode
   lifecycle
   ping_pong

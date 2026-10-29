@@ -4,6 +4,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <thread>
@@ -28,7 +29,76 @@ void SleepMs(int ms) { usleep(ms * 1000); }
 // about one frame type.
 const std::vector<std::string> kSkipAll = {"*"};
 
+class CapturedStderr {
+ public:
+  CapturedStderr() : file_(std::tmpfile()), saved_(::dup(STDERR_FILENO)) {
+    if (file_ == nullptr || saved_ < 0) {
+      if (file_ != nullptr) std::fclose(file_);
+      if (saved_ >= 0) ::close(saved_);
+      BT_FAIL("cannot capture SDK diagnostics");
+    }
+    std::fflush(stderr);
+    if (::dup2(::fileno(file_), STDERR_FILENO) < 0) {
+      ::close(saved_);
+      std::fclose(file_);
+      BT_FAIL("cannot redirect SDK diagnostics");
+    }
+  }
+  ~CapturedStderr() {
+    std::fflush(stderr);
+    ::dup2(saved_, STDERR_FILENO);
+    ::close(saved_);
+    std::fclose(file_);
+  }
+  std::string Read() {
+    std::fflush(stderr);
+    std::rewind(file_);
+    std::string output;
+    char buffer[1024];
+    while (const size_t count = std::fread(buffer, 1, sizeof(buffer), file_)) {
+      output.append(buffer, count);
+    }
+    return output;
+  }
+
+ private:
+  FILE* file_;
+  int saved_;
+};
+
 }  // namespace
+
+BT_TEST(malformed_frame_debug_redacts_payload) {
+  const char* previous = std::getenv("BIRDMAN_SDK_DEBUG");
+  const bool was_set = previous != nullptr;
+  const std::string original = previous != nullptr ? previous : "";
+  struct RestoreDebug {
+    bool was_set;
+    std::string original;
+    ~RestoreDebug() {
+      if (was_set) ::setenv("BIRDMAN_SDK_DEBUG", original.c_str(), 1);
+      else ::unsetenv("BIRDMAN_SDK_DEBUG");
+    }
+  } restore{was_set, original};
+  ::setenv("BIRDMAN_SDK_DEBUG", "1", 1);
+  CapturedStderr diagnostics;
+  bt::MockAgent mock;
+  ServerLink link;
+  Config config;
+  config.socket_path = mock.Path();
+  BT_CHECK(link.Init(config));
+  mock.Accept();
+  mock.Expect("hello");
+  mock.SendRaw("{\"data\":{\"secret\":\"ADMISSION_SENTINEL\"},broken\n");
+  // The following ordered pong proves the malformed line was processed.
+  mock.Send("ping", "{}");
+  mock.Expect("pong");
+  link.Shutdown();
+  const std::string output = diagnostics.Read();
+  BT_CHECK(output.find("bad frame") != std::string::npos);
+  BT_CHECK(output.find("ADMISSION_SENTINEL") == std::string::npos);
+  BT_CHECK(output.find("\"data\"") == std::string::npos);
+}
 
 // No env, no config -> no-op mode: every call is safe, zero sockets are
 // touched, IsManaged() == false.

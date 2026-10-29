@@ -507,7 +507,8 @@ class ServerLink::Impl {
     if (line.empty() || line.find_first_not_of(" \t\r") == std::string_view::npos) return;
     json::Value root;
     if (!json::Parse(line, &root) || !root.IsObject()) {
-      Debug("bad frame: %.*s", static_cast<int>(std::min<size_t>(line.size(), 200)), line.data());
+      // A truncated allocation frame can still contain private admission data.
+      Debug("bad frame (%zu bytes)", line.size());
       return;
     }
     if (root.GetInt("v", -1) != 1) {
