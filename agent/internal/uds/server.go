@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -95,6 +96,12 @@ func Listen(path string, ev Events, logf func(string, ...any)) (*Server, error) 
 	// угодно, кроме длины.
 	if len(path) >= 104 {
 		return nil, fmt.Errorf("socket path %s is %d bytes: длиннее лимита sun_path (~104), выберите каталог короче", path, len(path))
+	}
+	// Only this per-server directory is mounted into the game container. The
+	// agent's restrictive umask must not prevent non-root games traversing it;
+	// shared ancestors and private agent state retain their original permissions.
+	if err := os.Chmod(filepath.Dir(path), 0o755); err != nil {
+		return nil, fmt.Errorf("chmod socket directory %s: %w", filepath.Dir(path), err)
 	}
 	ln, err := net.Listen("unix", path)
 	if err != nil {
