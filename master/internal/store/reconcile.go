@@ -80,6 +80,10 @@ func (s *Store) DeprecatedWindowVersion(ctx context.Context, projectID, env stri
 //	           (anti-affinity, follow-ups итерации 5 §1);
 //	surplus  = ready of version beyond target             → draining + stop.
 //
+// The active buffer has priority when the version window cannot fit in the
+// fleet/node capacity: deprecated READY servers are stopped first, never live
+// matches. Their slots remain occupied until the agent confirms termination.
+//
 // Versions outside the window (registered/disabled/older): ready → draining +
 // stop; allocated (live matches) → draining + per-server Drain — the dedik
 // finishes the match and exits on its own (`доигрывают`).
@@ -139,13 +143,78 @@ func (s *Store) PlanFleet(ctx context.Context, f FleetConfig, dep *Version, paus
 		windowIDs = append(windowIDs, dep.ID)
 	}
 
-	var total int32
+	var total, activeWarm, occupiedAfterDrain int32
 	if err := tx.QueryRow(ctx, `
-		select count(*) from servers s join nodes n on n.id = s.node_id
+		select count(*),
+		       count(*) filter (where s.version_id = $4::uuid and s.state in ('creating','ready')),
+		       count(*) filter (where s.state <> 'draining')
+		from servers s join nodes n on n.id = s.node_id
 		where s.project_id = $1::uuid and n.region = $2 and s.env = $3
 		  and s.state in ('creating','ready','allocated','draining')`,
-		f.ProjectID, f.Region, f.Env).Scan(&total); err != nil {
+		f.ProjectID, f.Region, f.Env, *f.ActiveVersion).Scan(&total, &activeWarm, &occupiedAfterDrain); err != nil {
 		return nil, nil, nil, true, err
+	}
+
+	if dep != nil && dep.ID != *f.ActiveVersion && activeWarm < f.BufferReady {
+		paused := pausedByVersion[*f.ActiveVersion]
+		if paused == nil {
+			paused = []string{}
+		}
+		// Count capacity that will exist after already-dispatched stops finish,
+		// so repeated passes do not evict more old buffers while waiting for
+		// terminal process reports (command receipts do not release capacity).
+		// Node capacity is independent of max_servers; both must admit the active
+		// target. A crash-loop pause must retain a working deprecated fallback.
+		var nodeRoomAfterDrain int32
+		if err := tx.QueryRow(ctx, `
+			select coalesce(sum(greatest(n.capacity_slots - coalesce(u.used,0),0)),0)::int
+			from nodes n
+			left join lateral (
+				select count(*)::int as used from servers s
+				where s.node_id = n.id and s.state in ('creating','ready','allocated')
+			) u on true
+			where n.project_id = $1::uuid and n.region = $2 and n.env = $3
+			  and n.state = 'active' and n.last_heartbeat_at > now() - interval '10 seconds'
+			  and not (n.id::text = any($4::text[]))`,
+			f.ProjectID, f.Region, f.Env, paused).Scan(&nodeRoomAfterDrain); err != nil {
+			return nil, nil, nil, true, err
+		}
+		roomAfterDrain := max(int32(0), min(f.MaxServers-occupiedAfterDrain, nodeRoomAfterDrain))
+		if blocked := f.BufferReady - activeWarm - roomAfterDrain; blocked > 0 {
+			stopDeprecated := func(limit int32, eligibleOnly bool) ([]PlannedStop, error) {
+				return drainServers(ctx, tx, `
+				update servers set state = 'draining', updated_at = now()
+				where state = 'ready' and match_id is null and id in (
+					select s.id from servers s join nodes n on n.id = s.node_id
+					where s.project_id = $1::uuid and n.region = $2 and s.env = $3
+					  and s.version_id = $4::uuid and s.state = 'ready' and s.match_id is null
+					  and n.env = $3 and n.state = 'active'
+					  and n.last_heartbeat_at > now() - interval '10 seconds'
+					  and (not $7::boolean or not (n.id::text = any($6::text[])))
+					order by s.created_at, s.id limit $5
+					for update of s skip locked
+				)
+				returning id::text, node_id::text`,
+					f.ProjectID, f.Region, f.Env, dep.ID, limit, paused, eligibleOnly)
+			}
+			more, err := stopDeprecated(blocked, true)
+			if err != nil {
+				return nil, nil, nil, true, err
+			}
+			stops = append(stops, more...)
+			// A deprecated process on a paused node may also occupy the fleet's
+			// last slot while another healthy node is free. Reap only as many of
+			// those buffers as the eligible nodes can actually replace.
+			freed := int32(len(more))
+			fleetRoom := max(int32(0), f.MaxServers-occupiedAfterDrain+freed)
+			if needed := min(f.BufferReady-activeWarm, nodeRoomAfterDrain+freed) - fleetRoom; needed > 0 {
+				more, err = stopDeprecated(needed, false)
+				if err != nil {
+					return nil, nil, nil, true, err
+				}
+				stops = append(stops, more...)
+			}
+		}
 	}
 
 	for _, w := range window {
