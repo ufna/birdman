@@ -1,8 +1,9 @@
 // Package matchmaker is the v0 matchmaker of birdman-master
 // (docs/specs/master.md §4): in-memory ticket queues per (region,
 // compat-bucket) on top of the allocation API (store.Allocate). Tickets are
-// not persisted yet — see docs/party-matchmaking.md before enabling party
-// traffic. Identity, invitations and reconnect remain application concerns.
+// persisted encrypted in PostgreSQL, together with atomic assignments and an
+// allocation command outbox. Identity, invitations and reconnect remain
+// application concerns; see docs/party-matchmaking.md.
 package matchmaker
 
 import (
@@ -170,7 +171,8 @@ type Matchmaker struct {
 	tickets     map[string]*ticket
 	byPlayer    map[string]*ticket // active (queued) ticket per (project, env, player)
 	byParty     map[string]*ticket
-	byRequest   map[string]*ticket // retained for the same lifetime as terminal tickets
+	byRequest   map[string]*ticket // cache; durable request mapping remains in SQL
+	dirty       map[string]bool
 	regionsSeen map[regionEnv]bool // (region, env) pairs ever seen — for zeroing the queue-depth gauge
 }
 
@@ -181,6 +183,7 @@ func New(st *store.Store, m *metrics.Metrics, cfg Config, log *slog.Logger) *Mat
 		byPlayer:    map[string]*ticket{},
 		byParty:     map[string]*ticket{},
 		byRequest:   map[string]*ticket{},
+		dirty:       map[string]bool{},
 		regionsSeen: map[regionEnv]bool{},
 	}
 }
@@ -273,7 +276,21 @@ func (mm *Matchmaker) Submit(ctx context.Context, p SubmitParams) (Ticket, error
 	fingerprint := requestFingerprint(p)
 	mm.mu.Lock()
 	defer mm.mu.Unlock()
+	tx, err := mm.beginLocked(ctx)
+	if err != nil {
+		return Ticket{}, err
+	}
+	defer mm.finishLocked(tx)
 	if p.ClientRequestID != "" {
+		if mm.byRequest[scopeKey(project, env, p.ClientRequestID)] == nil {
+			records, err := tx.FindRequest(ctx, project, env, p.ClientRequestID)
+			if err != nil {
+				return Ticket{}, err
+			}
+			if err = mm.merge(records); err != nil {
+				return Ticket{}, err
+			}
+		}
 		if prev := mm.byRequest[scopeKey(project, env, p.ClientRequestID)]; prev != nil {
 			if prev.fingerprint != fingerprint {
 				return Ticket{}, ErrRequestConflict
@@ -307,6 +324,13 @@ func (mm *Matchmaker) Submit(ctx context.Context, p SubmitParams) (Ticket, error
 	}
 
 	if t.partyID != "" {
+		records, err := tx.LatestParty(ctx, project, env, t.partyID)
+		if err != nil {
+			return Ticket{}, err
+		}
+		if err = mm.merge(records); err != nil {
+			return Ticket{}, err
+		}
 		if prev := mm.byParty[scopeKey(project, env, t.partyID)]; prev != nil {
 			if t.partyRevision <= prev.partyRevision {
 				return Ticket{}, ErrRequestConflict
@@ -320,6 +344,7 @@ func (mm *Matchmaker) Submit(ctx context.Context, p SubmitParams) (Ticket, error
 		}
 	}
 	mm.tickets[t.id] = t
+	mm.dirty[t.id] = true
 	if t.partyID != "" {
 		mm.byParty[scopeKey(project, env, t.partyID)] = t
 	}
@@ -336,33 +361,49 @@ func (mm *Matchmaker) Submit(ctx context.Context, p SubmitParams) (Ticket, error
 		close(t.done)
 		mm.m.MMTickets.WithLabelValues(status).Inc()
 	}
+	if err = mm.commitLocked(ctx, tx); err != nil {
+		return Ticket{}, err
+	}
 	return t.snapshot(), nil
 }
 
 // Get returns the current ticket snapshot.
 func (mm *Matchmaker) Get(id string) (Ticket, bool) {
-	mm.mu.Lock()
-	defer mm.mu.Unlock()
-	t, ok := mm.tickets[id]
-	if !ok {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	t, ok, err := mm.GetContext(ctx, id)
+	if err != nil {
+		mm.log.Error("mm: get ticket failed")
 		return Ticket{}, false
 	}
-	return t.snapshot(), true
+	return t, ok
 }
 
 // Wait long-polls: it returns as soon as the ticket leaves queued, or after
 // wait, or when ctx is cancelled — whichever comes first.
 func (mm *Matchmaker) Wait(ctx context.Context, id string, wait time.Duration) (Ticket, bool) {
+	t, ok, err := mm.WaitContext(ctx, id, wait)
+	if err != nil && ctx.Err() != nil {
+		return mm.Get(id)
+	}
+	return t, ok && err == nil
+}
+
+func (mm *Matchmaker) WaitContext(ctx context.Context, id string, wait time.Duration) (Ticket, bool, error) {
+	_, ok, err := mm.GetContext(ctx, id)
+	if err != nil || !ok {
+		return Ticket{}, ok, err
+	}
 	mm.mu.Lock()
 	t, ok := mm.tickets[id]
 	if !ok {
 		mm.mu.Unlock()
-		return Ticket{}, false
+		return mm.GetContext(ctx, id)
 	}
 	if t.status != StatusQueued || wait <= 0 {
 		snap := t.snapshot()
 		mm.mu.Unlock()
-		return snap, true
+		return snap, true, nil
 	}
 	done := t.done
 	mm.mu.Unlock()
@@ -374,22 +415,20 @@ func (mm *Matchmaker) Wait(ctx context.Context, id string, wait time.Duration) (
 	case <-timer.C:
 	case <-ctx.Done():
 	}
-	return mm.Get(id)
+	return mm.GetContext(ctx, id)
 }
 
 // Cancel cancels a queued ticket (DELETE /v1/matchmaking/tickets/{id});
 // terminal tickets are returned unchanged.
 func (mm *Matchmaker) Cancel(id string) (Ticket, bool) {
-	mm.mu.Lock()
-	defer mm.mu.Unlock()
-	t, ok := mm.tickets[id]
-	if !ok {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	t, ok, err := mm.CancelContext(ctx, id)
+	if err != nil {
+		mm.log.Error("mm: cancel ticket failed")
 		return Ticket{}, false
 	}
-	if t.status == StatusQueued {
-		mm.finalize(t, StatusCancelled, nil, time.Now())
-	}
-	return t.snapshot(), true
+	return t, ok
 }
 
 // finalize moves a queued ticket to a terminal status. Caller holds mm.mu.
@@ -400,6 +439,7 @@ func (mm *Matchmaker) finalize(t *ticket, status string, match *Result, now time
 	t.status = status
 	t.match = match
 	t.terminalAt = now
+	mm.dirty[t.id] = true
 	close(t.done)
 	for _, key := range t.playerKeys() {
 		if mm.byPlayer[key] == t {

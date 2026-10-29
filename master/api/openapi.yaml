@@ -735,6 +735,32 @@ paths:
                 $ref: '#/components/schemas/httpapi.apiError'
         "200":
           description: Success. Body is not described by this contract (an upstream proxy response, an event stream, a non-JSON payload or no body at all).
+  /v1/fleets:
+    get:
+      operationId: listFleets
+      summary: List desired regional fleet configuration
+      description: Requires an API key with the "readonly" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.fleetsResp'
   /v1/fleets/{region}:
     parameters:
       - name: region
@@ -1566,6 +1592,38 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/httpapi.serversResp'
+  /v1/servers/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: getServer
+      summary: Read the authoritative state of one dedicated server
+      description: Requires an API key with the "readonly" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.serverResp'
   /v1/servers/{id}/logs:
     parameters:
       - name: id
@@ -2033,6 +2091,17 @@ components:
             $ref: '#/components/schemas/store.Event'
       required:
         - events
+    httpapi.fleetsResp:
+      type: object
+      properties:
+        fleets:
+          type:
+            - array
+            - "null"
+          items:
+            $ref: '#/components/schemas/store.FleetConfig'
+      required:
+        - fleets
     httpapi.healthzResp:
       type: object
       properties:
@@ -2147,6 +2216,13 @@ components:
           $ref: '#/components/schemas/store.Registry'
       required:
         - registry
+    httpapi.serverResp:
+      type: object
+      properties:
+        server:
+          $ref: '#/components/schemas/store.Server'
+      required:
+        - server
     httpapi.serversResp:
       type: object
       properties:
@@ -2783,6 +2859,37 @@ components:
         - kind
         - payload
         - ts
+    store.FleetConfig:
+      type: object
+      properties:
+        active_image_ref:
+          type: string
+        active_version:
+          type:
+            - string
+            - "null"
+        buffer_ready:
+          type: integer
+        env:
+          type: string
+        max_servers:
+          type: integer
+        project:
+          type: string
+        project_id:
+          type: string
+        reap_ttl_min:
+          type: integer
+        region:
+          type: string
+      required:
+        - buffer_ready
+        - env
+        - max_servers
+        - project
+        - project_id
+        - reap_ttl_min
+        - region
     store.Match:
       type: object
       properties:

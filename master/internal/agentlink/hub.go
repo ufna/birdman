@@ -29,6 +29,7 @@ type Hub struct {
 	// so noteRegistriesWithheld is safe to call from inside Send/attach
 	// critical sections; nil until wired.
 	registriesWithheld atomic.Pointer[func()]
+	ackObserver        atomic.Pointer[func(string, string)]
 
 	mu     sync.Mutex
 	queues map[string]*nodeQueue
@@ -125,11 +126,29 @@ func (h *Hub) queue(nodeID string) *nodeQueue {
 // non-blocking (select/default on a buffered channel — hub.go, session.push)
 // so this adds no unbounded lock hold time.
 func (h *Hub) Send(nodeID string, msg *agentlinkv1.MasterMsg) string {
-	cmdID := uuid.NewString()
+	return h.send(nodeID, uuid.NewString(), msg)
+}
+
+func (h *Hub) SendDurable(nodeID, cmdID string, msg *agentlinkv1.MasterMsg) string {
+	return h.send(nodeID, cmdID, msg)
+}
+
+func (h *Hub) SetAckObserver(f func(string, string)) { h.ackObserver.Store(&f) }
+
+func (h *Hub) send(nodeID, cmdID string, msg *agentlinkv1.MasterMsg) string {
 	stampCmdID(msg, cmdID)
 
 	h.mu.Lock()
 	q := h.queue(nodeID)
+	for _, pending := range q.pending {
+		if commandID(pending) == cmdID {
+			if q.sess != nil {
+				q.sess.push(h.log, nodeID, pending)
+			}
+			h.mu.Unlock()
+			return cmdID
+		}
+	}
 	if isSetRegistries(msg) {
 		if q.sess == nil || !q.sess.trustedForRegistries() {
 			h.mu.Unlock()
@@ -150,16 +169,18 @@ func (h *Hub) Send(nodeID string, msg *agentlinkv1.MasterMsg) string {
 // Ack removes the command from the node's pending queue.
 func (h *Hub) Ack(nodeID, cmdID string) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	q, ok := h.queues[nodeID]
-	if !ok {
-		return
-	}
-	for i, m := range q.pending {
-		if commandID(m) == cmdID {
-			q.pending = append(q.pending[:i], q.pending[i+1:]...)
-			return
+	if ok {
+		for i, m := range q.pending {
+			if commandID(m) == cmdID {
+				q.pending = append(q.pending[:i], q.pending[i+1:]...)
+				break
+			}
 		}
+	}
+	h.mu.Unlock()
+	if observer := h.ackObserver.Load(); observer != nil {
+		(*observer)(nodeID, cmdID)
 	}
 }
 

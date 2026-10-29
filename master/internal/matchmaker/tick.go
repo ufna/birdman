@@ -48,6 +48,11 @@ func (mm *Matchmaker) RunOnce(ctx context.Context) error {
 
 	// Pass 1 (locked): TTL, janitor, snapshot of queued tickets per (project, env).
 	mm.mu.Lock()
+	tx, err := mm.beginLocked(ctx)
+	if err != nil {
+		mm.mu.Unlock()
+		return err
+	}
 	queued := map[projectEnv][]qt{}
 	depth := map[regionEnv]int{}
 	for id, t := range mm.tickets {
@@ -81,7 +86,15 @@ func (mm *Matchmaker) RunOnce(ctx context.Context) error {
 		mm.regionsSeen[re] = true
 		mm.m.MMQueueDepth.WithLabelValues(re.region, re.env).Set(float64(n))
 	}
+	err = mm.commitLocked(ctx, tx)
+	mm.finishLocked(tx)
 	mm.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if err = mm.st.DispatchAllocations(ctx); err != nil {
+		return err
+	}
 
 	// Pass 2 (unlocked): match per (project, env).
 	var errs []error
@@ -124,12 +137,22 @@ func (mm *Matchmaker) matchProject(ctx context.Context, project, env string, tks
 	}
 	if len(stale) > 0 {
 		mm.mu.Lock()
+		tx, err := mm.beginLocked(ctx)
+		if err != nil {
+			mm.mu.Unlock()
+			return err
+		}
 		for _, id := range stale {
 			if t, ok := mm.tickets[id]; ok {
 				mm.finalize(t, StatusUpdateRequired, nil, now)
 			}
 		}
+		err = mm.commitLocked(ctx, tx)
+		mm.finishLocked(tx)
 		mm.mu.Unlock()
+		if err != nil {
+			return err
+		}
 	}
 
 	for _, list := range byBucket {
@@ -171,9 +194,15 @@ func (mm *Matchmaker) matchBucket(ctx context.Context, project, env string, size
 		ver := verFor[region]
 		matchID := uuid.NewString()
 		// Keep cancel/revision and concurrent ticks on one side of the claim.
-		// The store call is bounded by the tick context. Durable assignment and
-		// restart recovery are a separate required step before deployment.
+		// The store call is bounded by the tick context. Its transaction also
+		// fences other processes and commits every ticket with the claim/outbox.
 		mm.mu.Lock()
+		tx, err := mm.beginLocked(ctx)
+		if err != nil {
+			mm.mu.Unlock()
+			mm.log.Error("mm: begin claim failed", "err", err)
+			return
+		}
 		valid := true
 		metadata := map[string]string{}
 		for _, g := range group {
@@ -186,16 +215,19 @@ func (mm *Matchmaker) matchBucket(ctx context.Context, project, env string, size
 			}
 		}
 		if !valid {
+			mm.finishLocked(tx)
 			mm.mu.Unlock()
 			continue
 		}
 		if len(metadata) > 16 {
+			mm.finishLocked(tx)
 			mm.mu.Unlock()
 			mm.log.Error("mm: allocation exceeds metadata ticket limit", "project", project)
 			return
 		}
-		alloc, err := mm.st.Allocate(ctx, project, env, region, &ver.VersionID, matchID, int32(groupSeats(group)), metadata)
+		alloc, err := tx.Allocate(ctx, project, env, region, ver.VersionID, matchID, int32(groupSeats(group)), metadata)
 		if errors.Is(err, store.ErrNoCapacity) {
+			mm.finishLocked(tx)
 			mm.mu.Unlock()
 			// Tickets stay queued; the warm pool catches up via reconcile and
 			// the next tick retries. Feeds the BufferEmpty alert (ops.md §1).
@@ -204,14 +236,22 @@ func (mm *Matchmaker) matchBucket(ctx context.Context, project, env string, size
 			continue
 		}
 		if err != nil {
+			mm.finishLocked(tx)
 			mm.mu.Unlock()
 			mm.log.Error("mm: allocate failed", "project", project, "region", region, "err", err)
 			return
 		}
-		if err := mm.st.RecordMatch(ctx, matchID, project, region, alloc.ServerID, ver.VersionID, env); err != nil {
-			mm.log.Error("mm: record match failed", "match_id", matchID, "err", err) // non-fatal
-		}
 		mm.deliverLocked(group, matchID, ver.VersionID, alloc)
+		err = mm.commitLocked(ctx, tx)
+		mm.finishLocked(tx)
+		if err != nil {
+			mm.mu.Unlock()
+			mm.log.Error("mm: commit assignment failed", "err", err)
+			return
+		}
+		if err = mm.st.DispatchAllocations(ctx); err != nil {
+			mm.log.Error("mm: dispatch allocation failed", "err", err)
+		}
 		mm.mu.Unlock()
 		for _, t := range group {
 			delete(pool, t.id)

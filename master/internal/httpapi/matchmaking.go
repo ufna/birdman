@@ -148,7 +148,11 @@ func (s *Server) requireTicketBinding(w http.ResponseWriter, r *http.Request, t 
 
 func (s *Server) handleGetTicket(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	t, ok := s.mm.Get(id)
+	t, ok, err := s.mm.GetContext(r.Context(), id)
+	if err != nil {
+		writeError(w, 500, "internal", "ticket state is unavailable")
+		return
+	}
 	if !ok {
 		ticketNotFound(w, id)
 		return
@@ -175,7 +179,11 @@ func (s *Server) handleGetTicket(w http.ResponseWriter, r *http.Request) {
 
 	// The (project, env) of a ticket is immutable and Wait returns the same id,
 	// so the binding checked above still holds — no re-check needed.
-	t, ok = s.mm.Wait(r.Context(), id, wait)
+	t, ok, err = s.mm.WaitContext(r.Context(), id, wait)
+	if err != nil {
+		writeError(w, 500, "internal", "ticket state is unavailable")
+		return
+	}
 	if !ok {
 		ticketNotFound(w, id)
 		return
@@ -185,7 +193,11 @@ func (s *Server) handleGetTicket(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCancelTicket(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	t, ok := s.mm.Get(id)
+	t, ok, err := s.mm.GetContext(r.Context(), id)
+	if err != nil {
+		writeError(w, 500, "internal", "ticket state is unavailable")
+		return
+	}
 	if !ok {
 		ticketNotFound(w, id)
 		return
@@ -198,7 +210,11 @@ func (s *Server) handleCancelTicket(w http.ResponseWriter, r *http.Request) {
 			"matchmaking rate limit: 5 rps per player_id")
 		return
 	}
-	t, ok = s.mm.Cancel(id)
+	t, ok, err = s.mm.CancelContext(r.Context(), id)
+	if err != nil {
+		writeError(w, 500, "internal", "ticket cancellation is unavailable")
+		return
+	}
 	if !ok {
 		ticketNotFound(w, id)
 		return

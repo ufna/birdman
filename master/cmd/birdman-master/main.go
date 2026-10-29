@@ -198,6 +198,13 @@ func run() error {
 	// Allocations notify the dedik's agent (AllocateServer → liba `allocated`,
 	// итерация 2) — wire the dispatcher before anything can allocate.
 	st.SetCommandSender(hub)
+	hub.SetAckObserver(func(nodeID, cmdID string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := st.AckAllocation(ctx, nodeID, cmdID); err != nil {
+			log.Error("allocation ACK persistence failed", "node_id", nodeID)
+		}
+	})
 
 	m := metrics.New(st, log)
 	// mTLS agentlink v1 observability (design §3): live sessions by auth kind
@@ -255,6 +262,9 @@ func run() error {
 		return err
 	}
 	mm := matchmaker.New(st, m, mmCfg, log)
+	if err := mm.Restore(ctx); err != nil {
+		return fmt.Errorf("restore matchmaking: %w", err)
+	}
 	// Backups v1 runner (internal/backup): constructed before httpapi.New so a
 	// later task can expose it through the API (manual run / status); it is
 	// started with the other background loops below (go backupRunner.Run).
@@ -310,6 +320,7 @@ func run() error {
 	// what lets the sweep stamp image_cleanup_at only for images actually gone.
 	// WithOrphanSweeper wires the deploy manager's orphan-prepull sweep (W2-реестр).
 	go reconcile.New(st, hub, log).
+		WithRuntimeVariables(cfg.GameRuntimeVariables()).
 		WithImageCleaner(imageCleaner).
 		WithOrphanSweeper(dep).
 		Run(loopCtx, time.Second)

@@ -1,10 +1,9 @@
 # Party matchmaking (local implementation)
 
-Status on 2026-10-29: the API and in-process scheduler are implemented and
-tested. **Do not deploy this branch for recoverable party traffic yet.** The
-queue, request fingerprints and assignments are still in memory. Durable
-request/assignment storage and an allocation command outbox are required before
-deployment; the CSO tracker owns that remaining work (`cso-ops-orj.4.2`).
+Status on 2026-10-29: the party API, scheduler, encrypted PostgreSQL tickets,
+atomic assignments and allocation command outbox are implemented and tested.
+The CSO tracker owns deployment and end-to-end acceptance. Identity and game
+admission remain application responsibilities.
 
 ## API and ownership
 
@@ -42,8 +41,9 @@ original ticket, including a cancelled or matched result. Changed content or
 a stale party revision returns `409 request_conflict`. An overlap with a queued
 player cancels the entire previous party. A higher party revision cancels the
 previous queued ticket even if the new roster is disjoint. These guarantees
-currently last only for the lifetime of the master and retained ticket (at
-least five minutes after terminal status); they do not provide crash recovery.
+survive a master restart and the in-memory cache's terminal retention. Original
+request IDs remain in SQL, so an old retry returns its original terminal result
+instead of allocating another server. Queued state also survives a restart.
 
 ## Selection and policies
 
@@ -89,13 +89,44 @@ server/version IDs and all ticket references, without other parties' rosters.
 Legacy optional join tokens remain for single-player requests; the application
 issues personal admission and reconnect tickets for party members.
 
-A queue mutex fences validation, server claim and assignment publication.
+A queue mutex and PostgreSQL transaction advisory lock fence validation, server
+claim and assignment publication across process instances.
 Cancel/revision wins before this fence or receives the completed assignment
 after it; concurrent ticks cannot allocate the same ticket twice. Store calls
 in the background tick have its ten-second context deadline. This deliberately
-serializes queue mutations during allocation; it is not multi-master fencing.
+serializes queue mutations during allocation. Each ticket body and allocation
+metadata envelope uses the existing master at-rest encryption key, bound to
+its row ID with authenticated encryption. Preserve that key with backups.
 
-The upstream allocator commits a server claim before notifying its in-memory
-command hub. A process crash or an ambiguous database response in that window
-still needs durable recovery. Reconnect, admission verification and game-server
-callbacks belong to the application and are not implemented by this patch.
+The matchmaking transaction commits the server claim, match row, all selected
+ticket results and private command metadata together. Failed assignment writes
+roll back the claim. After an ambiguous commit response, retries reload SQL.
+The command outbox retries a stable `cmd_id` until an authenticated agent ACKs.
+Every new authenticated agent Hello re-arms active allocations as well: an ACK
+can precede delivery to the game, and an agent restart loses its cached Unix
+socket frame. Replaying the same match and payload repairs that window without
+claiming another slot. The older external `POST /v1/allocate` path is unchanged.
+
+`GET /v1/servers/{id}` exposes authoritative state without the historical list's
+1000-row limit. Readonly project/env bindings return the same 404 for foreign
+and missing IDs. Applications can distinguish a draining live server from a
+failed or reaped one without invalidating a valid long-running match.
+
+## Portable game configuration
+
+Nonsecret application settings are supplied at runtime, separately from the
+OCI image. These values are scoped to the named project/environment and passed
+through the existing agent command; `BIRDMAN_*` variables are reserved:
+
+```yaml
+game_runtime:
+  - project: game
+    env: dev
+    variables:
+      CSO_LOBBY_URL: https://lobby.example
+      CSO_ENVIRONMENT: dev
+```
+
+Admission secrets belong in encrypted allocation metadata, not in this public
+configuration. Reconnect, admission verification and game-server callbacks are
+implemented by the application.

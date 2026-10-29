@@ -39,7 +39,8 @@ type Store struct {
 	// codec encrypts/decrypts the reversible at-rest secrets (registries.token,
 	// internal_ca.key_pem). Required — every Open supplies one (main via the
 	// loaded box key, testdb via a random per-database key). The read/write
-	// paths that touch those two columns go through it; nothing else does.
+	// paths for these columns and durable matchmaking ticket/allocation
+	// payloads all go through it.
 	codec  *secrets.Codec
 	sender CommandSender // nil until SetCommandSender (some tests)
 

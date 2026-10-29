@@ -5,7 +5,9 @@ package config
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -59,6 +61,22 @@ type QueuePolicy struct {
 	PartialWaitS     int    `yaml:"partial_wait_s"`
 	MaxRTTms         int32  `yaml:"max_rtt_ms"`
 	ExpandedMaxRTTms int32  `yaml:"expanded_max_rtt_ms"`
+}
+
+// GameRuntime carries nonsecret application configuration independently from
+// the OCI image. BIRDMAN_* remains owned by the runtime and cannot be replaced.
+type GameRuntime struct {
+	Project   string            `yaml:"project"`
+	Env       string            `yaml:"env"`
+	Variables map[string]string `yaml:"variables"`
+}
+
+func (c Config) GameRuntimeVariables() map[string]map[string]string {
+	out := map[string]map[string]string{}
+	for _, entry := range c.GameRuntime {
+		out[entry.Project+"/"+entry.Env] = entry.Variables
+	}
+	return out
 }
 
 // CompatOverride is one compat.overrides row (docs/specs/ops.md §3):
@@ -137,11 +155,12 @@ type Config struct {
 	// post-release default and transition mode) or "mtls" (Session requires a
 	// verified client cert; token-only Hello → PermissionDenied, though
 	// Enroll-by-token stays possible). Env override BIRDMAN_AGENTLINK_AUTH.
-	AgentlinkAuth string      `yaml:"agentlink_auth"`
-	Matchmaking   Matchmaking `yaml:"matchmaking"`
-	Compat        Compat      `yaml:"compat"`
-	Metrics       Metrics     `yaml:"metrics"`
-	Alerts        Alerts      `yaml:"alerts"`
+	AgentlinkAuth string        `yaml:"agentlink_auth"`
+	Matchmaking   Matchmaking   `yaml:"matchmaking"`
+	GameRuntime   []GameRuntime `yaml:"game_runtime"`
+	Compat        Compat        `yaml:"compat"`
+	Metrics       Metrics       `yaml:"metrics"`
+	Alerts        Alerts        `yaml:"alerts"`
 	// StatsRollupInterval is how often the rollup-maintenance job
 	// (internal/statsrollup, «Статистика v1» T9) recomputes the trailing
 	// two UTC days of match_stats_daily/match_ccu_daily. A human-readable
@@ -307,6 +326,19 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.Backups.PgDumpPath == "" {
 		cfg.Backups.PgDumpPath = "pg_dump"
+	}
+	seenRuntime := map[string]bool{}
+	for _, entry := range cfg.GameRuntime {
+		key := entry.Project + "/" + entry.Env
+		if entry.Project == "" || entry.Env == "" || seenRuntime[key] || len(entry.Variables) > 32 {
+			return cfg, fmt.Errorf("invalid or duplicate game_runtime project/env")
+		}
+		seenRuntime[key] = true
+		for name, value := range entry.Variables {
+			if !regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`).MatchString(name) || strings.HasPrefix(name, "BIRDMAN_") || strings.ContainsRune(value, '\x00') || len(value) > 2048 {
+				return cfg, fmt.Errorf("invalid or reserved game_runtime variable name")
+			}
+		}
 	}
 	return cfg, nil
 }

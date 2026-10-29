@@ -76,7 +76,20 @@ type Reconciler struct {
 
 	// lastRetention throttles the ~60s retention subtick (§6а M5). Written only
 	// from RunOnce, which the loop serialises — no lock needed.
-	lastRetention time.Time
+	lastRetention    time.Time
+	runtimeVariables map[string]map[string]string
+}
+
+func (r *Reconciler) WithRuntimeVariables(variables map[string]map[string]string) *Reconciler {
+	r.runtimeVariables = map[string]map[string]string{}
+	for key, values := range variables {
+		copy := map[string]string{}
+		for name, value := range values {
+			copy[name] = value
+		}
+		r.runtimeVariables[key] = copy
+	}
+	return r
 }
 
 type pairKey struct{ versionID, nodeID string }
@@ -273,6 +286,11 @@ func (r *Reconciler) reconcileFleet(ctx context.Context, f store.FleetConfig) er
 		return nil // another master holds the fleet lock
 	}
 	for _, p := range starts {
+		env := map[string]string{}
+		for key, value := range r.runtimeVariables[f.Project+"/"+f.Env] {
+			env[key] = value
+		}
+		env["BIRDMAN_ENV"], env["BIRDMAN_PROJECT"] = f.Env, f.Project
 		cmdID := r.sender.Send(p.NodeID, &agentlinkv1.MasterMsg{
 			Msg: &agentlinkv1.MasterMsg_Start{Start: &agentlinkv1.StartServer{
 				ServerId: p.ServerID,
@@ -286,7 +304,7 @@ func (r *Reconciler) reconcileFleet(ctx context.Context, f store.FleetConfig) er
 				// запускается, то есть чеканится в момент старта — инвариант I6:
 				// перевод НОДЫ в другое окружение (PATCH /v1/nodes/{id}) историю
 				// уже запущенных дедиков не переписывает.
-				Env:  map[string]string{"BIRDMAN_ENV": f.Env, "BIRDMAN_PROJECT": f.Project},
+				Env:  env,
 				Port: 0, // agent picks from its pool
 			}},
 		})

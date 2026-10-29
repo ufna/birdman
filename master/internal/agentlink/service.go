@@ -148,6 +148,12 @@ func (s *Service) Session(stream agentlinkv1.AgentLink_SessionServer) error {
 	// (docs/superpowers/specs/2026-07-09-registries-design.md §2).
 	sess := s.attachWithFreshRegistries(ctx, node.ID, certAuth, loopback)
 	defer s.hub.detach(node.ID, sess)
+	if err := s.st.RearmAllocations(ctx, node.ID); err != nil {
+		return status.Error(codes.Internal, "allocation recovery failed")
+	}
+	if err := s.st.DispatchAllocations(ctx); err != nil {
+		return status.Error(codes.Internal, "allocation delivery recovery failed")
+	}
 
 	recvErr := make(chan error, 1)
 	go func() { recvErr <- s.readLoop(ctx, stream, node.ID) }()

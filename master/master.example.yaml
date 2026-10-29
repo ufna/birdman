@@ -145,6 +145,13 @@ matchmaking:
     secret: ""          # НЕ класть секрет в файл — env BIRDMAN_MM_JOIN_SECRET
 
 # Совместимость клиент↔сервер (docs/specs/ops.md §3).
+game_runtime: []      # nonsecret per-project/env game settings, separate from OCI
+# - project: game
+#   env: dev
+#   variables:
+#     CSO_LOBBY_URL: https://lobby.example
+#     CSO_ENVIRONMENT: dev
+
 compat:
   default: "major.minor"  # единственное поддерживаемое правило (можно опустить)
   overrides: []           # окна миграции, аддитивно к default:
