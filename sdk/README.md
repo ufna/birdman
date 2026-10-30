@@ -105,3 +105,12 @@ end-to-end (`ready → allocated → match_start → players → match_end → r
 0 потерянных датаграмм. Это ровно тот путь, которым поедет UE-игра. Значит: чтобы
 поставить игру на платформу, достаточно собрать её сервер с этим SDK в
 Docker-образ и зарегистрировать версию — платформенная сторона доказана.
+
+## Cumulative allocation callbacks
+
+Backfill extends an existing match. `on_allocated` may therefore fire again for
+its unchanged `match_id`, with a larger expected roster and cumulative metadata.
+The SDK suppresses identical snapshots and delayed smaller rosters in both
+callback modes. Changed same-size metadata is delivered so game admission can
+reject conflicting keys or membership. Games must merge authorized additions
+without another match start, map travel or reset of current players.

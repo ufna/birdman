@@ -52,9 +52,9 @@ enum class MatchResult {
 };
 
 // AllocatedEvent: the master allocated a match to this server
-// (agent frame `allocated`). Delivered exactly once per distinct match_id:
-// the agent replays the last allocated frame on every reconnect, the SDK
-// deduplicates replays by match_id.
+// (agent frame `allocated`). Backfill delivers changed cumulative snapshots
+// for the same match_id. Identical replays and smaller stale snapshots are
+// suppressed; changed same-size metadata reaches the game for validation.
 struct AllocatedEvent {
   std::string match_id;
   int players_expected = 0;  // 0 = unknown (external matchmaker via REST)
