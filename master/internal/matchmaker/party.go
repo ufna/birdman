@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -23,17 +24,21 @@ type Member struct {
 type QueuePolicy struct {
 	Project          string
 	Env              string
+	GameMode         string
+	Backfill         bool
 	MinimumSize      int
 	PartialWait      time.Duration
 	MaxRTTms         int32
 	ExpandedMaxRTTms int32
 }
 
+var gameModeID = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
+
 func ValidatePolicies(policies []QueuePolicy) error {
 	seen := map[string]bool{}
 	for _, p := range policies {
-		key := scopeKey(p.Project, p.Env, "")
-		if p.Project == "" || p.Env == "" || seen[key] || p.MinimumSize < 1 || p.PartialWait < 0 || p.MaxRTTms < 0 || p.ExpandedMaxRTTms < 0 || (p.ExpandedMaxRTTms > 0 && (p.MaxRTTms == 0 || p.ExpandedMaxRTTms < p.MaxRTTms)) {
+		key := scopeKey(p.Project, p.Env, p.GameMode)
+		if p.Project == "" || p.Env == "" || (p.GameMode != "" && !gameModeID.MatchString(p.GameMode)) || seen[key] || p.MinimumSize < 1 || p.PartialWait < 0 || p.MaxRTTms < 0 || p.ExpandedMaxRTTms < 0 || (p.ExpandedMaxRTTms > 0 && (p.MaxRTTms == 0 || p.ExpandedMaxRTTms < p.MaxRTTms)) {
 			return fmt.Errorf("invalid or duplicate matchmaking policy for %q/%q", p.Project, p.Env)
 		}
 		seen[key] = true
@@ -41,14 +46,20 @@ func ValidatePolicies(policies []QueuePolicy) error {
 	return nil
 }
 
-func (mm *Matchmaker) policy(project, env string, size int) QueuePolicy {
+func (mm *Matchmaker) policy(project, env, gameMode string, size int) QueuePolicy {
+	selected := QueuePolicy{MinimumSize: size}
 	for _, p := range mm.cfg.Policies {
 		if p.Project == project && p.Env == env {
 			p.MinimumSize = min(size, max(1, p.MinimumSize))
-			return p
+			if p.GameMode == gameMode {
+				return p
+			}
+			if p.GameMode == "" {
+				selected = p
+			}
 		}
 	}
-	return QueuePolicy{MinimumSize: size}
+	return selected
 }
 
 func validPlayer(id string) bool {

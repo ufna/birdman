@@ -64,7 +64,8 @@ type Server struct {
 	ev   Events
 	logf func(format string, args ...any)
 
-	wmu sync.Mutex // serializes frame writes to the current connection
+	wmu          sync.Mutex // serializes frame writes to the current connection
+	allocationMu sync.Mutex // cumulative allocation snapshots never regress on delayed retries
 
 	mu            sync.Mutex
 	ln            net.Listener
@@ -162,6 +163,8 @@ func (s *Server) Close() error {
 // agent neither reads nor invents it, and the replay carries it because the
 // frame itself is what is remembered.
 func (s *Server) SendAllocated(matchID string, playersExpected int, metadata map[string]string) error {
+	s.allocationMu.Lock()
+	defer s.allocationMu.Unlock()
 	data := map[string]any{
 		"match_id":         matchID,
 		"players_expected": playersExpected,
@@ -171,6 +174,15 @@ func (s *Server) SendAllocated(matchID string, playersExpected int, metadata map
 	}
 	f := &outFrame{V: Version, Type: "allocated", Data: data}
 	s.mu.Lock()
+	if s.lastAllocated != nil {
+		last := s.lastAllocated.Data.(map[string]any)
+		if last["match_id"] == matchID && playersExpected < last["players_expected"].(int) {
+			// An older command may still be in flight after a backfill ACK.
+			// Keep the newest roster for both live delivery and SDK reconnect.
+			s.mu.Unlock()
+			return nil
+		}
+	}
 	s.lastAllocated = f
 	conn := s.conn
 	s.mu.Unlock()

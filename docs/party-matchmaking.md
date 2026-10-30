@@ -76,10 +76,20 @@ are preferred; a partial group must include the oldest eligible ticket after
 its wait and meet the minimum size. RTT expansion takes effect after
 `widen_after_s`; it never exceeds `expanded_max_rtt_ms`. Zero RTT limits disable
 that bound. A zero partial wait disables partial starts. Policies are validated
-at master startup; duplicate project/env entries are rejected. The ordinary
+at master startup; duplicate project/env/mode entries are rejected. The ordinary
 ticket TTL still expires queued tickets.
 
 ## Allocation and concurrency
+
+Requests may include `game_mode`, a lowercase ID matching
+`[a-z][a-z0-9_-]{0,31}`. It is a compatibility dimension independent of the
+client build bucket and region. Tickets and results preserve it across restart;
+allocation metadata carries the same `game_mode` to the game. A policy can name
+`game_mode` to scope partial starts and RTT limits to one mode; an omitted mode
+is the project/env fallback. Legacy requests with no mode keep their original
+queue bucket and durable request fingerprints. Explicit modes never mix with
+each other or with that legacy bucket. The application backend owns defaults
+and the list of enabled game modes.
 
 The `allocated` SDK message receives the actual player count and a metadata
 entry `ticket_<ticket UUID>` for every nonempty allocation payload (at most
@@ -111,6 +121,28 @@ claiming another slot. The older external `POST /v1/allocate` path is unchanged.
 1000-row limit. Readonly project/env bindings return the same 404 for foreign
 and missing IDs. Applications can distinguish a draining live server from a
 failed or reaped one without invalidating a valid long-running match.
+
+## Opt-in live backfill
+
+A policy with `backfill: true` first fills unused seats of the oldest compatible
+live match before claiming a warm server. It still checks game mode, preferred
+compatible version, environment, measured region/RTT and whole-ticket size.
+Draining, terminal, disabled-version and stale-node matches cannot admit new
+players. The original match capacity is fixed at creation; a player-count
+heartbeat does not free a reserved seat. Every admitted seat remains reserved
+for the match lifetime, even after disconnect or explicit leave. A fresh ticket
+containing a previous member cannot re-enter that same match; reconnect uses the
+application's original admission instead. Legacy/manual matches are ineligible.
+
+Capacity, hashes of scoped opaque player IDs, ticket assignment and a cumulative
+encrypted allocation snapshot commit in the same fenced transaction. Every
+roster extension gets a new command ID, so a delayed ACK cannot acknowledge a
+newer snapshot. The agent ignores a lower-count replay for the same match and
+caches the latest cumulative roster for SDK reconnect. Games must merge new
+members idempotently, preserve existing player state, reject changed secrets,
+and avoid another match-start or map travel for a backfill. The CSO game sends a
+separate ready callback for each new ticket before that ticket's admission can
+be issued. Backfill does not implement reconnect or application identity.
 
 ## Portable game configuration
 

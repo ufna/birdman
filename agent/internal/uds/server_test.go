@@ -277,6 +277,21 @@ func TestReconnectReplaysAllocatedAndDrain(t *testing.T) {
 	}
 }
 
+func TestBackfillStaleAllocationCannotRegressSDKReplay(t *testing.T) {
+	ev, _ := recorder()
+	s, path := listen(t, ev)
+	// No SDK is connected yet; backfill and a delayed first command arrive.
+	_ = s.SendAllocated("m-backfill", 2, map[string]string{"ticket_a": "fixture-a", "ticket_b": "fixture-b"})
+	if err := s.SendAllocated("m-backfill", 1, map[string]string{"ticket_a": "fixture-a"}); err != nil {
+		t.Fatal(err)
+	}
+	liba := dialLiba(t, path)
+	d := liba.expect("allocated")
+	if d["players_expected"].(float64) != 2 || len(d["metadata"].(map[string]any)) != 2 {
+		t.Fatal("stale snapshot replaced cumulative admission")
+	}
+}
+
 // Мусор, чужой мажор envelope и неизвестные типы игнорируются (forward-compat).
 func TestIgnoresGarbageAndUnknown(t *testing.T) {
 	ev, ch := recorder()

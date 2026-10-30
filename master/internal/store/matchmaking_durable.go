@@ -103,7 +103,7 @@ func (t *MatchmakingTx) Save(ctx context.Context, records []TicketRecord) error 
 	return nil
 }
 
-func (t *MatchmakingTx) Allocate(ctx context.Context, project, env, region, versionID, matchID string, players int32, metadata map[string]string) (Allocation, error) {
+func (t *MatchmakingTx) Allocate(ctx context.Context, project, env, region, versionID, matchID, mode string, players, capacity int32, metadata map[string]string, playerKeys []string) (Allocation, error) {
 	var projectID string
 	if err := t.tx.QueryRow(ctx, `select id::text from projects where slug=$1`, project).Scan(&projectID); err != nil {
 		return Allocation{}, err
@@ -121,20 +121,30 @@ func (t *MatchmakingTx) Allocate(ctx context.Context, project, env, region, vers
 	if err = t.tx.QueryRow(ctx, `select host(public_ip) from nodes where id=$1::uuid`, nodeID).Scan(&a.Host); err != nil {
 		return Allocation{}, err
 	}
-	if _, err = t.tx.Exec(ctx, `insert into matches(id,project_id,server_id,version_id,region,env) values($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6) on conflict(id) do nothing`, matchID, projectID, serverID, versionID, region, env); err != nil {
+	if _, err = t.tx.Exec(ctx, `insert into matches(id,project_id,server_id,version_id,region,env,game_mode,reserved_size,max_size) values($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,$7,$8,$9)`, matchID, projectID, serverID, versionID, region, env, mode, players, capacity); err != nil {
 		return Allocation{}, err
 	}
+	if err = t.saveRoster(ctx, matchID, playerKeys); err != nil {
+		return Allocation{}, err
+	}
+	return a, t.queueAllocation(ctx, nodeID, serverID, matchID, players, metadata)
+}
+
+func (t *MatchmakingTx) queueAllocation(ctx context.Context, nodeID, serverID, matchID string, players int32, metadata map[string]string) error {
 	cmdID := uuid.NewString()
 	raw, err := json.Marshal(metadata)
 	if err != nil {
-		return Allocation{}, err
+		return err
 	}
 	envelope, err := t.st.codec.Encrypt(raw, "allocation_outbox.metadata:"+cmdID)
 	if err != nil {
-		return Allocation{}, err
+		return err
 	}
-	_, err = t.tx.Exec(ctx, `insert into allocation_outbox(cmd_id,node_id,server_id,match_id,players_expected,metadata) values($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6)`, cmdID, nodeID, serverID, matchID, players, envelope)
-	return a, err
+	// One cumulative snapshot per server. A new command ID fences old ACKs;
+	// stale in-flight envelopes cannot remove members from the game's roster.
+	_, err = t.tx.Exec(ctx, `insert into allocation_outbox(cmd_id,node_id,server_id,match_id,players_expected,metadata) values($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6)
+	 on conflict(server_id) do update set cmd_id=excluded.cmd_id,match_id=excluded.match_id,players_expected=excluded.players_expected,metadata=excluded.metadata,last_sent_at=null,acked_at=null`, cmdID, nodeID, serverID, matchID, players, envelope)
+	return err
 }
 
 type durableCommandSender interface {

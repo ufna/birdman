@@ -28,6 +28,7 @@ type submitTicketRequest struct {
 	Env               string                  `json:"env,omitempty"`
 	PlayerID          string                  `json:"player_id"`
 	ClientVersion     string                  `json:"client_version"`
+	GameMode          string                  `json:"game_mode,omitempty"`
 	Regions           []matchmaker.RegionPing `json:"regions"`
 	Members           []matchmaker.Member     `json:"members,omitempty"`
 	PartyID           string                  `json:"party_id,omitempty"`
@@ -85,6 +86,7 @@ func (s *Server) handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 		Env:           env,
 		PlayerID:      req.PlayerID,
 		ClientVersion: req.ClientVersion,
+		GameMode:      req.GameMode,
 		Regions:       req.Regions,
 		Members:       req.Members, PartyID: req.PartyID, PartyRevision: req.PartyRevision,
 		ClientRequestID: req.ClientRequestID, AllocationPayload: req.AllocationPayload,

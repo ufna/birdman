@@ -426,7 +426,7 @@ func matchmakerConfig(cfg config.Config, log *slog.Logger) (matchmaker.Config, e
 	}
 	for _, p := range cfg.Matchmaking.Policies {
 		mc.Policies = append(mc.Policies, matchmaker.QueuePolicy{
-			Project: p.Project, Env: p.Env, MinimumSize: p.MinimumSize,
+			Project: p.Project, Env: p.Env, GameMode: p.GameMode, Backfill: p.Backfill, MinimumSize: p.MinimumSize,
 			PartialWait: time.Duration(p.PartialWaitS) * time.Second,
 			MaxRTTms:    p.MaxRTTms, ExpandedMaxRTTms: p.ExpandedMaxRTTms,
 		})

@@ -14,15 +14,16 @@ import (
 // qt is a queued-ticket snapshot used for unlocked candidate selection.
 // Server claim and assignment publication revalidate it under the queue lock.
 type qt struct {
-	id      string
-	player  string
-	bucket  string
-	version string // client_version (compat checks against candidates)
-	created time.Time
-	regions []RegionPing
-	players int
-	payload string
-	party   bool
+	id       string
+	player   string
+	bucket   string
+	gameMode string
+	version  string // client_version (compat checks against candidates)
+	created  time.Time
+	regions  []RegionPing
+	players  int
+	payload  string
+	party    bool
 }
 
 // projectEnv keys the per-tick match pass: tickets are grouped and candidates
@@ -64,7 +65,8 @@ func (mm *Matchmaker) RunOnce(ctx context.Context) error {
 			queued[pe] = append(queued[pe], qt{
 				id: t.id, player: t.playerID, bucket: t.bucket,
 				version: t.clientVersion, created: t.createdAt, regions: t.regions,
-				players: max(1, len(t.members)), payload: t.payload, party: len(t.members) > 0,
+				gameMode: t.gameMode,
+				players:  max(1, len(t.members)), payload: t.payload, party: len(t.members) > 0,
 			})
 			depth[regionEnv{t.regions[0].Region, t.env}]++ // depth by the player's best (region, env)
 		case now.Sub(t.terminalAt) > mm.retention():
@@ -126,14 +128,16 @@ func (mm *Matchmaker) matchProject(ctx context.Context, project, env string, tks
 	// no candidates at all the fleet is not set up yet — keep waiting (TTL).
 	// Compatibility is identical inside a bucket (BucketOf), so it is
 	// resolved once per bucket.
-	byBucket := map[string][]qt{}
+	type modeBucket struct{ version, gameMode string }
+	byBucket := map[modeBucket][]qt{}
 	var stale []string
 	for _, t := range tks {
 		if len(candidates) > 0 && !mm.compatibleWithAny(t.version, candidates) {
 			stale = append(stale, t.id)
 			continue
 		}
-		byBucket[t.bucket] = append(byBucket[t.bucket], t)
+		key := modeBucket{t.bucket, t.gameMode}
+		byBucket[key] = append(byBucket[key], t)
 	}
 	if len(stale) > 0 {
 		mm.mu.Lock()
@@ -184,10 +188,17 @@ func (mm *Matchmaker) matchBucket(ctx context.Context, project, env string, size
 	for _, t := range list {
 		pool[t.id] = t
 	}
+	policy := mm.policy(project, env, list[0].gameMode, size)
+	if policy.Backfill {
+		if err := mm.backfill(ctx, project, env, list[0].gameMode, pool, verFor, now, policy); err != nil {
+			mm.log.Error("mm: backfill failed", "project", project, "err", err)
+			return
+		}
+	}
 	exhausted := map[string]bool{} // regions that answered no_capacity this tick
 
 	for {
-		region, group := mm.bestGroup(pool, size, verFor, exhausted, now, mm.policy(project, env, size))
+		region, group := mm.bestGroup(pool, size, verFor, exhausted, now, policy)
 		if region == "" {
 			return
 		}
@@ -205,6 +216,9 @@ func (mm *Matchmaker) matchBucket(ctx context.Context, project, env string, size
 		}
 		valid := true
 		metadata := map[string]string{}
+		if list[0].gameMode != "" {
+			metadata["game_mode"] = list[0].gameMode
+		}
 		for _, g := range group {
 			if t := mm.tickets[g.id]; t == nil || t.status != StatusQueued {
 				delete(pool, g.id)
@@ -225,7 +239,7 @@ func (mm *Matchmaker) matchBucket(ctx context.Context, project, env string, size
 			mm.log.Error("mm: allocation exceeds metadata ticket limit", "project", project)
 			return
 		}
-		alloc, err := tx.Allocate(ctx, project, env, region, ver.VersionID, matchID, int32(groupSeats(group)), metadata)
+		alloc, err := tx.Allocate(ctx, project, env, region, ver.VersionID, matchID, list[0].gameMode, int32(groupSeats(group)), int32(size), metadata, mm.groupPlayerKeys(group))
 		if errors.Is(err, store.ErrNoCapacity) {
 			mm.finishLocked(tx)
 			mm.mu.Unlock()
@@ -368,7 +382,7 @@ func (mm *Matchmaker) deliverLocked(group []qt, matchID, versionID string, alloc
 				"ticket_id", g.id, "match_id", matchID)
 			continue
 		}
-		res := &Result{Host: alloc.Host, Port: alloc.Port, MatchID: matchID, ServerID: alloc.ServerID, VersionID: versionID, TicketIDs: refs}
+		res := &Result{Host: alloc.Host, Port: alloc.Port, MatchID: matchID, ServerID: alloc.ServerID, VersionID: versionID, GameMode: t.gameMode, TicketIDs: refs}
 		if mm.cfg.JoinTokenEnabled && len(t.members) == 0 {
 			res.JoinToken = GenerateJoinToken(mm.cfg.JoinTokenSecret,
 				matchID, t.playerID, now.Add(mm.cfg.JoinTokenTTL))

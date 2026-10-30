@@ -22,10 +22,11 @@ type persistedTicket struct {
 	Status                                            string
 	Match                                             *Result
 	TerminalAt                                        time.Time
+	GameMode                                          string `json:",omitempty"`
 }
 
 func record(t *ticket) (store.TicketRecord, error) {
-	p := persistedTicket{t.id, t.project, t.env, t.playerID, t.clientVersion, t.bucket, t.regions, t.createdAt, t.members, t.partyID, t.partyRevision, t.requestID, t.fingerprint, t.payload, t.status, t.match, t.terminalAt}
+	p := persistedTicket{t.id, t.project, t.env, t.playerID, t.clientVersion, t.bucket, t.regions, t.createdAt, t.members, t.partyID, t.partyRevision, t.requestID, t.fingerprint, t.payload, t.status, t.match, t.terminalAt, t.gameMode}
 	b, err := json.Marshal(p)
 	return store.TicketRecord{ID: t.id, Project: t.project, Env: t.env, RequestID: t.requestID, PartyID: t.partyID, PartyRevision: t.partyRevision, Status: t.status, CreatedAt: t.createdAt, Body: b}, err
 }
@@ -46,7 +47,7 @@ func (mm *Matchmaker) merge(records []store.TicketRecord) error {
 		} else if p.Status != StatusQueued {
 			close(done)
 		}
-		mm.tickets[p.ID] = &ticket{id: p.ID, project: p.Project, env: p.Env, playerID: p.PlayerID, clientVersion: p.ClientVersion, bucket: p.Bucket, regions: p.Regions, createdAt: p.CreatedAt, members: p.Members, partyID: p.PartyID, partyRevision: p.PartyRevision, requestID: p.RequestID, fingerprint: p.Fingerprint, payload: p.Payload, status: p.Status, match: p.Match, terminalAt: p.TerminalAt, done: done}
+		mm.tickets[p.ID] = &ticket{id: p.ID, project: p.Project, env: p.Env, playerID: p.PlayerID, clientVersion: p.ClientVersion, gameMode: p.GameMode, bucket: p.Bucket, regions: p.Regions, createdAt: p.CreatedAt, members: p.Members, partyID: p.PartyID, partyRevision: p.PartyRevision, requestID: p.RequestID, fingerprint: p.Fingerprint, payload: p.Payload, status: p.Status, match: p.Match, terminalAt: p.TerminalAt, done: done}
 	}
 	mm.byPlayer = map[string]*ticket{}
 	mm.byParty = map[string]*ticket{}

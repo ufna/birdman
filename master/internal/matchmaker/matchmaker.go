@@ -49,6 +49,7 @@ type Result struct {
 	JoinToken string   `json:"join_token,omitempty"`
 	ServerID  string   `json:"server_id,omitempty"`
 	VersionID string   `json:"version_id,omitempty"`
+	GameMode  string   `json:"game_mode,omitempty"`
 	TicketIDs []string `json:"ticket_ids,omitempty"`
 }
 
@@ -59,6 +60,7 @@ type Ticket struct {
 	Env             string       `json:"env"`
 	PlayerID        string       `json:"player_id"`
 	ClientVersion   string       `json:"client_version"`
+	GameMode        string       `json:"game_mode,omitempty"`
 	Regions         []RegionPing `json:"regions"`
 	Status          string       `json:"status"`
 	CreatedAt       time.Time    `json:"created_at"`
@@ -112,6 +114,7 @@ type ticket struct {
 	env           string
 	playerID      string
 	clientVersion string
+	gameMode      string
 	bucket        string // MajorMinor(clientVersion)
 	regions       []RegionPing
 	createdAt     time.Time
@@ -156,7 +159,8 @@ func (t *ticket) snapshot() Ticket {
 	return Ticket{
 		ID: t.id, Project: t.project, Env: t.env, PlayerID: t.playerID,
 		ClientVersion: t.clientVersion, Regions: regions,
-		Status: t.status, CreatedAt: t.createdAt, Match: match,
+		GameMode: t.gameMode,
+		Status:   t.status, CreatedAt: t.createdAt, Match: match,
 		Members: cloneMembers(t.members), PartyID: t.partyID, PartyRevision: t.partyRevision, ClientRequestID: t.requestID,
 	}
 }
@@ -217,6 +221,9 @@ type SubmitParams struct {
 	PartyRevision     int64
 	ClientRequestID   string
 	AllocationPayload string
+	// Omit the zero value from fingerprints so old durable request IDs still
+	// match byte-for-byte after upgrading a master with legacy queued tickets.
+	GameMode string `json:",omitempty"`
 }
 
 // Submit validates and enqueues a ticket. Anti-dup (master.md §4, env v1 §3 M6):
@@ -225,6 +232,9 @@ type SubmitParams struct {
 // deprecated in the multi-version window, per compat rules) is rejected as
 // update_required right away (the ticket is still stored for GET).
 func (mm *Matchmaker) Submit(ctx context.Context, p SubmitParams) (Ticket, error) {
+	if p.GameMode != "" && !gameModeID.MatchString(p.GameMode) {
+		return Ticket{}, fmt.Errorf("%w: invalid game_mode", ErrInvalid)
+	}
 	members, regions, err := normalizeParty(p)
 	if err != nil {
 		return Ticket{}, err
@@ -318,6 +328,7 @@ func (mm *Matchmaker) Submit(ctx context.Context, p SubmitParams) (Ticket, error
 	t := &ticket{
 		id: uuid.NewString(), project: project, env: env, playerID: p.PlayerID,
 		clientVersion: p.ClientVersion, bucket: bucket, regions: regions,
+		gameMode:  p.GameMode,
 		createdAt: now, status: status, done: make(chan struct{}),
 		members: members, partyID: p.PartyID, partyRevision: p.PartyRevision,
 		requestID: p.ClientRequestID, fingerprint: fingerprint, payload: p.AllocationPayload,

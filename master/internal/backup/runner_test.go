@@ -60,6 +60,17 @@ esac
 	return p
 }
 
+// Match the actual test server, including an externally supplied PG17 DSN.
+// The explicit mismatch test still supplies major 99.
+func databaseMajor(t *testing.T, st *store.Store) int {
+	t.Helper()
+	var number int
+	if err := st.Pool.QueryRow(t.Context(), "select current_setting('server_version_num')::int").Scan(&number); err != nil {
+		t.Fatal(err)
+	}
+	return number / 10000
+}
+
 func newTestRunner(t *testing.T, st *store.Store, mode string, versionMajor int) (*Runner, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -71,7 +82,7 @@ func newTestRunner(t *testing.T, st *store.Store, mode string, versionMajor int)
 func TestRunOnceOKAndRotation(t *testing.T) {
 	st := testdb.New(t)
 	ctx := context.Background()
-	r, dir := newTestRunner(t, st, "ok", 16) // testdb = postgres:16
+	r, dir := newTestRunner(t, st, "ok", databaseMajor(t, st))
 
 	// Предзаполнить каталог старыми дампами (имитация снесённого таймера) —
 	// формат имён тот же, ротация должна их подхватить.
@@ -117,7 +128,7 @@ func TestRunOnceKeepsPasswordOutOfArgv(t *testing.T) {
 	st := testdb.New(t)
 	ctx := context.Background()
 	dir := t.TempDir()
-	pgDump := fakePgDump(t, dir, "ok", 16) // testdb = postgres:16
+	pgDump := fakePgDump(t, dir, "ok", databaseMajor(t, st))
 	const dsn = "postgres://postgres:sekret-pw@127.0.0.1:5432/x?sslmode=disable"
 	r := New(st, dsn, config.Backups{Dir: dir, PgDumpPath: pgDump}, testLog())
 
@@ -144,7 +155,7 @@ func TestRunOnceKeepsPasswordOutOfArgv(t *testing.T) {
 func TestRunOnceDumpFailure(t *testing.T) {
 	st := testdb.New(t)
 	ctx := context.Background()
-	r, dir := newTestRunner(t, st, "fail", 16)
+	r, dir := newTestRunner(t, st, "fail", databaseMajor(t, st))
 
 	if err := r.runOnce(ctx, "scheduled"); err == nil {
 		t.Fatal("runOnce must return the dump error")
@@ -193,7 +204,7 @@ func TestRunOnceVersionMismatch(t *testing.T) {
 // залипает в 'running'.
 func TestRunOnceRecordsFailureOnDeadContext(t *testing.T) {
 	st := testdb.New(t)
-	r, _ := newTestRunner(t, st, "ok", 16)
+	r, _ := newTestRunner(t, st, "ok", databaseMajor(t, st))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // прогон стартует с уже мёртвым ctx
@@ -235,7 +246,7 @@ func TestRunOnceRecordsFailureOnDeadContext(t *testing.T) {
 // раньше InsertBackupRun и runID оставался 0.
 func TestRunOnceTimeoutMarksError(t *testing.T) {
 	st := testdb.New(t)
-	r, _ := newTestRunner(t, st, "slow", 16)
+	r, _ := newTestRunner(t, st, "slow", databaseMajor(t, st))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
@@ -258,7 +269,7 @@ func TestRunOnceTimeoutMarksError(t *testing.T) {
 
 func TestRunNowBusy(t *testing.T) {
 	st := testdb.New(t)
-	r, _ := newTestRunner(t, st, "ok", 16)
+	r, _ := newTestRunner(t, st, "ok", databaseMajor(t, st))
 	r.running.Store(true) // симуляция идущего прогона
 	if err := r.RunNow(context.Background()); err != ErrBusy {
 		t.Fatalf("want ErrBusy, got %v", err)
@@ -304,7 +315,7 @@ func TestBackoffDelay(t *testing.T) {
 func TestMaybeRunBackoff(t *testing.T) {
 	st := testdb.New(t)
 	ctx := context.Background()
-	r, _ := newTestRunner(t, st, "fail", 16) // дефолты settings: enabled, истории нет → due
+	r, _ := newTestRunner(t, st, "fail", databaseMajor(t, st)) // дефолты settings: enabled, истории нет → due
 
 	// Первый прогон падает: 1 error-строка, бэкофф взведён (failStreak=1).
 	if err := r.maybeRun(ctx); err == nil {
@@ -344,7 +355,7 @@ func TestMaybeRunBackoff(t *testing.T) {
 func TestSweepStuck(t *testing.T) {
 	st := testdb.New(t)
 	ctx := context.Background()
-	r, _ := newTestRunner(t, st, "ok", 16)
+	r, _ := newTestRunner(t, st, "ok", databaseMajor(t, st))
 
 	stuckID, err := st.InsertBackupRun(ctx, "scheduled") // остаётся 'running'
 	if err != nil {
@@ -409,7 +420,7 @@ func runResult(t *testing.T, ctx context.Context, st *store.Store, id int64) str
 func TestRunNowHappyPath(t *testing.T) {
 	st := testdb.New(t)
 	ctx := context.Background()
-	r, _ := newTestRunner(t, st, "ok", 16)
+	r, _ := newTestRunner(t, st, "ok", databaseMajor(t, st))
 
 	if err := r.RunNow(ctx); err != nil {
 		t.Fatalf("RunNow: %v", err)

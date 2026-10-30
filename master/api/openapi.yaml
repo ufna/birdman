@@ -2298,6 +2298,8 @@ components:
     matchmaker.Result:
       type: object
       properties:
+        game_mode:
+          type: string
         host:
           type: string
         join_token:
@@ -2331,6 +2333,8 @@ components:
           type: string
           format: date-time
         env:
+          type: string
+        game_mode:
           type: string
         match:
           $ref: '#/components/schemas/matchmaker.Result'

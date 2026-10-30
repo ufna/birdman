@@ -57,6 +57,8 @@ type Matchmaking struct {
 type QueuePolicy struct {
 	Project          string `yaml:"project"`
 	Env              string `yaml:"env"`
+	GameMode         string `yaml:"game_mode"`
+	Backfill         bool   `yaml:"backfill"`
 	MinimumSize      int    `yaml:"minimum_size"`
 	PartialWaitS     int    `yaml:"partial_wait_s"`
 	MaxRTTms         int32  `yaml:"max_rtt_ms"`
