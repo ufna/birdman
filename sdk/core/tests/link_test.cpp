@@ -312,6 +312,42 @@ BT_TEST(poll_mode) {
 
 // Agent restart: the SDK reconnects with backoff and replays its state —
 // hello, ready, players — and the agent's allocated replay is deduplicated.
+// Both callback modes must deliver backfill without replaying match start.
+BT_TEST(cumulative_allocation) {
+  for (auto mode : {birdman::CallbackMode::kDispatch, birdman::CallbackMode::kPoll}) {
+    bt::MockAgent mock;
+    std::atomic<int> allocations{0};
+    ServerLink link;
+    Config cfg;
+    cfg.socket_path = mock.Path();
+    cfg.callback_mode = mode;
+    cfg.on_allocated = [&](const AllocatedEvent&) { allocations.fetch_add(1); };
+    BT_CHECK(link.Init(cfg));
+    mock.Accept();
+    mock.Expect("hello");
+    auto send = [&](const char* body, int expected) {
+      mock.Send("allocated", body);
+      mock.Send("ping", "{}");
+      mock.Expect("pong");  // I/O-thread barrier before checking callbacks.
+      if (mode == birdman::CallbackMode::kPoll) link.PollCallbacks();
+      BT_CHECK_EQ(allocations.load(), expected);
+    };
+    const char* first = R"({"match_id":"m-fill","players_expected":1,"metadata":{"ticket_a":"first"}})";
+    const char* second = R"({"match_id":"m-fill","players_expected":2,"metadata":{"ticket_a":"first","ticket_b":"second"}})";
+    send(first, 1);
+    send(first, 1);
+    send(second, 2);
+    send(second, 2);
+    send(first, 2);  // Delayed smaller envelope cannot roll the SDK back.
+    send(second, 2);
+    // A same-size metadata change reaches admission, which must fail closed.
+    send(R"({"match_id":"m-fill","players_expected":2,"metadata":{"ticket_a":"changed","ticket_b":"second"}})", 3);
+    send(R"({"match_id":"another","players_expected":1})", 4);
+    BT_CHECK_EQ(link.MatchId(), "another");
+    link.Shutdown();
+  }
+}
+
 BT_TEST(reconnect_replay) {
   bt::MockAgent mock;
   std::atomic<int> allocations{0};

@@ -37,6 +37,7 @@ set(BIRDMAN_CORE_TESTS
   drain_callback
   poll_mode
   reconnect_replay
+  cumulative_allocation
   ring_buffer
   ring_overflow
   metric_rate_limit

@@ -550,11 +550,18 @@ class ServerLink::Impl {
     bool deliver = false;
     {
       std::lock_guard<std::mutex> lock(mu_);
-      // The agent replays the last allocated on every reconnect: dedup by
-      // match_id so the game sees each allocation exactly once.
-      if (!(have_allocated_ && allocated_match_id_ == ev.match_id)) {
+      // Backfill extends the same match's cumulative admission metadata.
+      // Suppress identical replays and older smaller snapshots, while letting
+      // the game validate changed metadata (including same-size conflicts).
+      const bool same_match = have_allocated_ && allocated_match_id_ == ev.match_id;
+      const bool replay = same_match &&
+          (ev.players_expected < allocated_players_expected_ ||
+           (ev.players_expected == allocated_players_expected_ && ev.metadata == allocated_metadata_));
+      if (!replay) {
         have_allocated_ = true;
         allocated_match_id_ = ev.match_id;
+        allocated_players_expected_ = ev.players_expected;
+        allocated_metadata_ = ev.metadata;
         match_id_ = ev.match_id;
         fresh = true;
         if (cfg_.callback_mode == CallbackMode::kPoll) {
@@ -629,6 +636,8 @@ class ServerLink::Impl {
   std::string match_id_;
   bool have_allocated_ = false;
   std::string allocated_match_id_;
+  int allocated_players_expected_ = 0;
+  std::map<std::string, std::string> allocated_metadata_;
   bool have_drain_ = false;
   double drain_deadline_ = 0.0;
   std::string drain_reason_;
