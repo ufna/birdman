@@ -6,11 +6,13 @@ on:
     paths:
       - 'master/**'
       - 'proto/**'
+      - 'infra/ci/minio.Dockerfile'
       - '.github/workflows/master.yml'
   pull_request:
     paths:
       - 'master/**'
       - 'proto/**'
+      - 'infra/ci/minio.Dockerfile'
       - '.github/workflows/master.yml'
 
 permissions:
@@ -48,11 +50,12 @@ jobs:
             master/go.sum
             proto/go.sum
 
-      - name: Start MinIO (S3 integration tests)
+      - name: Build and start MinIO (pinned source, S3 integration tests)
         run: |
+          docker build --tag birdman-ci-minio:local - < infra/ci/minio.Dockerfile
           docker run -d --rm --name minio -p 9000:9000 \
             -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio server /data
+            birdman-ci-minio:local server /data
           # Явный health-probe: bounded-луп (15×1с); не поднялся — фейл шага.
           for _ in {1..15}; do
             if curl -sf http://localhost:9000/minio/health/live >/dev/null; then
@@ -61,6 +64,7 @@ jobs:
             sleep 1
           done
           echo "ERROR: MinIO did not become healthy on :9000" >&2
+          docker logs --tail 100 minio >&2
           exit 1
 
       - name: Vet & build proto

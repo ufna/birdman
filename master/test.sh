@@ -19,10 +19,11 @@ docker network create "$NET" >/dev/null
 docker run -d --rm --name "$PG" --network "$NET" \
   -e POSTGRES_PASSWORD=birdman postgres:16 >/dev/null
 
-# MinIO — S3-совместимая обвязка для интеграционных тестов backup/s3.
+# Та же закреплённая исходная версия, что в CI: публичные образы MinIO удалены.
+docker build --tag birdman-ci-minio:local - < infra/ci/minio.Dockerfile
 docker run -d --rm --name "$MINIO" --network "$NET" \
   -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-  minio/minio server /data >/dev/null
+  birdman-ci-minio:local server /data >/dev/null
 
 # Явный health-probe вместо ставки на прогрев компиляцией: bounded-луп
 # (15×1с) на health/live изнутри docker-сети; не поднялся — явная ошибка.
