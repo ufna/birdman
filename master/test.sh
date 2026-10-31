@@ -24,7 +24,7 @@ source infra/ci/s3-image.env
 docker run -d --rm --name "$S3" --network "$NET" \
   -e AWS_ACCESS_KEY_ID=minioadmin -e AWS_SECRET_ACCESS_KEY=minioadmin \
   "$BIRDMAN_TEST_S3_IMAGE" mini -dir=/data \
-  -webdav=false -admin.ui=false -s3.port.iceberg=0 -s3.port.lance=0 >/dev/null
+  -webdav=false -admin.ui=false -s3.autoCreateBucket=false -s3.port.iceberg=0 -s3.port.lance=0 >/dev/null
 
 # Явный health-probe вместо ставки на прогрев компиляцией: bounded-луп
 # (30×1с) на readyz изнутри docker-сети; не поднялся — явная ошибка.

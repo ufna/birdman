@@ -56,7 +56,7 @@ jobs:
           docker run -d --rm --name s3 -p 127.0.0.1:9000:8333 \
             -e AWS_ACCESS_KEY_ID=minioadmin -e AWS_SECRET_ACCESS_KEY=minioadmin \
             "$BIRDMAN_TEST_S3_IMAGE" mini -dir=/data \
-            -webdav=false -admin.ui=false -s3.port.iceberg=0 -s3.port.lance=0
+            -webdav=false -admin.ui=false -s3.autoCreateBucket=false -s3.port.iceberg=0 -s3.port.lance=0
           # Проверяется реальный S3 gateway; ожидание ограничено 30 секундами.
           for _ in {1..30}; do
             if curl -sf http://localhost:9000/readyz >/dev/null; then

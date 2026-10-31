@@ -47,7 +47,8 @@ image="${BIRDMAN_VECTOR_IMAGE:-$(sed -n 's/^birdman_vector_image: *//p' "$role/d
 # собой убираем. Их ДВА, и это несущее: у удалённой ноды деплоер живёт не на
 # ней, а на master-боксе флота, поэтому один контейнер не отличил бы «проба
 # спросила мастера» от «проба спросила хоть кого-нибудь» (#1070).
-box_image="${BIRDMAN_TEST_BOX_IMAGE:-python:3-alpine}"
+# Match Ubuntu24.04 target Python; rolling :3 now selects unsupported3.15.
+box_image="${BIRDMAN_TEST_BOX_IMAGE:-python:3.12-alpine}"
 # Имена переопределяемы: в дереве работают несколько сессий разом, а `docker rm -f`
 # на фиксированном имени убил бы контейнер чужого прогона на середине.
 box="${BIRDMAN_TEST_BOX_NAME:-bm1069-box}"
