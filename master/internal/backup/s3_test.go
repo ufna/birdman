@@ -14,7 +14,7 @@ import (
 	"github.com/ufna/birdman/master/internal/testdb"
 )
 
-// testS3Cfg — скипает тест, если MinIO-обвязки нет (локальный запуск без test.sh).
+// testS3Cfg — скипает тест без S3-обвязки (локальный запуск без test.sh).
 func testS3Cfg(t *testing.T, bucket string) store.BackupS3Config {
 	t.Helper()
 	ep := os.Getenv("BIRDMAN_TEST_S3_ENDPOINT")

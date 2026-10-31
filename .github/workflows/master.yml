@@ -6,13 +6,13 @@ on:
     paths:
       - 'master/**'
       - 'proto/**'
-      - 'infra/ci/minio.Dockerfile'
+      - 'infra/ci/s3-image.env'
       - '.github/workflows/master.yml'
   pull_request:
     paths:
       - 'master/**'
       - 'proto/**'
-      - 'infra/ci/minio.Dockerfile'
+      - 'infra/ci/s3-image.env'
       - '.github/workflows/master.yml'
 
 permissions:
@@ -36,7 +36,7 @@ jobs:
     env:
       # Тесты берут DSN из env вместо самоподнятого docker-постгреса.
       BIRDMAN_TEST_DSN: postgres://postgres:birdman@localhost:5432/postgres?sslmode=disable
-      # S3-интеграционные тесты (backup/s3) ходят в MinIO, поднятый шагом ниже.
+      # S3-интеграционные тесты (backup/s3) ходят в SeaweedFS, поднятый ниже.
       BIRDMAN_TEST_S3_ENDPOINT: http://localhost:9000
       BIRDMAN_TEST_S3_KEY: minioadmin
       BIRDMAN_TEST_S3_SECRET: minioadmin
@@ -50,21 +50,22 @@ jobs:
             master/go.sum
             proto/go.sum
 
-      - name: Build and start MinIO (pinned source, S3 integration tests)
+      - name: Start SeaweedFS (S3 integration tests)
         run: |
-          docker build --tag birdman-ci-minio:local - < infra/ci/minio.Dockerfile
-          docker run -d --rm --name minio -p 9000:9000 \
-            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-            birdman-ci-minio:local server /data
-          # Явный health-probe: bounded-луп (15×1с); не поднялся — фейл шага.
-          for _ in {1..15}; do
-            if curl -sf http://localhost:9000/minio/health/live >/dev/null; then
+          source infra/ci/s3-image.env
+          docker run -d --rm --name s3 -p 127.0.0.1:9000:8333 \
+            -e AWS_ACCESS_KEY_ID=minioadmin -e AWS_SECRET_ACCESS_KEY=minioadmin \
+            "$BIRDMAN_TEST_S3_IMAGE" mini -dir=/data \
+            -webdav=false -admin.ui=false -s3.port.iceberg=0 -s3.port.lance=0
+          # Проверяется реальный S3 gateway; ожидание ограничено 30 секундами.
+          for _ in {1..30}; do
+            if curl -sf http://localhost:9000/readyz >/dev/null; then
               exit 0
             fi
             sleep 1
           done
-          echo "ERROR: MinIO did not become healthy on :9000" >&2
-          docker logs --tail 100 minio >&2
+          echo "ERROR: SeaweedFS S3 did not become healthy on :9000" >&2
+          docker logs --tail 100 s3 >&2
           exit 1
 
       - name: Vet & build proto
@@ -76,6 +77,10 @@ jobs:
       - name: Vet master
         working-directory: master
         run: go vet ./...
+
+      - name: Verify real S3 upload, retention and bucket checks
+        working-directory: master
+        run: go test -race -timeout 2m -v ./internal/backup -run '^(TestSyncS3UploadAndRotation|TestTestS3)$'
 
       - name: Test master (integration, Postgres 16)
         working-directory: master
