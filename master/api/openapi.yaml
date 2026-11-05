@@ -1168,6 +1168,38 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/httpapi.nodeResp'
+  /v1/nodes/{id}/reconcile-address:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      operationId: reconcileNodeAddress
+      summary: Reconcile an idle node address after an operator-confirmed host replacement
+      description: Requires an API key with the "admin" scope (or "admin").
+      security:
+        - apiKey: []
+      responses:
+        4XX:
+          description: Client error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        5XX:
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.apiError'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.nodeResp'
   /v1/nodes/{id}/revoke:
     parameters:
       - name: id
